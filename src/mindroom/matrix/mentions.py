@@ -281,6 +281,9 @@ def _find_matching_entity_name_for_localpart(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return the configured agent or team name matched by one localpart string, if any."""
+    if _is_reserved_user_alias_localpart(localpart):
+        return None
+
     lower_localpart = localpart.lower()
     candidate_names = {
         candidate_name.lower() for candidate_name in _localpart_candidate_names(localpart, runtime_paths)
@@ -318,7 +321,7 @@ def _localpart_candidate_names(localpart: str, runtime_paths: RuntimePaths) -> l
         prefix = MatrixID.AGENT_PREFIX
         name = localpart[len(prefix) :]
 
-    if name.lower().startswith("user_"):
+    if _is_reserved_user_alias_localpart(localpart):
         return []
 
     candidate_names = [name]
@@ -339,6 +342,13 @@ def _localpart_candidate_names(localpart: str, runtime_paths: RuntimePaths) -> l
         if stripped_name:
             candidate_names.append(f"{prefix}{stripped_name}")
     return candidate_names
+
+
+def _is_reserved_user_alias_localpart(localpart: str) -> bool:
+    name = localpart
+    if name.lower().startswith(MatrixID.AGENT_PREFIX):
+        name = name[len(MatrixID.AGENT_PREFIX) :]
+    return name.lower().startswith("user_")
 
 
 def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:

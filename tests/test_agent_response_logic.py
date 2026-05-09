@@ -15,12 +15,15 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import should_agent_respond
+from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
 
 
@@ -119,6 +122,52 @@ class TestAgentResponseLogic:
             sender_id=alias_user,
         )
         assert should_respond is True
+
+    def test_materializable_responder_filter_preserves_team_reject_owner(self) -> None:
+        """Runtime materialization filters concrete agents, not configured team responder bots."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "alpha": AgentConfig(display_name="Alpha"),
+                    "beta": AgentConfig(display_name="Beta"),
+                },
+                teams={"ops": TeamConfig(display_name="Ops", role="Operations", agents=["alpha", "beta"])},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            runtime_paths,
+        )
+        runtime_paths = runtime_paths_for(config)
+        team_id = config.get_ids(runtime_paths)["ops"]
+        runtime = MagicMock()
+        runtime.config = config
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=runtime_paths,
+                agent_name="ops",
+                matrix_id=team_id,
+            ),
+        )
+
+        responder_pool = policy.filter_materializable_responders([team_id], {"alpha", "beta"})
+        action = policy.team_response_action(
+            TeamResolution(
+                intent=TeamIntent.EXPLICIT_MEMBERS,
+                requested_members=[team_id],
+                member_statuses=[],
+                eligible_members=[],
+                outcome=TeamOutcome.REJECT,
+                reason="Team request includes no available members.",
+            ),
+            responder_pool,
+        )
+
+        assert responder_pool == [team_id]
+        assert action is not None
+        assert action.kind == "reject"
+        assert action.rejection_message == "Team request includes no available members."
 
     def test_mentioned_agent_reply_permissions_support_domain_pattern(self) -> None:
         """Per-agent reply patterns should allow domain-scoped sender matching."""

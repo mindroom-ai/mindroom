@@ -277,20 +277,21 @@ class TurnPolicy:
             return None
         return resolve_live_shared_agent_names(orchestrator, config=self.deps.runtime.config)
 
-    def filter_materializable_agents(
+    def filter_materializable_responders(
         self,
-        agent_ids: list[MatrixID],
+        responder_ids: list[MatrixID],
         materializable_agent_names: set[str] | None,
     ) -> list[MatrixID]:
-        """Keep only agents that can currently be materialized."""
+        """Keep concrete agents materializable while preserving configured team responders."""
         if materializable_agent_names is None:
-            return agent_ids
-        return [
-            agent_id
-            for agent_id in agent_ids
-            if (agent_id.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or agent_id.username)
-            in materializable_agent_names
-        ]
+            return responder_ids
+
+        filtered_responders = []
+        for responder_id in responder_ids:
+            entity_name = responder_id.agent_name(self.deps.runtime.config, self.deps.runtime_paths)
+            if entity_name in self.deps.runtime.config.teams or entity_name in materializable_agent_names:
+                filtered_responders.append(responder_id)
+        return filtered_responders
 
     def response_owner_for_team_resolution(
         self,
@@ -583,7 +584,7 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
         materializable_agent_names = self.materializable_agent_names()
-        responder_pool = self.filter_materializable_agents(
+        responder_pool = self.filter_materializable_responders(
             available_agents_in_room,
             materializable_agent_names,
         )

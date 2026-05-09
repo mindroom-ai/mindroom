@@ -181,6 +181,25 @@ class TestMentionParsing:
         assert processed == "@mindroom_user_123 and @mindroom_calculator:localhost"
         assert mentions == ["@mindroom_calculator:localhost"]
 
+    def test_user_like_entity_name_does_not_override_user_mention(self) -> None:
+        """Reserved user-style aliases stay literal even when an entity has that name."""
+        runtime_paths = _default_runtime_paths()
+        config = _bind_config(
+            runtime_paths,
+            {
+                "user_123": AgentConfig(display_name="UserLikeAgent"),
+                "calculator": AgentConfig(display_name="Calculator"),
+            },
+        )
+
+        processed, mentions, _markdown = _parse_mentions_in_text(
+            "@mindroom_user_123 and @calculator",
+            config,
+        )
+
+        assert processed == "@mindroom_user_123 and @mindroom_calculator:localhost"
+        assert mentions == ["@mindroom_calculator:localhost"]
+
     def test_no_duplicate_mentions(self) -> None:
         """Test that duplicate mentions are handled."""
         config = _make_config(_default_runtime_paths())

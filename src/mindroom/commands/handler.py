@@ -136,14 +136,11 @@ def _format_welcome_message(
             continue
 
         description = _format_agent_description(entity_name, config)
-        # Always show the entity, with or without description
-        # Use the username with mindroom_ prefix (but without domain) for proper mention parsing
         entity_entry = f"• **@{entity_id.username}**"
         if description:
             entity_entry += f": {description}"
         entity_list.append(entity_entry)
 
-    # Create welcome message
     welcome_msg = (
         "🎉 **Welcome to MindRoom!**\n\n"
         "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
