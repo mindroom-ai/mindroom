@@ -1838,6 +1838,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.output_files"
 depends_on = [
+    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.workspaces",
 ]

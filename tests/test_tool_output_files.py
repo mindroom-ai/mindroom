@@ -17,7 +17,7 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 from pydantic import BaseModel
 
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, resolve_runtime_paths
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -28,6 +28,7 @@ from mindroom.hooks import (
 )
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.output_files import (
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     _wrap_function_for_output_files,
