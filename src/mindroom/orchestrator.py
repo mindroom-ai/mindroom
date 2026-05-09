@@ -54,6 +54,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -2004,6 +2005,10 @@ async def main(
     except KeyboardInterrupt:
         shutdown_requested.set()
         logger.info("Multi-agent bot system stopped by user")
+    except PermanentStartupError as exc:
+        shutdown_requested.set()
+        logger.error("MindRoom startup failed", error=str(exc))  # noqa: TRY400
+        raise
     except Exception:
         shutdown_requested.set()
         logger.exception("Error in MindRoom runtime")

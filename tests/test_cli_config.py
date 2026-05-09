@@ -28,6 +28,7 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PL
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
+from mindroom.startup_errors import PermanentStartupError
 from tests.conftest import normalize_console_output
 
 runner = CliRunner()
@@ -1114,6 +1115,24 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
         assert "Could not read configuration text" in result.output
+
+    def test_run_permanent_startup_error_prints_message_without_traceback(self, tmp_path: Path) -> None:
+        """Permanent startup failures should not dump an implementation traceback."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4-6\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+            encoding="utf-8",
+        )
+        mock_main = AsyncMock(side_effect=PermanentStartupError("GOOGLE_APPLICATION_CREDENTIALS is invalid"))
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg)
+
+        assert result.exit_code == 1
+        assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
+        assert "Traceback" not in result.output
 
     def test_avatars_generate_reports_avatar_generation_failure(
         self,
