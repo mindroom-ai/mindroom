@@ -21,7 +21,7 @@ from mindroom.services.config import (
 )
 from mindroom.services.launchd import _generate_plist
 from mindroom.services.manager import get_service_manager
-from mindroom.services.runtime import resolve_service_environment
+from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
 
 runner = CliRunner(env={"NO_COLOR": "1", "TERM": "dumb"})
@@ -114,6 +114,7 @@ def test_systemd_unit_runs_mindroom() -> None:
         {
             "MINDROOM_CONFIG_PATH": "/Users/test/Mind Room/config.yaml",
             "MINDROOM_STORAGE_PATH": "/Users/test/Mind Room/data%root",
+            "PATH": "/Users/test/.local/bin:/usr/bin",
         },
     )
 
@@ -122,6 +123,7 @@ def test_systemd_unit_runs_mindroom() -> None:
     assert "ExecStart=/usr/bin/uv tool run --from mindroom mindroom run" in unit
     assert 'Environment="MINDROOM_CONFIG_PATH=/Users/test/Mind Room/config.yaml"' in unit
     assert 'Environment="MINDROOM_STORAGE_PATH=/Users/test/Mind Room/data%%root"' in unit
+    assert 'Environment="PATH=/Users/test/.local/bin:/usr/bin"' in unit
     assert "Restart=on-failure" in unit
 
 
@@ -130,6 +132,7 @@ def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:
     service_environment = {
         "MINDROOM_CONFIG_PATH": str(tmp_path / "config.yaml"),
         "MINDROOM_STORAGE_PATH": str(tmp_path / "mindroom_data"),
+        "PATH": f"{tmp_path}/bin:/usr/bin",
     }
     plist_data = _generate_plist(tmp_path / "uv", tmp_path, tmp_path / "logs", service_environment)
     rendered = plistlib.dumps(plist_data)
@@ -152,16 +155,36 @@ def test_resolve_service_environment_captures_active_runtime(monkeypatch: pytest
     """Installed services capture the same config and storage context as the invoking CLI."""
     config_path = tmp_path / "local config.yaml"
     storage_path = tmp_path / "local storage"
+    uv_path = tmp_path / "custom uv bin" / "uv"
+    uv_path.parent.mkdir()
+    uv_path.touch()
     config_path.write_text("agents: {}\n", encoding="utf-8")
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
+    monkeypatch.setenv("PATH", "/existing/bin")
 
-    service_environment = resolve_service_environment()
+    service_environment = resolve_service_environment(uv_path)
 
-    assert service_environment == {
-        "MINDROOM_CONFIG_PATH": str(config_path.resolve()),
-        "MINDROOM_STORAGE_PATH": str(storage_path.resolve()),
-    }
+    assert service_environment["MINDROOM_CONFIG_PATH"] == str(config_path.resolve())
+    assert service_environment["MINDROOM_STORAGE_PATH"] == str(storage_path.resolve())
+    path_entries = service_environment["PATH"].split(":")
+    assert path_entries[0] == str(uv_path.parent)
+    assert str(Path.home() / ".local" / "bin") in path_entries
+    assert "/opt/homebrew/bin" in path_entries
+    assert "/usr/local/bin" in path_entries
+    assert "/existing/bin" in path_entries
+
+
+def test_resolve_service_environment_requires_existing_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Service install fails before writing a service when no active config exists."""
+    config_path = tmp_path / "missing.yaml"
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+
+    with pytest.raises(ServiceConfigMissingError, match="mindroom config init"):
+        resolve_service_environment(tmp_path / "uv")
 
 
 def test_service_help_is_registered() -> None:

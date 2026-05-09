@@ -17,7 +17,7 @@ from mindroom.services.config import (
     find_uv,
     install_uv,
 )
-from mindroom.services.runtime import resolve_service_environment
+from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 
 _MACOS_UV_PATHS = [Path("/opt/homebrew/bin/uv")]
 _LABEL = "chat.mindroom.local"
@@ -105,6 +105,11 @@ def _install_service() -> InstallResult:
     if uv_path is None:
         return InstallResult(success=False, message="uv not found. Install it from https://docs.astral.sh/uv/")
 
+    try:
+        service_environment = resolve_service_environment(uv_path)
+    except ServiceConfigMissingError as exc:
+        return InstallResult(success=False, message=str(exc))
+
     home_dir = Path.home()
     log_dir = _get_log_dir()
     plist_path = _get_plist_path()
@@ -112,7 +117,7 @@ def _install_service() -> InstallResult:
     plist_path.parent.mkdir(parents=True, exist_ok=True)
 
     with plist_path.open("wb") as f:
-        plistlib.dump(_generate_plist(uv_path, home_dir, log_dir, resolve_service_environment()), f)
+        plistlib.dump(_generate_plist(uv_path, home_dir, log_dir, service_environment), f)
 
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], capture_output=True, check=False)

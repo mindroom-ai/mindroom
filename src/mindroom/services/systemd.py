@@ -16,7 +16,7 @@ from mindroom.services.config import (
     find_uv,
     install_uv,
 )
-from mindroom.services.runtime import resolve_service_environment
+from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 
 _LINUX_UV_PATHS = [Path("/usr/bin/uv")]
 
@@ -127,8 +127,13 @@ def _install_service() -> InstallResult:
 
     unit_path = _get_unit_path()
     unit_name = _get_unit_name()
+    try:
+        service_environment = resolve_service_environment(uv_path)
+    except ServiceConfigMissingError as exc:
+        return InstallResult(success=False, message=str(exc))
+
     unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(_generate_unit_file(uv_path, resolve_service_environment()), encoding="utf-8")
+    unit_path.write_text(_generate_unit_file(uv_path, service_environment), encoding="utf-8")
 
     subprocess.run(["systemctl", "--user", "stop", unit_name], capture_output=True, check=False)
 
