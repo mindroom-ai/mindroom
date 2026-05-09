@@ -160,6 +160,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
+    "mindroom.google_adc",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
     "mindroom.vertex_claude_prompt_cache",
@@ -180,6 +181,14 @@ visibility = [
 [[modules]]
 path = "mindroom.metadata_merge"
 depends_on = []
+
+[[modules]]
+path = "mindroom.google_adc"
+depends_on = ["mindroom.startup_errors"]
+visibility = [
+    "mindroom.cli.doctor",
+    "mindroom.model_loading",
+]
 
 [[modules]]
 path = "mindroom.agent_policy"
@@ -1644,6 +1653,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.embeddings",
+    "mindroom.google_adc",
     "mindroom.matrix.health",
 ]
 

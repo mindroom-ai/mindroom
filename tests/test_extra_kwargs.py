@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
 from mindroom.vertex_claude_prompt_cache import (
     _copy_messages_with_vertex_prompt_cache_breakpoint,
@@ -597,7 +598,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
             return type("FakeOauthCredentialsModule", (), {"Credentials": FakeAuthorizedUserCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.model_loading.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
@@ -635,7 +636,43 @@ def test_vertexai_claude_rejects_missing_runtime_google_application_credentials(
     )
     config = Config(**config_data)
 
-    with pytest.raises(ValueError, match="GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist"):
+    with pytest.raises(
+        PermanentStartupError,
+        match="GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist",
+    ):
+        get_model_instance(config, runtime_paths, "vertex_claude_model")
+
+
+def test_vertexai_claude_rejects_invalid_runtime_google_application_credentials() -> None:
+    """Invalid ADC files should fail as permanent startup errors."""
+    config_data = {
+        "models": {
+            "vertex_claude_model": {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-4-6",
+                "extra_kwargs": {
+                    "project_id": "demo-project",
+                    "region": "us-central1",
+                },
+            },
+        },
+        "router": {
+            "model": "vertex_claude_model",
+        },
+        "agents": {},
+    }
+
+    runtime_root = Path(tempfile.mkdtemp())
+    credentials_path = runtime_root / "invalid-google-credentials.json"
+    credentials_path.write_text('{"type":"authorized_user"}\n', encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    config = Config(**config_data)
+
+    with pytest.raises(PermanentStartupError, match="Failed to load GOOGLE_APPLICATION_CREDENTIALS"):
         get_model_instance(config, runtime_paths, "vertex_claude_model")
 
 
@@ -690,7 +727,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
             return type("FakeServiceAccountModule", (), {"Credentials": FakeServiceAccountCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.model_loading.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 

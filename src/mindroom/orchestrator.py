@@ -499,6 +499,7 @@ class _MultiAgentOrchestrator:
                         await run_with_retry(
                             f"Updating Matrix room memberships for {entity_name}",
                             partial(self._setup_rooms_and_memberships, bots_to_setup),
+                            permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
                     self._start_sync_task(entity_name, bot)

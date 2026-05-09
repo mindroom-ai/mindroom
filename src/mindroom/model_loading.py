@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
-import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.models.anthropic import Claude
@@ -20,16 +17,15 @@ from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, 
 from mindroom.constants import RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
-from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
     from agno.models.base import Model
-    from google.auth.credentials import Credentials as GoogleCredentials
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
@@ -39,68 +35,10 @@ logger = get_logger(__name__)
 
 __all__ = ["get_model_instance"]
 
-_GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-
-
-class _ModelCredentialError(PermanentStartupError):
-    """Raised when a model credential configuration is invalid."""
-
 
 def _canonical_provider(provider: str) -> str:
     """Return normalized provider key for model dispatch."""
     return provider.strip().lower().replace("-", "_")
-
-
-def _google_adc_file_type(credentials_path: str) -> str | None:
-    """Return the ADC JSON credential type without invoking google-auth loaders."""
-    try:
-        with Path(credentials_path).open(encoding="utf-8") as credentials_file:
-            credentials_info = json.load(credentials_file)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-
-    if not isinstance(credentials_info, dict):
-        return None
-    credentials_type = credentials_info.get("type")
-    return credentials_type if isinstance(credentials_type, str) else None
-
-
-def _load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
-    """Load Google ADC credentials for Vertex-backed model clients."""
-    if not Path(credentials_path).is_file():
-        msg = (
-            "GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist: "
-            f"{credentials_path}. Fix the path, recreate the credential file, or unset "
-            "GOOGLE_APPLICATION_CREDENTIALS if this MindRoom instance should not use Vertex AI."
-        )
-        raise _ModelCredentialError(msg)
-
-    credentials_type = _google_adc_file_type(credentials_path)
-    if credentials_type == "service_account":
-        service_account = importlib.import_module("google.oauth2.service_account")
-        credentials_cls = service_account.Credentials
-        credentials = credentials_cls.from_service_account_file(
-            credentials_path,
-            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-        )
-        return cast("GoogleCredentials", credentials)
-
-    if credentials_type == "authorized_user":
-        oauth_credentials = importlib.import_module("google.oauth2.credentials")
-        credentials_cls = oauth_credentials.Credentials
-        credentials = credentials_cls.from_authorized_user_file(
-            credentials_path,
-            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-        )
-        return cast("GoogleCredentials", credentials)
-
-    google_auth = importlib.import_module("google.auth")
-    load_credentials_from_file = google_auth.load_credentials_from_file
-    credentials, _project_id = load_credentials_from_file(
-        credentials_path,
-        scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-    )
-    return cast("GoogleCredentials", credentials)
 
 
 def _create_model_for_provider(  # noqa: C901, PLR0912
@@ -139,7 +77,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         if "credentials" not in client_params and (
             google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         ):
-            client_params["credentials"] = _load_google_application_credentials(str(google_application_credentials))
+            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
         if client_params:
             extra_kwargs["client_params"] = client_params
 

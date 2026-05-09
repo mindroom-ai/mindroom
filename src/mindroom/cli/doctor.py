@@ -16,10 +16,12 @@ from anthropic import APIStatusError
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider
+from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
 from mindroom.embeddings import create_sentence_transformers_embedder
+from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
+from mindroom.startup_errors import PermanentStartupError
 
 from .config import activate_cli_runtime, console, load_config_quiet
 
@@ -286,6 +288,25 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
+def _classify_vertexai_claude_error(
+    exc: APIStatusError
+    | DefaultCredentialsError
+    | RefreshError
+    | RuntimeError
+    | TypeError
+    | ValueError
+    | httpx.HTTPError,
+) -> tuple[bool | None, str]:
+    """Classify one Vertex AI Claude validation failure for doctor output."""
+    if isinstance(exc, APIStatusError):
+        return False, f"HTTP {exc.status_code}"
+    if isinstance(exc, DefaultCredentialsError):
+        return None, str(exc)
+    if isinstance(exc, RefreshError):
+        return False, str(exc)
+    return None, str(exc)
+
+
 def _validate_vertexai_claude_connection(
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
@@ -304,6 +325,16 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
+    client_params = dict(extra_kwargs.get("client_params") or {})
+    google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+    if "credentials" not in client_params and google_application_credentials is not None:
+        try:
+            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
+        except PermanentStartupError as exc:
+            return False, str(exc)
+    if client_params:
+        extra_kwargs["client_params"] = client_params
+
     extra_kwargs.setdefault("project_id", project_id)
     extra_kwargs.setdefault("region", region)
     extra_kwargs.setdefault("timeout", 10)
@@ -319,14 +350,16 @@ def _validate_vertexai_claude_connection(
         client.messages.create(
             **request_kwargs,
         )
-    except APIStatusError as exc:
-        return False, f"HTTP {exc.status_code}"
-    except DefaultCredentialsError as exc:
-        return None, str(exc)
-    except RefreshError as exc:
-        return False, str(exc)
-    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
-        return None, str(exc)
+    except (
+        APIStatusError,
+        DefaultCredentialsError,
+        RefreshError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        httpx.HTTPError,
+    ) as exc:
+        return _classify_vertexai_claude_error(exc)
 
     return True, ""
 

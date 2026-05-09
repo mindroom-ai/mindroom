@@ -1677,6 +1677,7 @@ class TestDoctor:
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
@@ -1718,6 +1719,60 @@ class TestDoctor:
             "timeout": 10,
         }
 
+    def test_vertexai_claude_connection_uses_runtime_adc_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should pass resolved runtime ADC credentials to the Vertex client."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        (tmp_path / ".env").write_text("GOOGLE_APPLICATION_CREDENTIALS=adc.json\n", encoding="utf-8")
+        storage = tmp_path / "storage"
+        fake_credentials = object()
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        called: dict[str, object] = {}
+
+        def _load_adc(path: str) -> object:
+            called["adc_path"] = path
+            return fake_credentials
+
+        class _FakeMessages:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                called["kwargs"] = kwargs
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
+
+        class _FakeVertexModel:
+            def __init__(self, **kwargs: object) -> None:
+                called["client_kwargs"] = kwargs
+                self.id = str(kwargs["id"])
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": called["client_kwargs"]["timeout"]}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.load_google_application_credentials", _load_adc)
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert called["adc_path"] == str((tmp_path / "adc.json").resolve())
+        assert called["client_kwargs"] == {
+            "id": "claude-sonnet-4-6",
+            "project_id": "mindroom-test",
+            "region": "us-central1",
+            "timeout": 10,
+            "client_params": {"credentials": fake_credentials},
+        }
+
     def test_vertexai_claude_connection_checks_each_configured_model(
         self,
         tmp_path: Path,
@@ -1729,6 +1784,7 @@ class TestDoctor:
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
@@ -1792,6 +1848,7 @@ class TestDoctor:
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
@@ -1818,6 +1875,52 @@ class TestDoctor:
         assert "ADC" in result.output
         assert "unavailable" in result.output
 
+    def test_vertexai_claude_missing_adc_file_is_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor fails when an explicit Vertex AI ADC file path is invalid."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing-adc.json"))
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 1
+        output = normalize_console_output(result.output)
+        assert "vertexai_claude connection failed for claude-sonnet-4-6" in output
+        assert "GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist" in output
+
+    def test_vertexai_claude_invalid_adc_file_is_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor fails when an explicit Vertex AI ADC file cannot be loaded."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        adc_path = tmp_path / "invalid-adc.json"
+        adc_path.write_text('{"type":"authorized_user"}\n', encoding="utf-8")
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 1
+        output = normalize_console_output(result.output)
+        assert "vertexai_claude connection failed for claude-sonnet-4-6" in output
+        assert "Failed to load GOOGLE_APPLICATION_CREDENTIALS" in output
+
     def test_vertexai_claude_api_rejection_is_failure(
         self,
         tmp_path: Path,
@@ -1829,6 +1932,7 @@ class TestDoctor:
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
