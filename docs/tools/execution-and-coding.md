@@ -38,8 +38,12 @@ When an agent has a canonical workspace root, MindRoom injects that workspace as
 In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-managed instead of something you set inline.
 Those workspace-backed agents also receive the optional `mindroom_output_path` argument on eligible tools.
 Set it to a workspace-relative file path to save the full supported tool output to that file and return a compact receipt to the model.
+When `mindroom_output_path` is omitted, MindRoom automatically saves supported tool outputs larger than `MINDROOM_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES` to `mindroom_tool_outputs/` inside the workspace and returns a compact receipt with the path, size, format, threshold, and preview.
+The default automatic-save threshold is 256 KiB.
 Agents without a resolved workspace do not receive this argument.
-No extra configuration is required beyond that workspace root, and `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` only overrides the default 64 MiB per-output write cap.
+No extra configuration is required beyond that workspace root.
+`MINDROOM_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES` overrides the automatic-save threshold.
+`MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` overrides the default 64 MiB per-output write cap for explicit and automatic saves.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, and `matplotlib`.
 
