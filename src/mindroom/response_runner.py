@@ -1752,7 +1752,6 @@ class ResponseRunner:
         run_id: str | None = None,
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-        run_success_collector: list[bool] | None = None,
         transient_system_context_collector: list[str] | None = None,
         model_prompt_collector: list[str] | None = None,
         attempt_run_id_collector: list[str] | None = None,
@@ -1887,8 +1886,6 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
-        if run_success_collector is not None:
-            run_success_collector.append(turn_recorder.outcome == "completed")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
@@ -1900,7 +1897,6 @@ class ResponseRunner:
         run_id: str | None = None,
         response_kind: str = "ai",
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-        run_success_collector: list[bool] | None = None,
         transient_system_context_collector: list[str] | None = None,
         model_prompt_collector: list[str] | None = None,
         attempt_run_id_collector: list[str] | None = None,
@@ -2001,8 +1997,6 @@ class ResponseRunner:
                     is_team=False,
                     response_event_id=error.event_id,
                 )
-            if run_success_collector is not None:
-                run_success_collector.append(turn_recorder.outcome == "completed")
             if compaction_outcomes_collector is not None:
                 compaction_outcomes_collector.extend(compaction_outcomes)
             response_extra_content = _merge_response_extra_content(
@@ -2087,8 +2081,6 @@ class ResponseRunner:
             request.pipeline_timing.mark_first_visible_reply("final")
             request.pipeline_timing.mark("response_complete")
 
-        if run_success_collector is not None:
-            run_success_collector.append(turn_recorder.outcome == "completed")
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.extend(compaction_outcomes)
         return delivery
@@ -2163,7 +2155,6 @@ class ResponseRunner:
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         final_delivery_outcome: FinalDeliveryOutcome | None = None
         compaction_outcomes: list[CompactionOutcome] = []
-        run_successes: list[bool] = []
         response_run_id = str(uuid4())
         tracked_event_id: str | None = request.existing_event_id
         delivery_stage_started = False
@@ -2266,7 +2257,6 @@ class ResponseRunner:
                     delivery_request,
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
-                    run_success_collector=run_successes,
                     transient_system_context_collector=transient_system_contexts,
                     model_prompt_collector=model_prompts,
                     attempt_run_id_collector=attempt_run_ids,
@@ -2279,7 +2269,6 @@ class ResponseRunner:
                     delivery_request,
                     run_id=response_run_id,
                     compaction_outcomes_collector=compaction_outcomes,
-                    run_success_collector=run_successes,
                     transient_system_context_collector=transient_system_contexts,
                     model_prompt_collector=model_prompts,
                     attempt_run_id_collector=attempt_run_ids,

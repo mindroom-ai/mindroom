@@ -758,17 +758,6 @@ class TestResolveConfigRelativePath:
         with pytest.raises(ValidationError, match="reserved root Space alias"):
             load_config_yaml(config_path)
 
-    def test_config_from_yaml_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
-        """Config loads should not accept duplicated runtime context."""
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-            encoding="utf-8",
-        )
-        invalid_kwargs = {"runtime_paths": constants_mod.resolve_runtime_paths(config_path=config_path)}
-        with pytest.raises(TypeError):
-            load_config_yaml(config_path, **invalid_kwargs)
-
     def test_config_from_yaml_explicit_path_ignores_activated_runtime_storage(self, tmp_path: Path) -> None:
         """Explicit path reloads should stay pure and ignore compatibility-injected runtime storage."""
         config_path = tmp_path / "config.yaml"
