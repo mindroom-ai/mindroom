@@ -843,7 +843,7 @@ def _evaluate_team_members(
 ) -> list[TeamResolutionMember]:
     """Evaluate one status and response capability for each requested member."""
     room_visible_ids: set[str] | None = None
-    if room is not None and config is not None:
+    if sender_visible_agents is None and room is not None and config is not None:
         room_visible_ids = {
             agent_id.full_id
             for agent_id in _normalize_team_request_members(

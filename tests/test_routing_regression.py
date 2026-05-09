@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -287,14 +288,13 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_agent_for_message")
-    async def test_router_bypasses_ai_when_reply_permissions_leave_one_candidate(
+    async def test_router_relay_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
         mock_suggest_agent: AsyncMock,
         mock_research_agent: AgentMatrixUser,
-        mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Router should route directly when sender permissions leave one candidate."""
+        """Router relay should use deterministic handoff when sender permissions leave one candidate."""
         test_room_id = "!research:localhost"
         test_config = _runtime_bound_config(
             Config(
@@ -322,6 +322,11 @@ class TestRoutingRegression:
             tmp_path,
         )
 
+        runtime_paths = runtime_paths_for(test_config)
+        state = MatrixState()
+        state.add_account("agent_news", "mindroom_news_oldns", "pw", domain=test_config.get_domain(runtime_paths))
+        state.save(runtime_paths=runtime_paths)
+
         router_agent = AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
@@ -341,7 +346,7 @@ class TestRoutingRegression:
         mock_room.users = {
             router_agent.user_id: MagicMock(),
             mock_research_agent.user_id: MagicMock(),
-            mock_news_agent.user_id: MagicMock(),
+            "@mindroom_news_oldns:localhost": MagicMock(),
         }
 
         message_event = MagicMock(spec=nio.RoomMessageText)
@@ -366,8 +371,8 @@ class TestRoutingRegression:
         mock_suggest_agent.assert_not_awaited()
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == "@mindroom_news:localhost could you help with this?"
-        assert content["m.mentions"]["user_ids"] == ["@mindroom_news:localhost"]
+        assert content["body"] == "@mindroom_news_oldns:localhost could you help with this?"
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_news_oldns:localhost"]
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_agent_for_message")
@@ -451,7 +456,7 @@ class TestRoutingRegression:
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
         runtime_paths = runtime_paths_for(test_config)
-        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "news"]
+        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["news", "facts"]
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_agent_for_message")
@@ -630,7 +635,7 @@ class TestRoutingRegression:
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
         runtime_paths = runtime_paths_for(test_config)
-        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "research"]
+        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["research", "facts"]
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.resolve_agent_knowledge_access")

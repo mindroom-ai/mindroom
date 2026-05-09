@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.entity_resolution import configured_bot_usernames_for_room
+from mindroom.entity_resolution import configured_bot_usernames_for_room, entity_matrix_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
@@ -25,7 +25,6 @@ from mindroom.matrix.invited_rooms_store import (
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import managed_account_usernames, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
-from mindroom.matrix_identifiers import agent_username_localpart
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -54,6 +53,7 @@ def _load_all_persisted_invited_rooms(
 ) -> dict[str, set[str]]:
     """Load persisted invited rooms for invite-accepting entities, keyed by bot username."""
     invited_rooms_by_bot: dict[str, set[str]] = {}
+    config_ids = entity_matrix_ids(config, runtime_paths)
 
     for entity_name in invited_room_entity_names(config):
         if not should_persist_invited_rooms(config, entity_name):
@@ -61,7 +61,7 @@ def _load_all_persisted_invited_rooms(
 
         rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, entity_name))
         if rooms:
-            invited_rooms_by_bot[agent_username_localpart(entity_name, runtime_paths)] = rooms
+            invited_rooms_by_bot[config_ids[entity_name].username] = rooms
 
     return invited_rooms_by_bot
 
@@ -117,9 +117,7 @@ async def _cleanup_orphaned_bots_in_room(
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
         agent_name = matrix_id.agent_name(config, runtime_paths)
-        is_configured_current_bot = (
-            agent_name is not None and agent_username_localpart(agent_name, runtime_paths) in configured_bots
-        )
+        is_configured_current_bot = agent_name is not None and matrix_id.username in configured_bots
 
         # Check if this is a mindroom bot and shouldn't be in this room
         if matrix_id.username in known_bot_usernames and not is_configured_current_bot:

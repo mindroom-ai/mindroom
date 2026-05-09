@@ -1639,7 +1639,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
 @pytest.mark.asyncio
 async def test_schedule_task_refreshes_room_membership_when_cached_room_has_no_agents() -> None:
-    """Scheduling should recover from empty cached room membership via joined_members."""
+    """Configured schedule rooms should use the static responder boundary without membership refresh."""
     client = AsyncMock()
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -1695,4 +1695,4 @@ async def test_schedule_task_refreshes_room_membership_when_cached_room_has_no_a
 
     assert task_id == "task1234"
     assert "Scheduled" in message
-    client.joined_members.assert_awaited_once_with("!test:server")
+    client.joined_members.assert_not_awaited()

@@ -66,7 +66,7 @@ MindRoom's architecture consists of several key components working together.
 ## Data Flow
 
 1. **Message arrives** from Matrix homeserver
-1. **Router decides** which agent or team should handle it (if no explicit agent or team mention)
+1. **Responder is resolved** directly when one eligible agent or team remains, otherwise the router selects among candidates
 1. **Selected entity processes** the message using the Agno runtime
 1. **Tools execute** as needed (file operations, API calls, etc.)
 1. **Response sent** back to Matrix room

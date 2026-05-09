@@ -29,11 +29,13 @@ Streaming behavior is configured in `config.yaml` with `defaults.enable_streamin
 
 ## Agent Users
 
-Each agent gets its own Matrix user with the `mindroom_` prefix:
+Each agent, team, and the router gets its own Matrix user.
+New accounts bootstrap with the generated `mindroom_` localpart, but persisted Matrix state is authoritative after provisioning and may contain a drifted username.
 
 ```
 @mindroom_assistant:example.com
 @mindroom_router:example.com  (built-in routing agent)
+@mindroom_assistant_oldns:example.com  (persisted drifted username)
 ```
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
@@ -115,9 +117,11 @@ Agents show typing indicators while processing via `typing_indicator()` context 
 ## Mentions
 
 Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
-- `@calculator` - Short agent name
-- `@mindroom_calculator` - Full username
-- `@mindroom_calculator:localhost` - Full Matrix ID
+- `@calculator` - Stable configured agent or team key
+- `@mindroom_calculator_oldns` - Current persisted username localpart
+- `@mindroom_calculator_oldns:localhost` - Current full Matrix ID
+
+Generated bootstrap IDs such as `@mindroom_calculator:localhost` are only valid before persisted state records a different current username.
 
 Returns content with `m.mentions` and `formatted_body` containing clickable links.
 
@@ -155,11 +159,11 @@ mid.username  # "mindroom_assistant"
 mid.domain    # "example.com"
 mid.full_id   # "@mindroom_assistant:example.com"
 
-# Create from agent name
+# Create the bootstrap Matrix ID from an agent name
 mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
 
-# Extract agent name (returns "code" if configured, None otherwise)
-agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_paths)
+# Extract agent name from the current persisted Matrix ID
+agent_name = extract_agent_name("@mindroom_code_oldns:localhost", config, runtime_paths)
 ```
 
 ## Root Space

@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import MatrixID
-from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, TeamConfig
@@ -21,13 +21,12 @@ def configured_bot_usernames_for_room(
     runtime_paths: RuntimePaths,
 ) -> set[str]:
     """Return bot username localparts configured for one Matrix room."""
-    configured_bots = {
-        agent_username_localpart(entity_name, runtime_paths)
-        for entity_name in configured_routable_entity_names_for_room(config, room_id, runtime_paths)
-    }
+    configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    config_ids = entity_matrix_ids(config, runtime_paths)
+    configured_bots = {config_ids[entity_name].username for entity_name in configured_names}
 
     if configured_bots:
-        configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
+        configured_bots.add(config_ids[ROUTER_AGENT_NAME].username)
 
     return configured_bots
 
@@ -63,7 +62,7 @@ def configured_routable_entity_ids_for_room(
     """Return non-router agent and team IDs statically configured for one room."""
     configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
     config_ids = entity_matrix_ids(config, runtime_paths)
-    return sorted((config_ids[name] for name in configured_names), key=lambda value: value.full_id)
+    return [config_ids[name] for name in configured_names]
 
 
 def matrix_domain(runtime_paths: RuntimePaths) -> str:
@@ -76,6 +75,19 @@ def entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, 
     """Return Matrix IDs for configured agents, teams, and the router."""
     domain = matrix_domain(runtime_paths)
     mapping: dict[str, MatrixID] = {
+        agent_name: _entity_matrix_id(agent_name, domain, runtime_paths) for agent_name in config.agents
+    }
+    mapping[ROUTER_AGENT_NAME] = _entity_matrix_id(ROUTER_AGENT_NAME, domain, runtime_paths)
+    mapping.update(
+        {team_name: _entity_matrix_id(team_name, domain, runtime_paths) for team_name in config.teams},
+    )
+    return mapping
+
+
+def bootstrap_entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
+    """Return config-derived Matrix IDs for configured agents, teams, and the router."""
+    domain = matrix_domain(runtime_paths)
+    mapping: dict[str, MatrixID] = {
         agent_name: MatrixID.from_agent(agent_name, domain, runtime_paths) for agent_name in config.agents
     }
     mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, domain, runtime_paths)
@@ -83,6 +95,13 @@ def entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, 
         {team_name: MatrixID.from_agent(team_name, domain, runtime_paths) for team_name in config.teams},
     )
     return mapping
+
+
+def _entity_matrix_id(entity_name: str, domain: str, runtime_paths: RuntimePaths) -> MatrixID:
+    persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
+    if persisted_user_id is not None:
+        return MatrixID.parse(persisted_user_id)
+    return MatrixID.from_agent(entity_name, domain, runtime_paths)
 
 
 def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:

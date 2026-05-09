@@ -325,6 +325,20 @@ class TestHelperFunctions:
         assert managed_account_user_id(account_key, domain, runtime_paths) == f"@mindroom_general_oldns:{domain}"
         assert managed_account_user_id(managed_account_key("missing"), domain, runtime_paths) is None
 
+    def test_config_entity_ids_resolve_persisted_current_username_drift(self, tmp_path: Path) -> None:
+        """Config entity IDs should use live persisted account usernames when present."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=domain)
+        state.save(runtime_paths=runtime_paths)
+
+        ids = self.config.get_ids(runtime_paths)
+
+        assert ids["general"].full_id == f"@mindroom_general_oldns:{domain}"
+        assert ids["calculator"].full_id == f"@mindroom_calculator:{domain}"
+
     def test_matrix_id_agent_name_trusts_persisted_current_username_drift(self, tmp_path: Path) -> None:
         """MatrixID.agent_name should use the same live drift-aware identity seam."""
         self.config = _bind_runtime_paths(self.config, tmp_path)

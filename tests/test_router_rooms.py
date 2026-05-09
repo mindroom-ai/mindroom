@@ -8,11 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.bot import create_bot_for_entity
+from mindroom.bot import TeamBot, create_bot_for_entity
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
@@ -144,6 +145,48 @@ def test_team_bot_uses_defaults_streaming_setting(
     assert team_bot.team_agents == [
         MatrixID.from_agent("agent1", domain, runtime_paths),
         MatrixID.from_agent("agent2", domain, runtime_paths),
+    ]
+
+
+def test_team_bot_uses_persisted_member_usernames(
+    config_with_rooms: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Team bots should resolve configured members through live persisted usernames."""
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+    runtime_paths = runtime_paths_for(config_with_rooms)
+    state = MatrixState()
+    state.add_account("agent_agent1", "mindroom_agent1_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
+    state.add_account("agent_agent2", "mindroom_agent2_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
+    state.save(runtime_paths=runtime_paths)
+
+    def mock_resolve_room_aliases(
+        aliases: list[str],
+        runtime_paths: object | None = None,
+    ) -> list[str]:
+        del runtime_paths
+        return list(aliases)
+
+    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
+
+    team_bot = create_bot_for_entity(
+        "team1",
+        AgentMatrixUser(
+            agent_name="team1",
+            user_id="@mindroom_team1:localhost",
+            display_name="Team 1",
+            password=TEST_PASSWORD,
+        ),
+        config_with_rooms,
+        runtime_paths,
+        tmp_path,
+    )
+
+    assert isinstance(team_bot, TeamBot)
+    assert [member.full_id for member in team_bot.team_agents] == [
+        "@mindroom_agent1_oldns:localhost",
+        "@mindroom_agent2_oldns:localhost",
     ]
 
 

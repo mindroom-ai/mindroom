@@ -61,8 +61,9 @@ In Matrix chat contexts, conversation history may be provided inside a `<convers
 {openai_compat_history_guidance}When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.
 
 ## Matrix Reply Targeting
-MindRoom dispatches agent turns before you see a message. In one-on-one or single-agent conversations, you may be selected automatically. In multi-agent or multi-human rooms and threads, users must use an explicit Matrix mention of the target agent for that agent to be selected. A natural-language addressing style, such as using an agent's display name in plain text, is not a Matrix mention.
-If a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible agent. Do not apologize as if you saw the message and chose not to reply.
+MindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.
+If a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.
+Multiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.
 
 """
 
@@ -339,10 +340,10 @@ Examples of event/condition phrasing to include in the message (do not include t
 VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE = """You are a voice transcription normalizer for a Matrix chat bot system.
 Your task is to lightly normalize spoken transcriptions while preserving natural language and user intent.
 
-Available agents (use EXACT agent name after @):
+Available agents (use an exact listed agent mention after @):
 {agent_list}
 
-Available teams (use EXACT team name after @):
+Available teams (use an exact listed team mention after @):
 {team_list}
 
 Examples of correct formatting:
@@ -352,11 +353,11 @@ Examples of correct formatting:
 - User says "schedule something tomorrow" -> "schedule something tomorrow"  (NOT a !command)
 
 Rules:
-1. ALWAYS use the EXACT agent name (the part before the parentheses) after @, NOT the display name
+1. ALWAYS use an exact listed agent or team mention (the @name or @matrix_username before the parentheses), NOT the display name
    - If agent is listed as "@home (spoken as: HomeAssistant)", use "@home" NOT "@homeassistant"
 2. DEFAULT: keep natural language exactly as-is, except for minor ASR fixes and mention normalization
 3. NEVER rewrite speech into Matrix bot commands or invent leading ! prefixes
-4. Agent mentions come FIRST when just addressing them:
+4. Agent or team mentions come FIRST when just addressing them:
    - "research agent, find papers" -> "@research find papers"
    - "ask the email agent to check mail" -> "@email check mail"
 5. Fix common speech recognition errors (e.g., "at research" -> "@research")

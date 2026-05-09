@@ -8456,6 +8456,113 @@ class TestAgentBot:
         assert action.kind == "skip"
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_configured_room_boundary_for_explicit_mention(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit mentions must not let unconfigured bots answer in configured rooms."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths)["calculator"].full_id: MagicMock(),
+            config.get_ids(runtime_paths)["research"].full_id: MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[config.get_ids(runtime_paths)["calculator"]],
+            has_non_agent_mentions=False,
+        )
+
+        action = await bot._turn_policy.resolve_response_action(
+            context,
+            room,
+            "@bob:localhost",
+            "calculator, help",
+            False,
+        )
+
+        assert action.kind == "skip"
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_configured_room_boundary_for_team_mention(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit team mentions must not let unconfigured teams answer in configured rooms."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Ops workflow",
+                        agents=["calculator"],
+                    ),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        team_user = AgentMatrixUser(
+            agent_name="ops",
+            user_id=config.get_ids(runtime_paths)["ops"].full_id,
+            display_name="Ops Team",
+            password=TEST_PASSWORD,
+        )
+        bot = TeamBot(
+            team_user,
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_agents=[config.get_ids(runtime_paths)["calculator"]],
+            team_mode="coordinate",
+        )
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths)["ops"].full_id: MagicMock(),
+            config.get_ids(runtime_paths)["research"].full_id: MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[config.get_ids(runtime_paths)["ops"]],
+            has_non_agent_mentions=False,
+        )
+
+        action = await bot._turn_policy.resolve_response_action(
+            context,
+            room,
+            "@bob:localhost",
+            "ops, help",
+            False,
+        )
+
+        assert action.kind == "skip"
+
+    @pytest.mark.asyncio
     async def test_resolve_response_action_ignores_non_materializable_owner_candidates(
         self,
         mock_agent_user: AgentMatrixUser,

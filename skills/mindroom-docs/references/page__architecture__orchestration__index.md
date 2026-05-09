@@ -122,12 +122,12 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content. The agent edits its own previous reply in place rather than sending a new message.
 Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
 
-**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent.
+**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the selected responder.
 When no agent or team is mentioned, routing selects the appropriate agent or team, similar to text messages.
 
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
-**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, routes directly when one candidate remains, and uses `suggest_agent_for_message()` only when multiple candidates remain. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required.
+**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_agent_for_message()` only when multiple candidates remain. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required.
 Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency

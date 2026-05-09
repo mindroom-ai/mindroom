@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _RoutingSuggestion(BaseModel):
+class RoutingSuggestion(BaseModel):
     """Structured output for routing decisions."""
 
     entity_name: str = Field(description="The name of the agent or team that should respond")
@@ -89,7 +89,7 @@ async def suggest_agent(
             name="Router",
             role="Route messages to appropriate agents or teams",
             model=model,
-            output_schema=_RoutingSuggestion,
+            output_schema=RoutingSuggestion,
             telemetry=False,
         )
 
@@ -97,7 +97,7 @@ async def suggest_agent(
         suggestion = response.content
 
         # With output_schema, we should always get the correct type
-        if not isinstance(suggestion, _RoutingSuggestion):
+        if not isinstance(suggestion, RoutingSuggestion):
             logger.error(
                 "Unexpected response type from AI routing",
                 expected="RoutingSuggestion",
@@ -153,6 +153,7 @@ async def suggest_agent_for_message(
 
 
 __all__ = [
+    "RoutingSuggestion",
     "suggest_agent",
     "suggest_agent_for_message",
 ]

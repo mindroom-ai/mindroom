@@ -474,7 +474,7 @@ Expected outcome: The stream includes standard completion chunks plus inline Min
 Expected outcome: Conversation continuity and sessionful tool behavior persist across requests that share the same session ID.
 
 - [ ] `OAI-006` Send a request to the `auto` model and to a `team/<name>` model.
-Expected outcome: Auto-routing uses the same selection logic as Matrix routing and team models execute the full team workflow instead of degrading to one member.
+Expected outcome: The `auto` model routes among compatible agents, while `team/<name>` executes the full team workflow instead of degrading to one member.
 
 - [ ] `OAI-007` Send a request to an unsupported private or incompatible worker-scoped agent.
 Expected outcome: The API rejects the request with a clear compatibility error instead of exposing a broken or partial execution path.

@@ -4,7 +4,7 @@ icon: lucide/calendar
 
 # Scheduling
 
-Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
+Schedule agents or teams to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
 
 ## Commands
 
@@ -32,7 +32,7 @@ Schedule agents to perform tasks at specific times or intervals using natural la
 **Conditional Workflows (polling-based):**
 
 Conditional or event-like requests are converted to recurring cron-based polling schedules.
-The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the agent checks it on each poll cycle.
+The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
 These are **not** real event subscriptions — they are periodic checks.
 
 ```

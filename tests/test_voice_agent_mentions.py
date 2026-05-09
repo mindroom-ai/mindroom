@@ -11,6 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.matrix.state import MatrixState
 from mindroom.voice_handler import _process_transcription, _sanitize_unavailable_mentions
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -131,12 +132,45 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         # Verify the prompt shows the correct format
         assert "@home or @mindroom_home (spoken as: HomeAssistant)" in captured_prompt
         assert "@calc or @mindroom_calc (spoken as: Calculator)" in captured_prompt
-        assert "use EXACT agent name after @" in captured_prompt
+        assert "use an exact listed agent mention after @" in captured_prompt
         assert 'use "@home" NOT "@homeassistant"' in captured_prompt
         assert "NEVER rewrite speech into Matrix bot commands" in captured_prompt
         assert "!schedule" not in captured_prompt
         assert "!help" not in captured_prompt
         assert "!skill" not in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_prompt_uses_persisted_current_username_drift() -> None:
+    """Voice mention hints should use the live managed Matrix username."""
+    config = _voice_config({"home": "HomeAssistant"})
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_home", "mindroom_home_oldns", "pw", domain=config.get_domain(runtime_paths))
+    state.save(runtime_paths=runtime_paths)
+
+    captured_prompt = None
+
+    async def capture_run(prompt: str, **kwargs: str) -> MagicMock:  # noqa: ARG001
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        mock_resp = MagicMock()
+        mock_resp.content = "@home test"
+        return mock_resp
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.arun = AsyncMock(side_effect=capture_run)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        await _process_transcription_for_test("test", config)
+
+    assert "@home or @mindroom_home_oldns (spoken as: HomeAssistant)" in captured_prompt
+    assert "@mindroom_home (spoken as: HomeAssistant)" not in captured_prompt
 
 
 @pytest.mark.asyncio
@@ -176,7 +210,7 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
 
     assert "@openclaw or @mindroom_openclaw (spoken as: OpenClaw)" in captured_prompt
     assert "@code or @mindroom_code (spoken as: CodeAgent)" not in captured_prompt
-    assert "Available teams (use EXACT team name after @):\n  (none)" in captured_prompt
+    assert "Available teams (use an exact listed team mention after @):\n  (none)" in captured_prompt
 
 
 @pytest.mark.asyncio
@@ -208,6 +242,41 @@ async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
         )
 
     assert result == "code review this"
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_strips_unavailable_persisted_username_alias() -> None:
+    """Unavailable live Matrix usernames should not survive voice mention sanitization."""
+    config = _voice_config(
+        {
+            "openclaw": "OpenClaw",
+            "code": "CodeAgent",
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_code", "mindroom_code_oldns", "pw", domain=config.get_domain(runtime_paths))
+    state.save(runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.voice_handler.Agent") as mock_agent_class,
+        patch("mindroom.model_loading.get_model_instance") as mock_get_model,
+    ):
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "@mindroom_code_oldns review this"
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+        mock_agent_class.return_value = mock_agent
+        mock_get_model.return_value = MagicMock()
+
+        result = await _process_transcription_for_test(
+            "review this",
+            config,
+            available_agent_names=["openclaw"],
+            available_team_names=[],
+        )
+
+    assert result == "mindroom_code_oldns review this"
 
 
 @pytest.mark.parametrize(

@@ -124,7 +124,7 @@ This prevents MindRoom entities from injecting themselves into human-to-human co
 
 The rules are:
 
-1. **Mentioned agents or teams always respond** — an explicit `@agent` or `@team` overrides all other rules.
+1. **Mentioned eligible agents or teams respond** — an explicit `@agent` or `@team` bypasses AI routing, but room configuration and reply permissions still apply.
 2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
 3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
 4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
@@ -150,7 +150,7 @@ Accounts in this list are treated like MindRoom entities for response logic — 
 
 If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message that asks the user to mention an agent or team directly or rephrase the request.
 
-Users can always mention agents or teams directly with `@entity_name` to bypass routing.
+Users can mention eligible agents or teams directly with `@entity_name` to bypass routing, while configured-room allowlists and reply permissions still decide whether that entity may answer.
 
 ## Note on the Router Agent
 
@@ -160,7 +160,8 @@ If no `router` section is configured, it uses the default model.
 
 The router account is not a conversational AI agent to tag directly.
 If a message mentions only the router and no other users, agents, or teams, the router replies with the rules of engagement instead of answering the prompt.
-Mention a specific agent or team when you want that entity to answer, or mention multiple agents or teams when you want an ad-hoc collaboration.
+Mention a specific agent or team when you want that entity to answer.
+Mention multiple agents when you want an ad-hoc collaboration, or mention a configured team directly for its team workflow.
 When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
 Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.

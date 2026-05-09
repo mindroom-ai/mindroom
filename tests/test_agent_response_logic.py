@@ -1,10 +1,10 @@
 """Tests for agent response decision logic.
 
 This module comprehensively tests all agent response rules:
-1. Mentioned agents always respond
-2. Single agent continues conversation
+1. Mentioned available agents respond
+2. A single eligible responder can continue directly
 3. Multiple agents need explicit mentions
-4. Smart routing for new threads
+4. Smart routing selects among multiple eligible responders
 5. Invited agents behave like native agents
 
 These tests ensure no regressions in the core response logic.
@@ -392,6 +392,34 @@ class TestAgentResponseLogic:
             is_thread=True,
             room=room,
             thread_history=thread_history,
+            config=config,
+            runtime_paths=runtime_paths,
+            sender_id=f"@bob:{self.domain}",
+        )
+
+        assert should_respond is False
+
+    def test_explicit_mention_cannot_widen_configured_room_boundary(self) -> None:
+        """Explicit mentions must stay inside the configured-room responder boundary."""
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator"),
+                    "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                authorization={"default_room_access": True},
+            ),
+            self.runtime_paths,
+        )
+        runtime_paths = runtime_paths_for(config)
+
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=False,
+            room=create_mock_room("!room:localhost", ["calculator", "research"], config),
+            thread_history=[],
             config=config,
             runtime_paths=runtime_paths,
             sender_id=f"@bob:{self.domain}",

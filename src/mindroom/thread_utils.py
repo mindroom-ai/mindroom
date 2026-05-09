@@ -264,14 +264,6 @@ def should_agent_respond(  # noqa: PLR0911
     if not authorization.is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths):
         return False
 
-    # Always respond if mentioned
-    if am_i_mentioned:
-        return True
-
-    # Never respond if anyone else is explicitly mentioned (agent or not)
-    if mentioned_agents or has_non_agent_mentions:
-        return False
-
     available_agents = available_agents_in_room
     if available_agents is None:
         available_agents = authorization.responder_candidate_entities_from_cached_room(
@@ -281,6 +273,17 @@ def should_agent_respond(  # noqa: PLR0911
             runtime_paths,
         )
     agent_matrix_id = config.get_ids(runtime_paths)[agent_name]
+    available_agent_ids = {agent.full_id for agent in available_agents}
+    if agent_matrix_id.full_id not in available_agent_ids:
+        return False
+
+    # Always respond if mentioned
+    if am_i_mentioned:
+        return True
+
+    # Never respond if anyone else is explicitly mentioned (agent or not)
+    if mentioned_agents or has_non_agent_mentions:
+        return False
 
     # Non-thread messages: auto-respond if we're the only visible agent in the room.
     if not is_thread:
@@ -288,10 +291,6 @@ def should_agent_respond(  # noqa: PLR0911
 
     # In threads with multiple human participants, always require explicit mention.
     if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths):
-        return False
-
-    available_agent_ids = {agent.full_id for agent in available_agents}
-    if agent_matrix_id.full_id not in available_agent_ids:
         return False
 
     # For threads, continue only if we're the single participating agent

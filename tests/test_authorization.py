@@ -1342,6 +1342,77 @@ def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp
     assert [agent.full_id for agent in available_agents] == ["@mindroom_assistant_oldns:example.com"]
 
 
+def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:
+    """Configured-room responders should resolve through live persisted account usernames."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["!test:server"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
+
+    candidates = mindroom.authorization.responder_candidate_entities_from_cached_room(
+        room,
+        "@alice:example.com",
+        config,
+        runtime_paths,
+    )
+
+    assert [candidate.full_id for candidate in candidates] == ["@mindroom_assistant_oldns:example.com"]
+    assert [candidate.agent_name(config, runtime_paths) for candidate in candidates] == ["assistant"]
+
+
+def test_configured_team_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:
+    """Team responder candidates should resolve through live persisted account usernames."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+            },
+        },
+        teams={
+            "ops": {
+                "display_name": "Ops",
+                "role": "Operations team",
+                "agents": ["assistant"],
+                "rooms": ["!test:server"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account("agent_ops", "mindroom_ops_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_ops_oldns:example.com", "Ops", None)
+
+    candidates = mindroom.authorization.responder_candidate_entities_from_cached_room(
+        room,
+        "@alice:example.com",
+        config,
+        runtime_paths,
+    )
+
+    assert [candidate.full_id for candidate in candidates] == ["@mindroom_ops_oldns:example.com"]
+    assert [candidate.agent_name(config, runtime_paths) for candidate in candidates] == ["ops"]
+
+
 def test_resolve_alias_method() -> None:
     """Test the resolve_alias helper directly."""
     auth = AuthorizationConfig(

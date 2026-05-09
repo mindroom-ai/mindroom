@@ -21,7 +21,6 @@ from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix_identifiers import agent_username_localpart
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -403,11 +402,12 @@ async def _process_transcription(
         team_names = available_team_names if available_team_names is not None else list(config.teams.keys())
         agent_display_names = {name: config.agents[name].display_name for name in agent_names if name in config.agents}
         team_display_names = {name: config.teams[name].display_name for name in team_names if name in config.teams}
+        config_ids = config.get_ids(runtime_paths)
 
         agent_list = (
             "\n".join(
                 [
-                    f"  - @{name} or @{agent_username_localpart(name, runtime_paths)} (spoken as: {agent_display_names[name]})"
+                    f"  - @{name} or @{config_ids[name].username} (spoken as: {agent_display_names[name]})"
                     for name in agent_names
                 ],
             )
@@ -415,7 +415,12 @@ async def _process_transcription(
             else "  (none)"
         )
         team_list = (
-            "\n".join([f"  - @{name} (spoken as: {team_display_names[name]})" for name in team_names])
+            "\n".join(
+                [
+                    f"  - @{name} or @{config_ids[name].username} (spoken as: {team_display_names[name]})"
+                    for name in team_names
+                ],
+            )
             if team_names
             else "  (none)"
         )
@@ -449,6 +454,7 @@ async def _process_transcription(
                 response.content.strip(),
                 allowed_entities=set(agent_names) | set(team_names),
                 configured_entities=set(config.agents) | set(config.teams),
+                entity_aliases_by_localpart=_entity_aliases_by_localpart(config, runtime_paths),
             )
 
     except Exception as e:
@@ -496,6 +502,7 @@ def _sanitize_unavailable_mentions(
     *,
     allowed_entities: set[str],
     configured_entities: set[str],
+    entity_aliases_by_localpart: dict[str, str] | None = None,
 ) -> str:
     """Strip @ from mentions that target configured but unavailable entities."""
     if not text:
@@ -503,10 +510,14 @@ def _sanitize_unavailable_mentions(
 
     configured_by_lower = {name.lower(): name for name in configured_entities}
     allowed_lower = {name.lower() for name in allowed_entities}
+    aliases_by_lower = {
+        localpart.lower(): entity_name for localpart, entity_name in (entity_aliases_by_localpart or {}).items()
+    }
 
     def _replace(match: re.Match[str]) -> str:
         name = match.group("name")
-        configured_name = configured_by_lower.get(name.lower())
+        localpart = f"{match.group('prefix') or ''}{name}"
+        configured_name = aliases_by_lower.get(localpart.lower()) or configured_by_lower.get(name.lower())
         if configured_name is None:
             return match.group(0)
         if configured_name.lower() in allowed_lower:
@@ -515,3 +526,12 @@ def _sanitize_unavailable_mentions(
         return match.group(0)[1:]
 
     return _VOICE_MENTION_PATTERN.sub(_replace, text)
+
+
+def _entity_aliases_by_localpart(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
+    config_ids = config.get_ids(runtime_paths)
+    aliases: dict[str, str] = {}
+    for entity_name in (*config.agents, *config.teams):
+        aliases[entity_name] = entity_name
+        aliases[config_ids[entity_name].username] = entity_name
+    return aliases

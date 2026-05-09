@@ -343,10 +343,8 @@ class TurnPolicy:
         if team_config is None:
             return None
         configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
-        team_agents = [
-            MatrixID.from_agent(agent_name, self.deps.matrix_id.domain, self.deps.runtime_paths)
-            for agent_name in team_config.agents
-        ]
+        config_ids = self.deps.runtime.config.get_ids(self.deps.runtime_paths)
+        team_agents = [config_ids[agent_name] for agent_name in team_config.agents]
         team_resolution = resolve_configured_team(
             self.deps.agent_name,
             team_agents,

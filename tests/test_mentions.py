@@ -9,6 +9,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -116,7 +117,6 @@ class TestMentionParsing:
         text = "Ask @mindroom_calculator:matrix.org for help"
         processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
-        # Should replace with sender's domain
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
 
@@ -153,14 +153,14 @@ class TestMentionParsing:
         assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
 
     def test_custom_domain(self) -> None:
-        """Test with custom sender domain."""
+        """Configured entity mentions should use the current configured Matrix domain."""
         config = _make_config(_default_runtime_paths())
 
         text = "Hey @calculator"
         processed, mentions, _markdown = _parse_mentions_in_text(text, "matrix.org", config)
 
-        assert processed == "Hey @mindroom_calculator:matrix.org"
-        assert mentions == ["@mindroom_calculator:matrix.org"]
+        assert processed == "Hey @mindroom_calculator:localhost"
+        assert mentions == ["@mindroom_calculator:localhost"]
 
     def test_ignore_unknown_mentions(self) -> None:
         """Test that unknown agents are not converted."""
@@ -205,13 +205,26 @@ class TestMentionParsing:
         )
 
         assert content["msgtype"] == "m.text"
-        assert content["body"] == "@mindroom_calculator:matrix.org and @mindroom_code:matrix.org please help"
+        assert content["body"] == "@mindroom_calculator:localhost and @mindroom_code:localhost please help"
         assert set(content["m.mentions"]["user_ids"]) == {
-            "@mindroom_calculator:matrix.org",
-            "@mindroom_code:matrix.org",
+            "@mindroom_calculator:localhost",
+            "@mindroom_code:localhost",
         }
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content["m.relates_to"]["rel_type"] == "m.thread"
+
+    def test_format_message_bootstrap_fallback_uses_configured_domain(self) -> None:
+        """Without persisted state, config-derived mentions should use the configured Matrix domain."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "@calculator please help",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == "@mindroom_calculator:localhost please help"
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_calculator:localhost"]
 
     def test_format_message_with_team_mention(self) -> None:
         """Team aliases should format as Matrix mentions for router handoffs."""
@@ -240,6 +253,129 @@ class TestMentionParsing:
             content["formatted_body"] == '<p><a href="https://matrix.to/#/@mindroom_ops:localhost">@Ops Team</a> '
             "could you help with this?</p>\n"
         )
+
+    def test_format_message_with_mentions_uses_persisted_current_username_drift(self, tmp_path: Path) -> None:
+        """Mention formatting should target the live persisted Matrix account ID."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _make_config(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        content = _format_message_with_mentions(
+            config,
+            "@general could you help with this?",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "@mindroom_general_oldns:localhost could you help with this?"
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_general_oldns:localhost"]
+
+    def test_format_message_rejects_stale_generated_username_after_drift(self, tmp_path: Path) -> None:
+        """After username drift, stale generated localparts should not retarget the live account."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _make_config(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        content = _format_message_with_mentions(
+            config,
+            "@mindroom_general could you help with this?",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "@mindroom_general could you help with this?"
+        assert "m.mentions" not in content
+
+    def test_format_message_rejects_stale_generated_full_mxid_after_drift(self, tmp_path: Path) -> None:
+        """After username drift, stale generated full MXIDs should stay plain text."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _make_config(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        content = _format_message_with_mentions(
+            config,
+            "@mindroom_general:localhost could you help with this?",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "@mindroom_general:localhost could you help with this?"
+        assert "m.mentions" not in content
+
+    def test_format_message_rejects_cross_domain_stale_generated_full_mxid_after_drift(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Stale generated localparts should not become unmanaged mentions on other domains."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _make_config(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        content = _format_message_with_mentions(
+            config,
+            "@mindroom_general:matrix.org could you help with this?",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "@mindroom_general:matrix.org could you help with this?"
+        assert "m.mentions" not in content
+
+    def test_format_message_accepts_persisted_current_username_alias(self, tmp_path: Path) -> None:
+        """Bare live usernames shown in generated copy should still become Matrix mentions."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _make_config(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        content = _format_message_with_mentions(
+            config,
+            "@mindroom_general_oldns could you help with this?",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "@mindroom_general_oldns:localhost could you help with this?"
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_general_oldns:localhost"]
 
     def test_tool_marker_followed_by_thematic_break_renders_as_paragraph_hr_heading_via_format_message_with_mentions(
         self,
@@ -367,15 +503,15 @@ class TestMentionParsing:
         )
 
         assert content["body"] == (
-            "@mindroom_calculator:matrix.org please follow up with @bas.nijholt:chat-mindroom.example.com"
+            "@mindroom_calculator:localhost please follow up with @bas.nijholt:chat-mindroom.example.com"
         )
         assert content["m.mentions"]["user_ids"] == [
-            "@mindroom_calculator:matrix.org",
+            "@mindroom_calculator:localhost",
             "@bas.nijholt:chat-mindroom.example.com",
         ]
         assert (
             content["formatted_body"]
-            == '<p><a href="https://matrix.to/#/@mindroom_calculator:matrix.org">@Calculator</a> '
+            == '<p><a href="https://matrix.to/#/@mindroom_calculator:localhost">@Calculator</a> '
             'please follow up with <a href="https://matrix.to/#/@bas.nijholt:chat-mindroom.example.com">'
             "@bas.nijholt:chat-mindroom.example.com</a></p>\n"
         )
@@ -527,6 +663,32 @@ class TestMentionParsing:
 
         assert mentions == ["@mindroom_mindroom_dev:localhost"]
         assert processed == "@mindroom_mindroom_dev:localhost help"
+
+    def test_prefixed_agent_key_alias_survives_persisted_username_drift(self, tmp_path: Path) -> None:
+        """Configured entity keys remain stable mention aliases after username drift."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _bind_config(
+            runtime_paths,
+            {
+                "mindroom_dev": AgentConfig(display_name="DevAgent"),
+            },
+        )
+        state = MatrixState()
+        state.add_account("agent_mindroom_dev", "mindroom_mindroom_dev_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        text = "@mindroom_dev help"
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
+
+        assert mentions == ["@mindroom_mindroom_dev_oldns:localhost"]
+        assert processed == "@mindroom_mindroom_dev_oldns:localhost help"
 
     def test_namespaced_prefixed_agent_name_with_namespace_suffix(self, tmp_path: Path) -> None:
         """Namespaced mentions for prefixed config keys should try prefix + stripped candidates."""

@@ -848,6 +848,54 @@ class TestRouterTeamFormation:
         )
 
     @pytest.mark.asyncio
+    async def test_tagged_agents_use_supplied_responder_boundary_over_room_cache(self) -> None:
+        """Supplied responder candidates are authoritative for explicit team requests."""
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+        runtime_paths = runtime_paths_for(config)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths)["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths)["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths)["calculator"],
+                config.get_ids(runtime_paths)["general"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths,
+            message="calculator and general, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[
+                config.get_ids(runtime_paths)["calculator"],
+                config.get_ids(runtime_paths)["general"],
+            ],
+            materializable_agent_names={"calculator", "general"},
+        )
+
+        assert result.outcome is TeamOutcome.TEAM
+        assert result.intent is TeamIntent.EXPLICIT_MEMBERS
+        assert _agent_names(result.eligible_members, config) == ["calculator", "general"]
+
+    @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
         """Explicit rejects should preserve the full requested-member failure state."""
         import nio  # noqa: PLC0415
@@ -890,11 +938,11 @@ class TestRouterTeamFormation:
 
         assert result.outcome is TeamOutcome.REJECT
         assert {member.name: member.status for member in result.member_statuses} == {
-            "general": TeamMemberStatus.NOT_IN_ROOM,
-            "research": TeamMemberStatus.NOT_IN_ROOM,
+            "general": TeamMemberStatus.HIDDEN_FROM_SENDER,
+            "research": TeamMemberStatus.HIDDEN_FROM_SENDER,
         }
         assert result.reason == (
-            "Team request includes agents 'general', 'research' that are not available in this room."
+            "Team request includes agents 'general', 'research' that are not available to you in this room."
         )
 
     @pytest.mark.asyncio

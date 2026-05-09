@@ -2320,7 +2320,7 @@ When multiple human users have posted in a thread, the router, agents, and teams
 
 The rules are:
 
-1. **Mentioned agents or teams always respond** — an explicit `@agent` or `@team` overrides all other rules.
+1. **Mentioned eligible agents or teams respond** — an explicit `@agent` or `@team` bypasses AI routing, but room configuration and reply permissions still apply.
 1. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
 1. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
 1. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
@@ -2344,13 +2344,13 @@ Accounts in this list are treated like MindRoom entities for response logic — 
 
 If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message that asks the user to mention an agent or team directly or rephrase the request.
 
-Users can always mention agents or teams directly with `@entity_name` to bypass routing.
+Users can mention eligible agents or teams directly with `@entity_name` to bypass routing, while configured-room allowlists and reply permissions still decide whether that entity may answer.
 
 ## Note on the Router Agent
 
 The router is always present and cannot be disabled. It automatically joins any room with configured agents or teams. If no `router` section is configured, it uses the default model.
 
-The router account is not a conversational AI agent to tag directly. If a message mentions only the router and no other users, agents, or teams, the router replies with the rules of engagement instead of answering the prompt. Mention a specific agent or team when you want that entity to answer, or mention multiple agents or teams when you want an ad-hoc collaboration. When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine. Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next. In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
+The router account is not a conversational AI agent to tag directly. If a message mentions only the router and no other users, agents, or teams, the router replies with the rules of engagement instead of answering the prompt. Mention a specific agent or team when you want that entity to answer. Mention multiple agents when you want an ad-hoc collaboration, or mention a configured team directly for its team workflow. When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine. Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next. In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
 
 # Toolkit Configuration
 
@@ -10787,7 +10787,7 @@ If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment
 
 The intelligence component uses an AI model to analyze transcriptions and format them properly:
 
-1. **Agent mentions** - Converts spoken agent names to `@agent` format
+1. **Agent and team mentions** - Converts spoken agent or team names to listed `@agent` or `@team` mentions
 1. **Mention sanitization** - Mentions of agents or teams not available in the current room have their `@` stripped so the responder is not falsely targeted
 1. **Command patterns** - Identifies and formats `!command` syntax
 1. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
@@ -10987,7 +10987,7 @@ This fallback is transparent — no user action is required. It detects provider
 
 ## Limitations
 
-- **Routing in rooms with multiple agents or teams** -- without an `@mention`, the router selects the best agent or team based on the image caption.
+- **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.
 
@@ -11087,7 +11087,7 @@ MindRoom automatically prunes attachment metadata and managed `incoming_media/` 
 
 ## Limitations
 
-- **Routing in rooms with multiple agents or teams** -- without an `@mention`, the router selects the best agent or team based on the file caption.
+- **Routing with multiple eligible responders** -- without an `@mention`, the router uses the file caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.
 
 # Chat Commands
@@ -11541,7 +11541,7 @@ MindRoom also supports a `ReplacementStreamingResponse` variant where each chunk
 
 # Scheduling
 
-Schedule agents to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
+Schedule agents or teams to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
 
 ## Commands
 
@@ -11568,7 +11568,7 @@ Schedule agents to perform tasks at specific times or intervals using natural la
 
 **Conditional Workflows (polling-based):**
 
-Conditional or event-like requests are converted to recurring cron-based polling schedules. The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the agent checks it on each poll cycle. These are **not** real event subscriptions — they are periodic checks.
+Conditional or event-like requests are converted to recurring cron-based polling schedules. The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle. These are **not** real event subscriptions — they are periodic checks.
 
 ```
 !schedule If I get an email about "urgent", @phone_agent call me
@@ -12101,7 +12101,7 @@ MindRoom's architecture consists of several key components working together.
 ## Data Flow
 
 1. **Message arrives** from Matrix homeserver
-1. **Router decides** which agent or team should handle it (if no explicit agent or team mention)
+1. **Responder is resolved** directly when one eligible agent or team remains, otherwise the router selects among candidates
 1. **Selected entity processes** the message using the Agno runtime
 1. **Tools execute** as needed (file operations, API calls, etc.)
 1. **Response sent** back to Matrix room
@@ -12134,11 +12134,12 @@ Streaming behavior is configured in `config.yaml` with `defaults.enable_streamin
 
 ## Agent Users
 
-Each agent gets its own Matrix user with the `mindroom_` prefix:
+Each agent, team, and the router gets its own Matrix user. New accounts bootstrap with the generated `mindroom_` localpart, but persisted Matrix state is authoritative after provisioning and may contain a drifted username.
 
 ```
 @mindroom_assistant:example.com
 @mindroom_router:example.com  (built-in routing agent)
+@mindroom_assistant_oldns:example.com  (persisted drifted username)
 ```
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
@@ -12219,9 +12220,11 @@ Agents show typing indicators while processing via `typing_indicator()` context 
 
 Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
 
-- `@calculator` - Short agent name
-- `@mindroom_calculator` - Full username
-- `@mindroom_calculator:localhost` - Full Matrix ID
+- `@calculator` - Stable configured agent or team key
+- `@mindroom_calculator_oldns` - Current persisted username localpart
+- `@mindroom_calculator_oldns:localhost` - Current full Matrix ID
+
+Generated bootstrap IDs such as `@mindroom_calculator:localhost` are only valid before persisted state records a different current username.
 
 Returns content with `m.mentions` and `formatted_body` containing clickable links.
 
@@ -12254,11 +12257,11 @@ mid.username  # "mindroom_assistant"
 mid.domain    # "example.com"
 mid.full_id   # "@mindroom_assistant:example.com"
 
-# Create from agent name
+# Create the bootstrap Matrix ID from an agent name
 mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
 
-# Extract agent name (returns "code" if configured, None otherwise)
-agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_paths)
+# Extract agent name from the current persisted Matrix ID
+agent_name = extract_agent_name("@mindroom_code_oldns:localhost", config, runtime_paths)
 ```
 
 ## Root Space
@@ -12425,11 +12428,11 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content. The agent edits its own previous reply in place rather than sending a new message. Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
 
-**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent or team is mentioned, routing selects the appropriate agent or team, similar to text messages.
+**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the selected responder. When no agent or team is mentioned, routing selects the appropriate agent or team, similar to text messages.
 
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
-**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, routes directly when one candidate remains, and uses `suggest_agent_for_message()` only when multiple candidates remain. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
+**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_agent_for_message()` only when multiple candidates remain. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 

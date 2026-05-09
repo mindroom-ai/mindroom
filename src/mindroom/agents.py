@@ -23,9 +23,9 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent a
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.entity_resolution import entity_matrix_ids
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import MatrixID
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -980,11 +980,7 @@ def _render_agent_identity_context(
         )
         return overridden_identity_context + openai_context
 
-    matrix_id = MatrixID.from_agent(
-        agent_name,
-        config.get_domain(runtime_paths),
-        runtime_paths,
-    ).full_id
+    matrix_id = entity_matrix_ids(config, runtime_paths)[agent_name].full_id
     return build_agent_identity_context(
         display_name=display_name,
         matrix_id=matrix_id,

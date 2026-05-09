@@ -565,10 +565,11 @@ agents:
 ## Using Agents in the Multi-Agent System
 
 Each agent has its own Matrix account.
+Persisted Matrix state is the source of truth for the account username after provisioning, so generated `@mindroom_<agent>` IDs are only bootstrap examples.
 To interact with an agent:
 
-1. **Mention the agent by its Matrix display name or ID**: `@mindroom_agentname:<server>`
-   - Example: `@mindroom_code what is 25 * 4?`
+1. **Mention the agent by its configured name or current Matrix username**: `@agentname` or the username shown in the room
+   - Example: `@code what is 25 * 4?`
 
 2. **In threads**: Agents continue responding based on thread context, but multi-human threads require an explicit current `@mention`
    - Start a thread by replying to any message
@@ -576,7 +577,7 @@ To interact with an agent:
    - Once two or more humans are participating, mention the agent again before expecting a reply
 
 3. **Multiple agents**: You can mention multiple agents in one message
-   - Example: `@mindroom_research @mindroom_code Compare renewable energy trends`
+   - Example: `@research @code Compare renewable energy trends`
 
 ## Tool Requirements
 

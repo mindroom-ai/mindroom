@@ -157,7 +157,7 @@ def generate_welcome_message(room_id: str, config: Config, runtime_paths: Runtim
         "• Mention an agent or team with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
         "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
-        "• Multiple agents or teams can collaborate when you mention them together\n"
+        "• Multiple agents can collaborate when you mention them together; mention a team directly for its team workflow\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
         f"{quick_commands}\n\n"

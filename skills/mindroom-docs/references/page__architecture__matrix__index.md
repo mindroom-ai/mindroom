@@ -15,21 +15,23 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
-| `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| Variable             | Default                 | Description                              |
+| -------------------- | ----------------------- | ---------------------------------------- |
+| `MATRIX_HOMESERVER`  | `http://localhost:8008` | Matrix homeserver URL                    |
+| `MATRIX_SERVER_NAME` | (from homeserver)       | Federation server name                   |
+| `MATRIX_SSL_VERIFY`  | `true`                  | Set to `false` for dev/self-signed certs |
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
 ## Agent Users
 
-Each agent gets its own Matrix user with the `mindroom_` prefix:
+Each agent, team, and the router gets its own Matrix user.
+New accounts bootstrap with the generated `mindroom_` localpart, but persisted Matrix state is authoritative after provisioning and may contain a drifted username.
 
 ```
 @mindroom_assistant:example.com
 @mindroom_router:example.com  (built-in routing agent)
+@mindroom_assistant_oldns:example.com  (persisted drifted username)
 ```
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
@@ -54,9 +56,9 @@ Replies that never reach threaded context stay room-level.
 When deriving context for an incoming event, MindRoom:
 
 1. Uses explicit `m.thread` relations as the primary inbound thread identity.
-2. Lets plain replies inherit thread membership transitively when their reply chain reaches a threaded ancestor or proven thread root.
-3. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
-4. May start a new thread under a room-root event when agent thread mode requires it.
+1. Lets plain replies inherit thread membership transitively when their reply chain reaches a threaded ancestor or proven thread root.
+1. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
+1. May start a new thread under a room-root event when agent thread mode requires it.
 
 ```
 ├── User: @assistant help with this code
@@ -74,20 +76,20 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 Each agent bot runs its own sync loop with 30-second long-polling timeout. Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
 Events are processed in background tasks:
+
 1. Sync receives event via long-polling
-2. Event callback triggered (`_on_message`, `_on_invite`, etc.)
-3. Background task created for async processing
-4. Agent responds in thread
+1. Event callback triggered (`_on_message`, `_on_invite`, etc.)
+1. Background task created for async processing
+1. Agent responds in thread
 
 ### Streaming Responses
 
-Agents stream responses by progressively editing messages.
-Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
-See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
+Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users. See [Streaming Responses](https://docs.mindroom.chat/streaming/index.md) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 
 Marker format:
+
 ```text
 🔧 `tool_name` [N] ⏳     ← pending
 🔧 `tool_name` [N]        ← completed
@@ -100,6 +102,7 @@ Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-
 Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-6 | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
+
 - **online** - Agent running and ready
 - **unavailable** - Agent idle but connected (treated as online for streaming)
 - **offline** - Agent stopped or disconnected
@@ -111,9 +114,12 @@ Agents show typing indicators while processing via `typing_indicator()` context 
 ## Mentions
 
 Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
-- `@calculator` - Short agent name
-- `@mindroom_calculator` - Full username
-- `@mindroom_calculator:localhost` - Full Matrix ID
+
+- `@calculator` - Stable configured agent or team key
+- `@mindroom_calculator_oldns` - Current persisted username localpart
+- `@mindroom_calculator_oldns:localhost` - Current full Matrix ID
+
+Generated bootstrap IDs such as `@mindroom_calculator:localhost` are only valid before persisted state records a different current username.
 
 Returns content with `m.mentions` and `formatted_body` containing clickable links.
 
@@ -151,11 +157,11 @@ mid.username  # "mindroom_assistant"
 mid.domain    # "example.com"
 mid.full_id   # "@mindroom_assistant:example.com"
 
-# Create from agent name
+# Create the bootstrap Matrix ID from an agent name
 mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
 
-# Extract agent name (returns "code" if configured, None otherwise)
-agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_paths)
+# Extract agent name from the current persisted Matrix ID
+agent_name = extract_agent_name("@mindroom_code_oldns:localhost", config, runtime_paths)
 ```
 
 ## Root Space

@@ -66,6 +66,7 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.memory",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
@@ -271,6 +272,7 @@ path = "mindroom.entity_resolution"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.identity",
+    "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
 ]
 
@@ -367,6 +369,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
     "mindroom.matrix.users",
 ]
 
@@ -520,6 +523,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.logging_config",
+    "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.scheduling",
 ]
@@ -547,6 +551,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
     "mindroom.runtime_protocols",
 ]
 
@@ -788,7 +793,7 @@ depends_on = ["mindroom.matrix.client_session", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.matrix.room_cleanup"
-depends_on = ["mindroom.entity_resolution", "mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.users", "mindroom.matrix_identifiers"]
+depends_on = ["mindroom.entity_resolution", "mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.state", "mindroom.matrix.users"]
 
 [[modules]]
 path = "mindroom.matrix.rooms"
@@ -797,9 +802,16 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
     "mindroom.topic_generator",
+]
+
+[[modules]]
+path = "mindroom.matrix.state"
+depends_on = [
+    "mindroom.constants",
 ]
 
 [[modules]]
@@ -809,6 +821,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_session",
     "mindroom.matrix.provisioning",
+    "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
 ]
 
@@ -832,6 +845,7 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
@@ -933,6 +947,7 @@ depends_on = [
     "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
+    "mindroom.matrix.state",
     "mindroom.model_loading",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
@@ -1099,6 +1114,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
+    "mindroom.matrix.state",
     "mindroom.model_loading",
 ]
 
@@ -1579,6 +1595,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
     "mindroom.post_response_effects",
@@ -1931,7 +1948,6 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.matrix.media",
     "mindroom.matrix.mentions",
-    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -2190,6 +2206,7 @@ from = ["mindroom.agent_storage"]
 
 [[interfaces]]
 expose = [
+    "RoutingSuggestion",
     "suggest_agent",
     "suggest_agent_for_message",
 ]

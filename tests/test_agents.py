@@ -44,6 +44,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.matrix.state import MatrixState
 from mindroom.prompts import HIDDEN_TOOL_CALLS_PROMPT, OPENAI_COMPAT_HISTORY_GUIDANCE
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -210,6 +211,33 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     assert "## Custom Identity" in openai_compat_agent.role
     assert "Matrix=not available in OpenAI-compatible API" in openai_compat_agent.role
     assert "OpenAI-compatible API" in openai_compat_agent.role
+
+
+def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) -> None:
+    """Agent identity prompt should describe the live persisted Matrix account ID."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General assistant",
+                    tools=[],
+                    rooms=["lobby"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        ),
+        runtime_paths,
+    )
+    state = MatrixState()
+    state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
+    agent = _create_agent_for_test("general", config)
+
+    assert "@mindroom_general_oldns:localhost" in agent.role
+    assert "@mindroom_general:localhost" not in agent.role
 
 
 def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> None:
