@@ -27,6 +27,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
+from mindroom import runtime_env_policy
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
@@ -479,16 +480,67 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS", "9")
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path / "shared-storage"))
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
+    credentials_encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key)
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        None,
+        startup_runtime,
+        extra_env_passthrough="MINDROOM_*",
+    )
 
     assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == credentials_encryption_key
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
     assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "9"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT") == str(tmp_path / "shared-storage")
+
+
+def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
+    """Linux exposes the original startup env through /proc, so static runners wipe the key entry too."""
+    if not Path("/proc/self/environ").exists():
+        pytest.skip("/proc/self/environ is not available on this platform")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NAMESPACE": "alpha1234"},
+    )
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime, public_runtime=True)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    env = os.environ.copy()
+    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
+    env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
+    script = (
+        "import os\n"
+        "from mindroom.api import sandbox_runner as m\n"
+        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "raw_environ = open('/proc/self/environ', 'rb').read()\n"
+        f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
+        f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
+        "print(b'MINDROOM_CREDENTIALS_ENCRYPTION_KEY=' in raw_environ)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
 
 
 def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
@@ -526,7 +578,7 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
     execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
-    effective_runtime = sandbox_exec_module.runtime_paths_with_execution_env(startup_runtime, execution_env)
+    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(startup_runtime, execution_env)
 
     assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert startup_runtime.env_value("OPENAI_API_KEY") is None
@@ -540,6 +592,105 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     assert "TEST_EXECUTION_ENV" not in execution_env
     assert effective_runtime.env_value("OPENAI_BASE_URL") is None
     assert effective_runtime.env_value("TEST_EXECUTION_ENV") is None
+
+
+def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers may read the encryption key from process env without exposing it to tools."""
+    wiped_entries: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_process_environment_entry",
+        lambda name: (123, 45) if name == runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV else None,
+    )
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_wipe_process_environment_entry",
+        lambda address, size: wiped_entries.append((address, size)),
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+        },
+    )
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        None,
+        startup_runtime,
+        extra_env_passthrough="MINDROOM_*",
+    )
+    subprocess_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
+        startup_runtime,
+        {"VIRTUAL_ENV": "/worker-venv"},
+    )
+
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
+    assert wiped_entries == [(123, 45)]
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in constants_module.shell_extra_env_values(
+        extra_env_passthrough="MINDROOM_*",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    assert not constants_module.is_workspace_env_overlay_name_allowed(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV)
+    assert subprocess_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+
+
+def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
+    """Linux exposes the original startup env through /proc, so wipe the credential key entry too."""
+    if not Path("/proc/self/environ").exists():
+        pytest.skip("/proc/self/environ is not available on this platform")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    storage_path = tmp_path / "storage"
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1"},
+    )
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    env = os.environ.copy()
+    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
+    env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
+    script = (
+        "import os\n"
+        "from mindroom.api import sandbox_runner as m\n"
+        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "raw_environ = open('/proc/self/environ', 'rb').read()\n"
+        f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
+        f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
+        "print(b'MINDROOM_CREDENTIALS_ENCRYPTION_KEY=' in raw_environ)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
 
 
 @pytest.mark.asyncio
@@ -954,10 +1105,15 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
-        "MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\n",
+        f"MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\n"
+        f"{runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV}=dotenv-key\n",
         encoding="utf-8",
     )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
     captured_payload: dict[str, object] = {}
 
     def fake_run(
@@ -993,6 +1149,208 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert "dotenv-key" not in json.dumps(captured_payload)
+
+
+def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Python subprocess execution should not receive the credential encryption key through runtime payloads."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    encryption_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": "/secrets/google-service-account.json",
+            "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
+        },
+    )
+    captured_payload: dict[str, object] = {}
+
+    def fake_run(
+        cmd: list[str],
+        **run_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd
+        envelope = json.loads(str(run_kwargs["input"]))
+        captured_payload.update(envelope["runtime_paths"])
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="python",
+            function_name="run_python_code",
+            args=["result = 1", "result"],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+    child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(captured_payload)
+
+    assert response.ok is True
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert child_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") is None
+    assert child_runtime.env_value("GOOGLE_DELEGATED_USER") is None
+    assert encryption_key not in json.dumps(captured_payload)
+
+
+def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: Path) -> None:
+    """Trusted non-execution tool runtime paths should keep the key needed to load encrypted credentials."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    encryption_key = base64.urlsafe_b64encode(b"2" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": "/secrets/google-service-account.json",
+            "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
+        },
+    )
+    credentials = {"token": "secret", "_source": "ui"}
+    get_runtime_credentials_manager(runtime_paths).save_credentials("custom_tool", credentials)
+
+    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
+        runtime_paths,
+        {},
+        include_credentials_encryption_key=True,
+    )
+    python_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
+        runtime_paths,
+        {},
+        include_base_execution_env=False,
+    )
+
+    assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert effective_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") == "/secrets/google-service-account.json"
+    assert effective_runtime.env_value("GOOGLE_DELEGATED_USER") == "workspace-user@example.com"
+    assert get_runtime_credentials_manager(effective_runtime).load_credentials("custom_tool") == credentials
+    assert python_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert python_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") is None
+    assert python_runtime.env_value("GOOGLE_DELEGATED_USER") is None
+    assert get_runtime_credentials_manager(python_runtime).load_credentials("custom_tool") is None
+
+
+@pytest.mark.asyncio
+async def test_inprocess_execution_tool_uses_encrypted_persisted_config_after_key_wipe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runner-side shell construction should load encrypted config without exposing the key to shell env."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    encryption_key = base64.urlsafe_b64encode(b"3" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "shell",
+        {"base_dir": str(workspace), "_source": "ui"},
+    )
+    monkeypatch.delenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, raising=False)
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-c", 'printf "%s|%s" "$PWD" "$MINDROOM_CREDENTIALS_ENCRYPTION_KEY"']],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True, response
+    assert response.result == f"{workspace}|"
+
+
+def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtime_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subprocess shell payloads should carry resolved config, not the encryption key."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    encryption_key = base64.urlsafe_b64encode(b"4" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "shell",
+        {"base_dir": str(workspace), "_source": "ui"},
+    )
+    captured_envelope: dict[str, object] = {}
+    monkeypatch.delenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, raising=False)
+
+    def fake_run(
+        cmd: list[str],
+        **run_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd
+        captured_envelope.update(json.loads(str(run_kwargs["input"])))
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["pwd"]],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+    child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(captured_envelope["runtime_paths"])
+    request_payload = captured_envelope["request"]
+
+    assert response.ok is True
+    assert isinstance(request_payload, dict)
+    credential_overrides = request_payload["credential_overrides"]
+    assert isinstance(credential_overrides, dict)
+    assert credential_overrides["base_dir"] == str(workspace)
+    assert "_source" not in credential_overrides
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert encryption_key not in json.dumps(captured_envelope)
 
 
 def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Path) -> None:
@@ -1258,7 +1616,7 @@ def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
     )
 
     execution_env = sandbox_exec_module.request_execution_env("shell", None, runtime_paths)
-    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+    effective_runtime_paths = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
         include_base_execution_env=False,
@@ -3959,7 +4317,7 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
     )
     execution_env.update(protected_env)
     trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
-    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+    effective_runtime_paths = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
         trusted_env_overlay=trusted_overlay,

@@ -109,9 +109,9 @@ Each worker pod runs the sandbox-runner app and is addressed through an internal
 Each dedicated worker needs access to its agent's storage directory.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
-The runtime chart stores derived worker tokens as per-worker keys in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
-The hosted instance chart stores derived worker tokens as per-worker keys in a pre-created tenant auth Secret.
+The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
 The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
 Use the instance Helm chart with values like:
@@ -232,7 +232,7 @@ Committed runtime `.env` values and provider credentials are not forwarded impli
 Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default.
 Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
 `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries.
-To prevent runtime control material from reaching tools, shell passthrough drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`.
+To prevent runtime control material from reaching tools, shell passthrough drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Everything else that matches your configured names or globs passes through, including service tokens and provider credentials.
 If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
 
@@ -282,7 +282,7 @@ The runner sources this script with `bash` after applying the workspace home con
 **Filtering:**
 
 `.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.).
-To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`.
+To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export.
 After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook.
 If you don't want a value to reach tools, don't export it.

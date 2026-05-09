@@ -78,6 +78,7 @@ stringData:
   stripe_secret_key: {{ .Values.stripe.secretKey }}
   stripe_webhook_secret: {{ .Values.stripe.webhookSecret }}
   provisioner_api_key: {{ .Values.provisioner.apiKey }}
+  instance_credentials_encryption_secret: {{ .Values.provisioner.instanceCredentialsEncryptionSecret | default "" | quote }}
   openai_key: {{ .Values.apiKeys.openai | default "" }}
   anthropic_key: {{ .Values.apiKeys.anthropic | default "" }}
   openrouter_key: {{ .Values.apiKeys.openrouter | default "" }}
@@ -190,6 +191,8 @@ spec:
           value: "/etc/secrets/stripe_webhook_secret"
         - name: PROVISIONER_API_KEY_FILE
           value: "/etc/secrets/provisioner_api_key"
+        - name: INSTANCE_CREDENTIALS_ENCRYPTION_SECRET_FILE
+          value: "/etc/secrets/instance_credentials_encryption_secret"
         - name: OPENAI_API_KEY_FILE
           value: "/etc/secrets/openai_key"
         - name: ANTHROPIC_API_KEY_FILE

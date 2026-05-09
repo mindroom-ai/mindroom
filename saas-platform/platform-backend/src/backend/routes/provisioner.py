@@ -1,7 +1,13 @@
 """Instance provisioning and management routes."""
 
+import base64
+import binascii
+import contextlib
+import hashlib
 import hmac
+import os
 import secrets
+import tempfile
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -10,6 +16,7 @@ from backend.config import (
     DEEPSEEK_API_KEY,
     GOOGLE_API_KEY,
     INSTANCE_BASE_DOMAIN,
+    INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
     INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
@@ -76,6 +83,85 @@ def _require_provisioner_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
     if not hmac.compare_digest(token, PROVISIONER_API_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _instance_credentials_encryption_key(instance_id: str) -> str:
+    """Derive a stable per-instance credential encryption key."""
+    root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
+    if not root_secret:
+        msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
+        raise HTTPException(status_code=500, detail=msg)
+    digest = hmac.digest(
+        root_secret.encode("utf-8"),
+        f"mindroom.instance-credentials.v1:{instance_id}".encode("utf-8"),
+        hashlib.sha256,
+    )
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _write_helm_secret_value_file(value: str) -> str:
+    """Write one Helm --set-file secret value to a private temporary file."""
+    fd, path = tempfile.mkstemp(prefix="mindroom-credentials-encryption-key-", text=True)
+    try:
+        os.write(fd, value.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def _append_credentials_encryption_key_helm_args(helm_args: list[str], key: str) -> str | None:
+    """Append credential encryption key Helm args without putting key material in argv."""
+    if not key:
+        helm_args += ["--set", "credentials_encryption_key="]
+        return None
+    secret_file_path = _write_helm_secret_value_file(key)
+    helm_args += ["--set-file", f"credentials_encryption_key={secret_file_path}"]
+    return secret_file_path
+
+
+async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
+    """Return the existing credential encryption key from an instance Secret when present."""
+    secret_name = f"mindroom-api-keys-{instance_id}"
+    code, out, err = await run_kubectl(
+        [
+            "get",
+            "secret",
+            secret_name,
+            "--ignore-not-found",
+            "-o=jsonpath={.data.credentials_encryption_key}",
+        ],
+        namespace=namespace,
+    )
+    if code != 0:
+        msg = f"Failed to inspect existing credential encryption state for instance {instance_id}: {err or out}"
+        raise HTTPException(status_code=500, detail=msg)
+    encoded_key = out.strip()
+    if not encoded_key:
+        return None
+    try:
+        key = base64.b64decode(encoded_key, validate=True).decode("utf-8").strip()
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        msg = f"Instance {instance_id} has an invalid credential encryption key Secret value"
+        raise HTTPException(status_code=500, detail=msg) from exc
+    return key or None
+
+
+async def _provision_credentials_encryption_key(
+    *,
+    customer_id: str,
+    existing_instance_id: Any,
+    data: dict,
+    namespace: str,
+) -> str:
+    """Return the instance chart credential encryption key value for this provision run."""
+    existing_key = (
+        await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
+    )
+    if existing_key is not None:
+        return existing_key
+    if not existing_instance_id or data.get("enable_credentials_encryption") is True:
+        return _instance_credentials_encryption_key(customer_id)
+    return ""
 
 
 @router.post("/system/provision", response_model=ProvisionResponse)
@@ -180,6 +266,13 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
+    # Existing instances may have plaintext credential files; preserve their current encryption state.
+    credentials_encryption_key = await _provision_credentials_encryption_key(
+        customer_id=customer_id,
+        existing_instance_id=existing_instance_id,
+        data=data,
+        namespace=namespace,
+    )
 
     try:
         # Use upgrade --install to handle both new and re-provisioning cases
@@ -270,7 +363,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"trustedUpstreamAuth.jwtMatrixUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM}",
             ]
 
-        code, stdout, stderr = await run_helm(helm_args)
+        credentials_encryption_key_file_path = _append_credentials_encryption_key_helm_args(
+            helm_args,
+            credentials_encryption_key,
+        )
+        try:
+            code, stdout, stderr = await run_helm(helm_args)
+        finally:
+            if credentials_encryption_key_file_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(credentials_encryption_key_file_path)
         if code != 0:
             # Mark as error in DB
             try:

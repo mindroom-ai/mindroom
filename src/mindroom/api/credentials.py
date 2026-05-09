@@ -862,7 +862,10 @@ class _DashboardCredentialAccess:
     def save(self, service: str, credentials: dict[str, Any]) -> None:
         """Save dashboard-visible credentials for one service."""
         self.reject_token_service(service)
-        _save_credentials_for_target(service, credentials, self.target)
+        try:
+            _save_credentials_for_target(service, credentials, self.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def delete(self, service: str) -> None:
         """Delete dashboard-visible credentials for one service."""
@@ -1144,13 +1147,13 @@ async def copy_credentials(
     _reject_oauth_token_service(destination_match)
     _reject_oauth_token_service(source_match)
     _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
-    target = resolve_request_credentials_target(
+    access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service, source_service),
     )
-    source_creds = load_credentials_for_target(source_service, target)
-    destination_creds = load_credentials_for_target(service, target)
+    source_creds = access.load(source_service)
+    destination_creds = access.load(service)
 
     if not source_creds:
         raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
@@ -1161,7 +1164,7 @@ async def copy_credentials(
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
-    _save_credentials_for_target(service, target_creds, target)
+    access.save(service, target_creds)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 

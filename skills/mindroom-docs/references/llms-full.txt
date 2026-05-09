@@ -785,13 +785,14 @@ tool_approval:
 
 ### Core
 
-| Variable                   | Description                                                                                                                                                                             | Default                                     |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `MINDROOM_CONFIG_PATH`     | Path to `config.yaml`                                                                                                                                                                   | `./config.yaml` → `~/.mindroom/config.yaml` |
-| `MINDROOM_STORAGE_PATH`    | Data storage directory                                                                                                                                                                  | `mindroom_data/` next to config             |
-| `MINDROOM_CONFIG_TEMPLATE` | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path                         |
-| `LOG_LEVEL`                | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`)                                                                                                                  | `INFO`                                      |
-| `MINDROOM_LOGGER_LEVELS`   | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`                                   | unset                                       |
+| Variable                              | Description                                                                                                                                                                             | Default                                     |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `MINDROOM_CONFIG_PATH`                | Path to `config.yaml`                                                                                                                                                                   | `./config.yaml` → `~/.mindroom/config.yaml` |
+| `MINDROOM_STORAGE_PATH`               | Data storage directory                                                                                                                                                                  | `mindroom_data/` next to config             |
+| `MINDROOM_CONFIG_TEMPLATE`            | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path                         |
+| `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Optional base64-encoded 32-byte key for encrypted-at-rest credential files                                                                                                              | unset                                       |
+| `LOG_LEVEL`                           | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`)                                                                                                                  | `INFO`                                      |
+| `MINDROOM_LOGGER_LEVELS`              | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`                                   | unset                                       |
 
 ### Matrix
 
@@ -1198,6 +1199,21 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIA
 ```
 
 Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file. If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+
+## Credential Storage Encryption
+
+Set `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` to encrypt stored credential files at rest. The key must be a base64-encoded 32-byte value and must stay stable across restarts. Generate one with:
+
+```
+python - <<'PY'
+import base64
+import os
+
+print(base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"))
+PY
+```
+
+When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`. Encrypted mode refuses plaintext credential JSON files. No plaintext-to-encrypted migration is performed automatically, so configure the key before saving credentials that must be encrypted.
 
 ## Debug Logging
 
@@ -2809,7 +2825,7 @@ kill_shell_command("shell:abcd1234")
 
 ### Notes
 
-- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries. MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names, and names starting with `MINDROOM_SANDBOX_`.
+- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries. MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -13374,7 +13390,7 @@ In Kubernetes the shared runner can still run as a second container in the same 
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
-In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand. Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service. Each dedicated worker needs access to its agent's storage directory. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved. The runtime chart stores derived worker tokens as per-worker keys in one chart-created worker-auth Secret when workers run in the release namespace. If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace. The hosted instance chart stores derived worker tokens as per-worker keys in a pre-created tenant auth Secret. The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
+In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand. Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service. Each dedicated worker needs access to its agent's storage directory. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved. The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace. If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace. The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret. The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
 Use the instance Helm chart with values like:
 
@@ -13486,7 +13502,7 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ## Shell env and PATH
 
-When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables. Committed runtime `.env` values and provider credentials are not forwarded implicitly. Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default. Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent runtime control material from reaching tools, shell passthrough drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
+When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables. Committed runtime `.env` values and provider credentials are not forwarded implicitly. Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default. Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent runtime control material from reaching tools, shell passthrough drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
@@ -13519,7 +13535,7 @@ The runner sources this script with `bash` after applying the workspace home con
 
 **Filtering:**
 
-`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.). To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`. Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export. After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook. If you don't want a value to reach tools, don't export it.
+`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.). To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`. Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export. After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook. If you don't want a value to reach tools, don't export it.
 
 **Limits and failure handling:**
 
@@ -13775,11 +13791,11 @@ Both modes store agent data in the same per-agent directory structure.
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all proxied tool calls share the same runner process. The runner reads and writes the same agent storage directories as the main process.
+`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all proxied tool calls share the same runner process. The runner reads and writes the same agent storage directories as the main process. When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
 
 ### Dedicated Worker Mode
 
-`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker. Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved. The runtime chart stores derived worker tokens as per-worker keys in one chart-created worker-auth Secret when workers run in the release namespace. If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace. The hosted instance chart stores derived worker tokens as per-worker keys in a pre-created tenant auth Secret. The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
+`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker. Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved. The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace. If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace. The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret. The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
 > [!WARNING] **Filesystem isolation depends on `worker_scope`.** With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available. With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user. Use `user_agent` for per-agent filesystem isolation.
 
@@ -13929,7 +13945,7 @@ curl -X POST "https://api.mindroom.chat/system/provision" \
   -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
 ```
 
-The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
+The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase. For provisioned instance charts, set `provisioner.instanceCredentialsEncryptionSecret` to a stable high-entropy value so the provisioner can derive stable per-instance `credentials_encryption_key` chart values. If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner falls back to `PROVISIONER_API_KEY` when generating keys for new instances or explicit existing-instance opt-ins. Keep this source stable because changing it changes future derived credential encryption keys. New provisioned instances receive a derived credential encryption key by default. When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present. To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body. Treat that opt-in as a one-way switch until a plaintext migration exists. If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them. Clear or replace stale plaintext credential files before enabling the flag. If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
 
 ## Deployment Scripts
 

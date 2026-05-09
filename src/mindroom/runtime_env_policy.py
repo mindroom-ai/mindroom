@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
@@ -17,13 +18,16 @@ __all__ = [
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
-    "is_execution_runtime_env_file_name",
-    "is_execution_runtime_process_env_name",
+    "credentials_encryption_key_from_env",
+    "credentials_encryption_key_value",
+    "execution_tool_runtime_env",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
     "is_runtime_control_env_name",
     "is_runtime_database_url_env_name",
     "is_shell_passthrough_allowed_env_name",
+    "is_trusted_tool_runtime_env_file_name",
+    "is_trusted_tool_runtime_process_env_name",
     "is_worker_backend_config_env_name",
     "is_worker_extra_env_name",
     "isolated_worker_runtime_env",
@@ -39,6 +43,7 @@ __all__ = [
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
+CREDENTIALS_ENCRYPTION_KEY_ENV = "MINDROOM_CREDENTIALS_ENCRYPTION_KEY"
 SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 VERTEXAI_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
@@ -200,6 +205,7 @@ _WORKER_EXTRA_ENV_GENERATED_NAMES = frozenset(
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
         *_CREDENTIAL_SEED_DECLARATION_ENV_NAMES,
+        CREDENTIALS_ENCRYPTION_KEY_ENV,
         "MINDROOM_EVENT_CACHE_DATABASE_URL",
         "MINDROOM_LOCAL_CLIENT_ID",
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
@@ -224,6 +230,7 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
 )
 _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
     {
+        CREDENTIALS_ENCRYPTION_KEY_ENV,
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
     },
@@ -267,6 +274,8 @@ _SANDBOX_SHELL_SYSTEM_ENV_NAMES = _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES | frozens
 _KNOWN_WORKER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_DELEGATED_USER",
+        "GOOGLE_SERVICE_ACCOUNT_FILE",
         "GITHUB_TOKEN",
         *VERTEXAI_CLAUDE_ENV_BY_KEY.values(),
     },
@@ -295,7 +304,9 @@ def is_runtime_database_url_env_name(name: str) -> bool:
 
 def is_public_worker_startup_env_name(name: str) -> bool:
     """Return whether an env var may be serialized into public worker startup manifests."""
-    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES or is_worker_backend_config_env_name(name):
+    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
+        return False
+    if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
     if is_runtime_database_url_env_name(name):
         return False
@@ -308,7 +319,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
 
 def is_isolated_worker_runtime_env_name(name: str) -> bool:
     """Return whether inherited env may remain visible inside isolated workers."""
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES and name != CREDENTIALS_ENCRYPTION_KEY_ENV:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
@@ -321,8 +332,8 @@ def is_isolated_worker_runtime_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
-def is_execution_runtime_env_file_name(name: str) -> bool:
-    """Return whether a config-adjacent env value may be visible to local execution tools."""
+def is_trusted_tool_runtime_env_file_name(name: str) -> bool:
+    """Return whether a config-adjacent env value may be visible to trusted tool construction."""
     return (
         name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
         and not is_runtime_database_url_env_name(name)
@@ -330,8 +341,8 @@ def is_execution_runtime_env_file_name(name: str) -> bool:
     )
 
 
-def is_execution_runtime_process_env_name(name: str) -> bool:
-    """Return whether a process env value may be visible to local execution tools."""
+def is_trusted_tool_runtime_process_env_name(name: str) -> bool:
+    """Return whether a process env value may be visible to trusted tool construction."""
     return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and (
         is_public_worker_startup_env_name(name) or name in _KNOWN_WORKER_CREDENTIAL_ENV_NAMES
     )
@@ -359,6 +370,15 @@ def public_worker_startup_env(env: Mapping[str, str]) -> dict[str, str]:
 def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return inherited env safe for isolated worker RuntimePaths."""
     return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
+
+
+def execution_tool_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return env safe for sandboxed tool execution snapshots."""
+    return {
+        key: value
+        for key, value in env.items()
+        if is_isolated_worker_runtime_env_name(key) and key != CREDENTIALS_ENCRYPTION_KEY_ENV
+    }
 
 
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -393,6 +413,19 @@ def shell_passthrough_env(
         for key, value in env.items()
         if is_shell_passthrough_allowed_env_name(key) and any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns)
     }
+
+
+def credentials_encryption_key_value(value: str | None) -> str | None:
+    """Return the configured credential encryption key, treating blank values as unset."""
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def credentials_encryption_key_from_env(env: Mapping[str, str]) -> str | None:
+    """Return the credential encryption key from an env mapping."""
+    return credentials_encryption_key_value(env.get(CREDENTIALS_ENCRYPTION_KEY_ENV))
 
 
 def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:

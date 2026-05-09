@@ -18,8 +18,11 @@ from typing import TYPE_CHECKING
 
 from mindroom import constants
 from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    credentials_encryption_key_value,
+    is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
 )
@@ -161,27 +164,39 @@ def request_execution_env(
         )
     if execution_env:
         return dict(execution_env)
-    return dict(constants.sandbox_execution_runtime_env_values(runtime_paths))
+    return dict(constants.execution_tool_runtime_env_values(runtime_paths))
 
 
-def runtime_paths_with_execution_env(
+def tool_runtime_paths_with_request_env(
     runtime_paths: RuntimePaths,
     execution_env: dict[str, str],
     *,
     include_base_execution_env: bool = True,
+    include_credentials_encryption_key: bool = False,
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
-    """Return runtime paths overlaid with one execution env snapshot."""
-    if include_base_execution_env and not execution_env and not trusted_env_overlay:
-        return runtime_paths
-
-    process_env = dict(constants.execution_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
+    """Return runtime paths overlaid with one tool-request env snapshot."""
+    process_env = dict(constants.trusted_tool_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
     process_env.update(sandbox_runner_runtime_state_env(runtime_paths.process_env))
     process_env.update(execution_env)
-    env_file_values = dict(runtime_paths.env_file_values) if include_base_execution_env else {}
+    env_file_values = (
+        {
+            key: value
+            for key, value in runtime_paths.env_file_values.items()
+            if is_trusted_tool_runtime_env_file_name(key)
+        }
+        if include_base_execution_env
+        else {}
+    )
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
+    if include_credentials_encryption_key:
+        credentials_encryption_key = credentials_encryption_key_value(
+            runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV),
+        )
+        if credentials_encryption_key is not None:
+            process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,

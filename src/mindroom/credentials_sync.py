@@ -90,7 +90,16 @@ def _sync_service_credentials(
 ) -> bool:
     """Seed or update one env-backed named service."""
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials_path = creds_manager.get_credentials_path(service)
+    credentials_file_exists = credentials_path.exists()
     existing = creds_manager.load_credentials(service)
+    if existing is None and credentials_file_exists:
+        logger.warning(
+            "credential_env_sync_skipped_unreadable_existing_file",
+            service=service,
+            path=str(credentials_path),
+        )
+        return False
     if existing is not None:
         source = existing.get("_source")
         if source != "env":

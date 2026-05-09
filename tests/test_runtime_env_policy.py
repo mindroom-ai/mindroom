@@ -7,7 +7,8 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from mindroom import runtime_env_policy
+from mindroom import constants, runtime_env_policy
+from mindroom.api import sandbox_exec
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
@@ -20,6 +21,82 @@ _POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(runtime_env_policy.VERTEXAI_CLAUDE_ENV
 _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
 )
+_PROJECTION_MATRIX_ENV_NAMES = (
+    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_SERVICE_ACCOUNT_FILE",
+    "GOOGLE_DELEGATED_USER",
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"],
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
+    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
+    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
+    "OPENAI_API_KEY",
+)
+_PROJECTION_MATRIX_EXPECTATIONS = {
+    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": True,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    "GOOGLE_APPLICATION_CREDENTIALS": {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    "GOOGLE_SERVICE_ACCOUNT_FILE": {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    "GOOGLE_DELEGATED_USER": {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": True,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": True,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": True,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    "OPENAI_API_KEY": {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+}
 
 
 def _policy_owned_env_values(value: object) -> set[str]:
@@ -65,6 +142,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/worker-key",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
         "MINDROOM_CREDENTIAL_SEEDS_JSON": "{}",
         "MINDROOM_API_KEY": "runtime-secret",
         "OPENAI_API_KEY": "provider-secret",
@@ -98,6 +176,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/worker-key",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
     }
 
 
@@ -126,6 +205,49 @@ def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
         "MINDROOM_USER_SELECTED": "allowed",
         "PUBLIC_TOOL_VALUE": "allowed",
     }
+
+
+def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: Path) -> None:
+    """Sensitive and credential-adjacent env names should have one documented projection policy."""
+    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = constants.RuntimePaths(
+        config_path=config_path,
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env=process_env,
+        env_file_values=env_file_values,
+    )
+    trusted_tool_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
+        runtime_paths,
+        {},
+        include_base_execution_env=True,
+        include_credentials_encryption_key=True,
+    )
+    execution_tool_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
+        runtime_paths,
+        {},
+        include_base_execution_env=False,
+        include_credentials_encryption_key=False,
+    )
+    public_worker_startup_env = runtime_env_policy.public_worker_startup_env(process_env)
+    isolated_worker_runtime_env = runtime_env_policy.isolated_worker_runtime_env(process_env)
+    shell_passthrough_env = runtime_env_policy.shell_passthrough_env(process_env, patterns=("*",))
+
+    actual = {
+        name: {
+            "public_worker_startup_env": name in public_worker_startup_env,
+            "isolated_worker_runtime_env": name in isolated_worker_runtime_env,
+            "trusted_tool_runtime_paths": trusted_tool_runtime_paths.env_value(name) is not None,
+            "execution_tool_runtime_paths": execution_tool_runtime_paths.env_value(name) is not None,
+            "shell_passthrough_env": name in shell_passthrough_env,
+        }
+        for name in _PROJECTION_MATRIX_ENV_NAMES
+    }
+
+    assert actual == _PROJECTION_MATRIX_EXPECTATIONS
 
 
 def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_control() -> None:
@@ -205,15 +327,17 @@ def test_sandbox_runner_runtime_state_keeps_dedicated_storage_subpath_prefix() -
     }
 
 
-def test_worker_backend_config_names_are_classified_and_excluded_from_public_startup() -> None:
-    """Primary-side Kubernetes backend config env names are never public startup env."""
+def test_worker_backend_config_names_are_classified_and_filter_public_startup() -> None:
+    """Only worker runtime state survives public startup filtering for backend config env names."""
     backend_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
     env = dict.fromkeys(backend_names, "value")
 
     assert all(runtime_env_policy.is_worker_backend_config_env_name(name) for name in backend_names)
-    assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.public_worker_startup_env(env) == {
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "value",
+    }
     assert runtime_env_policy.shell_passthrough_env(env, patterns=("*",)) == {}
-    assert not any(runtime_env_policy.is_execution_runtime_env_file_name(name) for name in backend_names)
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_env_file_name(name) for name in backend_names)
 
 
 def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:

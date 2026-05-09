@@ -135,6 +135,7 @@ Both modes store agent data in the same per-agent directory structure.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
 The runner reads and writes the same agent storage directories as the main process.
+When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
 
 ### Dedicated Worker Mode
 
@@ -143,9 +144,9 @@ The primary runtime creates worker Deployments and Services on demand and routes
 Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
-The runtime chart stores derived worker tokens as per-worker keys in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
-The hosted instance chart stores derived worker tokens as per-worker keys in a pre-created tenant auth Secret.
+The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
 The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
 > [!WARNING]
@@ -306,6 +307,16 @@ curl -X POST "https://api.mindroom.chat/system/provision" \
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
+For provisioned instance charts, set `provisioner.instanceCredentialsEncryptionSecret` to a stable high-entropy value so the provisioner can derive stable per-instance `credentials_encryption_key` chart values.
+If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner falls back to `PROVISIONER_API_KEY` when generating keys for new instances or explicit existing-instance opt-ins.
+Keep this source stable because changing it changes future derived credential encryption keys.
+New provisioned instances receive a derived credential encryption key by default.
+When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
+To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body.
+Treat that opt-in as a one-way switch until a plaintext migration exists.
+If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
+Clear or replace stale plaintext credential files before enabling the flag.
+If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
 
 ## Deployment Scripts
 

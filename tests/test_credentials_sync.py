@@ -1,5 +1,6 @@
 """Tests for syncing shared provider/bootstrap credentials from runtime env."""
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,7 @@ from mindroom.credentials_sync import (
     get_secret_from_env,
     sync_env_to_credentials,
 )
-from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, SHARED_CREDENTIALS_PATH_ENV
 
 
 def _runtime_paths(
@@ -438,11 +439,11 @@ class TestCredentialsSync:
             "_source": "env",
         }
 
-    def test_declared_credential_seed_env_names_stay_out_of_runtime_env_views(
+    def test_internal_credential_env_names_stay_out_of_public_and_execution_env_views(
         self,
         tmp_path: Path,
     ) -> None:
-        """Credential seed declaration env vars must not leak to worker/runtime views."""
+        """Internal credential env vars must not leak to public manifests or tool execution envs."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         seed_file = tmp_path / "credential-seeds.json"
@@ -457,6 +458,7 @@ class TestCredentialsSync:
             config_path=config_path,
             storage_path=tmp_path,
             process_env={
+                CREDENTIALS_ENCRYPTION_KEY_ENV: "encryption-key-material",
                 "MINDROOM_CREDENTIAL_SEEDS_JSON": seed_json,
                 "MINDROOM_CREDENTIAL_SEEDS_FILE": str(seed_file),
             },
@@ -464,18 +466,25 @@ class TestCredentialsSync:
 
         public_runtime = constants_mod._serialize_public_runtime_paths(runtime_paths)
         isolated_runtime = constants_mod.isolated_runtime_paths(runtime_paths)
-        runtime_envs = [
+        public_and_execution_envs = [
             public_runtime["process_env"],
             public_runtime["env_file_values"],
-            isolated_runtime.process_env,
-            isolated_runtime.env_file_values,
-            constants_mod.execution_runtime_env_values(runtime_paths),
-            constants_mod.sandbox_execution_runtime_env_values(runtime_paths),
+            constants_mod.trusted_tool_runtime_env_values(runtime_paths),
+            constants_mod.execution_tool_runtime_env_values(runtime_paths),
+            constants_mod.trusted_tool_runtime_env_values(isolated_runtime),
+            constants_mod.execution_tool_runtime_env_values(isolated_runtime),
         ]
 
-        for runtime_env in runtime_envs:
+        assert isolated_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) == "encryption-key-material"
+        for runtime_env in public_and_execution_envs:
+            assert CREDENTIALS_ENCRYPTION_KEY_ENV not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in runtime_env
+        assert isolated_runtime.process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] == "encryption-key-material"
+        assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in isolated_runtime.process_env
+        assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in isolated_runtime.process_env
+        assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in isolated_runtime.env_file_values
+        assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in isolated_runtime.env_file_values
 
     def test_declared_credential_seed_logs_file_source(
         self,
@@ -549,6 +558,28 @@ class TestCredentialsSync:
         )
 
         assert cm.get_api_key("openai") == "ui-set-key"
+
+    def test_sync_env_does_not_overwrite_unreadable_existing_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted-mode sync should fail closed when an existing credential file cannot be loaded."""
+        encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+        plaintext_credentials = {"api_key": "ui-set-key", "_source": "ui"}
+        openai_path = temp_credentials_dir / "openai_credentials.json"
+        openai_path.write_text(json.dumps(plaintext_credentials), encoding="utf-8")
+        monkeypatch.setenv(CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
+        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert json.loads(openai_path.read_text(encoding="utf-8")) == plaintext_credentials
 
     def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(self, tmp_path: Path) -> None:
         """Relative *_FILE secret paths in the runtime `.env` should anchor to the config directory."""

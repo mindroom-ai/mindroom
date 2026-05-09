@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_env_values
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
+from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    credentials_encryption_key_value,
+    is_worker_backend_config_env_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -59,6 +65,11 @@ _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
+
+
+def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
+    """Return whether an env var configures the primary-side Kubernetes worker backend."""
+    return is_worker_backend_config_env_name(name) and name != _WORKER_BACKEND_ENV
 
 
 def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -204,6 +215,8 @@ def kubernetes_backend_config_signature(
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
+    credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
@@ -235,6 +248,15 @@ def kubernetes_backend_config_signature(
         resource_limits_json,
         str(config.enable_service_links),
         config.auth_secret_name or "",
+        credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
+
+
+def credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
+    """Return a stable non-secret marker for the credential encryption key."""
+    normalized_key = credentials_encryption_key_value(encryption_key)
+    if normalized_key is None:
+        return None
+    return hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()

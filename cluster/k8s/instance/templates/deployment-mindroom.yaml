@@ -53,6 +53,10 @@ spec:
       labels:
         app: mindroom
         customer: {{ .Values.customer | quote }}
+      {{- if .Values.credentials_encryption_key }}
+      annotations:
+        mindroom.ai/credentials-encryption-key-hash: {{ .Values.credentials_encryption_key | sha256sum | quote }}
+      {{- end }}
     spec:
       {{- if $controlPlaneNodeName }}
       nodeName: {{ $controlPlaneNodeName }}
@@ -122,6 +126,13 @@ spec:
             secretKeyRef:
               name: mindroom-api-keys-{{ .Values.customer }}
               key: sandbox_proxy_token
+        {{- if .Values.credentials_encryption_key }}
+        - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mindroom-api-keys-{{ .Values.customer }}
+              key: credentials_encryption_key
+        {{- end }}
         - name: MINDROOM_SANDBOX_EXECUTION_MODE
           value: "selective"
         - name: MINDROOM_SANDBOX_PROXY_TOOLS

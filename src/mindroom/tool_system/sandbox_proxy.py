@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import httpx
 
-from mindroom.constants import sandbox_execution_runtime_env_values, sandbox_shell_execution_runtime_env_values
+from mindroom.constants import execution_tool_runtime_env_values, sandbox_shell_execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.runtime_context import (
@@ -516,7 +516,7 @@ def _execution_env_payload(
                 process_env=runtime_paths.process_env,
             ),
         )
-    return dict(sandbox_execution_runtime_env_values(runtime_paths))
+    return dict(execution_tool_runtime_env_values(runtime_paths))
 
 
 def _request_headers_for_handle(

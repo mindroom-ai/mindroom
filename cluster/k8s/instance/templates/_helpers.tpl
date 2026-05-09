@@ -69,6 +69,13 @@
       secretKeyRef:
         name: mindroom-api-keys-{{ $values.customer }}
         key: sandbox_proxy_token
+  {{- if $values.credentials_encryption_key }}
+  - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
+    valueFrom:
+      secretKeyRef:
+        name: mindroom-api-keys-{{ $values.customer }}
+        key: credentials_encryption_key
+  {{- end }}
   - name: MINDROOM_CONFIG_PATH
     value: "/app/config.yaml"
   - name: MINDROOM_STORAGE_PATH
