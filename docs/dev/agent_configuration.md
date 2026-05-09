@@ -374,6 +374,7 @@ defaults:
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
+  tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   thread_summary_temperature: 0.2  # Set null to omit temperature and use provider defaults
   thread_summary_first_threshold: 1  # First automatic thread summary after 1 message
   thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
@@ -648,6 +649,7 @@ defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
+  tool_output_auto_save_threshold_bytes: 51200
   thread_summary_first_threshold: 1
   thread_summary_subsequent_interval: 10
 

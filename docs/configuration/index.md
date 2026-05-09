@@ -277,6 +277,7 @@ defaults:
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
+  tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -293,6 +294,7 @@ defaults:
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
+  tool_output_auto_save_threshold_bytes: 51200  # Default: 51200 (auto-save supported tool outputs larger than 50 KiB)
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
   thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
