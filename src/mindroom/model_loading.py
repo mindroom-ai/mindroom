@@ -23,6 +23,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
@@ -39,6 +40,10 @@ logger = get_logger(__name__)
 __all__ = ["get_model_instance"]
 
 _GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+class _ModelCredentialError(PermanentStartupError):
+    """Raised when a model credential configuration is invalid."""
 
 
 def _canonical_provider(provider: str) -> str:
@@ -62,10 +67,28 @@ def _google_adc_file_type(credentials_path: str) -> str | None:
 
 def _load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
     """Load Google ADC credentials for Vertex-backed model clients."""
-    if _google_adc_file_type(credentials_path) == "service_account":
+    if not Path(credentials_path).is_file():
+        msg = (
+            "GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist: "
+            f"{credentials_path}. Fix the path, recreate the credential file, or unset "
+            "GOOGLE_APPLICATION_CREDENTIALS if this MindRoom instance should not use Vertex AI."
+        )
+        raise _ModelCredentialError(msg)
+
+    credentials_type = _google_adc_file_type(credentials_path)
+    if credentials_type == "service_account":
         service_account = importlib.import_module("google.oauth2.service_account")
         credentials_cls = service_account.Credentials
         credentials = credentials_cls.from_service_account_file(
+            credentials_path,
+            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
+        )
+        return cast("GoogleCredentials", credentials)
+
+    if credentials_type == "authorized_user":
+        oauth_credentials = importlib.import_module("google.oauth2.credentials")
+        credentials_cls = oauth_credentials.Credentials
+        credentials = credentials_cls.from_authorized_user_file(
             credentials_path,
             scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
         )

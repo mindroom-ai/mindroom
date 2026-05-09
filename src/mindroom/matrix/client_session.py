@@ -11,6 +11,7 @@ import nio
 
 from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
+from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -27,7 +28,7 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 )
 
 
-class PermanentMatrixStartupError(ValueError):
+class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 

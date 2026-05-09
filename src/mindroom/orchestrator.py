@@ -1108,6 +1108,7 @@ class _MultiAgentOrchestrator:
         await run_with_retry(
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
+            permanent_error_check=is_permanent_startup_error,
         )
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
         await self._auto_resume_after_restart(interrupted_threads, config)
