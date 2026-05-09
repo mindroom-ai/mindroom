@@ -1061,6 +1061,45 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
 
 
 @pytest.mark.asyncio
+async def test_prepare_bound_team_execution_context_truncates_long_fallback_messages() -> None:
+    """Fallback provider-native context should keep long messages after capping their bodies."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team(name="General Team")
+    long_body = "x" * 201
+    exact_limit_body = "y" * 200
+
+    prepared = await _prepare_bound_team_execution_context(
+        scope_context=None,
+        agents=[fake_agent],
+        team=mock_team,
+        prompt="Analyze this.",
+        thread_history=[
+            make_visible_message(event_id="event-1", sender="alice", body=long_body),
+            make_visible_message(event_id="event-2", sender="bob", body=exact_limit_body),
+        ],
+        runtime_paths=runtime_paths,
+        config=config,
+        team_name=None,
+        active_model_name=None,
+        active_context_window=None,
+        response_sender_id="@mindroom_team:example.org",
+        thread_history_render_limits=ThreadHistoryRenderLimits(
+            max_messages=30,
+            max_message_length=200,
+            missing_sender_label="Unknown",
+        ),
+    )
+
+    assert tuple((message.role, message.content) for message in prepared.messages) == (
+        ("user", f"alice: {'x' * 199}…"),
+        ("user", f"bob: {exact_limit_body}"),
+        ("user", "Analyze this."),
+    )
+
+
+@pytest.mark.asyncio
 async def test_team_response_scrubs_queued_notices_after_run_exception() -> None:
     """Failed team runs should still remove hidden queued-message notices from history."""
     config = _build_test_config()
