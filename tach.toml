@@ -1656,6 +1656,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.cli.service"
+depends_on = [
+    "mindroom.services.config",
+    "mindroom.services.manager",
+]
+
+[[modules]]
 path = "mindroom.cli.main"
 depends_on = [
     "mindroom",
@@ -1665,12 +1672,37 @@ depends_on = [
     "mindroom.cli.connect",
     "mindroom.cli.doctor",
     "mindroom.cli.local_stack",
+    "mindroom.cli.service",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.error_handling",
     "mindroom.frontend_assets",
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.services"
+depends_on = []
+
+[[modules]]
+path = "mindroom.services.config"
+depends_on = []
+
+[[modules]]
+path = "mindroom.services.manager"
+depends_on = [
+    "mindroom.services.config",
+    "mindroom.services.launchd",
+    "mindroom.services.systemd",
+]
+
+[[modules]]
+path = "mindroom.services.launchd"
+depends_on = ["mindroom.services.config"]
+
+[[modules]]
+path = "mindroom.services.systemd"
+depends_on = ["mindroom.services.config"]
 
 [[modules]]
 path = "mindroom.commands"

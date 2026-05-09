@@ -30,6 +30,7 @@ from .config import (
 )
 from .doctor import doctor
 from .local_stack import local_stack_setup
+from .service import service_app
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -58,6 +59,7 @@ app = typer.Typer(
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 app.add_typer(config_app, name="config")
 app.add_typer(avatars_app, name="avatars")
+app.add_typer(service_app, name="service")
 
 
 @app.command()
