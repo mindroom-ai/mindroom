@@ -3059,9 +3059,11 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
         assert receipt["auto_saved"] is True
         assert receipt["threshold_bytes"] == 100
         assert receipt["format"] == "text"
+        assert receipt["bytes"] == len((marker * 20).encode("utf-8"))
         assert marker in receipt["preview"]
         workspace = agent_workspace_root_path(storage_root, "general")
         saved_path = workspace / receipt["path"]
+        saved_path.resolve().relative_to(workspace.resolve())
         assert saved_path.read_text(encoding="utf-8") == marker * 20
     finally:
         metadata_module.TOOL_REGISTRY.clear()
