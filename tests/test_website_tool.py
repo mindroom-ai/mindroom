@@ -126,18 +126,67 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
 
 
 def test_website_reader_rejects_domain_suffix_lookalikes() -> None:
-    """Same-domain checks should not treat badexample.com as example.com."""
+    """Same-host checks should not treat badexample.com as example.com."""
     reader = _MindRoomWebsiteReader()
-
-    primary_domain = reader._get_primary_domain("https://example.com/")
 
     assert reader._should_skip_crawl_url(
         current_url="https://badexample.com/private",
         starting_url="https://example.com/",
         current_depth=1,
         num_links=0,
-        primary_domain=primary_domain,
+        crawl_host="example.com",
     )
+
+
+def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same-host crawling should not treat unrelated public-suffix siblings as in scope."""
+    start_url = "https://service.co.uk/"
+    attacker_url = "https://attacker.co.uk/private"
+    requested_urls: list[str] = []
+    pages = {
+        start_url: """
+        <html>
+          <body>
+            <nav><a href="https://attacker.co.uk/private">Attacker</a></nav>
+            <main>
+              <h1>Service docs</h1>
+              <p>Reference material with enough text to keep the starting page.</p>
+            </main>
+          </body>
+        </html>
+        """,
+        attacker_url: """
+        <html>
+          <body>
+            <main>
+              <h1>Private</h1>
+              <p>Unrelated sibling host content that must never be crawled.</p>
+            </main>
+          </body>
+        </html>
+        """,
+    }
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        requested_urls.append(url)
+        assert timeout == 10
+        assert follow_redirects is True
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, content=pages[url].encode(), request=request)
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = _MindRoomWebsiteReader().read(start_url)
+
+    assert requested_urls == [start_url]
+    assert [document.meta_data["url"] for document in documents] == [start_url]
+    assert "starting page" in documents[0].content
+    assert "sibling host content" not in documents[0].content
 
 
 def test_safe_url_for_log_strips_userinfo_query_and_fragment() -> None:

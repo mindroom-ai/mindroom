@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
@@ -113,35 +112,19 @@ def _normalized_hostname(url: str) -> str:
     return (urlparse(url).hostname or "").rstrip(".").lower()
 
 
-def _is_ip_address(host: str) -> bool:
-    """Return whether a host is an IPv4 or IPv6 address."""
-    try:
-        ip_address(host)
-    except ValueError:
-        return False
-    return True
-
-
-def _url_matches_primary_domain(url: str, primary_domain: str) -> bool:
-    """Return whether a URL belongs to the crawl's primary domain boundary."""
+def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
+    """Return whether a URL belongs to the crawl's exact starting host."""
     host = _normalized_hostname(url)
-    if not host or not primary_domain:
+    if not host or not crawl_host:
         return False
-    return host == primary_domain or host.endswith(f".{primary_domain}")
+    return host == crawl_host
 
 
 class _MindRoomWebsiteReader(WebsiteReader):
     """WebsiteReader variant that avoids selecting early search/navigation sections."""
 
-    def _get_primary_domain(self, url: str) -> str:
-        """Extract the primary domain without treating URL userinfo as part of the host."""
-        host = _normalized_hostname(url)
-        if _is_ip_address(host):
-            return host
-        return ".".join(host.split(".")[-2:])
-
-    def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, primary_domain: str) -> None:
-        """Queue same-domain crawl links from the unmodified page soup."""
+    def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, crawl_host: str) -> None:
+        """Queue same-host crawl links from the unmodified page soup."""
         for link in soup.find_all("a", href=True):
             if not isinstance(link, Tag):
                 continue
@@ -149,7 +132,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
             href_str = str(link["href"])
             full_url = urljoin(current_url, href_str)
             parsed_url = urlparse(full_url)
-            if not _url_matches_primary_domain(full_url, primary_domain) or parsed_url.path.endswith(
+            if not _url_matches_crawl_host(full_url, crawl_host) or parsed_url.path.endswith(
                 (".pdf", ".jpg", ".png"),
             ):
                 continue
@@ -165,24 +148,23 @@ class _MindRoomWebsiteReader(WebsiteReader):
         starting_url: str,
         current_depth: int,
         num_links: int,
-        primary_domain: str,
+        crawl_host: str,
     ) -> bool:
         """Return whether a queued crawl URL is outside the current crawl budget."""
         return (
             current_url in self._visited
-            or not _url_matches_primary_domain(current_url, primary_domain)
+            or not _url_matches_crawl_host(current_url, crawl_host)
             or (current_depth > self.max_depth and current_url != starting_url)
             or num_links >= self.max_links
         )
 
-    def _log_http_status_error(self, *, safe_current_url: str, error: httpx.HTTPStatusError, async_mode: bool) -> None:
+    def _log_http_status_error(self, *, safe_current_url: str, error: httpx.HTTPStatusError) -> None:
         """Log HTTP crawl failures without including provider exception text."""
-        if 300 <= error.response.status_code < 400 and not async_mode:
+        if 300 <= error.response.status_code < 400:
             log_debug(f"Redirect encountered for {safe_current_url}, skipping")
             return
 
-        prefix = "HTTP status error while crawling asynchronously" if async_mode else "HTTP status error while crawling"
-        log_warning(f"{prefix} {safe_current_url}: {error.response.status_code}")
+        log_warning(f"HTTP status error while crawling {safe_current_url}: {error.response.status_code}")
 
     def _documents_from_crawl(
         self,
@@ -212,7 +194,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
         *,
         current_url: str,
         current_depth: int,
-        primary_domain: str,
+        crawl_host: str,
         crawler_result: dict[str, str],
     ) -> bool:
         """Extract content from a response and queue crawl links from the original soup."""
@@ -221,14 +203,14 @@ class _MindRoomWebsiteReader(WebsiteReader):
         if main_content:
             crawler_result[current_url] = main_content
 
-        self._queue_links(soup, current_url, current_depth, primary_domain)
+        self._queue_links(soup, current_url, current_depth, crawl_host)
         return bool(main_content)
 
     def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
         num_links = 0
         crawler_result: dict[str, str] = {}
-        primary_domain = self._get_primary_domain(url)
+        crawl_host = _normalized_hostname(url)
 
         self._visited = set()
         self._urls_to_crawl = [(url, starting_depth)]
@@ -239,7 +221,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
                 starting_url=url,
                 current_depth=current_depth,
                 num_links=num_links,
-                primary_domain=primary_domain,
+                crawl_host=crawl_host,
             ):
                 continue
 
@@ -259,11 +241,11 @@ class _MindRoomWebsiteReader(WebsiteReader):
                     response,
                     current_url=current_url,
                     current_depth=current_depth,
-                    primary_domain=primary_domain,
+                    crawl_host=crawl_host,
                     crawler_result=crawler_result,
                 )
             except httpx.HTTPStatusError as e:
-                self._log_http_status_error(safe_current_url=safe_current_url, error=e, async_mode=False)
+                self._log_http_status_error(safe_current_url=safe_current_url, error=e)
                 if current_url == url and not crawler_result and not (300 <= e.response.status_code < 400):
                     raise
             except httpx.RequestError as e:
@@ -280,63 +262,6 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
         return crawler_result
 
-    async def async_crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
-        """Asynchronously crawl a website while logging only sanitized URL forms."""
-        num_links = 0
-        crawler_result: dict[str, str] = {}
-        primary_domain = self._get_primary_domain(url)
-
-        self._visited = set()
-        self._urls_to_crawl = [(url, starting_depth)]
-
-        async_client = httpx.AsyncClient(proxy=self.proxy) if self.proxy else httpx.AsyncClient()
-        async with async_client as client:
-            while self._urls_to_crawl and num_links < self.max_links:
-                current_url, current_depth = self._urls_to_crawl.pop(0)
-                if self._should_skip_crawl_url(
-                    current_url=current_url,
-                    starting_url=url,
-                    current_depth=current_depth,
-                    num_links=num_links,
-                    primary_domain=primary_domain,
-                ):
-                    continue
-
-                self._visited.add(current_url)
-                await self.async_delay()
-                safe_current_url = _safe_url_for_log(current_url)
-
-                try:
-                    log_debug(f"Crawling asynchronously: {safe_current_url}")
-                    response = await client.get(current_url, timeout=self.timeout, follow_redirects=True)
-                    response.raise_for_status()
-                    num_links += self._record_response_content(
-                        response,
-                        current_url=current_url,
-                        current_depth=current_depth,
-                        primary_domain=primary_domain,
-                        crawler_result=crawler_result,
-                    )
-                except httpx.HTTPStatusError as e:
-                    self._log_http_status_error(safe_current_url=safe_current_url, error=e, async_mode=True)
-                    if current_url == url and not crawler_result:
-                        raise
-                except httpx.RequestError as e:
-                    log_warning(
-                        f"Request error while crawling asynchronously {safe_current_url}: {e.__class__.__name__}",
-                    )
-                    if current_url == url and not crawler_result:
-                        raise
-                except Exception as e:
-                    log_warning(f"Failed to crawl asynchronously {safe_current_url}: {e.__class__.__name__}")
-                    if current_url == url and not crawler_result:
-                        raise httpx.RequestError(_FAILED_STARTING_URL, request=None) from e
-
-        if not crawler_result:
-            raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)
-
-        return crawler_result
-
     def read(self, url: str, name: str | None = None) -> list[Document]:
         """Read a website while logging only sanitized URL forms."""
         log_debug(f"Reading: {_safe_url_for_log(url)}")
@@ -344,15 +269,6 @@ class _MindRoomWebsiteReader(WebsiteReader):
             return self._documents_from_crawl(self.crawl(url), url=url, name=name)
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
-            raise
-
-    async def async_read(self, url: str, name: str | None = None) -> list[Document]:
-        """Asynchronously read a website while logging only sanitized URL forms."""
-        log_debug(f"Reading asynchronously: {_safe_url_for_log(url)}")
-        try:
-            return self._documents_from_crawl(await self.async_crawl(url), url=url, name=name)
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            log_error(f"Error reading website asynchronously {_safe_url_for_log(url)}: {e.__class__.__name__}")
             raise
 
     def _extract_main_content(self, soup: BeautifulSoup) -> str:
