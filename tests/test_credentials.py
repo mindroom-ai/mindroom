@@ -1061,6 +1061,7 @@ class TestCredentialsManager:
         assert manager.get_api_key("custom", "token") == "custom-token"
         assert manager.get_api_key("custom", "api_key") is None
 
+
 class TestGlobalCredentialsManager:
     """Test the global credentials manager singleton."""
 
