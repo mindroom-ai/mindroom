@@ -20,6 +20,7 @@ from mindroom.services.config import (
     install_uv,
 )
 from mindroom.services.launchd import _generate_plist
+from mindroom.services.launchd import _get_log_command as _get_launchd_log_command
 from mindroom.services.manager import get_service_manager
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
@@ -149,6 +150,15 @@ def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:
     ]
     assert plist_data["EnvironmentVariables"] == service_environment
     assert b"StandardOutPath" in rendered
+
+
+def test_launchd_log_command_uses_explicit_files() -> None:
+    """The launchd log command avoids zsh nomatch failures from an empty glob."""
+    command = _get_launchd_log_command()
+
+    assert "*.log" not in command
+    assert "stdout.log" in command
+    assert "stderr.log" in command
 
 
 def test_resolve_service_environment_captures_active_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

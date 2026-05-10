@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import plistlib
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -35,7 +36,10 @@ def _get_log_dir() -> Path:
 
 def _get_log_command() -> str:
     """Return the command for following service logs."""
-    return f"tail -f {_get_log_dir()}/*.log"
+    log_dir = _get_log_dir()
+    stdout_log = shlex.quote(str(log_dir / "stdout.log"))
+    stderr_log = shlex.quote(str(log_dir / "stderr.log"))
+    return f"tail -f {stdout_log} {stderr_log}"
 
 
 def _get_recent_logs(num_lines: int = 10) -> list[str]:
@@ -114,6 +118,8 @@ def _install_service() -> InstallResult:
     log_dir = _get_log_dir()
     plist_path = _get_plist_path()
     log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "stdout.log").touch()
+    (log_dir / "stderr.log").touch()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
 
     with plist_path.open("wb") as f:
