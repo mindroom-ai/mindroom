@@ -44,6 +44,76 @@ class AgentMatrixUser:
         return MatrixID.parse(self.user_id)
 
 
+@dataclass(frozen=True)
+class ManagedAccountProvisioningRequest:
+    """One managed Matrix account that may be created during account preparation."""
+
+    entity_name: str
+    username: str | None = None
+
+
+def _account_key_for_agent(entity_name: str) -> str:
+    if entity_name == INTERNAL_USER_AGENT_NAME:
+        return INTERNAL_USER_ACCOUNT_KEY
+    return managed_account_key(entity_name)
+
+
+def _account_label(entity_name: str) -> str:
+    if entity_name == INTERNAL_USER_AGENT_NAME:
+        return "internal user"
+    return f"entity {entity_name!r}"
+
+
+def _creation_username(request: ManagedAccountProvisioningRequest, runtime_paths: RuntimePaths) -> str:
+    return request.username or agent_username_localpart(request.entity_name, runtime_paths=runtime_paths)
+
+
+def preflight_managed_account_provisioning(
+    requests: list[ManagedAccountProvisioningRequest],
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Reject localpart collisions before creating any missing managed account."""
+    state = matrix_state_for_runtime(runtime_paths)
+    unique_requests = {_account_key_for_agent(request.entity_name): request for request in requests}
+    existing_owners_by_username = {
+        account.username: _account_label(account_key.removeprefix("agent_"))
+        for account_key, account in state.accounts.items()
+    }
+    pending_owners_by_username: dict[str, str] = {}
+
+    for account_key, request in unique_requests.items():
+        existing_account = state.get_account(account_key)
+        if existing_account is not None:
+            _validate_existing_internal_user_request(
+                agent_name=request.entity_name,
+                requested_username=request.username,
+                existing_creds={
+                    "username": existing_account.username,
+                    "requested_username": existing_account.requested_username,
+                },
+            )
+            continue
+
+        username = _creation_username(request, runtime_paths)
+        label = _account_label(request.entity_name)
+        existing_owner = existing_owners_by_username.get(username)
+        if existing_owner is not None:
+            msg = (
+                "Matrix account localpart collision before provisioning: "
+                f"{label} would create {username!r}, already used by {existing_owner}."
+            )
+            raise matrix_startup_error(msg, permanent=True)
+
+        pending_owner = pending_owners_by_username.get(username)
+        if pending_owner is not None:
+            msg = (
+                "Matrix account localpart collision before provisioning: "
+                f"{label} and {pending_owner} would both create {username!r}."
+            )
+            raise matrix_startup_error(msg, permanent=True)
+        pending_owners_by_username[username] = label
+
+
 def _get_agent_credentials(
     agent_name: str,
     runtime_paths: RuntimePaths,

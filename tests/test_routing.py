@@ -633,6 +633,40 @@ class TestBridgeMentionFallback:
         assert len(mentioned_agents) == 1
         assert mentioned_agents[0].full_id == "@mindroom_calculator:localhost"
 
+    def test_body_only_alias_mention_uses_persisted_current_id(self) -> None:
+        """Raw configured aliases in visible bodies resolve to persisted entity IDs."""
+        runtime_paths = runtime_paths_for(self.config)
+        persist_entity_accounts(self.config, runtime_paths, usernames={"general": "actual_general_live"})
+        agent_id = entity_identity_registry(self.config, runtime_paths).current_id("general")
+        event_source = {
+            "content": {
+                "body": "@general can you help?",
+            },
+        }
+
+        mentioned_agents, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+
+        assert am_i_mentioned is True
+        assert has_non_agent is False
+        assert [agent.full_id for agent in mentioned_agents] == ["@actual_general_live:localhost"]
+
+    def test_body_only_generated_localpart_does_not_resolve_after_username_drift(self) -> None:
+        """Stale generated localparts are not inbound aliases after persisted username drift."""
+        runtime_paths = runtime_paths_for(self.config)
+        persist_entity_accounts(self.config, runtime_paths, usernames={"general": "actual_general_live"})
+        agent_id = entity_identity_registry(self.config, runtime_paths).current_id("general")
+        event_source = {
+            "content": {
+                "body": "@mindroom_general can you help?",
+            },
+        }
+
+        mentioned_agents, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+
+        assert mentioned_agents == []
+        assert am_i_mentioned is False
+        assert has_non_agent is False
+
     def test_html_pill_non_agent_mention(self) -> None:
         """Bridge HTML pill mentioning a non-agent sets has_non_agent_mentions."""
         event_source = {

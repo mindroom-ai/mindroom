@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.visible_body import visible_content_from_content
 
 if TYPE_CHECKING:
@@ -27,13 +28,15 @@ if TYPE_CHECKING:
 _MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
 
 
-def _extract_mentioned_user_ids(content: dict[str, object]) -> list[str]:
+def _extract_mentioned_user_ids(
+    content: dict[str, object],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
     """Extract mentioned user IDs from message content.
 
-    Checks ``m.mentions.user_ids`` first.  When that field is absent or empty
-    (common with bridges like mautrix-telegram), falls back to parsing Matrix
-    HTML pills (``<a href="https://matrix.to/#/@user:domain">``) from
-    ``formatted_body``.
+    Checks ``m.mentions.user_ids`` first. When that field is absent or empty,
+    falls back to Matrix HTML pills and finally raw visible-body mention tokens.
     """
     mentions = content.get("m.mentions")
     user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
@@ -42,7 +45,13 @@ def _extract_mentioned_user_ids(content: dict[str, object]) -> list[str]:
 
     formatted_body = content.get("formatted_body")
     if isinstance(formatted_body, str):
-        return _MATRIX_PILL_RE.findall(formatted_body)
+        pill_user_ids = _MATRIX_PILL_RE.findall(formatted_body)
+        if pill_user_ids:
+            return pill_user_ids
+
+    body = content.get("body")
+    if isinstance(body, str):
+        return resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
     return []
 
 
@@ -83,7 +92,7 @@ def check_agent_mentioned(
     """
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
-    all_mentioned_ids = _extract_mentioned_user_ids(content)
+    all_mentioned_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
     has_non_agent_mentions = any(not _is_bot_or_agent(uid, config, runtime_paths) for uid in all_mentioned_ids)
@@ -206,7 +215,7 @@ def get_all_mentioned_agents_in_thread(
 
     for msg in thread_history:
         content = msg.content
-        user_ids = _extract_mentioned_user_ids(content)
+        user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
         agents = _agents_from_user_ids(user_ids, config, runtime_paths)
 
         for agent in agents:

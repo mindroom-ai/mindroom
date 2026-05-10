@@ -1,17 +1,21 @@
 """Matrix mention utilities."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.entity_resolution import EntityIdentityRegistry
     from mindroom.tool_system.events import ToolTraceEntry
 
 _ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
@@ -67,16 +71,39 @@ def parse_mentions_in_text(
         config=config,
     )
 
+    return (
+        _apply_replacements(text, replacements, use_markdown=False),
+        _mentioned_user_ids_from_replacements(replacements),
+        _apply_replacements(text, replacements, use_markdown=True),
+    )
+
+
+def resolve_mentioned_user_ids_from_text(
+    text: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Resolve visible text mention tokens to Matrix user IDs."""
+    tokens = _scan_mention_tokens(text)
+    if not tokens:
+        return []
+
+    registry = entity_identity_registry(config, runtime_paths)
+    replacements = _resolve_mention_tokens(
+        tokens,
+        registry=registry,
+        config=config,
+    )
+    return _mentioned_user_ids_from_replacements(replacements)
+
+
+def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement]) -> list[str]:
+    """Return replacement user IDs without duplicates while preserving mention order."""
     mentioned_user_ids: list[str] = []
     for replacement in replacements:
         if replacement.user_id not in mentioned_user_ids:
             mentioned_user_ids.append(replacement.user_id)
-
-    return (
-        _apply_replacements(text, replacements, use_markdown=False),
-        mentioned_user_ids,
-        _apply_replacements(text, replacements, use_markdown=True),
-    )
+    return mentioned_user_ids
 
 
 def _scan_mention_tokens(text: str) -> list[_MentionToken]:
@@ -337,7 +364,7 @@ def format_message_with_mentions(
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
-    tool_trace: list["ToolTraceEntry"] | None = None,
+    tool_trace: list[ToolTraceEntry] | None = None,
     extra_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.

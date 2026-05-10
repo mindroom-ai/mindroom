@@ -15,7 +15,7 @@ import nio
 import pytest
 from agno.models.ollama import Ollama
 
-from mindroom.bot import AgentBot
+from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -27,7 +27,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
-from mindroom.teams import TeamResolution
+from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
@@ -717,6 +717,85 @@ class TestRoutingRegression:
             for candidate in mock_should_agent_respond.call_args.kwargs["available_agents_in_room"]
         ]
         assert candidate_names == ["alpha"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_configured_team_mention_rejects_when_member_bot_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A live TeamBot must surface configured-team rejection even if members are unavailable."""
+        test_room_id = "!team-reject:localhost"
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(display_name="AlphaAgent"),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Operations",
+                        agents=["alpha"],
+                        rooms=[test_room_id],
+                    ),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(test_config)
+        ids = entity_ids(test_config, runtime_paths)
+        team_user = AgentMatrixUser(
+            agent_name="ops",
+            password=TEST_PASSWORD,
+            display_name="Ops Team",
+            user_id=ids["ops"].full_id,
+        )
+        bot = TeamBot(
+            team_user,
+            tmp_path,
+            config=test_config,
+            runtime_paths=runtime_paths,
+            rooms=[test_room_id],
+            team_agents=[ids["alpha"]],
+            team_mode="coordinate",
+        )
+        bot.orchestrator = SimpleNamespace(
+            agent_bots={
+                "ops": SimpleNamespace(running=True),
+                "router": SimpleNamespace(running=True),
+            },
+        )
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = test_room_id
+        room.users = {
+            ids["ops"].full_id: MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[ids["ops"]],
+            has_non_agent_mentions=False,
+        )
+
+        action = await bot._turn_policy.resolve_response_action(
+            context,
+            room,
+            "@user:localhost",
+            "ops, help",
+            False,
+        )
+
+        assert action.kind == "reject"
+        assert action.form_team is not None
+        assert action.form_team.outcome is TeamOutcome.REJECT
+        assert action.rejection_message == (
+            "Team 'ops' includes agent 'alpha' that could not be materialized for this request."
+        )
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")

@@ -26,6 +26,8 @@ from mindroom.matrix.users import (
     create_agent_user,
     login_agent_user,
 )
+from mindroom.matrix_identifiers import agent_username_localpart
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
@@ -1044,6 +1046,93 @@ class TestAgentUserCreation:
         assert agent_user.user_id == "@actual_internal:matrix.example"
         assert agent_user.password == "existing_pass"  # noqa: S105
         mock_register.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("colliding_entity_name", "agents", "teams"),
+        [
+            ("router", {}, {}),
+            ("general", {"general": {"display_name": "GeneralAgent"}}, {}),
+            (
+                "helpers",
+                {"general": {"display_name": "GeneralAgent"}},
+                {
+                    "helpers": {
+                        "display_name": "HelpersTeam",
+                        "role": "Coordinate helper agents",
+                        "agents": ["general"],
+                    },
+                },
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_startup_rejects_internal_user_generated_entity_localpart_collision_before_writes(
+        self,
+        tmp_path: Path,
+        colliding_entity_name: str,
+        agents: dict[str, dict[str, object]],
+        teams: dict[str, dict[str, object]],
+    ) -> None:
+        """Fresh startup must reject generated proposal collisions before persisting any account."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_NAMESPACE="",
+            MINDROOM_STORAGE_PATH=str(tmp_path / "mindroom_data"),
+        )
+        constants_mod.matrix_state_file(runtime_paths=runtime_paths).unlink(missing_ok=True)
+        mindroom_username = agent_username_localpart(colliding_entity_name, runtime_paths=runtime_paths)
+        config = Config.validate_with_runtime(
+            {
+                "agents": agents,
+                "teams": teams,
+                "mindroom_user": {
+                    "username": mindroom_username,
+                    "display_name": "MindRoomUser",
+                },
+            },
+            runtime_paths,
+        )
+        created_accounts: list[str] = []
+
+        async def recording_create_agent_user(
+            _homeserver: str,
+            agent_name: str,
+            agent_display_name: str,
+            runtime_paths: constants_mod.RuntimePaths,
+            username: str | None = None,
+        ) -> AgentMatrixUser:
+            matrix_username = username or agent_username_localpart(agent_name, runtime_paths=runtime_paths)
+            state = MatrixState.load(runtime_paths=runtime_paths)
+            if any(account.username == matrix_username for account in state.accounts.values()):
+                msg = "collision"
+                raise PermanentMatrixStartupError(msg)
+            state.add_account(
+                f"agent_{agent_name}",
+                matrix_username,
+                TEST_PASSWORD,
+                requested_username=matrix_username,
+                domain="localhost",
+            )
+            state.save(runtime_paths=runtime_paths)
+            created_accounts.append(agent_name)
+            return AgentMatrixUser(
+                agent_name=agent_name,
+                user_id=f"@{matrix_username}:localhost",
+                display_name=agent_display_name,
+                password=TEST_PASSWORD,
+            )
+
+        orchestrator = _MultiAgentOrchestrator(runtime_paths)
+
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=config),
+            patch("mindroom.orchestrator.create_agent_user", new=recording_create_agent_user),
+            pytest.raises(PermanentMatrixStartupError, match="localpart collision"),
+        ):
+            await orchestrator.initialize()
+
+        assert created_accounts == []
+        assert MatrixState.load(runtime_paths=runtime_paths).accounts == {}
 
 
 class TestAgentLogin:

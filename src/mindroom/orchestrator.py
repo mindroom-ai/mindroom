@@ -53,7 +53,9 @@ from mindroom.matrix.users import (
     INTERNAL_USER_ACCOUNT_KEY,
     INTERNAL_USER_AGENT_NAME,
     AgentMatrixUser,
+    ManagedAccountProvisioningRequest,
     create_agent_user,
+    preflight_managed_account_provisioning,
 )
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
@@ -758,6 +760,8 @@ class _MultiAgentOrchestrator:
         """Ensure managed Matrix accounts exist before runtime bot construction."""
         homeserver = constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths)
         users: dict[str, AgentMatrixUser] = {}
+        entity_names = tuple(entity_names)
+        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
         for entity_name in entity_names:
             users[entity_name] = await create_agent_user(
                 homeserver,
@@ -774,6 +778,25 @@ class _MultiAgentOrchestrator:
             entity_identity_registry(config, self.runtime_paths)
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
+
+    def _preflight_account_provisioning(
+        self,
+        config: Config,
+        *,
+        entity_names: Iterable[str],
+        include_internal_user: bool,
+    ) -> None:
+        """Reject account localpart collisions before any missing account is created."""
+        requests: list[ManagedAccountProvisioningRequest] = []
+        if include_internal_user and config.mindroom_user is not None:
+            requests.append(
+                ManagedAccountProvisioningRequest(
+                    INTERNAL_USER_AGENT_NAME,
+                    username=config.mindroom_user.username,
+                ),
+            )
+        requests.extend(ManagedAccountProvisioningRequest(entity_name) for entity_name in entity_names)
+        preflight_managed_account_provisioning(requests, self.runtime_paths)
 
     def validate_managed_entity_identities(self) -> None:
         """Validate persisted managed Matrix identities for the live config."""
@@ -992,8 +1015,9 @@ class _MultiAgentOrchestrator:
 
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
-        await self._prepare_user_account(config, update_runtime_state=True)
         entity_names = self._configured_entity_names(config)
+        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
+        await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
         self._activate_hook_registry(hook_registry)
@@ -1200,6 +1224,11 @@ class _MultiAgentOrchestrator:
 
     async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
         """Handle config loading before the runtime has an active config."""
+        self._preflight_account_provisioning(
+            new_config,
+            entity_names=self._configured_entity_names(new_config),
+            include_internal_user=True,
+        )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, self._configured_entity_names(new_config))
         self.config = new_config
@@ -1373,9 +1402,14 @@ class _MultiAgentOrchestrator:
 
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
+        entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
+        self._preflight_account_provisioning(
+            new_config,
+            entity_names=entities_requiring_account_check,
+            include_internal_user=plan.mindroom_user_changed,
+        )
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
         if entities_requiring_account_check:
             await self._prepare_entity_accounts(new_config, entities_requiring_account_check)
         elif plan.mindroom_user_changed:

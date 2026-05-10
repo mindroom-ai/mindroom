@@ -14461,6 +14461,7 @@ class TestMultiAgentOrchestrator:
             entities_to_restart=set(),
             new_entities=set(),
             added_entities=set(),
+            configured_entities=set(),
             removed_entities=set(),
             only_support_service_changes=True,
         )

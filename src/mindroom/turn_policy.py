@@ -375,7 +375,11 @@ class TurnPolicy:
             rejection_message=form_team.reason,
         )
 
-    def configured_team_response_action(self) -> ResponseAction | None:
+    def configured_team_response_action(
+        self,
+        *,
+        materializable_agent_names: set[str] | None = None,
+    ) -> ResponseAction | None:
         """Return the configured-team response action for this bot when it represents a team."""
         team_config = self.deps.runtime.config.teams.get(self.deps.agent_name)
         if team_config is None:
@@ -383,13 +387,15 @@ class TurnPolicy:
         configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
+        if materializable_agent_names is None:
+            materializable_agent_names = self.materializable_agent_names()
         team_resolution = resolve_configured_team(
             self.deps.agent_name,
             team_agents,
             configured_mode,
             self.deps.runtime.config,
             self.deps.runtime_paths,
-            materializable_agent_names=self.materializable_agent_names(),
+            materializable_agent_names=materializable_agent_names,
         )
         if team_resolution.outcome is TeamOutcome.TEAM:
             return ResponseAction(kind="team", form_team=team_resolution)
@@ -407,6 +413,35 @@ class TurnPolicy:
             return action
         configured_team_action = self.configured_team_response_action()
         return configured_team_action or action
+
+    def explicit_configured_team_rejection_action(
+        self,
+        context: MessageContext,
+        sender_visible_responders: list[MatrixID],
+        *,
+        materializable_agent_names: set[str] | None,
+        live_entity_names: set[str] | None,
+    ) -> ResponseAction | None:
+        """Return the explicit configured-team rejection action for this live team bot."""
+        if self.deps.agent_name not in self.deps.runtime.config.teams:
+            return None
+        if not context.am_i_mentioned:
+            return None
+        if live_entity_names is not None and self.deps.agent_name not in live_entity_names:
+            return None
+
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        team_matrix_id = registry.current_id(self.deps.agent_name)
+        sender_visible_ids = {responder.full_id for responder in sender_visible_responders}
+        if team_matrix_id.full_id not in sender_visible_ids:
+            return None
+
+        configured_team_action = self.configured_team_response_action(
+            materializable_agent_names=materializable_agent_names,
+        )
+        if configured_team_action is None or configured_team_action.kind != "reject":
+            return None
+        return configured_team_action
 
     async def decide_team_for_sender(
         self,
@@ -579,6 +614,14 @@ class TurnPolicy:
         """Decide whether to respond as a team, individually, or not at all."""
         planning_thread_history = context.planning_thread_history
         materializable_agent_names = self.materializable_agent_names()
+        live_entity_names = (
+            live_responder_entity_names(
+                self.deps.runtime.orchestrator,
+                self.deps.runtime.config,
+            )
+            if materializable_agent_names is not None
+            else None
+        )
         sender_visible_agents_in_room = await responder_candidate_entities_for_room(
             self.deps.runtime.client,
             room,
@@ -589,10 +632,17 @@ class TurnPolicy:
         available_agents_in_room = self.filter_materializable_responders(
             sender_visible_agents_in_room,
             materializable_agent_names=materializable_agent_names,
+            live_entity_names=live_entity_names,
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_matrix_id = registry.current_id(self.deps.agent_name)
         agent_is_responder_candidate = agent_matrix_id.full_id in {agent.full_id for agent in available_agents_in_room}
+        team_action = self.explicit_configured_team_rejection_action(
+            context,
+            sender_visible_agents_in_room,
+            materializable_agent_names=materializable_agent_names,
+            live_entity_names=live_entity_names,
+        )
         if (
             context.planning_thread_history_unavailable
             and not context.am_i_mentioned
@@ -621,17 +671,18 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        form_team = await self.decide_team_for_sender(
-            agents_in_thread,
-            context,
-            room,
-            requester_user_id,
-            message,
-            is_dm,
-            available_agents_in_room=sender_visible_agents_in_room,
-            materializable_agent_names=materializable_agent_names,
-        )
-        team_action = self.team_response_action(form_team, available_agents_in_room)
+        if team_action is None:
+            form_team = await self.decide_team_for_sender(
+                agents_in_thread,
+                context,
+                room,
+                requester_user_id,
+                message,
+                is_dm,
+                available_agents_in_room=sender_visible_agents_in_room,
+                materializable_agent_names=materializable_agent_names,
+            )
+            team_action = self.team_response_action(form_team, available_agents_in_room)
         if team_action is not None:
             return team_action
 
