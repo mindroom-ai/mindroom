@@ -512,6 +512,15 @@ class AgentBot:
             ),
         )
 
+    def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
+        """Refresh startup collaborators when Matrix login authenticates as a different user."""
+        if self.agent_user.user_id == matrix_id_before_login.full_id:
+            return
+
+        self.agent_user.__dict__.pop("matrix_id", None)
+        self.__dict__.pop("matrix_id", None)
+        self._init_runtime_components()
+
     @property
     def client(self) -> nio.AsyncClient | None:
         """Return the current Matrix client."""
@@ -1179,12 +1188,14 @@ class AgentBot:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
+        matrix_id_before_login = self.matrix_id
         self.client = await login_agent_user(
             constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
             self.agent_user,
             runtime_paths=self.runtime_paths,
         )
         try:
+            self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()

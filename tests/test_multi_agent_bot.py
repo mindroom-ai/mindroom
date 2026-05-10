@@ -1295,6 +1295,69 @@ class TestAgentBot:
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
+    @patch("mindroom.bot.interactive.init_persistence")
+    async def test_agent_bot_start_rebuilds_identity_bound_runtime_after_login_user_id_change(
+        self,
+        mock_init_persistence: MagicMock,
+        mock_ensure_user: AsyncMock,
+        mock_login: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Login may canonicalize the Matrix ID before sync callbacks are registered."""
+        stale_user_id = "@mindroom_general:localhost"
+        actual_user_id = "@actual_general:localhost"
+        config = _runtime_bound_config(
+            Config(
+                agents={"general": AgentConfig(display_name="GeneralAgent", model="default")},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id=stale_user_id,
+            display_name="GeneralAgent",
+            password=TEST_PASSWORD,
+        )
+        mock_client = AsyncMock()
+        mock_client.user_id = actual_user_id
+        mock_client.add_event_callback = MagicMock()
+        mock_client.add_response_callback = MagicMock()
+        mock_ensure_user.return_value = None
+
+        async def _login_with_actual_identity(
+            _homeserver: str,
+            login_user: AgentMatrixUser,
+            *_args: object,
+            **_kwargs: object,
+        ) -> object:
+            login_user.user_id = actual_user_id
+            login_user.__dict__.pop("matrix_id", None)
+            return mock_client
+
+        mock_login.side_effect = _login_with_actual_identity
+
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        stale_resolver = bot._conversation_resolver
+
+        await bot.start()
+
+        assert bot.running is True
+        assert bot.matrix_id.full_id == actual_user_id
+        assert bot._conversation_resolver is not stale_resolver
+        assert bot._conversation_resolver.deps.matrix_id.full_id == actual_user_id
+        assert bot._tool_runtime_support.matrix_id.full_id == actual_user_id
+        assert bot._response_runner.deps.matrix_full_id == actual_user_id
+        assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
+        assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
+        mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
+        assert mock_client.add_event_callback.call_count == 13
+
+    @pytest.mark.asyncio
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
+    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_start_revalidates_identity_after_login(
         self,
         mock_ensure_user: AsyncMock,
