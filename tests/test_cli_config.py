@@ -464,7 +464,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
         assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
@@ -494,7 +494,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
 
     @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
@@ -659,18 +659,20 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
-        content = target.read_text()
-        assert "provider: openai" in content
-        assert "id: gpt-5.4" in content
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "openai"
+        assert config["models"]["default"]["id"] == "gpt-5.4"
+        assert config["models"]["default"]["context_window"] == 1_000_000
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
         """Config init --provider anthropic prepopulates Anthropic defaults."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "anthropic"])
         assert result.exit_code == 0
-        content = target.read_text()
-        assert "provider: anthropic" in content
-        assert "id: claude-sonnet-4-6" in content
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "anthropic"
+        assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
         assert "ANTHROPIC_API_KEY=your-anthropic-key-here" in env_content
@@ -681,9 +683,10 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openrouter"])
         assert result.exit_code == 0
-        content = target.read_text()
-        assert "provider: openrouter" in content
-        assert "anthropic/claude-sonnet-4.6" in content
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "openrouter"
+        assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-4.6"
+        assert config["models"]["default"]["context_window"] == 1_000_000
 
     def test_provider_env_template_uses_canonical_provider_env_key(
         self,
@@ -710,7 +713,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
 
@@ -736,6 +739,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "anthropic"
         assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["context_window"] == 1_000_000
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -749,9 +753,10 @@ class TestConfigInit:
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "vertexai_claude"])
         assert result.exit_code == 0
-        content = target.read_text()
-        assert "provider: vertexai_claude" in content
-        assert "id: claude-sonnet-4-6" in content
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "vertexai_claude"
+        assert config["models"]["default"]["id"] == "claude-sonnet-4-6"
+        assert config["models"]["default"]["context_window"] == 1_000_000
 
         env_content = (tmp_path / ".env").read_text()
         assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content

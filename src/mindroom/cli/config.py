@@ -44,7 +44,7 @@ from mindroom.workspaces import ensure_workspace_template
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import yaml
+    import yaml  # type: ignore[import-untyped]
     from pydantic import ValidationError
 
 console = Console()
@@ -67,12 +67,12 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
 _ConfigInitProfile = Literal["full", "minimal", "public"]
 _ProviderPreset = Literal["anthropic", "codex", "openai", "openrouter", "vertexai_claude"]
 
-_DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
-    "anthropic": ("anthropic", "claude-sonnet-4-6"),
-    "codex": ("codex", "gpt-5.5"),
-    "openai": ("openai", "gpt-5.4"),
-    "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6"),
-    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6"),
+_DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str, int]] = {
+    "anthropic": ("anthropic", "claude-sonnet-4-6", 1_000_000),
+    "codex": ("codex", "gpt-5.5", 1_000_000),
+    "openai": ("openai", "gpt-5.4", 1_000_000),
+    "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6", 1_000_000),
+    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6", 1_000_000),
 }
 
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
@@ -719,12 +719,11 @@ def _prompt_provider_preset() -> _ProviderPreset:
 
 def _model_template_block(provider_preset: _ProviderPreset) -> str:
     """Render the provider-specific YAML fragment for models.default."""
-    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
-    lines = [f"provider: {provider}", f"id: {model_id}"]
+    provider, model_id, context_window = _DEFAULT_MODEL_PRESETS[provider_preset]
+    lines = [f"provider: {provider}", f"id: {model_id}", f"context_window: {context_window}"]
     if provider_preset == "codex":
         lines.extend(
             [
-                "context_window: 258000",
                 "# Prompt caching is enabled automatically per active agent session.",
                 "extra_kwargs:",
                 "  reasoning_effort: medium",
