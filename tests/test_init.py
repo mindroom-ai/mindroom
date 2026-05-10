@@ -90,7 +90,7 @@ import os
 import sys
 
 expected = json.loads({expected_json!r})
-targets = {{"httpx", "typer"}}
+targets = {{"typer"}}
 seen = set()
 
 

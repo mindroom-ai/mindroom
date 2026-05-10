@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
-import httpx
-
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 
@@ -17,6 +15,8 @@ from .env_file import env_path_for_config, upsert_env_values
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import httpx
 
 _PAIR_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
@@ -46,18 +46,21 @@ def complete_local_pairing(
     client_name: str,
     client_fingerprint: str,
     matrix_ssl_verify: bool,
-    post_request: Callable[..., httpx.Response] = httpx.post,
+    post_request: Callable[..., httpx.Response] | None = None,
 ) -> _PairCompleteResult:
     """Call the provisioning API and return local client credentials."""
+    import httpx  # noqa: PLC0415
+
     payload = {
         "pair_code": pair_code,
         "client_name": client_name.strip(),
         "client_pubkey_or_fingerprint": client_fingerprint,
     }
     endpoint = f"{provisioning_url.rstrip('/')}/v1/local-mindroom/pair/complete"
+    request = post_request or httpx.post
 
     try:
-        response = post_request(endpoint, json=payload, timeout=10, verify=matrix_ssl_verify)
+        response = request(endpoint, json=payload, timeout=10, verify=matrix_ssl_verify)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service: {exc}"
         raise ValueError(msg) from exc

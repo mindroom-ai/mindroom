@@ -14,38 +14,18 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
 import typer
-from dotenv import dotenv_values
 from rich.console import Console
-from rich.syntax import Syntax
 
-from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
-from mindroom.config.main import (
-    CONFIG_LOAD_USER_ERROR_TYPES,
-    Config,
-    ConfigRuntimeValidationError,
-    iter_config_validation_messages,
-    load_config,
-)
-from mindroom.constants import (
-    OWNER_MATRIX_USER_ID_ENV,
-    OWNER_MATRIX_USER_ID_PLACEHOLDER,
-    RuntimePaths,
-    config_search_locations,
-    env_key_for_provider,
-    exported_process_env,
-    resolve_primary_runtime_paths,
-    resolve_runtime_paths,
-)
-from mindroom.credentials_sync import get_secret_from_env
-from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from mindroom.workspaces import ensure_workspace_template
+from mindroom import constants
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import yaml  # type: ignore[import-untyped]
     from pydantic import ValidationError
+
+    from mindroom.config.main import Config, ConfigRuntimeValidationError
+    from mindroom.constants import RuntimePaths
 
 console = Console()
 
@@ -100,7 +80,7 @@ def _config_init_storage_plan(
     replace_env_file: bool,
 ) -> tuple[Path, bool]:
     """Return the storage root and whether the starter config can use the env placeholder."""
-    runtime_paths = resolve_runtime_paths(config_path=config_dir / "config.yaml")
+    runtime_paths = constants.resolve_runtime_paths(config_path=config_dir / "config.yaml")
     if replace_env_file:
         return runtime_paths.storage_root, True
     if "MINDROOM_STORAGE_PATH" in runtime_paths.env_file_values and env_path.is_file():
@@ -110,12 +90,16 @@ def _config_init_storage_plan(
 
 def _config_init_owner_user_id(config_path: Path) -> str | None:
     """Return the paired owner MXID available to config init, if one was persisted."""
-    runtime_paths = resolve_runtime_paths(config_path=config_path)
-    return parse_owner_matrix_user_id(runtime_paths.env_value(OWNER_MATRIX_USER_ID_ENV))
+    from mindroom.cli.owner import parse_owner_matrix_user_id  # noqa: PLC0415
+
+    runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
+    return parse_owner_matrix_user_id(runtime_paths.env_value(constants.OWNER_MATRIX_USER_ID_ENV))
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:
     """Return the shared single-user starter Mind workspace inside the canonical agent workspace."""
+    from mindroom.tool_system.worker_routing import agent_workspace_root_path  # noqa: PLC0415
+
     return agent_workspace_root_path(storage_root, "mind")
 
 
@@ -143,6 +127,8 @@ def _default_mind_knowledge_base_path(
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
     """Create the default Mind workspace files used by the full/public templates."""
+    from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
+
     ensure_workspace_template(workspace_path, template="mind", force=force)
 
 
@@ -184,6 +170,8 @@ def _append_missing_env_defaults(
     title: str,
 ) -> bool:
     """Append missing env defaults without changing existing user-owned values."""
+    from dotenv import dotenv_values  # noqa: PLC0415
+
     existing_values = dotenv_values(env_path)
     missing_defaults = [(key, value) for key, value in defaults if key not in existing_values]
     if not missing_defaults:
@@ -249,7 +237,7 @@ def _print_config_init_next_steps(
 
 def _config_discovery_env(path: Path | None = None) -> dict[str, str]:
     """Return the exported env snapshot used for config discovery and display."""
-    process_env = exported_process_env()
+    process_env = constants.exported_process_env()
     if path is not None:
         process_env["MINDROOM_CONFIG_PATH"] = str(path.expanduser().resolve())
     return process_env
@@ -259,7 +247,7 @@ def _format_config_search_locations(process_env: Mapping[str, str]) -> list[str]
     """Return rendered config search locations with existence labels."""
     return [
         f"  {i}. {loc} ({'[green]exists[/green]' if loc.exists() else '[dim]not found[/dim]'})"
-        for i, loc in enumerate(config_search_locations(process_env), 1)
+        for i, loc in enumerate(constants.config_search_locations(process_env), 1)
     ]
 
 
@@ -278,8 +266,8 @@ def _resolve_config_path(
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    resolved_process_env = dict(process_env) if process_env is not None else exported_process_env()
-    return resolve_primary_runtime_paths(process_env=resolved_process_env).config_path.resolve()
+    resolved_process_env = dict(process_env) if process_env is not None else constants.exported_process_env()
+    return constants.resolve_primary_runtime_paths(process_env=resolved_process_env).config_path.resolve()
 
 
 def activate_cli_runtime(
@@ -289,15 +277,15 @@ def activate_cli_runtime(
 ) -> RuntimePaths:
     """Create the CLI runtime context once and return it for explicit threading."""
     if path is not None:
-        return resolve_primary_runtime_paths(
+        return constants.resolve_primary_runtime_paths(
             config_path=path.expanduser().resolve(),
             storage_path=storage_path,
-            process_env=exported_process_env(),
+            process_env=constants.exported_process_env(),
         )
 
-    return resolve_primary_runtime_paths(
+    return constants.resolve_primary_runtime_paths(
         storage_path=storage_path,
-        process_env=exported_process_env(),
+        process_env=constants.exported_process_env(),
     )
 
 
@@ -326,6 +314,8 @@ def format_validation_errors(
     config_path: Path | None = None,
 ) -> None:
     """Print config validation errors in a user-friendly format."""
+    from mindroom.config.main import iter_config_validation_messages  # noqa: PLC0415
+
     if config_path:
         console.print(f"[red]Error:[/red] Invalid configuration in {config_path}\n")
     else:
@@ -413,6 +403,8 @@ def config_init(
     # In that order, connect persists the owner MXID in .env so init can render
     # authorization defaults without leaving pairing placeholders behind.
     if owner_user_id := _config_init_owner_user_id(target):
+        from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
+
         content = replace_owner_placeholders_in_text(content, owner_user_id)
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -460,13 +452,15 @@ def config_show(
 
     try:
         content = config_file.read_text(encoding="utf-8")
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+    except (OSError, UnicodeError) as exc:
         format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 
     if raw:
         print(content, end="")
         return
+
+    from rich.syntax import Syntax  # noqa: PLC0415
 
     console.print(f"[bold green]Config file:[/bold green] {config_file}\n")
     syntax = Syntax(content, "yaml", theme="monokai", line_numbers=True, word_wrap=True)
@@ -535,6 +529,8 @@ def config_validate(
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         raise typer.Exit(1)
 
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+
     try:
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
@@ -585,6 +581,8 @@ def load_config_quiet(
     """
     import structlog  # noqa: PLC0415
 
+    from mindroom.config.main import load_config  # noqa: PLC0415
+
     was_configured = structlog.is_configured()
     if not was_configured:
         logging.basicConfig(format="%(message)s", level=logging.WARNING)
@@ -607,6 +605,9 @@ def _find_missing_env_keys(
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
+    from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY  # noqa: PLC0415
+
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
@@ -617,7 +618,7 @@ def _find_missing_env_keys(
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
-        env_key = env_key_for_provider(provider)
+        env_key = constants.env_key_for_provider(provider)
         if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
             missing.append((provider, env_key))
     return missing
@@ -860,11 +861,11 @@ authorization:
   default_room_access: false
   global_users:
     # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
   agent_reply_permissions:
     "*":
       # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+      - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 defaults:
   tools:
@@ -971,11 +972,11 @@ authorization:
   default_room_access: false
   global_users:
     # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
   agent_reply_permissions:
     "*":
       # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}
+      - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
 
 defaults:
   tools:
@@ -1007,7 +1008,7 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
         """).rstrip()
 
-    required_env_key = env_key_for_provider(provider_preset)
+    required_env_key = constants.env_key_for_provider(provider_preset)
     key_placeholders = {
         "ANTHROPIC_API_KEY": "your-anthropic-key-here",
         "OPENAI_API_KEY": "your-openai-key-here",
