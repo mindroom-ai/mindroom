@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 _VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?P<localpart>[A-Za-z0-9._=/+\-]+)(?::(?P<domain>[A-Za-z0-9.\-:\[\]]+))?",
 )
-_VOICE_MENTION_TRAILING_PUNCTUATION = ".,!?;"
+_VOICE_MENTION_TRAILING_PUNCTUATION = ".,!?:;"
 
 
 @dataclass(frozen=True)

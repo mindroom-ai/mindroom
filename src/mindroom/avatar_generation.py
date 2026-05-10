@@ -415,7 +415,7 @@ def _build_avatar_generation_targets(
             _AvatarTarget(
                 entity_type="agents",
                 entity_name="router",
-                role="Intelligent routing and agent selection",
+                role="Intelligent routing and agent or team selection",
             ),
         )
 

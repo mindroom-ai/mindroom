@@ -454,8 +454,9 @@ def test_agent_and_team_names_must_not_overlap() -> None:
 
 
 @pytest.mark.parametrize("section", ["agents", "teams"])
-def test_agent_and_team_names_reject_internal_user_entity_name(section: str) -> None:
-    """The internal MindRoom user account key is not a configurable responder alias."""
+@pytest.mark.parametrize("entity_name", [constants_mod.ROUTER_AGENT_NAME, "user"])
+def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_name: str) -> None:
+    """Built-in managed entity account keys are not configurable responder aliases."""
     config_data = {
         "agents": {
             "assistant": {
@@ -466,12 +467,12 @@ def test_agent_and_team_names_reject_internal_user_entity_name(section: str) -> 
         "teams": {},
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
     }
-    config_data[section]["user"] = {
-        "display_name": "User",
+    config_data[section][entity_name] = {
+        "display_name": entity_name.title(),
         "role": "Reserved entity",
     }
     if section == "teams":
-        config_data[section]["user"]["agents"] = ["assistant"]
+        config_data[section][entity_name]["agents"] = ["assistant"]
 
-    with pytest.raises(ValueError, match="reserved internal entity names: user"):
+    with pytest.raises(ValueError, match=f"reserved internal entity names: {entity_name}"):
         Config(**config_data)

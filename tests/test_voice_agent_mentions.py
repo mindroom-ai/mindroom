@@ -326,6 +326,12 @@ async def test_voice_transcription_strips_unavailable_full_persisted_mxid() -> N
             "actual_code:localhost. review this",
         ),
         (
+            "@actual_code:localhost: review this",
+            {"openclaw"},
+            {"openclaw", "code"},
+            "actual_code:localhost: review this",
+        ),
+        (
             "@mindroom_code:remote.example review this",
             {"openclaw"},
             {"openclaw", "code"},

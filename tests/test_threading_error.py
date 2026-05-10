@@ -9564,7 +9564,6 @@ class TestThreadingBehavior:
 
         config = _runtime_bound_config(
             Config(
-                agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -9672,7 +9671,6 @@ class TestThreadingBehavior:
 
         config = _runtime_bound_config(
             Config(
-                agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -9795,7 +9793,6 @@ class TestThreadingBehavior:
 
         config = _runtime_bound_config(
             Config(
-                agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},

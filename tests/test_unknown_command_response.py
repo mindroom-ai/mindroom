@@ -9,7 +9,6 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -32,13 +31,6 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     # Create config
     config = bind_runtime_paths(
         Config(
-            agents={
-                "router": AgentConfig(
-                    display_name="Router",
-                    role="Route messages",
-                    rooms=["!test:localhost"],
-                ),
-            },
             router=RouterConfig(model="default"),
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
@@ -134,13 +126,6 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     # Create config
     config = bind_runtime_paths(
         Config(
-            agents={
-                "router": AgentConfig(
-                    display_name="Router",
-                    role="Route messages",
-                    rooms=["!test:localhost"],
-                ),
-            },
             router=RouterConfig(model="default"),
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
@@ -265,13 +250,6 @@ async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> N
     # Create config
     config = bind_runtime_paths(
         Config(
-            agents={
-                "router": AgentConfig(
-                    display_name="Router",
-                    role="Route messages",
-                    rooms=["!test:localhost"],
-                ),
-            },
             router=RouterConfig(model="default"),
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),

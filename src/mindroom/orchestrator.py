@@ -36,7 +36,6 @@ from mindroom.hooks import (
 from mindroom.knowledge import KnowledgeRefreshScheduler
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
-from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import (
@@ -483,7 +482,7 @@ class _MultiAgentOrchestrator:
         """Run one bot start attempt and classify the result."""
         try:
             return bool(await bot.try_start())
-        except PermanentMatrixStartupError:
+        except PermanentStartupError:
             logger.error(  # noqa: TRY400
                 "Bot startup failed permanently; leaving bot disabled until configuration changes",
                 agent_name=entity_name,
@@ -775,6 +774,10 @@ class _MultiAgentOrchestrator:
             entity_identity_registry(config, self.runtime_paths)
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
+
+    def validate_managed_entity_identities(self) -> None:
+        """Validate persisted managed Matrix identities for the live config."""
+        self._validate_entity_accounts(self._require_config())
 
     def _create_managed_bot(
         self,

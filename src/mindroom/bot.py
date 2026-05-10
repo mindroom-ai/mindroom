@@ -109,6 +109,7 @@ from .scheduling import (
     has_deferred_overdue_tasks,
     restore_scheduled_tasks,
 )
+from .startup_errors import PermanentStartupError
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -1184,6 +1185,9 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
         )
         try:
+            orchestrator = self.orchestrator
+            if orchestrator is not None:
+                orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             self._restore_saved_sync_token()
             await self._set_avatar_if_available()
@@ -1258,7 +1262,7 @@ class AgentBot:
         @retry(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_not_exception_type(PermanentMatrixStartupError),
+            retry=retry_if_not_exception_type(PermanentStartupError),
             reraise=True,
         )
         async def _start_with_retry() -> None:
@@ -1268,7 +1272,7 @@ class AgentBot:
             await _start_with_retry()
             return True  # noqa: TRY300
         except Exception as exc:
-            if isinstance(exc, PermanentMatrixStartupError):
+            if isinstance(exc, PermanentStartupError):
                 logger.error("agent_start_failed_permanently", agent=self.agent_name, error=str(exc))  # noqa: TRY400
                 raise
             logger.exception("agent_start_failed", agent=self.agent_name)

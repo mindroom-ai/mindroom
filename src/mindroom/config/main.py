@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-_RESERVED_ENTITY_NAMES = frozenset({"user"})
+_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",

@@ -57,6 +57,10 @@ class OrchestratorRuntime(Protocol):
 
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
 
+    def validate_managed_entity_identities(self) -> None:
+        """Validate persisted managed Matrix identities for the live config."""
+        ...
+
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...

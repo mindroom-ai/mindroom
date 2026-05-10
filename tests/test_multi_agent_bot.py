@@ -1295,6 +1295,68 @@ class TestAgentBot:
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
+    async def test_agent_bot_start_revalidates_identity_after_login(
+        self,
+        mock_ensure_user: AsyncMock,
+        mock_login: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Authenticated Matrix IDs must not drift into another configured entity ID."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="GeneralAgent", model="default"),
+                    "writer": AgentConfig(display_name="WriterAgent", model="default"),
+                },
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(
+            config,
+            runtime_paths,
+            usernames={
+                ROUTER_AGENT_NAME: "actual_router",
+                "general": "actual_general",
+                "writer": "actual_writer",
+            },
+        )
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@actual_general:localhost",
+            display_name="GeneralAgent",
+            password=TEST_PASSWORD,
+        )
+        mock_client = AsyncMock()
+        mock_client.close = AsyncMock()
+        mock_login.return_value = mock_client
+        mock_ensure_user.return_value = None
+
+        async def _login_with_duplicate_identity(*_args: object, **_kwargs: object) -> object:
+            state = MatrixState.load(runtime_paths=runtime_paths)
+            state.add_account("agent_general", "actual_writer", TEST_PASSWORD, domain="localhost")
+            state.save(runtime_paths=runtime_paths)
+            return mock_client
+
+        mock_login.side_effect = _login_with_duplicate_identity
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator.config = config
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.orchestrator = orchestrator
+        _install_runtime_cache_support(bot)
+
+        with pytest.raises(PermanentStartupError, match="actual_writer"):
+            await bot.start()
+
+        assert bot.running is False
+        assert bot.client is None
+        mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
+    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_enters_sync_without_startup_cleanup(
         self,
         mock_ensure_user: AsyncMock,
@@ -7466,7 +7528,6 @@ class TestAgentBot:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "router": AgentConfig(display_name="Router"),
                     "general": AgentConfig(
                         display_name="General",
                         rooms=["!test:localhost"],
@@ -7557,7 +7618,6 @@ class TestAgentBot:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "router": AgentConfig(display_name="Router"),
                     "general": AgentConfig(
                         display_name="General",
                         rooms=["!test:localhost"],
@@ -7624,7 +7684,6 @@ class TestAgentBot:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "router": AgentConfig(display_name="Router", rooms=["!test:localhost"]),
                     "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
                     "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
                 },
