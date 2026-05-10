@@ -69,6 +69,7 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
         "mindroom.history",
         "mindroom.history.runtime",
         "mindroom.agent_storage",
+        "agno",
         "sqlalchemy",
         "agno.db.sqlite.async_sqlite",
     ]
@@ -844,6 +845,24 @@ class TestConfigShow:
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
         assert "Could not read configuration text" in result.output
+
+    def test_show_os_error_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Config show should report OS-level read failures cleanly."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\n")
+
+        def raise_permission_error(_self: Path, *_args: object, **_kwargs: object) -> str:
+            msg = "permission denied"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr(Path, "read_text", raise_permission_error)
+
+        result = runner.invoke(app, ["config", "show", "--path", str(cfg)])
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.output
+        assert "Could not load configuration" in result.output
+        assert "permission denied" in result.output
 
 
 # ---------------------------------------------------------------------------

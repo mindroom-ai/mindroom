@@ -452,7 +452,7 @@ def config_show(
 
     try:
         content = config_file.read_text(encoding="utf-8")
-    except UnicodeError as exc:
+    except (OSError, UnicodeError) as exc:
         format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 

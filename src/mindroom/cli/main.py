@@ -212,7 +212,11 @@ async def _run(
 
 @app.command()
 def doctor() -> None:
-    """Check your environment for common issues."""
+    """Check your environment for common issues.
+
+    Runs connectivity, configuration, and credential checks in a single pass
+    so you can fix everything before running `mindroom run`.
+    """
     from .doctor import doctor as doctor_command  # noqa: PLC0415
 
     doctor_command()
