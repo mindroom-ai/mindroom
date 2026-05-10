@@ -661,6 +661,15 @@ def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) 
         username = agent_username_localpart(entity_name, runtime_paths)
         state.add_account(account_key, username, TEST_PASSWORD, domain=domain)
         changed = True
+    if config.mindroom_user is not None and managed_account_key("user") not in state.accounts:
+        state.add_account(
+            managed_account_key("user"),
+            config.mindroom_user.username,
+            TEST_PASSWORD,
+            requested_username=config.mindroom_user.username,
+            domain=domain,
+        )
+        changed = True
     if changed:
         state.save(runtime_paths=runtime_paths)
 

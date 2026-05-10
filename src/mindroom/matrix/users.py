@@ -65,6 +65,7 @@ def _get_agent_credentials(
         return {
             "username": account.username,
             "password": account.password,
+            "requested_username": account.requested_username,
             "domain": account.domain,
             "device_id": account.device_id,
             "access_token": account.access_token,
@@ -79,6 +80,7 @@ def _save_agent_credentials(
     runtime_paths: RuntimePaths,
     *,
     domain: str | None = None,
+    requested_username: str | None = None,
     device_id: str | None = None,
     access_token: str | None = None,
 ) -> None:
@@ -90,6 +92,7 @@ def _save_agent_credentials(
         password: The Matrix password
         runtime_paths: Explicit runtime context for matrix state persistence
         domain: Optional Matrix domain to persist with the account
+        requested_username: Optional Matrix username originally requested at account creation
         device_id: Optional Matrix device ID to persist with the account
         access_token: Optional Matrix access token to persist with the account
 
@@ -104,6 +107,7 @@ def _save_agent_credentials(
         agent_key,
         username,
         password,
+        requested_username=requested_username,
         domain=server_name,
         device_id=device_id,
         access_token=access_token,
@@ -121,6 +125,7 @@ def _persist_agent_session(
     device_id: str | None,
     access_token: str | None,
     runtime_paths: RuntimePaths,
+    requested_username: str | None = None,
 ) -> None:
     """Persist one agent session so restarts can reuse the same Matrix device."""
     _save_agent_credentials(
@@ -129,6 +134,7 @@ def _persist_agent_session(
         password,
         runtime_paths,
         domain=domain,
+        requested_username=requested_username,
         device_id=device_id,
         access_token=access_token,
     )
@@ -228,6 +234,7 @@ async def _register_user_with_token(
 
     detail, errcode = _registration_http_error_details(response)
     if response.is_success:
+        user_id = _direct_registration_success_user_id(response)
         logger.info("matrix_user_registered_with_token", user_id=user_id)
     elif errcode == "M_USER_IN_USE":
         logger.info("matrix_user_already_exists", user_id=user_id)
@@ -259,6 +266,29 @@ async def _register_user_with_token(
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
+
+
+def _validated_returned_user_id(raw_user_id: object, *, source: str) -> str:
+    if not isinstance(raw_user_id, str) or not raw_user_id.strip():
+        msg = f"{source} response missing user_id"
+        raise matrix_startup_error(msg, permanent=True)
+    try:
+        return MatrixID.parse(raw_user_id.strip()).full_id
+    except ValueError as exc:
+        msg = f"{source} response returned invalid user_id {raw_user_id!r}"
+        raise matrix_startup_error(msg, permanent=True) from exc
+
+
+def _direct_registration_success_user_id(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        msg = "Matrix registration response missing valid JSON."
+        raise matrix_startup_error(msg, permanent=True) from exc
+    if not isinstance(body, dict):
+        msg = "Matrix registration response payload must be an object."
+        raise matrix_startup_error(msg, permanent=True)
+    return _validated_returned_user_id(body.get("user_id"), source="Matrix registration")
 
 
 def _registration_http_error_details(response: httpx.Response) -> tuple[str, str | None]:
@@ -294,6 +324,25 @@ def _direct_token_registration_error(
         msg = f"Failed to register user {username}: {errcode}"
         return matrix_startup_error(msg, permanent=True)
     return None
+
+
+def _validate_existing_internal_user_request(
+    *,
+    agent_name: str,
+    requested_username: str | None,
+    existing_creds: dict[str, str | None],
+) -> None:
+    if agent_name != INTERNAL_USER_AGENT_NAME or requested_username is None:
+        return
+    stored_request = existing_creds.get("requested_username") or existing_creds.get("username")
+    if stored_request == requested_username:
+        return
+    msg = (
+        "mindroom_user.username cannot be changed after the internal Matrix account has been created. "
+        f"Configured username {requested_username!r} does not match the original requested username "
+        f"{stored_request!r}."
+    )
+    raise matrix_startup_error(msg, permanent=True)
 
 
 async def _register_user_with_token_via_nio(
@@ -432,9 +481,9 @@ async def _handle_register_response(
 ) -> str:
     """Handle a matrix-nio register response and finalize account setup."""
     if isinstance(response, nio.RegisterResponse):
-        actual_user_id = response.user_id or user_id
+        actual_user_id = _validated_returned_user_id(response.user_id, source="Matrix registration")
         logger.info("matrix_user_registered", user_id=actual_user_id)
-        client.user_id = response.user_id
+        client.user_id = actual_user_id
         client.access_token = response.access_token
         client.device_id = response.device_id
 
@@ -560,15 +609,19 @@ async def _register_user_via_provisioning_if_configured(
         display_name=display_name,
         runtime_paths=runtime_paths,
     )
+    provisioning_user_id = _validated_returned_user_id(
+        provisioning_result.user_id,
+        source="Provisioning service",
+    )
     if provisioning_result.status == "created":
-        logger.info("matrix_user_registered_via_provisioning", user_id=provisioning_result.user_id)
-        return provisioning_result.user_id
+        logger.info("matrix_user_registered_via_provisioning", user_id=provisioning_user_id)
+        return provisioning_user_id
 
     login_user_id = user_id
-    if provisioning_result.user_id != user_id:
+    if provisioning_user_id != user_id:
         logger.warning(
             "Provisioning service returned mismatched user_id for user_in_use; using local server_name-derived ID",
-            provisioning_user_id=provisioning_result.user_id,
+            provisioning_user_id=provisioning_user_id,
             expected_user_id=user_id,
         )
     logger.info("matrix_user_already_exists_via_provisioning", user_id=login_user_id)
@@ -637,8 +690,14 @@ async def create_agent_user(
     # Check if credentials already exist in matrix_state.yaml
     existing_creds = _get_agent_credentials(agent_name, runtime_paths)
     preferred_username = username
+    requested_username: str | None = None
 
     if existing_creds:
+        _validate_existing_internal_user_request(
+            agent_name=agent_name,
+            requested_username=preferred_username,
+            existing_creds=existing_creds,
+        )
         username_value = existing_creds["username"]
         password_value = existing_creds["password"]
         if username_value is None or password_value is None:
@@ -655,6 +714,7 @@ async def create_agent_user(
     else:
         # Generate new credentials
         matrix_username = preferred_username or _proposed_username_for_new_entity(agent_name, runtime_paths)
+        requested_username = matrix_username
         password = secrets.token_urlsafe(24)
         existing_device_id = None
         existing_access_token = None
@@ -680,7 +740,14 @@ async def create_agent_user(
 
     # Save credentials only after registration/verification succeeds.
     if registration_needed:
-        _save_agent_credentials(agent_name, matrix_username, password, runtime_paths, domain=server_name)
+        _save_agent_credentials(
+            agent_name,
+            matrix_username,
+            password,
+            runtime_paths,
+            domain=server_name,
+            requested_username=requested_username,
+        )
         logger.info("agent_credentials_saved_after_registration", agent=agent_name)
 
     return AgentMatrixUser(

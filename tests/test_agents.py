@@ -28,6 +28,7 @@ from mindroom.agents import (
     _PRIVATE_CULTURE_MANAGER_CACHE,
     build_agent_toolkit,
     create_agent,
+    get_agent_ids_for_room,
     get_agent_toolkit_names,
 )
 from mindroom.config.agent import (
@@ -151,6 +152,30 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
         execution_identity=execution_identity,
         **kwargs,
     )
+
+
+def test_get_agent_ids_for_room_includes_configured_teams(tmp_path: Path) -> None:
+    """Room creation power users should include team bots configured for that room."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
+            teams={
+                "ops": TeamConfig(
+                    display_name="OpsTeam",
+                    role="Coordinate operations",
+                    agents=["general"],
+                    rooms=["ops"],
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    assert get_agent_ids_for_room("ops", config, runtime_paths) == [
+        "@mindroom_router:localhost",
+        "@mindroom_ops:localhost",
+    ]
 
 
 class _TestVectorDb:

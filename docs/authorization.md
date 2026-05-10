@@ -48,7 +48,7 @@ authorization:
 
 # Optional: configure the internal MindRoom user identity (omit for hosted/public profiles)
 mindroom_user:
-  username: mindroom_user          # Set before first startup (cannot be changed later)
+  username: mindroom_user          # Set before first startup (bootstrap request cannot be changed later)
   display_name: MindRoomUser
 
 # Optional: room onboarding/discoverability policy
@@ -69,7 +69,9 @@ matrix_room_access:
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
 
-`mindroom_user.username` is a one-time setting used to create the internal Matrix account. After the account exists, keep the same username and only change `mindroom_user.display_name` for visible name changes.
+`mindroom_user.username` is a one-time bootstrap request used to create the internal Matrix account.
+After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.
+If hosted provisioning returns a different actual Matrix ID, MindRoom persists and authorizes that actual ID.
 
 For `authorization.room_permissions`, MindRoom accepts these key formats:
 
@@ -123,7 +125,7 @@ Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
 
 Authorization checks are performed in order:
 
-1. **Internal system user** - When `mindroom_user` is configured, `@{mindroom_user.username}:{domain}` is always authorized. When omitted (hosted/public profiles), this check is skipped. Note: the same user ID from a different domain is NOT authorized.
+1. **Internal system user** - When `mindroom_user` is configured and its Matrix account has been prepared, the persisted actual internal user ID is always authorized. When omitted (hosted/public profiles), this check is skipped.
 2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
 3. **Alias resolution** - If the sender matches a bridge alias in `aliases`, it is resolved to the canonical user ID for the remaining checks
 4. **Global users** - Users in `global_users` have access to all rooms

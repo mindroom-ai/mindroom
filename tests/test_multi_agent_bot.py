@@ -570,7 +570,7 @@ def _approval_removal_plan(new_config: Config) -> ConfigUpdatePlan:
     return ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        all_new_entities=set(),
+        configured_entities=set(),
         entities_to_restart=set(),
         new_entities=set(),
         removed_entities={"code"},
@@ -14360,6 +14360,7 @@ class TestMultiAgentOrchestrator:
             changed_mcp_servers=set(),
             entities_to_restart=set(),
             new_entities=set(),
+            added_entities=set(),
             removed_entities=set(),
             only_support_service_changes=True,
         )
@@ -14399,6 +14400,7 @@ class TestMultiAgentOrchestrator:
             changed_mcp_servers=set(),
             entities_to_restart=set(),
             new_entities=set(),
+            added_entities=set(),
             removed_entities=set(),
             only_support_service_changes=True,
         )
@@ -14450,7 +14452,7 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers={"demo-server"},
-            all_new_entities=set(),
+            configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
             removed_entities=set(),
@@ -14554,7 +14556,7 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers={"demo-server"},
-            all_new_entities=set(),
+            configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
             removed_entities=set(),
@@ -14625,7 +14627,7 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(
             new_config=new_config,
             changed_mcp_servers=set(),
-            all_new_entities=set(),
+            configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
             removed_entities=set(),

@@ -9,6 +9,7 @@ import httpx
 
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.matrix.client_session import matrix_startup_error
+from mindroom.matrix.identity import MatrixID
 
 
 def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
@@ -134,5 +135,10 @@ async def register_user_via_provisioning_service(
     if not isinstance(user_id, str) or not user_id.strip():
         msg = "Provisioning service response missing user_id for register-agent."
         raise matrix_startup_error(msg, permanent=True)
+    try:
+        parsed_user_id = MatrixID.parse(user_id.strip()).full_id
+    except ValueError as exc:
+        msg = "Provisioning service response returned invalid user_id for register-agent."
+        raise matrix_startup_error(msg, permanent=True) from exc
 
-    return _ProvisioningRegisterResult(status=status, user_id=user_id.strip())
+    return _ProvisioningRegisterResult(status=status, user_id=parsed_user_id)

@@ -36,7 +36,7 @@ class MatrixID:
 
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
-        """Parse a Matrix ID like @mindroom_calculator:localhost."""
+        """Parse a Matrix ID like @alice:example.com."""
         return _parse_matrix_id(matrix_id)
 
     @classmethod
@@ -46,7 +46,7 @@ class MatrixID:
 
     @property
     def full_id(self) -> str:
-        """Get the full Matrix ID like @mindroom_calculator:localhost."""
+        """Get the full Matrix ID like @alice:example.com."""
         return f"@{self.username}:{self.domain}"
 
     def __str__(self) -> str:

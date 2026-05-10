@@ -15,7 +15,9 @@ from mindroom import constants
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixRoom, MatrixState
+from tests.conftest import TEST_PASSWORD
 from tests.identity_helpers import entity_ids, entity_names_for_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -36,6 +38,16 @@ def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
     )
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     persist_entity_accounts(bound, runtime_paths)
+    if bound.mindroom_user is not None:
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account(
+            managed_account_key("user"),
+            bound.mindroom_user.username,
+            TEST_PASSWORD,
+            requested_username=bound.mindroom_user.username,
+            domain=bound.get_domain(runtime_paths),
+        )
+        state.save(runtime_paths=runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
 

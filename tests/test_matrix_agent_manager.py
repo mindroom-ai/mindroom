@@ -78,7 +78,12 @@ def _recording_httpx_async_client(
         async def __aexit__(self, *_: object) -> None:
             return None
 
-        async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
+        async def post(
+            self,
+            url: str,
+            json: dict[str, object],
+            **_: object,
+        ) -> httpx.Response:
             captured_requests.append((url, json))
             return response
 
@@ -343,7 +348,7 @@ class TestMatrixRegistration:
 
         mock_client = AsyncMock()
         mock_client.login.return_value = nio.LoginResponse(
-            user_id="@test_user:localhost",
+            user_id="@actual_test_user:matrix.example",
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
@@ -355,7 +360,7 @@ class TestMatrixRegistration:
                 "mindroom.matrix.users.httpx.AsyncClient",
                 _recording_httpx_async_client(
                     captured_requests,
-                    httpx.Response(200, json={"user_id": "@test_user:localhost"}),
+                    httpx.Response(200, json={"user_id": "@actual_test_user:matrix.example"}),
                 ),
             ),
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
@@ -370,7 +375,7 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
-            assert user_id == "@test_user:localhost"
+            assert user_id == "@actual_test_user:matrix.example"
             assert captured_requests == [
                 (
                     "http://localhost:8008/_matrix/client/v3/register",
@@ -458,6 +463,33 @@ class TestMatrixRegistration:
             )
             mock_client.login.assert_not_called()
             mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_rejects_invalid_direct_token_user_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Direct token registration must persist only valid returned Matrix IDs."""
+        test_pass = "test_pass"  # noqa: S105
+        runtime_paths = _runtime_paths(tmp_path, MATRIX_REGISTRATION_TOKEN="token-123")  # noqa: S106
+
+        with (
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_async_client(
+                    [],
+                    httpx.Response(200, json={"user_id": "not-a-matrix-id"}),
+                ),
+            ),
+            pytest.raises(PermanentMatrixStartupError, match="invalid user_id"),
+        ):
+            await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                test_pass,
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
 
     @pytest.mark.asyncio
     async def test_register_user_uses_provisioning_service_register_agent_when_configured(
@@ -561,6 +593,38 @@ class TestMatrixRegistration:
             assert user_id == "@test_user:localhost"
             mock_client.login.assert_called_once_with(test_pass)
             mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_rejects_invalid_provisioning_user_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Provisioning responses must return valid Matrix IDs before state persistence."""
+        test_pass = "test_pass"  # noqa: S105
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MINDROOM_LOCAL_CLIENT_ID="client-123",
+            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
+        )
+
+        with (
+            patch(
+                "mindroom.matrix.provisioning.httpx.AsyncClient",
+                _recording_httpx_async_client(
+                    [],
+                    httpx.Response(200, json={"status": "created", "user_id": "not-a-matrix-id"}),
+                ),
+            ),
+            pytest.raises(PermanentMatrixStartupError, match="invalid user_id"),
+        ):
+            await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                test_pass,
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
 
     @pytest.mark.asyncio
     async def test_register_user_provisioning_user_in_use_uses_local_server_name(
@@ -768,17 +832,24 @@ class TestAgentUserCreation:
     ) -> None:
         """Test creating a new agent user."""
         mock_get_creds.return_value = None  # No existing credentials
-        mock_register.return_value = "@mindroom_calculator:localhost"
+        mock_register.return_value = "@actual_calculator:matrix.example"
 
         runtime_paths = _runtime_paths(tmp_path)
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent", runtime_paths)
 
         assert agent_user.agent_name == "calculator"
-        assert agent_user.user_id == "@mindroom_calculator:localhost"
+        assert agent_user.user_id == "@actual_calculator:matrix.example"
         assert agent_user.display_name == "CalculatorAgent"
         assert agent_user.password
 
-        mock_save_creds.assert_called_once()
+        mock_save_creds.assert_called_once_with(
+            "calculator",
+            "actual_calculator",
+            agent_user.password,
+            runtime_paths,
+            domain="matrix.example",
+            requested_username="mindroom_calculator",
+        )
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
@@ -841,16 +912,46 @@ class TestAgentUserCreation:
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_internal_user_reuses_existing_credentials_when_config_username_changes(
+    async def test_create_internal_user_rejects_config_username_change(
         self,
         mock_get_creds: MagicMock,
         mock_register: AsyncMock,
         tmp_path: Path,
     ) -> None:
-        """Existing internal user credentials remain authoritative after config username edits."""
+        """The internal user's bootstrap username request is immutable after account creation."""
         mock_get_creds.return_value = {
             "username": DEFAULT_INTERNAL_USERNAME,
             "password": "existing_pass",
+            "requested_username": DEFAULT_INTERNAL_USERNAME,
+        }
+
+        runtime_paths = _runtime_paths(tmp_path)
+        with pytest.raises(PermanentMatrixStartupError, match=r"mindroom_user\.username cannot be changed"):
+            await create_agent_user(
+                "http://localhost:8008",
+                INTERNAL_USER_AGENT_NAME,
+                "MindRoomUser",
+                runtime_paths,
+                username="alice_internal",
+            )
+
+        mock_register.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users._get_agent_credentials")
+    async def test_create_internal_user_allows_persisted_actual_username_drift(
+        self,
+        mock_get_creds: MagicMock,
+        mock_register: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted provisioning may return an actual username different from the bootstrap request."""
+        mock_get_creds.return_value = {
+            "username": "actual_internal",
+            "password": "existing_pass",
+            "requested_username": DEFAULT_INTERNAL_USERNAME,
+            "domain": "matrix.example",
         }
 
         runtime_paths = _runtime_paths(tmp_path)
@@ -859,10 +960,10 @@ class TestAgentUserCreation:
             INTERNAL_USER_AGENT_NAME,
             "MindRoomUser",
             runtime_paths,
-            username="alice_internal",
+            username=DEFAULT_INTERNAL_USERNAME,
         )
 
-        assert agent_user.user_id == "@mindroom_user:localhost"
+        assert agent_user.user_id == "@actual_internal:matrix.example"
         assert agent_user.password == "existing_pass"  # noqa: S105
         mock_register.assert_not_called()
 

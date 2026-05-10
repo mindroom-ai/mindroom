@@ -46,7 +46,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 **MultiAgentOrchestrator** (`orchestrator.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
 
 **Entity types**:
-- `router`: Built-in traffic director that greets rooms and decides which agent should answer
+- `router`: Built-in traffic director that greets rooms and decides which agent or team should answer
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 
@@ -57,7 +57,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `bot.py` | AgentBot and TeamBot runtime for Matrix event handling, responses, and room behavior |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
-| `routing.py` | Intelligent agent selection when no agent is mentioned |
+| `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |

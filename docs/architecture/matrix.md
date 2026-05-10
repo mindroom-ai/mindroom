@@ -33,7 +33,7 @@ Each agent, team, and the router gets its own Matrix user.
 
 The configured alias is the user-facing runtime handle, such as `@assistant` in chat.
 
-Provisioning may request generated bootstrap localparts such as `mindroom_assistant` or `mindroom_router`, but persisted Matrix state is authoritative after provisioning and may contain a different username.
+Provisioning may request localparts such as `mindroom_assistant` or `mindroom_router`, but persisted Matrix state is authoritative after provisioning and may contain a different username.
 
 For example, a persisted Matrix account such as `@assistant_live:example.com` can become the live assistant account even if the original provisioning request used `mindroom_assistant`.
 
@@ -121,7 +121,7 @@ Mentions are parsed via `format_message_with_mentions()` which handles multiple 
 - `@actual_calculator:localhost` - Current full Matrix ID
 
 Bare Matrix account localparts such as `@actual_calculator` are not runtime handles.
-Generated bootstrap IDs such as `@mindroom_calculator:localhost` are provisioning details and should not be taught as runtime handles once persisted state records the current Matrix ID.
+A generated-looking full Matrix ID such as `@mindroom_calculator:localhost` is not a runtime handle unless it is the current persisted Matrix ID for that agent or team.
 
 Returns content with `m.mentions` and `formatted_body` containing clickable links.
 

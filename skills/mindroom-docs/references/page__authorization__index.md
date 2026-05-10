@@ -44,7 +44,7 @@ authorization:
 
 # Optional: configure the internal MindRoom user identity (omit for hosted/public profiles)
 mindroom_user:
-  username: mindroom_user          # Set before first startup (cannot be changed later)
+  username: mindroom_user          # Set before first startup (bootstrap request cannot be changed later)
   display_name: MindRoomUser
 
 # Optional: room onboarding/discoverability policy
@@ -65,7 +65,9 @@ matrix_room_access:
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
 
-`mindroom_user.username` is a one-time setting used to create the internal Matrix account. After the account exists, keep the same username and only change `mindroom_user.display_name` for visible name changes.
+`mindroom_user.username` is a one-time bootstrap request used to create the internal Matrix account.
+After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.
+If hosted provisioning returns a different actual Matrix ID, MindRoom persists and authorizes that actual ID.
 
 For `authorization.room_permissions`, MindRoom accepts these key formats:
 
@@ -78,8 +80,8 @@ For `authorization.room_permissions`, MindRoom accepts these key formats:
 When users authenticate through Synapse OIDC, they are regular Matrix users. To let them join managed MindRoom rooms by alias without manual invites:
 
 1. Set `matrix_room_access.mode: multi_user`.
-2. Set `multi_user_join_rule` to `public` (direct join) or `knock` (request access).
-3. Set `publish_to_room_directory: true` if rooms should appear in Explore/public room directory.
+1. Set `multi_user_join_rule` to `public` (direct join) or `knock` (request access).
+1. Set `publish_to_room_directory: true` if rooms should appear in Explore/public room directory.
 
 If you keep `mode: single_user_private` (default), managed rooms remain invite-only and private in the directory.
 
@@ -98,14 +100,14 @@ If permissions are insufficient, MindRoom logs actionable warnings including the
 Use this opt-in migration flow to move existing managed rooms to multi-user onboarding safely:
 
 1. Update config:
-   - `matrix_room_access.mode: multi_user`
-   - choose `multi_user_join_rule`
-   - set `publish_to_room_directory` as needed
-   - optionally list restricted rooms in `invite_only_rooms`
-2. Enable reconciliation once:
-   - `matrix_room_access.reconcile_existing_rooms: true`
-3. Restart MindRoom and verify logs for each managed room.
-4. After migration is complete, set `reconcile_existing_rooms: false` again (recommended steady state).
+1. `matrix_room_access.mode: multi_user`
+1. choose `multi_user_join_rule`
+1. set `publish_to_room_directory` as needed
+1. optionally list restricted rooms in `invite_only_rooms`
+1. Enable reconciliation once:
+1. `matrix_room_access.reconcile_existing_rooms: true`
+1. Restart MindRoom and verify logs for each managed room.
+1. After migration is complete, set `reconcile_existing_rooms: false` again (recommended steady state).
 
 Only managed rooms (rooms configured through MindRoom agents/teams) are reconciled.
 
@@ -119,15 +121,14 @@ Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
 
 Authorization checks are performed in order:
 
-1. **Internal system user** - When `mindroom_user` is configured, `@{mindroom_user.username}:{domain}` is always authorized. When omitted (hosted/public profiles), this check is skipped. Note: the same user ID from a different domain is NOT authorized.
-2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
-3. **Alias resolution** - If the sender matches a bridge alias in `aliases`, it is resolved to the canonical user ID for the remaining checks
-4. **Global users** - Users in `global_users` have access to all rooms
-5. **Room permissions** - If any matching room identifier exists in `room_permissions` (room ID, full alias, or managed room key), user must be in that list (does NOT fall through to `default_room_access`)
-6. **Default access** - Rooms not in `room_permissions` use `default_room_access`
+1. **Internal system user** - When `mindroom_user` is configured and its Matrix account has been prepared, the persisted actual internal user ID is always authorized. When omitted (hosted/public profiles), this check is skipped.
+1. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
+1. **Alias resolution** - If the sender matches a bridge alias in `aliases`, it is resolved to the canonical user ID for the remaining checks
+1. **Global users** - Users in `global_users` have access to all rooms
+1. **Room permissions** - If any matching room identifier exists in `room_permissions` (room ID, full alias, or managed room key), user must be in that list (does NOT fall through to `default_room_access`)
+1. **Default access** - Rooms not in `room_permissions` use `default_room_access`
 
-> [!TIP]
-> Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
+> [!TIP] Set `default_room_access: false` and explicitly grant access via `global_users` or `room_permissions` for better security.
 
 ## Bridge Aliases
 
@@ -198,4 +199,4 @@ bot_accounts:
   - "@slack_bot:example.com"
 ```
 
-For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](https://docs.mindroom.chat/configuration/router/) page.
+For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](https://docs.mindroom.chat/configuration/router/index.md) page.

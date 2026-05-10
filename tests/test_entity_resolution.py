@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.entity_resolution import configured_bot_user_ids_for_room, entity_identity_registry
+from mindroom.entity_resolution import (
+    DuplicateManagedEntityIdentityError,
+    MissingManagedEntityAccountError,
+    configured_bot_user_ids_for_room,
+    entity_identity_registry,
+)
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -118,3 +125,45 @@ def test_entity_identity_registry_uses_only_persisted_current_ids(tmp_path: Path
     assert identity.current_ids["general"].full_id == "@mindroom_general_oldns:localhost"
     assert identity.current_entity_name_for_user_id("@mindroom_general_oldns:localhost") == "general"
     assert identity.current_entity_name_for_user_id("@mindroom_general:localhost") is None
+
+
+def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Path) -> None:
+    """Runtime identity lookup fails at the account-preparation boundary."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config.validate_with_runtime(
+        Config(agents={"general": AgentConfig(display_name="General", role="General agent")}).authored_model_dump(),
+        runtime_paths,
+    )
+
+    with pytest.raises(MissingManagedEntityAccountError, match="router"):
+        entity_identity_registry(config, runtime_paths)
+
+
+def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_path: Path) -> None:
+    """Persisted Matrix IDs must map to one configured entity alias."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", role="General agent"),
+                "writer": AgentConfig(display_name="Writer", role="Writer agent"),
+            },
+        ),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router", "pw", domain="localhost")
+    state.add_account("agent_general", "shared_bot", "pw", domain="localhost")
+    state.add_account("agent_writer", "shared_bot", "pw", domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
+    with pytest.raises(DuplicateManagedEntityIdentityError, match="shared_bot"):
+        entity_identity_registry(config, runtime_paths)

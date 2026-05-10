@@ -1365,15 +1365,16 @@ def get_agent_ids_for_room(
     config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> list[str]:
-    """Get all agent Matrix IDs assigned to a specific room."""
+    """Get all bot Matrix IDs assigned to a specific room."""
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
-    # Always include the router agent
     agent_ids = [config_ids[ROUTER_AGENT_NAME].full_id]
 
-    # Add agents from config
     for agent_name, agent_cfg in config.agents.items():
         if room_key in agent_cfg.rooms:
             agent_ids.append(config_ids[agent_name].full_id)
+    for team_name, team_cfg in config.teams.items():
+        if room_key in team_cfg.rooms:
+            agent_ids.append(config_ids[team_name].full_id)
     return agent_ids
 
 

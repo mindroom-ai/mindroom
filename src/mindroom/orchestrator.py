@@ -18,7 +18,12 @@ from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entit
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import configured_bot_user_ids_for_room, entity_identity_registry
+from mindroom.entity_resolution import (
+    DuplicateManagedEntityIdentityError,
+    MissingManagedEntityAccountError,
+    configured_bot_user_ids_for_room,
+    entity_identity_registry,
+)
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
@@ -763,7 +768,7 @@ class _MultiAgentOrchestrator:
             )
         try:
             entity_identity_registry(config, self.runtime_paths)
-        except RuntimeError as exc:
+        except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
         return users
 
@@ -1298,7 +1303,7 @@ class _MultiAgentOrchestrator:
                 await self._cancel_bot_start_task(entity_name)
             await stop_entities(entities_to_stop, self.agent_bots, self._sync_tasks)
 
-        entities_to_recreate = plan.entities_to_restart & plan.all_new_entities
+        entities_to_recreate = plan.entities_to_restart & plan.configured_entities
         changed_entities = entities_to_recreate | plan.new_entities
         start_results = await self._create_and_start_entities(
             changed_entities,
@@ -1306,7 +1311,7 @@ class _MultiAgentOrchestrator:
             start_sync_tasks=True,
         )
 
-        removed_restarted_entities = plan.entities_to_restart - plan.all_new_entities
+        removed_restarted_entities = plan.entities_to_restart - plan.configured_entities
         for entity_name in removed_restarted_entities:
             self.agent_bots.pop(entity_name, None)
 
@@ -1379,8 +1384,8 @@ class _MultiAgentOrchestrator:
 
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        if plan.new_entities:
-            await self._prepare_entity_accounts(new_config, plan.new_entities)
+        if plan.added_entities:
+            await self._prepare_entity_accounts(new_config, plan.added_entities)
 
         if plugin_changes:
             pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
@@ -1420,7 +1425,7 @@ class _MultiAgentOrchestrator:
             await self._emit_config_reloaded(
                 new_config=new_config,
                 changed_entities=set(),
-                added_entities=plan.new_entities,
+                added_entities=plan.added_entities,
                 removed_entities=plan.removed_entities,
                 plugin_changes=plugin_changes,
             )
@@ -1445,7 +1450,7 @@ class _MultiAgentOrchestrator:
         await self._emit_config_reloaded(
             new_config=new_config,
             changed_entities=changed_entities,
-            added_entities=plan.new_entities,
+            added_entities=plan.added_entities,
             removed_entities=plan.removed_entities,
             plugin_changes=plugin_changes,
         )

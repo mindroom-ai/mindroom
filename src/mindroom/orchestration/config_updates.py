@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -44,7 +44,7 @@ class ConfigUpdatePlan:
 
     new_config: Config
     changed_mcp_servers: set[str]
-    all_new_entities: set[str]
+    configured_entities: set[str]
     entities_to_restart: set[str]
     new_entities: set[str]
     removed_entities: set[str]
@@ -52,6 +52,7 @@ class ConfigUpdatePlan:
     matrix_room_access_changed: bool
     matrix_space_changed: bool
     authorization_changed: bool
+    added_entities: set[str] = field(default_factory=set)
 
     @property
     def has_entity_changes(self) -> bool:
@@ -260,12 +261,13 @@ def build_config_update_plan(
             )
         entities_to_restart |= default_affected_entities
 
-    new_entities = configured_entities - existing_entities - entities_to_restart
+    added_entities = configured_entities - existing_entities
+    new_entities = added_entities - entities_to_restart
 
     return ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=changed_mcp_servers,
-        all_new_entities=configured_entities,
+        configured_entities=configured_entities,
         entities_to_restart=entities_to_restart,
         new_entities=new_entities,
         removed_entities=existing_entities - configured_entities,
@@ -273,4 +275,5 @@ def build_config_update_plan(
         matrix_room_access_changed=current_config.matrix_room_access != new_config.matrix_room_access,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
+        added_entities=added_entities,
     )

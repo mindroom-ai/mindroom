@@ -302,6 +302,7 @@ class TestUserAccountManagement:
             INTERNAL_USER_ACCOUNT_KEY,
             "actual_mindroom_user",
             "existing_password",
+            requested_username="alice",
             domain="matrix.example",
         )
 
@@ -343,17 +344,19 @@ def test_mindroom_user_username_rejects_invalid_characters() -> None:
         Config(mindroom_user={"username": "alice smith", "display_name": "Alice"})
 
 
-def test_mindroom_user_username_rejects_router_collision() -> None:
+def test_mindroom_user_username_rejects_router_collision(tmp_path: Path) -> None:
     """Internal user localpart must not collide with the router account localpart."""
+    runtime_paths = _runtime_paths(tmp_path)
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
         Config.model_validate(
             {"mindroom_user": {"username": "mindroom_router", "display_name": "Alice"}},
-            context={"runtime_paths": constants_mod.resolve_runtime_paths(process_env={"MINDROOM_NAMESPACE": ""})},
+            context={"runtime_paths": runtime_paths},
         )
 
 
-def test_mindroom_user_username_rejects_agent_collision() -> None:
+def test_mindroom_user_username_rejects_agent_collision(tmp_path: Path) -> None:
     """Internal user localpart must not collide with configured agent localparts."""
+    runtime_paths = _runtime_paths(tmp_path)
     with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
         Config.model_validate(
             {
@@ -366,7 +369,7 @@ def test_mindroom_user_username_rejects_agent_collision() -> None:
                 },
                 "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
             },
-            context={"runtime_paths": constants_mod.resolve_runtime_paths(process_env={"MINDROOM_NAMESPACE": ""})},
+            context={"runtime_paths": runtime_paths},
         )
 
 
@@ -391,6 +394,31 @@ def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_p
             },
             context={"runtime_paths": runtime_paths},
         )
+
+
+def test_mindroom_user_username_allows_prepared_agent_with_different_actual_username(tmp_path: Path) -> None:
+    """Internal user validation should not reserve an agent's obsolete proposed username after account prep."""
+    runtime_paths = _runtime_paths(tmp_path)
+    state = MatrixState()
+    state.add_account("agent_assistant", "actual_assistant", "pw", domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
+    config = Config.model_validate(
+        {
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+            },
+            "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
+        },
+        context={"runtime_paths": runtime_paths},
+    )
+
+    assert config.mindroom_user is not None
+    assert config.mindroom_user.username == "mindroom_assistant"
 
 
 def test_mindroom_user_none_validates_and_returns_none_id() -> None:

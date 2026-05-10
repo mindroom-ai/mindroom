@@ -17,6 +17,7 @@ class _MatrixAccount(BaseModel):
 
     username: str
     password: str
+    requested_username: str | None = None
     domain: str | None = None
     device_id: str | None = None
     access_token: str | None = None
@@ -72,6 +73,7 @@ class MatrixState(BaseModel):
         username: str,
         password: str,
         *,
+        requested_username: str | None = None,
         domain: str | None = None,
         device_id: str | None = None,
         access_token: str | None = None,
@@ -79,9 +81,17 @@ class MatrixState(BaseModel):
         """Add or update an account."""
         existing_account = self.accounts.get(key)
         effective_domain = domain if domain is not None else existing_account.domain if existing_account else None
+        effective_requested_username = (
+            requested_username
+            if requested_username is not None
+            else existing_account.requested_username
+            if existing_account
+            else None
+        )
         self.accounts[key] = _MatrixAccount(
             username=username,
             password=password,
+            requested_username=effective_requested_username,
             domain=effective_domain,
             device_id=device_id,
             access_token=access_token,

@@ -243,7 +243,7 @@ def _build_router_user(
     )
     return AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
-        user_id=MatrixID.from_username(router_account.username, server_name).full_id,
+        user_id=MatrixID.from_username(router_account.username, router_account.domain or server_name).full_id,
         display_name="Router",
         password=router_account.password,
         access_token=None,

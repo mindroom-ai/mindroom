@@ -965,6 +965,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
     orchestrator.config = current_config
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()}
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
@@ -976,7 +977,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
         await orchestrator.update_config()
 
     assert orchestrator.config is current_config
-    prepare.assert_awaited_once()
+    prepare.assert_awaited_once_with(new_config, {"writer"})
 
 
 @pytest.mark.asyncio
@@ -1021,6 +1022,55 @@ async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tm
         pytest.raises(PermanentStartupError, match="shared_bot"),
     ):
         await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general", "writer"])
+
+
+@pytest.mark.asyncio
+async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision(tmp_path: Path) -> None:
+    """Account preparation should fail when the internal user shares an entity Matrix ID."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "test", "id": "test-model"}},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
+    state.add_account("agent_general", "shared_actual", TEST_PASSWORD, domain="localhost")
+    state.add_account(
+        "agent_user",
+        "shared_actual",
+        TEST_PASSWORD,
+        requested_username="mindroom_user",
+        domain="localhost",
+    )
+    state.save(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+
+    async def existing_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        runtime_paths: object,
+        username: str | None = None,
+    ) -> AgentMatrixUser:
+        del runtime_paths, username
+        user_id = "@actual_router:localhost" if entity_name == ROUTER_AGENT_NAME else "@shared_actual:localhost"
+        return AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=user_id,
+            display_name=display_name,
+            password=TEST_PASSWORD,
+        )
+
+    with (
+        patch("mindroom.orchestrator.create_agent_user", new=existing_user),
+        pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
+    ):
+        await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general"])
 
 
 @pytest.mark.asyncio
@@ -1116,7 +1166,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
-        all_new_entities=set(),
+        configured_entities=set(),
         entities_to_restart=set(),
         new_entities=set(),
         removed_entities=set(),
@@ -1638,6 +1688,37 @@ def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes()
 
     assert plan.entities_to_restart == {"general", "team1"}
     assert plan.only_support_service_changes is False
+
+
+def test_config_update_plan_tracks_added_entities_even_when_they_restart() -> None:
+    """Added entities stay visible to account-preparation gates even when restart planning creates them."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent"),
+                "writer": AgentConfig(display_name="Writer Agent"),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities={ROUTER_AGENT_NAME, "general", "writer"},
+        existing_entities={ROUTER_AGENT_NAME, "general"},
+        agent_bots={ROUTER_AGENT_NAME: AsyncMock(), "general": AsyncMock()},
+    )
+
+    assert plan.added_entities == {"writer"}
+    assert plan.new_entities == set()
+    assert plan.entities_to_restart == {"writer"}
 
 
 @pytest.fixture

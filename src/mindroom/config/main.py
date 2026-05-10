@@ -871,14 +871,16 @@ class Config(BaseModel):
         entity_names = [ROUTER_AGENT_NAME, *self.agents, *self.teams]
         persisted_usernames = _persisted_agent_usernames(runtime_paths)
         for entity_name in entity_names:
+            account_key = f"agent_{entity_name}"
             if entity_name == ROUTER_AGENT_NAME:
                 label = f"router '{ROUTER_AGENT_NAME}'"
             elif entity_name in self.agents:
                 label = f"agent '{entity_name}'"
             else:
                 label = f"team '{entity_name}'"
-            reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
-            if username := persisted_usernames.get(f"agent_{entity_name}"):
+            if account_key not in persisted_usernames:
+                reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
+            if username := persisted_usernames.get(account_key):
                 reserved_localparts[username] = label
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
@@ -920,13 +922,10 @@ class Config(BaseModel):
         if self.mindroom_user is None:
             return None
         domain = self.get_domain(runtime_paths)
-        return (
-            _persisted_account_user_id(
-                _INTERNAL_USER_ACCOUNT_KEY,
-                domain,
-                runtime_paths,
-            )
-            or f"@{self.mindroom_user.username}:{domain}"
+        return _persisted_account_user_id(
+            _INTERNAL_USER_ACCOUNT_KEY,
+            domain,
+            runtime_paths,
         )
 
     @classmethod

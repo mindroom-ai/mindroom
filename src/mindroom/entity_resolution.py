@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 _INTERNAL_USER_ENTITY_NAME = "user"
 
 
+class MissingManagedEntityAccountError(RuntimeError):
+    """Raised when runtime entity identity is requested before account preparation."""
+
+
+class DuplicateManagedEntityIdentityError(RuntimeError):
+    """Raised when persisted managed Matrix accounts are ambiguous."""
+
+
 def configured_bot_user_ids_for_room(
     config: Config,
     room_id: str,
@@ -109,6 +117,7 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
     """Return current persisted Matrix identities for configured runtime entities."""
     current_ids = _persisted_entity_id_map(config, runtime_paths)
     _validate_unique_entity_ids(current_ids)
+    _validate_internal_user_id_is_unique(config, runtime_paths, current_ids)
     return EntityIdentityRegistry(current_ids=current_ids)
 
 
@@ -124,7 +133,7 @@ def _persisted_entity_matrix_id(entity_name: str, domain: str, runtime_paths: Ru
     persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
     if persisted_user_id is None:
         msg = f"Matrix account for configured entity {entity_name!r} has not been prepared"
-        raise RuntimeError(msg)
+        raise MissingManagedEntityAccountError(msg)
     return MatrixID.parse(persisted_user_id)
 
 
@@ -143,7 +152,25 @@ def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:
             for user_id, first_entity, second_entity in duplicates
         )
         msg = f"Configured entities must have unique Matrix IDs: {formatted}"
-        raise RuntimeError(msg)
+        raise DuplicateManagedEntityIdentityError(msg)
+
+
+def _validate_internal_user_id_is_unique(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    current_ids: dict[str, MatrixID],
+) -> None:
+    internal_user_id = mindroom_user_id(config, runtime_paths)
+    if internal_user_id is None:
+        return
+    for entity_name, matrix_id in current_ids.items():
+        if matrix_id.full_id != internal_user_id:
+            continue
+        msg = (
+            "MindRoom internal user Matrix ID must not match a configured entity Matrix ID: "
+            f"{internal_user_id} is also used by {entity_name!r}"
+        )
+        raise DuplicateManagedEntityIdentityError(msg)
 
 
 def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
@@ -151,16 +178,10 @@ def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
     if config.mindroom_user is None:
         return None
     domain = _matrix_domain(runtime_paths)
-    return (
-        managed_account_user_id(
-            managed_account_key(_INTERNAL_USER_ENTITY_NAME),
-            domain,
-            runtime_paths,
-        )
-        or MatrixID.from_username(
-            config.mindroom_user.username,
-            domain,
-        ).full_id
+    return managed_account_user_id(
+        managed_account_key(_INTERNAL_USER_ENTITY_NAME),
+        domain,
+        runtime_paths,
     )
 
 

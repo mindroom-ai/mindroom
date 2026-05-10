@@ -20,6 +20,7 @@ from mindroom.prompts import (
     AVATAR_ROOM_SYSTEM_PROMPT,
     AVATAR_TEAM_SYSTEM_PROMPT,
 )
+from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,6 +42,16 @@ def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> consta
         config_path=config_path,
         storage_path=tmp_path / "storage",
     )
+
+
+def test_build_router_user_uses_persisted_account_domain(tmp_path: Path) -> None:
+    """Avatar sync should log in with the router's actual persisted Matrix ID."""
+    runtime_paths = _runtime_paths(tmp_path)
+    router_account = SimpleNamespace(username="actual_router", domain="matrix.example", password=TEST_PASSWORD)
+
+    router_user = generate_avatars._build_router_user(router_account, runtime_paths)
+
+    assert router_user.user_id == "@actual_router:matrix.example"
 
 
 def _config_with_runtime_paths(
@@ -726,7 +737,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     space_avatar_path.parent.mkdir(parents=True)
     space_avatar_path.write_bytes(b"space-bytes")
 
-    router_account = SimpleNamespace(username="router")
+    router_account = SimpleNamespace(username="router", domain=None)
     router_account.password = b"pw".decode()
 
     def _get_account(key: str) -> object | None:
@@ -789,7 +800,7 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
     room_avatar_path.parent.mkdir(parents=True)
     room_avatar_path.write_bytes(b"room-bytes")
 
-    router_account = SimpleNamespace(username="router")
+    router_account = SimpleNamespace(username="router", domain=None)
     router_account.password = b"pw".decode()
 
     def _get_account(key: str) -> object | None:
@@ -859,7 +870,7 @@ async def test_set_room_avatars_in_matrix_force_replaces_existing_matrix_avatar(
     room_avatar_path.parent.mkdir(parents=True)
     room_avatar_path.write_bytes(b"room-bytes")
 
-    router_account = SimpleNamespace(username="router")
+    router_account = SimpleNamespace(username="router", domain=None)
     router_account.password = b"pw".decode()
 
     def _get_account(key: str) -> object | None:
@@ -925,7 +936,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
     room_avatar_path.parent.mkdir(parents=True)
     room_avatar_path.write_bytes(b"room-bytes")
 
-    router_account = SimpleNamespace(username="router")
+    router_account = SimpleNamespace(username="router", domain=None)
     router_account.password = b"pw".decode()
 
     def _get_account(key: str) -> object | None:
@@ -987,7 +998,7 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     space_avatar_path.parent.mkdir(parents=True)
     space_avatar_path.write_bytes(b"space-bytes")
 
-    router_account = SimpleNamespace(username="router")
+    router_account = SimpleNamespace(username="router", domain=None)
     router_account.password = b"pw".decode()
 
     def _get_account(key: str) -> object | None:
@@ -1054,7 +1065,7 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
         },
         "matrix_space": {"enabled": False},
     }
-    router_account = SimpleNamespace(username="router")
+    router_account = SimpleNamespace(username="router", domain=None)
     router_account.password = b"pw".decode()
     state = SimpleNamespace(get_account=lambda key: router_account if key == "agent_router" else None)
 
