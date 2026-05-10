@@ -3,27 +3,37 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _mid(name: str) -> MatrixID:
     return MatrixID(username=name, domain="localhost")
 
 
-def _runtime_paths() -> object:
-    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+@pytest.fixture
+def runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Create isolated runtime paths for scheduling parser tests."""
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
 
 
 @pytest.fixture
-def mock_config() -> Config:
+def mock_config(runtime_paths: RuntimePaths) -> Config:
     """Create a typed config with test agents."""
     agent_names = (
         "email_assistant",
@@ -37,10 +47,12 @@ def mock_config() -> Config:
         "ci_agent",
         "ticket_agent",
     )
-    return Config(
+    config = Config(
         agents={name: {"display_name": name.replace("_", " ").title()} for name in agent_names},
         models={"default": {"provider": "openai", "id": "gpt-5.4"}},
     )
+    persist_entity_accounts(config, runtime_paths)
+    return config
 
 
 @pytest.mark.asyncio
@@ -54,6 +66,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting 'if email urgent' to polling schedule."""
         # Setup
@@ -77,7 +90,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("email_assistant"), _mid("phone_agent")],
         )
 
@@ -99,6 +112,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting Bitcoin price condition to polling schedule."""
         # Setup
@@ -121,7 +135,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "When Bitcoin drops below $40k, notify me",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("crypto_agent"), _mid("notification_agent")],
         )
 
@@ -136,6 +150,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting server monitoring condition to polling schedule."""
         # Setup
@@ -158,7 +173,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "If server CPU goes above 80%, scale up",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("monitoring_agent"), _mid("ops_agent")],
         )
 
@@ -173,6 +188,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting build failure event to polling schedule."""
         # Setup
@@ -195,7 +211,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "When the build fails, create a ticket",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("ci_agent"), _mid("ticket_agent")],
         )
 
@@ -210,6 +226,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting Reddit mention event to polling schedule."""
         # Setup
@@ -232,7 +249,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("reddit_agent"), _mid("analyst")],
         )
 
@@ -247,6 +264,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test converting boss email event with immediate urgency."""
         # Setup
@@ -269,7 +287,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("email_assistant"), _mid("notification_agent")],
         )
 
@@ -284,6 +302,7 @@ class TestEventDrivenScheduling:
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
         mock_config: Config,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test that the prompt includes event-driven examples."""
         # Setup
@@ -306,7 +325,7 @@ class TestEventDrivenScheduling:
         await _parse_workflow_schedule(
             "Test request",
             mock_config,
-            _runtime_paths(),
+            runtime_paths,
             available_agents=[_mid("test_agent")],
         )
 

@@ -9,10 +9,37 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
-from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
+from tests.conftest import (
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    replace_turn_controller_deps,
+    wrap_extracted_collaborators,
+)
+from tests.identity_helpers import persist_entity_accounts
+
+
+def _runtime_config_and_paths(
+    tmp_path: Path,
+    *,
+    agents: dict[str, AgentConfig] | None = None,
+    usernames: dict[str, str] | None = None,
+) -> tuple[Config, RuntimePaths]:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "http://example.com"},
+    )
+    config = bind_runtime_paths(
+        Config(agents=agents or {}, authorization={"default_room_access": True}),
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths, usernames=usernames)
+    return config, runtime_paths
 
 
 @pytest.mark.asyncio
@@ -30,16 +57,17 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
+    config, runtime_paths = _runtime_config_and_paths(
+        tmp_path,
+        usernames={ROUTER_AGENT_NAME: "router"},
+    )
+
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        config=config,
+        runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
     )
     wrap_extracted_collaborators(bot)
@@ -122,16 +150,17 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
+    config, runtime_paths = _runtime_config_and_paths(
+        tmp_path,
+        usernames={ROUTER_AGENT_NAME: "router"},
+    )
+
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        config=config,
+        runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
     )
     wrap_extracted_collaborators(bot)
@@ -218,16 +247,18 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
+    config, runtime_paths = _runtime_config_and_paths(
+        tmp_path,
+        agents={"test_agent": AgentConfig(display_name="Test Agent")},
+        usernames={ROUTER_AGENT_NAME: "router", "test_agent": "test_agent"},
+    )
+
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        config=config,
+        runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
     )
     wrap_extracted_collaborators(bot)

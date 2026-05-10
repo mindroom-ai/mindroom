@@ -65,6 +65,7 @@ from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     get_tool_execution_identity,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 _TEST_MODEL = "openai:gpt-5.4"
 
@@ -84,6 +85,12 @@ def _make_test_team(
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
     return resolve_runtime_paths(config_path=Path(__file__), process_env=process_env or {})
+
+
+def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None = None) -> RuntimePaths:
+    runtime_paths = _runtime_paths(process_env)
+    persist_entity_accounts(config, runtime_paths)
+    return runtime_paths
 
 
 def _knowledge_lookup(
@@ -210,6 +217,7 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+    persist_entity_accounts(test_config, runtime_paths)
     initialize_api_app(app, runtime_paths)
 
     with (
@@ -229,6 +237,7 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "test-key-1,test-key-2"})
+    persist_entity_accounts(test_config, runtime_paths)
     initialize_api_app(app, runtime_paths)
 
     with (
@@ -382,6 +391,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         },
         runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths)
     execution_identity = build_tool_execution_identity(
         channel="openai_compat",
         agent_name="code",
@@ -429,6 +439,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         },
         runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths)
     execution_identity = build_tool_execution_identity(
         channel="openai_compat",
         agent_name="code",
@@ -2660,6 +2671,7 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+    persist_entity_accounts(team_config, runtime_paths)
     initialize_api_app(app, runtime_paths)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
@@ -4461,7 +4473,12 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("collab_team", collaborate_config, _runtime_paths(), execution_identity=None)
+            _build_team(
+                "collab_team",
+                collaborate_config,
+                _runtime_paths_for_config(collaborate_config),
+                execution_identity=None,
+            )
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
@@ -4491,14 +4508,13 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+            _build_team("coord_team", config, _runtime_paths_for_config(config), execution_identity=None)
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
 
     def test_build_team_uses_stable_team_scope_db(self) -> None:
         """Configured teams should persist runs into the stable team scope store."""
-        runtime_paths = _runtime_paths()
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -4512,6 +4528,7 @@ class TestTeamCompletion:
                 ),
             },
         )
+        runtime_paths = _runtime_paths_for_config(config)
         member = MagicMock(name="GeneralAgent")
         member.id = "general"
 
@@ -4565,7 +4582,12 @@ class TestTeamCompletion:
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _agents, team, _mode = _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+            _agents, team, _mode = _build_team(
+                "coord_team",
+                config,
+                _runtime_paths_for_config(config),
+                execution_identity=None,
+            )
 
         assert team.num_history_runs is None
         assert team.num_history_messages is None
@@ -4696,7 +4718,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("team_with_kb", config, _runtime_paths(), execution_identity=None)
+            _build_team("team_with_kb", config, _runtime_paths_for_config(config), execution_identity=None)
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs

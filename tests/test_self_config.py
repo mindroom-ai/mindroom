@@ -19,6 +19,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
 from tests.conftest import load_config_yaml, write_config_yaml
+from tests.identity_helpers import persist_entity_accounts
 
 _DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o")}
 _BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
@@ -42,6 +43,7 @@ def _make_config(
     runtime_paths = resolve_runtime_paths(config_path=config_path)
     write_config_yaml(config, config_path)
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound, config_path
 

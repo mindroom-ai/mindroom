@@ -488,7 +488,7 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
     await bot._send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
 
     response_text = bot._send_response.await_args.kwargs["response_text"]
-    assert "\u2022 **@mindroom_code**: Writes code" in response_text
+    assert "\u2022 **@code**: Writes code" in response_text
     bot.client.joined_members.assert_awaited_once_with("!adhoc:localhost")
 
 
@@ -599,7 +599,7 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
     await bot._on_invite(room, event)
 
     response_text = bot._send_response.await_args.kwargs["response_text"]
-    assert "\u2022 **@mindroom_code**: Writes code" in response_text
+    assert "\u2022 **@code**: Writes code" in response_text
     assert "@mindroom_research" not in response_text
 
 

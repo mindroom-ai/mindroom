@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.attachments import load_attachment, register_local_attachment
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
 from mindroom.tool_system.runtime_context import (
@@ -24,7 +26,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.conftest import make_event_cache_mock
+from tests.conftest import bind_runtime_paths, make_event_cache_mock
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,6 +53,13 @@ def _tool_context(
         storage_path=tmp_path,
         process_env=process_env or {},
     )
+    config = bind_runtime_paths(
+        Config(
+            agents={"openclaw": AgentConfig(display_name="OpenClaw")},
+            authorization={"default_room_access": True},
+        ),
+        runtime_paths,
+    )
     conversation_cache = AsyncMock()
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     return ToolRuntimeContext(
@@ -60,7 +69,7 @@ def _tool_context(
         resolved_thread_id="$thread:localhost",
         requester_id="@user:localhost",
         client=client,
-        config=MagicMock(),
+        config=config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=conversation_cache,

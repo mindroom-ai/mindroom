@@ -48,6 +48,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    matrix_state_file,
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
@@ -56,7 +57,6 @@ from mindroom.git_urls import credential_free_repo_url
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
-from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import (
     agent_username_localpart,
     extract_server_name_from_homeserver,
@@ -86,6 +86,30 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "subagents",
     "matrix_message",
 )
+
+
+def _persisted_agent_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
+    state_file = matrix_state_file(runtime_paths=runtime_paths)
+    if not state_file.exists():
+        return {}
+    data = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    accounts = data.get("accounts")
+    if not isinstance(accounts, dict):
+        return {}
+    usernames: dict[str, str] = {}
+    for account_key, account_data in accounts.items():
+        if not isinstance(account_key, str) or not account_key.startswith("agent_"):
+            continue
+        if not isinstance(account_data, dict):
+            continue
+        username = account_data.get("username")
+        if isinstance(username, str):
+            usernames[account_key] = username
+    return usernames
+
+
 logger = get_logger(__name__)
 
 _OPTIONAL_DICT_SECTION_NAMES = (
@@ -831,7 +855,7 @@ class Config(BaseModel):
             return self
         reserved_localparts: dict[str, str] = {}
         entity_names = [ROUTER_AGENT_NAME, *self.agents, *self.teams]
-        persisted_accounts = matrix_state_for_runtime(runtime_paths).accounts
+        persisted_usernames = _persisted_agent_usernames(runtime_paths)
         for entity_name in entity_names:
             if entity_name == ROUTER_AGENT_NAME:
                 label = f"router '{ROUTER_AGENT_NAME}'"
@@ -840,9 +864,8 @@ class Config(BaseModel):
             else:
                 label = f"team '{entity_name}'"
             reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
-            account = persisted_accounts.get(f"agent_{entity_name}")
-            if account is not None:
-                reserved_localparts[account.username] = label
+            if username := persisted_usernames.get(f"agent_{entity_name}"):
+                reserved_localparts[username] = label
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"

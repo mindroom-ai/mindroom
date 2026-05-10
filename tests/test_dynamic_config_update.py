@@ -19,6 +19,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -110,6 +111,8 @@ class TestDynamicConfigUpdate:
             },
             models={"default": {"provider": "test", "id": "test-model"}},
         )
+        persist_entity_accounts(initial_config, orchestrator.runtime_paths)
+        persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         # Mock the explicit runtime-bound config loader used by update_config().
         with patch("mindroom.orchestrator.load_config", return_value=updated_config):  # noqa: SIM117
@@ -206,7 +209,7 @@ class TestDynamicConfigUpdate:
         router_bot._set_presence_with_model_info.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_scheduling_with_dynamically_added_agent(self) -> None:
+    async def test_scheduling_with_dynamically_added_agent(self, tmp_path: Path) -> None:
         """Test that scheduling commands work correctly with dynamically added agents."""
         # Update config to add callagent
         updated_config = Config(
@@ -229,6 +232,12 @@ class TestDynamicConfigUpdate:
 
         # Test that parse_workflow_schedule correctly recognizes the new agent
         request = "whenever i get an email with title urgent, notify @callagent to send me a text"
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        persist_entity_accounts(updated_config, runtime_paths)
 
         # Mock the AI model to return a proper workflow
         with patch("mindroom.model_loading.get_model_instance") as mock_get_model:
@@ -261,7 +270,7 @@ class TestDynamicConfigUpdate:
                 result = await _parse_workflow_schedule(
                     request,
                     updated_config,
-                    resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+                    runtime_paths,
                     available_agents=[
                         MatrixID(username="email_assistant", domain="localhost"),
                         MatrixID(username="callagent", domain="localhost"),

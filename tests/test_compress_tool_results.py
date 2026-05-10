@@ -21,6 +21,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -114,7 +115,9 @@ def _load_test_config(
         ),
         encoding="utf-8",
     )
-    return load_config(runtime_paths), runtime_paths
+    config = load_config(runtime_paths)
+    persist_entity_accounts(config, runtime_paths)
+    return config, runtime_paths
 
 
 def _create_test_agent(

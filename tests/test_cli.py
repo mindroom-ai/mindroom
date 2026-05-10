@@ -165,7 +165,7 @@ class TestUserAccountManagement:
             state = MatrixState.load(runtime_paths=runtime_paths)
 
             assert INTERNAL_USER_ACCOUNT_KEY in state.accounts
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
+            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == f"{DEFAULT_INTERNAL_USERNAME}_test"
             generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
             assert generated_password
             assert generated_password != "user_secure_password"  # noqa: S105

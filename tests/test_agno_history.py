@@ -128,6 +128,7 @@ from tests.conftest import (
     make_visible_message,
     prepare_history_for_run_for_test,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
@@ -4978,6 +4979,7 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
+    persist_entity_accounts(config, runtime_paths, usernames={"test_agent": "bot"})
     live_agent = _agent()
     thread_history = [
         make_visible_message(sender="@alice:localhost", body="Original question", event_id="$root"),
@@ -4987,11 +4989,6 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     ]
 
     with (
-        patch.object(
-            Config,
-            "get_ids",
-            return_value={"test_agent": SimpleNamespace(full_id="@bot:localhost")},
-        ),
         patch("mindroom.ai.create_agent", return_value=live_agent),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         patch(

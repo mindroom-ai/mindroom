@@ -230,7 +230,7 @@ class TestDMPreservationDuringCleanup:
             },
         )
         runtime_paths = runtime_paths_for(config)
-        state = MatrixState()
+        state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account(
             "agent_configured_agent",
             "mindroom_configured_agent_oldns",
@@ -360,7 +360,7 @@ class TestDMPreservationDuringCleanup:
             },
         )
         rp = runtime_paths_for(config)
-        state = MatrixState()
+        state = MatrixState.load(runtime_paths=rp)
         state.add_account("agent_agent", "mindroom_agent_oldns", "pw", domain=config.get_domain(rp))
         state.save(runtime_paths=rp)
         invited_rooms_path = agent_state_root_path(rp.storage_root, "agent") / "invited_rooms.json"

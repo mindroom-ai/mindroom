@@ -15,6 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.memory import MemoryPromptParts
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -72,6 +73,7 @@ class TestMemoryIntegration:
         """Test that AI response uses memory enhancement."""
         mock_build = mock_memory_functions
         runtime_paths = self._runtime_paths(tmp_path)
+        persist_entity_accounts(config, runtime_paths)
 
         with (
             patch("mindroom.ai_runtime.cached_agent_run", mock_agent_run),

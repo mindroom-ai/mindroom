@@ -40,6 +40,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     save_loaded_toolkits_for_session,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -87,7 +88,10 @@ def _clear_loaded_toolkits_state() -> Generator[None, None, None]:
 
 def _validated_config(tmp_path: Path, raw: dict[str, object]) -> Config:
     """Validate one raw config payload against an isolated runtime."""
-    return Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(raw, runtime_paths)
+    persist_entity_accounts(config, runtime_paths)
+    return config
 
 
 def _tool_payload(result: str) -> dict[str, object]:
@@ -1089,6 +1093,7 @@ def test_openai_team_builder_passes_session_id_to_member_agents(tmp_path: Path) 
         },
     )
     runtime_paths = _runtime_paths(tmp_path)
+    persist_entity_accounts(config, runtime_paths)
 
     with (
         patch("mindroom.teams.create_agent", return_value=MagicMock(name="CodeAgent")) as mock_create,
