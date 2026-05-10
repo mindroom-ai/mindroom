@@ -210,8 +210,8 @@ async def test_agents_list_payload_structure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agents_list_uses_current_room_responder_boundary(tmp_path: Path) -> None:
-    """agents_list should only advertise agents that routing could target in this room."""
+async def test_agents_list_uses_current_room_responder_boundary_for_spawn(tmp_path: Path) -> None:
+    """agents_list should mark current-room responders as spawnable."""
     config = _make_config()
     ctx = _make_context(tmp_path, config=config, room_agent_names=["openclaw", "code"])
 
@@ -220,6 +220,30 @@ async def test_agents_list_uses_current_room_responder_boundary(tmp_path: Path) 
 
     assert payload["status"] == "ok"
     assert [row["name"] for row in payload["agents"]] == ["code"]
+
+
+@pytest.mark.asyncio
+async def test_agents_list_includes_delegate_only_target(tmp_path: Path) -> None:
+    """agents_list should show delegate targets even when they cannot be spawned in this room."""
+    config = _make_config(
+        agents={
+            "openclaw": _make_agent_config(role="Coordinate work", delegate_to=["research"]),
+            "code": _make_agent_config(role="Write code"),
+            "research": _make_agent_config(role="Research topics"),
+        },
+    )
+    ctx = _make_context(tmp_path, config=config, room_agent_names=["openclaw", "code"])
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert payload["status"] == "ok"
+    rows_by_name = {row["name"]: row for row in payload["agents"]}
+    assert list(rows_by_name) == ["code", "research"]
+    assert rows_by_name["code"]["can_delegate"] is False
+    assert rows_by_name["code"]["can_spawn"] is True
+    assert rows_by_name["research"]["can_delegate"] is True
+    assert rows_by_name["research"]["can_spawn"] is False
 
 
 @pytest.mark.asyncio

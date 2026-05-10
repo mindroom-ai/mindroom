@@ -613,14 +613,17 @@ class SubAgentsTools(Toolkit):
         caller_cfg = context.config.agents.get(caller_name)
         delegate_to = set(caller_cfg.delegate_to) if caller_cfg else set()
         available_agents = await _available_subagent_names(context)
+        spawnable_agents = set(available_agents)
+        agent_names = set(context.config.agents)
+        visible_agents = sorted((delegate_to | spawnable_agents) & agent_names)
         rows = [
             {
                 "name": name,
                 "can_delegate": name in delegate_to,
-                "can_spawn": True,
+                "can_spawn": name in spawnable_agents,
                 "description": describe_agent(name, context.config),
             }
-            for name in available_agents
+            for name in visible_agents
             if name != caller_name
         ]
         return _payload(
