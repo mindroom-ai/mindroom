@@ -19,7 +19,8 @@ from mindroom.services.config import (
     find_uv,
     install_uv,
 )
-from mindroom.services.launchd import _generate_plist, _get_log_command as _get_launchd_log_command
+from mindroom.services.launchd import _generate_plist
+from mindroom.services.launchd import _get_log_command as _get_launchd_log_command
 from mindroom.services.manager import get_service_manager
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name

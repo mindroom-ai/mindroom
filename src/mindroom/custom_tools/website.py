@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 from agno.knowledge.document import Document
+from agno.knowledge.knowledge import Knowledge  # noqa: TC002 - metadata sync resolves runtime type hints.
 from agno.knowledge.reader.website_reader import WebsiteReader
 from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
-
-if TYPE_CHECKING:
-    from agno.knowledge.knowledge import Knowledge
 
 _PREFERRED_CONTENT_SELECTORS = (
     "main",
