@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-import httpx
 import typer
 
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
@@ -22,10 +21,19 @@ from .env_file import env_path_for_config, upsert_env_values
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    import httpx
+
     from mindroom.constants import RuntimePaths
 
 _CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-cinny:latest"
 _CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
+
+
+def _httpx_get(url: str, *, timeout: float, verify: bool) -> httpx.Response:
+    """Call httpx.get without importing httpx during CLI help rendering."""
+    import httpx  # noqa: PLC0415
+
+    return httpx.get(url, timeout=timeout, verify=verify)
 
 
 def local_stack_setup(
@@ -312,11 +320,13 @@ def _wait_for_http_success(
     response_matches: Callable[[httpx.Response], bool] | None = None,
 ) -> bool:
     """Wait until an HTTP GET request returns success."""
+    import httpx  # noqa: PLC0415
+
     deadline = time.monotonic() + timeout_seconds
     matcher = response_matches or (lambda response: response.is_success)
     while time.monotonic() < deadline:
         try:
-            response = httpx.get(url, timeout=3, verify=verify)
+            response = _httpx_get(url, timeout=3, verify=verify)
             if matcher(response):
                 return True
         except httpx.HTTPError:
