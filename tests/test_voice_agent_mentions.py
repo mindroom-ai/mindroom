@@ -284,7 +284,14 @@ async def test_voice_transcription_strips_unavailable_persisted_username_alias()
     [
         ("@code review this", {"openclaw"}, {"openclaw", "code"}, "code review this"),
         ("@mindroom_code review this", {"openclaw"}, {"openclaw", "code"}, "mindroom_code review this"),
-        ("@code:server.com review this", {"openclaw"}, {"openclaw", "code"}, "code:server.com review this"),
+        ("@code:localhost review this", {"openclaw"}, {"openclaw", "code"}, "code:localhost review this"),
+        ("@code:server.com review this", {"openclaw"}, {"openclaw", "code"}, "@code:server.com review this"),
+        (
+            "@mindroom_code:remote.example review this",
+            {"openclaw"},
+            {"openclaw", "code"},
+            "@mindroom_code:remote.example review this",
+        ),
         ("@openclaw review this", {"openclaw"}, {"openclaw", "code"}, "@openclaw review this"),
         ("@unknown review this", {"openclaw"}, {"openclaw", "code"}, "@unknown review this"),
         ("@Code review this", {"openclaw"}, {"openclaw", "code"}, "Code review this"),

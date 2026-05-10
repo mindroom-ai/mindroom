@@ -56,7 +56,6 @@ from mindroom.git_urls import credential_free_repo_url
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
 from mindroom.matrix_identifiers import (
-    agent_username_localpart,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
@@ -827,17 +826,15 @@ class Config(BaseModel):
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
         if runtime_paths is None:
             return self
-        reserved_localparts = {
-            agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths=runtime_paths): f"router '{ROUTER_AGENT_NAME}'",
-            **{
-                agent_username_localpart(agent_name, runtime_paths=runtime_paths): f"agent '{agent_name}'"
-                for agent_name in self.agents
-            },
-            **{
-                agent_username_localpart(team_name, runtime_paths=runtime_paths): f"team '{team_name}'"
-                for team_name in self.teams
-            },
-        }
+        reserved_localparts: dict[str, str] = {}
+        for entity_name, entity_id in self.get_ids(runtime_paths).items():
+            if entity_name == ROUTER_AGENT_NAME:
+                label = f"router '{ROUTER_AGENT_NAME}'"
+            elif entity_name in self.agents:
+                label = f"agent '{entity_name}'"
+            else:
+                label = f"team '{entity_name}'"
+            reserved_localparts[entity_id.username] = label
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"

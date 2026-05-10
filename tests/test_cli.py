@@ -354,6 +354,29 @@ def test_mindroom_user_username_rejects_agent_collision() -> None:
         )
 
 
+def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_path: Path) -> None:
+    """Internal user localpart must not collide with current persisted agent localparts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    state = MatrixState()
+    state.add_account("agent_assistant", "mindroom_user", "pw", domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
+    with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
+        Config.model_validate(
+            {
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "Test assistant",
+                        "rooms": ["test_room"],
+                    },
+                },
+                "mindroom_user": {"username": "mindroom_user", "display_name": "Alice"},
+            },
+            context={"runtime_paths": runtime_paths},
+        )
+
+
 def test_mindroom_user_none_validates_and_returns_none_id() -> None:
     """Config with mindroom_user omitted should validate and return None user ID."""
     config = Config()

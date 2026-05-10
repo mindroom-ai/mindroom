@@ -84,7 +84,7 @@ class EntityMatrixIdentity:
     """Current configured entity IDs plus stale bootstrap-ID predicates."""
 
     current_ids: dict[str, MatrixID]
-    _bootstrap_ids: dict[str, MatrixID]
+    bootstrap_ids: dict[str, MatrixID]
 
     def current_entity_name_for_user_id(self, user_id: str, *, include_router: bool = True) -> str | None:
         """Return the configured entity currently represented by one Matrix user ID."""
@@ -97,7 +97,7 @@ class EntityMatrixIdentity:
 
     def is_stale_localpart(self, entity_name: str, localpart: str) -> bool:
         """Return whether a localpart is this entity's old generated localpart."""
-        generated_localpart = self._bootstrap_ids[entity_name].username
+        generated_localpart = self.bootstrap_ids[entity_name].username
         if localpart.lower() != generated_localpart.lower():
             return False
         return self.current_ids[entity_name].username.lower() != localpart.lower()
@@ -106,7 +106,7 @@ class EntityMatrixIdentity:
         """Return whether a user ID is an old generated ID for any configured entity."""
         return any(
             bootstrap_id.full_id == user_id and self.current_ids[entity_name].full_id != user_id
-            for entity_name, bootstrap_id in self._bootstrap_ids.items()
+            for entity_name, bootstrap_id in self.bootstrap_ids.items()
         )
 
 
@@ -114,7 +114,7 @@ def entity_matrix_identity(config: Config, runtime_paths: RuntimePaths) -> Entit
     """Return current entity IDs with generated-ID staleness checks."""
     return EntityMatrixIdentity(
         current_ids=entity_matrix_ids(config, runtime_paths),
-        _bootstrap_ids=_entity_matrix_id_map(config, runtime_paths, MatrixID.from_agent),
+        bootstrap_ids=_entity_matrix_id_map(config, runtime_paths, MatrixID.from_agent),
     )
 
 

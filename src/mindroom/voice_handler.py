@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _VOICE_MENTION_PATTERN = re.compile(
-    r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::[A-Za-z0-9.\-]+)?",
+    r"(?<![\w])@(?:(?P<prefix>mindroom_))?(?P<name>[A-Za-z0-9_]+)(?::(?P<domain>[A-Za-z0-9.\-]+))?",
 )
 
 
@@ -507,8 +507,13 @@ def _sanitize_unavailable_mentions(
         return text
 
     allowed_lower = {name.lower() for name in allowed_entities}
+    local_domain = config.get_domain(runtime_paths)
 
     def _replace(match: re.Match[str]) -> str:
+        domain = match.group("domain")
+        if domain is not None and domain != local_domain:
+            return match.group(0)
+
         name = match.group("name")
         localpart = f"{match.group('prefix') or ''}{name}"
         configured_name = resolve_entity_name_for_mention_localpart(localpart, config, runtime_paths)

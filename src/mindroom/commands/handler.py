@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
@@ -29,6 +28,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
@@ -131,10 +131,7 @@ def _format_welcome_message(
     """Generate the welcome message text for resolved responder candidates."""
     entity_list = []
     for entity_id in candidate_entities:
-        entity_name = entity_id.agent_name(config, runtime_paths)
-        if not entity_name or entity_name == ROUTER_AGENT_NAME:
-            continue
-
+        entity_name = cast("str", entity_id.agent_name(config, runtime_paths))
         description = _format_agent_description(entity_name, config)
         entity_entry = f"• **@{entity_id.username}**"
         if description:

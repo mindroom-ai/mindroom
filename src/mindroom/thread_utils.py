@@ -190,20 +190,6 @@ def thread_requires_explicit_agent_targeting(
     return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)
 
 
-def _has_any_agent_mentions_in_thread(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Check if any agents are mentioned anywhere in the thread."""
-    for msg in thread_history:
-        content = msg.content
-        user_ids = _extract_mentioned_user_ids(content)
-        if _agents_from_user_ids(user_ids, config, runtime_paths):
-            return True
-    return False
-
-
 def get_all_mentioned_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
