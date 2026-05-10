@@ -14,7 +14,6 @@ from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from
 from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
-    responder_candidate_entities_for_room,
 )
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
@@ -658,12 +657,9 @@ class TurnController:
             return False
         if thread_history is None:
             return False
-        available_agents = await responder_candidate_entities_for_room(
-            self._client(),
+        available_agents = await self.deps.turn_policy.responder_candidates_for_room(
             room,
             requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
         )
         return thread_requires_explicit_agent_targeting(
             thread_history,
@@ -1071,6 +1067,7 @@ class TurnController:
             record_handled_turn=self.deps.turn_store.record_turn,
             send_response=send_response,
             reload_plugins=reload_plugins,
+            responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
         )
         await handle_command(
             context=context,
@@ -1181,12 +1178,9 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        available_agents = await responder_candidate_entities_for_room(
-            self._client(),
+        available_agents = await self.deps.turn_policy.responder_candidates_for_room(
             room,
             permission_sender_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
         )
         if not available_agents:
             self.deps.logger.debug(

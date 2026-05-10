@@ -134,6 +134,23 @@ def test_production_code_imports_identifier_helpers_from_matrix_identifiers() ->
     assert forbidden == []
 
 
+def test_config_validation_does_not_use_generated_agent_usernames() -> None:
+    """Config validation reserves actual persisted Matrix identities, not provisioning proposals."""
+    tree = ast.parse(CONFIG_MAIN_MODULE.read_text(encoding="utf-8"))
+    forbidden: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "mindroom.matrix_identifiers":
+            forbidden.extend(
+                f"{CONFIG_MAIN_MODULE}:{node.lineno}: import {alias.name}"
+                for alias in node.names
+                if alias.name == "agent_username_localpart"
+            )
+        if isinstance(node, ast.Name) and node.id == "agent_username_localpart":
+            forbidden.append(f"{CONFIG_MAIN_MODULE}:{node.lineno}: {node.id}")
+
+    assert forbidden == []
+
+
 def test_matrix_naming_compatibility_module_does_not_exist() -> None:
     """Pure Matrix identifier helpers live in matrix_identifiers with no legacy re-export module."""
     forbidden: list[str] = []

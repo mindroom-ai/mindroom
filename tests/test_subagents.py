@@ -267,6 +267,46 @@ async def test_agents_list_does_not_widen_configured_rooms_to_present_unconfigur
 
 
 @pytest.mark.asyncio
+async def test_agents_list_filters_non_running_configured_room_agents_when_live_state_is_known(
+    tmp_path: Path,
+) -> None:
+    """agents_list spawn discovery should require configured-room and live responder availability."""
+    room_id = "!room:localhost"
+    config = _make_config(
+        agents={
+            "openclaw": _make_agent_config(role="Coordinate work", rooms=[room_id], delegate_to=[]),
+            "code": _make_agent_config(role="Write code", rooms=[room_id]),
+            "research": _make_agent_config(role="Research topics", rooms=[room_id]),
+            "writer": _make_agent_config(role="Write prose"),
+        },
+    )
+    ctx = _make_context(
+        tmp_path,
+        config=config,
+        room_id=room_id,
+        room_agent_names=["openclaw", "code", "research", "writer"],
+    )
+    ctx = replace(
+        ctx,
+        orchestrator=SimpleNamespace(
+            agent_bots={
+                "openclaw": SimpleNamespace(running=True),
+                "code": SimpleNamespace(running=False),
+                "research": SimpleNamespace(running=True),
+                "writer": SimpleNamespace(running=True),
+            },
+        ),
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert payload["status"] == "ok"
+    assert [row["name"] for row in payload["agents"]] == ["research"]
+    assert payload["agents"][0]["can_spawn"] is True
+
+
+@pytest.mark.asyncio
 async def test_agents_list_can_delegate_reflects_delegate_to(tmp_path: Path) -> None:
     """agents_list should flag only names present in the caller delegate_to allowlist."""
     config = _make_config(

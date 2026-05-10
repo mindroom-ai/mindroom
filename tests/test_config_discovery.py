@@ -704,9 +704,13 @@ class TestResolveConfigRelativePath:
 
         assert config.get_domain(resolved_runtime_paths) == "example.org"
 
-    def test_config_from_yaml_rejects_reserved_mindroom_user_localpart(self, tmp_path: Path) -> None:
-        """Pure YAML loads must still apply runtime-sensitive reserved-user validation."""
+    def test_config_from_yaml_rejects_persisted_router_mindroom_user_localpart(self, tmp_path: Path) -> None:
+        """Pure YAML loads must still apply runtime-sensitive prepared-account validation."""
         config_path = tmp_path / "config.yaml"
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path.resolve())
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
+        state.save(runtime_paths=runtime_paths)
         config_path.write_text(
             (
                 "models:\n"

@@ -283,7 +283,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.teams"]
+visibility = [
+    "mindroom.responder_availability",
+    "mindroom.teams",
+]
 
 [[modules]]
 path = "mindroom.custom_tools.memory"
@@ -616,6 +619,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
+    "mindroom.responder_availability",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
 ]
@@ -933,6 +937,19 @@ depends_on = ["mindroom.final_delivery"]
 visibility = ["mindroom.response_runner"]
 
 [[modules]]
+path = "mindroom.responder_availability"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.team_exact_members",
+    "mindroom.teams",
+]
+visibility = [
+    "mindroom.custom_tools.subagents",
+    "mindroom.turn_policy",
+]
+
+[[modules]]
 path = "mindroom.routing"
 depends_on = [
     "mindroom.agent_descriptions",
@@ -973,6 +990,7 @@ depends_on = [
 visibility = [
     "mindroom.api.openai_compat",
     "mindroom.bot",
+    "mindroom.responder_availability",
     "mindroom.response_runner",
     "mindroom.turn_policy",
 ]
@@ -2105,6 +2123,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.identity",
+    "mindroom.responder_availability",
     "mindroom.runtime_protocols",
     "mindroom.teams",
     "mindroom.thread_utils",

@@ -30,6 +30,7 @@ from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
+from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
@@ -2374,6 +2375,9 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
         config_path=config_path,
         process_env={"MINDROOM_NAMESPACE": "prod1"},
     )
+    matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+    matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
+    matrix_state.save(runtime_paths=runtime_paths)
     main.initialize_api_app(main.app, runtime_paths)
 
     async def _idle_watch_config(

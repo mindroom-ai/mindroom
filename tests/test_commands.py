@@ -21,6 +21,7 @@ from mindroom.commands.parsing import (
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
 from tests.conftest import make_event_cache_mock
 from tests.identity_helpers import persist_entity_accounts
@@ -473,6 +474,66 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
     assert "\U0001f9e0 **Available agents and teams in this room:**" in response_text
     assert "\u2022 **@code**: Writes code" in response_text
     context.client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path: Path) -> None:
+    """The live command path should mirror routing's responder candidate boundary."""
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="Code",
+                role="Writes code",
+            ),
+            "research": AgentConfig(
+                display_name="Research",
+                role="Researches topics",
+            ),
+        },
+    )
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={
+            "router": "mindroom_router",
+            "code": "mindroom_code",
+            "research": "mindroom_research",
+        },
+    )
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    send_response = AsyncMock(return_value="$welcome")
+    candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        logger=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
+        stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
+        record_handled_turn=MagicMock(),
+        send_response=send_response,
+        responder_candidates_for_room=candidate_resolver,
+    )
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=SimpleNamespace(
+            sender="@alice:localhost",
+            event_id="$event",
+            body="!hi",
+            source={"content": {"body": "!hi"}},
+        ),
+        command=Command(type=CommandType.HI, args={}, raw_text="!hi"),
+        requester_user_id="@alice:localhost",
+    )
+
+    candidate_resolver.assert_awaited_once_with(room, "@alice:localhost")
+    response_text = send_response.await_args.args[0]
+    assert "\u2022 **@code**: Writes code" in response_text
+    assert "@research" not in response_text
 
 
 def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:

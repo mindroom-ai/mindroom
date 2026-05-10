@@ -31,6 +31,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
+from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
 from tests.conftest import make_event_cache_mock, write_config_yaml
@@ -717,6 +718,9 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
         config_path=config_path,
         process_env={"MINDROOM_NAMESPACE": "prod1"},
     )
+    matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+    matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
+    matrix_state.save(runtime_paths=runtime_paths)
 
     response, change_info = await handle_config_command(
         "set mindroom_user.username mindroom_assistant_prod1",

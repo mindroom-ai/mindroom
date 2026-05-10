@@ -18,6 +18,11 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
+from mindroom.responder_availability import (
+    filter_materializable_responders,
+    live_responder_entity_names,
+    materializable_agent_names_for_orchestrator,
+)
 from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     normalize_thread_summary_text,
@@ -264,6 +269,17 @@ async def _available_subagent_names(context: ToolRuntimeContext) -> list[str]:
         context.requester_id,
         context.config,
         context.runtime_paths,
+    )
+    materializable_agent_names = materializable_agent_names_for_orchestrator(
+        context.orchestrator,
+        context.config,
+    )
+    candidates = filter_materializable_responders(
+        candidates,
+        context.config,
+        context.runtime_paths,
+        materializable_agent_names=materializable_agent_names,
+        live_entity_names=live_responder_entity_names(context.orchestrator, context.config),
     )
     registry = entity_identity_registry(context.config, context.runtime_paths)
     names: list[str] = []

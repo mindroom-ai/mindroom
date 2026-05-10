@@ -20,6 +20,7 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
@@ -482,6 +483,10 @@ class TestConsolidatedConfigManager:
             )
 
         try:
+            runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+            matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+            matrix_state.add_account("agent_assistant", "mindroom_assistant", "pw", domain="localhost")
+            matrix_state.save(runtime_paths=runtime_paths)
             cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",

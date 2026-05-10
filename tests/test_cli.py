@@ -345,9 +345,13 @@ def test_mindroom_user_username_rejects_invalid_characters() -> None:
         Config(mindroom_user={"username": "alice smith", "display_name": "Alice"})
 
 
-def test_mindroom_user_username_rejects_router_collision(tmp_path: Path) -> None:
-    """Internal user localpart must not collide with the router account localpart."""
+def test_mindroom_user_username_rejects_persisted_router_collision(tmp_path: Path) -> None:
+    """Internal user localpart must not collide with the prepared router account localpart."""
     runtime_paths = _runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
         Config.model_validate(
             {"mindroom_user": {"username": "mindroom_router", "display_name": "Alice"}},
@@ -355,23 +359,25 @@ def test_mindroom_user_username_rejects_router_collision(tmp_path: Path) -> None
         )
 
 
-def test_mindroom_user_username_rejects_agent_collision(tmp_path: Path) -> None:
-    """Internal user localpart must not collide with configured agent localparts."""
+def test_mindroom_user_username_allows_unprepared_agent_proposal_name(tmp_path: Path) -> None:
+    """Generated account proposals are not reserved runtime identities before provisioning."""
     runtime_paths = _runtime_paths(tmp_path)
-    with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
-        Config.model_validate(
-            {
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "Test assistant",
-                        "rooms": ["test_room"],
-                    },
+    config = Config.model_validate(
+        {
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
                 },
-                "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
             },
-            context={"runtime_paths": runtime_paths},
-        )
+            "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
+        },
+        context={"runtime_paths": runtime_paths},
+    )
+
+    assert config.mindroom_user is not None
+    assert config.mindroom_user.username == "mindroom_assistant"
 
 
 def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_path: Path) -> None:

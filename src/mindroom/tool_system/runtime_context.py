@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
@@ -85,6 +86,7 @@ class ToolRuntimeContext:
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
+    orchestrator: OrchestratorRuntime | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ class ToolRuntimeSupport:
             room_state_querier=self.hook_context.room_state_querier(),
             room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
+            orchestrator=self.runtime.orchestrator,
         )
 
     def build_dispatch_context(

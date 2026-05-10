@@ -88,6 +88,7 @@ class CommandHandlerContext:
     send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
+    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -177,7 +178,7 @@ async def generate_welcome_message_for_room(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str:
-    """Generate a welcome message from the same responder candidates used by routing."""
+    """Generate a welcome message for callers without a live turn-policy candidate source."""
     if sender_id is None:
         candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
     else:
@@ -232,13 +233,17 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 response_text = f"❌ Plugin reload failed: {exc}"
 
     elif command.type == CommandType.HI:
-        response_text = await generate_welcome_message_for_room(
-            context.client,
-            room,
-            requester_user_id,
-            context.config,
-            context.runtime_paths,
-        )
+        if context.responder_candidates_for_room is None:
+            response_text = await generate_welcome_message_for_room(
+                context.client,
+                room,
+                requester_user_id,
+                context.config,
+                context.runtime_paths,
+            )
+        else:
+            candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
+            response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]

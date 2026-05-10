@@ -30,6 +30,11 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.responder_availability import (
+    filter_materializable_responders,
+    live_responder_entity_names,
+    materializable_agent_names_for_orchestrator,
+)
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams import (
     TeamIntent,
@@ -38,7 +43,6 @@ from mindroom.teams import (
     TeamResolution,
     decide_team_formation,
     resolve_configured_team,
-    resolve_live_shared_agent_names,
 )
 from mindroom.thread_utils import (
     get_agents_in_thread,
@@ -273,27 +277,58 @@ class TurnPolicy:
 
     def materializable_agent_names(self) -> set[str] | None:
         """Return live shared agent names that can currently answer."""
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            return None
-        return resolve_live_shared_agent_names(orchestrator, config=self.deps.runtime.config)
+        materializable_agent_names = materializable_agent_names_for_orchestrator(
+            self.deps.runtime.orchestrator,
+            self.deps.runtime.config,
+        )
+        if materializable_agent_names is not None and self.deps.agent_name in self.deps.runtime.config.agents:
+            materializable_agent_names = materializable_agent_names | {self.deps.agent_name}
+        return materializable_agent_names
 
     def filter_materializable_responders(
         self,
         responder_ids: list[MatrixID],
         materializable_agent_names: set[str] | None,
+        *,
+        live_entity_names: set[str] | None = None,
     ) -> list[MatrixID]:
-        """Keep concrete agents materializable while preserving configured team responders."""
-        if materializable_agent_names is None:
-            return responder_ids
+        """Keep only materializable responder candidates when live state is known."""
+        if live_entity_names is None and materializable_agent_names is not None:
+            live_entity_names = live_responder_entity_names(
+                self.deps.runtime.orchestrator,
+                self.deps.runtime.config,
+            )
+        return filter_materializable_responders(
+            responder_ids,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            materializable_agent_names=materializable_agent_names,
+            live_entity_names=live_entity_names,
+        )
 
-        filtered_responders = []
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        for responder_id in responder_ids:
-            entity_name = registry.current_entity_name_for_user_id(responder_id.full_id)
-            if entity_name in self.deps.runtime.config.teams or entity_name in materializable_agent_names:
-                filtered_responders.append(responder_id)
-        return filtered_responders
+    async def responder_candidates_for_room(
+        self,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+        *,
+        materializable_agent_names: set[str] | None = None,
+        live_entity_names: set[str] | None = None,
+    ) -> list[MatrixID]:
+        """Return sender-visible candidates filtered by live responder availability."""
+        available_responders = await responder_candidate_entities_for_room(
+            self.deps.runtime.client,
+            room,
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        if materializable_agent_names is None:
+            materializable_agent_names = self.materializable_agent_names()
+        return self.filter_materializable_responders(
+            available_responders,
+            materializable_agent_names,
+            live_entity_names=live_entity_names,
+        )
 
     def response_owner_for_team_resolution(
         self,
@@ -403,16 +438,14 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        if available_agents_in_room is None:
-            available_agents_in_room = await responder_candidate_entities_for_room(
-                self.deps.runtime.client,
-                room,
-                requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            )
         if materializable_agent_names is None:
             materializable_agent_names = self.materializable_agent_names()
+        if available_agents_in_room is None:
+            available_agents_in_room = await self.responder_candidates_for_room(
+                room,
+                requester_user_id,
+                materializable_agent_names=materializable_agent_names,
+            )
         return await decide_team_formation(
             self.deps.matrix_id,
             context.mentioned_agents,
@@ -465,12 +498,9 @@ class TurnPolicy:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         else:
-            available_agents = await responder_candidate_entities_for_room(
-                self.deps.runtime.client,
+            available_agents = await self.responder_candidates_for_room(
                 room,
                 requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
             )
             if context.is_thread and thread_requires_explicit_agent_targeting(
                 planning_thread_history,
@@ -548,12 +578,17 @@ class TurnPolicy:
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
         planning_thread_history = context.planning_thread_history
-        available_agents_in_room = await responder_candidate_entities_for_room(
+        materializable_agent_names = self.materializable_agent_names()
+        sender_visible_agents_in_room = await responder_candidate_entities_for_room(
             self.deps.runtime.client,
             room,
             requester_user_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+        )
+        available_agents_in_room = self.filter_materializable_responders(
+            sender_visible_agents_in_room,
+            materializable_agent_names=materializable_agent_names,
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_matrix_id = registry.current_id(self.deps.agent_name)
@@ -586,11 +621,6 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        materializable_agent_names = self.materializable_agent_names()
-        responder_pool = self.filter_materializable_responders(
-            available_agents_in_room,
-            materializable_agent_names,
-        )
         form_team = await self.decide_team_for_sender(
             agents_in_thread,
             context,
@@ -598,10 +628,10 @@ class TurnPolicy:
             requester_user_id,
             message,
             is_dm,
-            available_agents_in_room=available_agents_in_room,
+            available_agents_in_room=sender_visible_agents_in_room,
             materializable_agent_names=materializable_agent_names,
         )
-        team_action = self.team_response_action(form_team, responder_pool)
+        team_action = self.team_response_action(form_team, available_agents_in_room)
         if team_action is not None:
             return team_action
 
