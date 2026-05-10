@@ -15,11 +15,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, SchedulingRuntime, schedule_task
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for scheduling tests."""
-    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    bound = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
+    return bound
 
 
 def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.MatrixRoom:
@@ -117,7 +121,7 @@ async def test_schedule_validates_agents_in_room() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
+        calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         assert "not available in this room" in response
 
@@ -177,7 +181,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
+        calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         assert "not available in this thread" in response
 
@@ -313,10 +317,10 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
+        calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         # Researcher should not be mentioned as invalid
-        researcher_matrix_id = config.get_ids(runtime_paths_for(config))["researcher"].full_id
+        researcher_matrix_id = entity_ids(config, runtime_paths_for(config))["researcher"].full_id
         assert researcher_matrix_id not in response.split("not available")[1] if "not available" in response else True
 
 
@@ -387,8 +391,8 @@ async def test_schedule_with_no_agent_mentions() -> None:
     conversation_cache.get_thread_history.assert_not_called()
     available_agents = mock_parse.await_args.args[3]
     expected_agents = [
-        config.get_ids(runtime_paths_for(config))["assistant"],
-        config.get_ids(runtime_paths_for(config))["researcher"],
+        entity_ids(config, runtime_paths_for(config))["assistant"],
+        entity_ids(config, runtime_paths_for(config))["researcher"],
     ]
     assert available_agents == expected_agents
 
@@ -442,7 +446,7 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
         )
 
     assert task_id is None
-    calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
+    calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
     assert calculator_matrix_id in response
     assert "not available in this room" in response
 

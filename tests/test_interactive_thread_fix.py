@@ -30,6 +30,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -99,6 +100,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
             Config(agents={"general": AgentConfig(display_name="General")}),
             test_runtime_paths(tmp_path),
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         config.memory.backend = "file"
         agent_user = AgentMatrixUser(
             agent_name="general",
@@ -198,6 +200,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
             Config(agents={"general": AgentConfig(display_name="General")}),
             test_runtime_paths(tmp_path),
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         config.memory.backend = "file"
         agent_user = AgentMatrixUser(
             agent_name="general",
@@ -285,6 +288,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             Config(agents={"general": AgentConfig(display_name="General")}),
             test_runtime_paths(tmp_path),
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         config.memory.backend = "file"
         agent_user = AgentMatrixUser(
             agent_name="general",

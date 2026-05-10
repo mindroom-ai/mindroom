@@ -23,7 +23,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent a
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.entity_resolution import entity_matrix_ids
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
@@ -980,7 +980,7 @@ def _render_agent_identity_context(
         )
         return overridden_identity_context + openai_context
 
-    matrix_id = entity_matrix_ids(config, runtime_paths)[agent_name].full_id
+    matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id
     return build_agent_identity_context(
         display_name=display_name,
         matrix_id=matrix_id,
@@ -1366,7 +1366,7 @@ def get_agent_ids_for_room(
     runtime_paths: constants.RuntimePaths,
 ) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
-    config_ids = config.get_ids(runtime_paths)
+    config_ids = entity_identity_registry(config, runtime_paths).current_ids
     # Always include the router agent
     agent_ids = [config_ids[ROUTER_AGENT_NAME].full_id]
 

@@ -14,7 +14,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_identifiers import managed_space_alias_localpart, mindroom_namespace
+from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, managed_space_alias_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import bind_runtime_paths, load_config_yaml, orchestrator_runtime_paths, runtime_paths_for
 
@@ -70,12 +70,7 @@ def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
     """Managed room keys must not map to the reserved root Space alias."""
     runtime_paths = constants.resolve_runtime_paths()
     reserved_alias = managed_space_alias_localpart(runtime_paths)
-    namespace = mindroom_namespace(runtime_paths)
-    colliding_room_key = (
-        reserved_alias.removesuffix(f"_{namespace}")
-        if namespace and reserved_alias.endswith(f"_{namespace}")
-        else reserved_alias
-    )
+    colliding_room_key = managed_room_key_from_alias_localpart(reserved_alias, runtime_paths) or reserved_alias
 
     with pytest.raises(ValueError, match="reserved root Space alias"):
         Config.model_validate(
@@ -91,12 +86,7 @@ def test_config_allows_colliding_room_key_when_space_disabled() -> None:
     """Colliding room keys should be accepted when the space feature is disabled."""
     runtime_paths = constants.resolve_runtime_paths()
     reserved_alias = managed_space_alias_localpart(runtime_paths)
-    namespace = mindroom_namespace(runtime_paths)
-    colliding_room_key = (
-        reserved_alias.removesuffix(f"_{namespace}")
-        if namespace and reserved_alias.endswith(f"_{namespace}")
-        else reserved_alias
-    )
+    colliding_room_key = managed_room_key_from_alias_localpart(reserved_alias, runtime_paths) or reserved_alias
 
     config = Config.model_validate(
         {

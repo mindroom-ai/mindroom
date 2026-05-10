@@ -11,6 +11,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history import HistoryScope, create_scope_session_storage
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 
@@ -54,8 +55,10 @@ class ConversationStateWriter:
         config = self.deps.runtime.config
         if self.deps.agent_name in config.teams:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
         team_member_names = [
-            matrix_id.agent_name(config, self.deps.runtime_paths) or matrix_id.username for matrix_id in team_agents
+            registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
+            for matrix_id in team_agents
         ]
         return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
 

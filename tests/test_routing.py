@@ -18,6 +18,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import RoutingSuggestion
@@ -29,6 +30,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
@@ -36,7 +38,10 @@ if TYPE_CHECKING:
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for routing tests."""
-    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    bound_config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound_config, runtime_paths)
+    return bound_config
 
 
 async def suggest_agent_for_message(
@@ -97,9 +102,9 @@ def has_multiple_non_agent_users_in_thread(thread_history: list[ResolvedVisibleM
     )
 
 
-def extract_agent_name(sender_id: str, config: Config) -> str | None:
+def entity_name_for_sender(sender_id: str, config: Config) -> str | None:
     """Extract configured agent names with the test config's bound runtime context."""
-    return mindroom.thread_utils.extract_agent_name(sender_id, config, runtime_paths_for(config))
+    return entity_identity_registry(config, runtime_paths_for(config)).current_entity_name_for_user_id(sender_id)
 
 
 def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
@@ -470,17 +475,20 @@ class TestThreadUtils:
 
         assert _has_any_agent_mentions_in_thread(thread_history, self.config) is False
 
-    def test_extract_agent_name_rejects_unconfigured(self) -> None:
+    def test_entity_name_rejects_unconfigured(self) -> None:
         """Test that unconfigured agents are not recognized."""
         # This should return None because "fake_agent" is not in config.yaml
-        assert extract_agent_name("@mindroom_fake_agent:localhost", self.config) is None
+        assert entity_name_for_sender("@mindroom_fake_agent:localhost", self.config) is None
 
         # But real agents should work
-        assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
+        assert entity_name_for_sender("@mindroom_calculator:localhost", self.config) == "calculator"
 
         # Regular users should still be rejected
-        assert extract_agent_name(self.config.get_mindroom_user_id(runtime_paths_for(self.config)), self.config) is None
-        assert extract_agent_name("@regular_user:localhost", self.config) is None
+        assert (
+            entity_name_for_sender(self.config.get_mindroom_user_id(runtime_paths_for(self.config)), self.config)
+            is None
+        )
+        assert entity_name_for_sender("@regular_user:localhost", self.config) is None
 
     def test_has_multiple_non_agent_users_in_thread_true(self) -> None:
         """Detect more than one non-agent user posting in a thread."""

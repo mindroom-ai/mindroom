@@ -42,6 +42,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -50,7 +51,9 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound test config."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    return bind_runtime_paths(config, runtime_paths)
+    bound_config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
+    return bound_config
 
 
 def _message(
@@ -885,8 +888,8 @@ class TestCommandHandling:
             is_thread=True,
             thread_id="$thread123",
             mentioned_agents=(
-                [config.get_ids(runtime_paths_for(config))["calculator"]]
-                if "calculator" in config.get_ids(runtime_paths_for(config))
+                [entity_ids(config, runtime_paths_for(config))["calculator"]]
+                if "calculator" in entity_ids(config, runtime_paths_for(config))
                 else []
             ),
         )
@@ -968,14 +971,9 @@ class TestCommandHandling:
                 },
             )
 
-            # Mock interactive.handle_text_response and extract_agent_name
             with (
                 patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-                patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
             ):
-                # Make extract_agent_name return "router" for the router agent sender
-                mock_extract.return_value = "router"
-                # Call _on_message
                 await bot._on_message(room, event)
                 await drain_coalescing(bot)
 
@@ -1103,7 +1101,6 @@ class TestCommandHandling:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_controller.extract_agent_name", return_value="router"),
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1211,13 +1208,9 @@ class TestCommandHandling:
 
         with (
             patch("mindroom.bot.interactive") as mock_interactive,
-            patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
             patch("mindroom.response_runner.team_response") as mock_team,
         ):
             mock_interactive.handle_text_response = AsyncMock(return_value=None)
-            mock_extract.side_effect = lambda x, _config, _runtime_paths: (
-                "router" if "router" in x else ("news" if "news" in x else ("research" if "research" in x else None))
-            )
 
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1343,12 +1336,8 @@ class TestCommandHandling:
 
         with (
             patch("mindroom.bot.interactive") as mock_interactive,
-            patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
         ):
             mock_interactive.handle_text_response = AsyncMock(return_value=None)
-            mock_extract.side_effect = (
-                lambda x, config, runtime_paths: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
-            )
 
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1410,14 +1399,9 @@ class TestCommandHandling:
             },
         )
 
-        # Mock interactive.handle_text_response and extract_agent_name
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_controller.extract_agent_name") as mock_extract,
         ):
-            # Make extract_agent_name return "router" for the router agent sender
-            mock_extract.return_value = "router"
-            # Call _on_message
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -1641,7 +1625,6 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
@@ -1649,7 +1632,7 @@ class TestRouterSkipsSingleAgent:
             ) as mock_get_available,
         ):
             # Return only one agent (general)
-            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
 
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1730,7 +1713,6 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
@@ -1739,8 +1721,8 @@ class TestRouterSkipsSingleAgent:
         ):
             # Return multiple agents
             mock_get_available.return_value = [
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
 
             await bot._on_message(room, event)
@@ -1835,7 +1817,6 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            patch("mindroom.turn_controller.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
@@ -1843,8 +1824,8 @@ class TestRouterSkipsSingleAgent:
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
             await bot._turn_controller._dispatch_text_message(
                 room,
@@ -1917,7 +1898,7 @@ class TestRouterSkipsSingleAgent:
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
-            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -1989,7 +1970,7 @@ class TestRouterSkipsSingleAgent:
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
-            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -2074,7 +2055,7 @@ class TestRouterSkipsSingleAgent:
             ) as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
         ):
-            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
             mock_agents_in_thread.return_value = []
             await bot._on_message(room, voice_event)
             await drain_coalescing(bot)
@@ -2152,8 +2133,8 @@ class TestRouterSkipsSingleAgent:
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
             await bot._on_message(room, event)
             await drain_coalescing(bot)

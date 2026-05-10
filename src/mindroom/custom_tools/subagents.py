@@ -12,6 +12,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
@@ -244,8 +245,8 @@ def _threaded_dispatch_error(
 
 
 def _current_agent_mention(context: ToolRuntimeContext, agent_name: str) -> str:
-    matrix_id = context.config.get_ids(context.runtime_paths)[agent_name]
-    return f"@{matrix_id.username}"
+    matrix_id = entity_identity_registry(context.config, context.runtime_paths).current_id(agent_name)
+    return matrix_id.full_id
 
 
 def _unknown_agent_id_error(context: ToolRuntimeContext, *, tool_name: str, agent_id: str | None) -> str | None:

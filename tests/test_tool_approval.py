@@ -30,6 +30,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
@@ -46,6 +47,7 @@ from mindroom.tool_approval import (
 )
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -111,13 +113,16 @@ def reset_approval_store() -> Generator[None, None, None]:
 
 
 def _config(tmp_path: Path) -> Config:
-    return bind_runtime_paths(
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
             models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
         ),
-        test_runtime_paths(tmp_path),
+        runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
+    return config
 
 
 def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
@@ -405,6 +410,7 @@ async def test_public_tool_approval_facade_resolves_live_matrix_action(tmp_path:
         ),
         runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
     initialize_approval_store(runtime_paths, sender=sender, editor=editor)
@@ -831,6 +837,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
         ),
         runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
     orchestrator = MagicMock()
     orchestrator.send_approval_notice = AsyncMock(return_value=True)
 
@@ -2255,8 +2262,9 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
         ),
         runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "actual_router", "code": "actual_code"})
     internal_user_id = config.get_mindroom_user_id(runtime_paths)
-    agent_user_id = f"@mindroom_code:{config.get_domain(runtime_paths)}"
+    agent_user_id = entity_identity_registry(config, runtime_paths).current_id("code").full_id
 
     assert resolve_tool_approval_approver(config, runtime_paths, None) is None
     assert resolve_tool_approval_approver(config, runtime_paths, agent_user_id) is None

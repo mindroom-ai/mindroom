@@ -54,6 +54,7 @@ from mindroom.dispatch_replay_guard import (
     has_newer_unresponded_in_thread,
 )
 from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
@@ -69,7 +70,6 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
@@ -256,7 +256,12 @@ class TurnController:
 
     def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""
-        return extract_agent_name(sender_id, self.deps.runtime.config, self.deps.runtime_paths) is not None
+        return self._managed_entity_name_for_sender(sender_id) is not None
+
+    def _managed_entity_name_for_sender(self, sender_id: str, *, include_router: bool = True) -> str | None:
+        """Return the configured entity alias for an exact current Matrix user ID."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.current_entity_name_for_user_id(sender_id, include_router=include_router)
 
     def _should_trust_internal_payload_metadata(self, event: DispatchEvent) -> bool:
         """Return whether internal payload keys on one event should be treated as authoritative."""
@@ -284,11 +289,7 @@ class TurnController:
         """Return whether one trusted internal relay originated from the router."""
         if not self._is_trusted_internal_relay_event(event):
             return False
-        sender_agent_name = extract_agent_name(
-            event.sender,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
+        sender_agent_name = self._managed_entity_name_for_sender(event.sender)
         return sender_agent_name == ROUTER_AGENT_NAME
 
     def _should_use_trusted_router_relay_context(
@@ -303,7 +304,7 @@ class TurnController:
             return self._is_trusted_router_relay_event(event)
         if ingress_metadata.source_kind != COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY:
             return False
-        sender_agent_name = extract_agent_name(event.sender, self.deps.runtime.config, self.deps.runtime_paths)
+        sender_agent_name = self._managed_entity_name_for_sender(event.sender)
         if sender_agent_name != ROUTER_AGENT_NAME:
             return False
         if payload_metadata is not None:
@@ -446,7 +447,7 @@ class TurnController:
             return False
         if is_automation_source_kind(source_kind):
             return False
-        if is_agent_id(sender_id, self.deps.runtime.config, self.deps.runtime_paths):
+        if self._managed_entity_name_for_sender(sender_id) is not None:
             return False
         return self.deps.response_runner.has_active_response_for_target(target)
 
@@ -980,7 +981,7 @@ class TurnController:
             self._mark_source_events_responded(handled_turn)
             return None
 
-        sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
+        sender_agent_name = self._managed_entity_name_for_sender(requester_user_id)
         if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
             self.deps.logger.debug(
                 "ignore_unmentioned_agent_event",
@@ -1196,7 +1197,7 @@ class TurnController:
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
             if len(available_agents) == 1:
-                suggested_agent = available_agents[0].agent_name(self.deps.runtime.config, self.deps.runtime_paths)
+                suggested_agent = self._managed_entity_name_for_sender(available_agents[0].full_id)
                 self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
             else:
                 self.deps.logger.info("Handling AI routing", event_id=event.event_id)
@@ -1398,8 +1399,9 @@ class TurnController:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
+                registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
                 target_member_names = tuple(
-                    member.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or member.username
+                    registry.current_entity_name_for_user_id(member.full_id) or member.username
                     for member in action.form_team.eligible_members
                 )
 
@@ -2071,7 +2073,7 @@ class TurnController:
         """
         event = prechecked_event.event
 
-        if is_agent_id(event.sender, self.deps.runtime.config, self.deps.runtime_paths):
+        if self._managed_entity_name_for_sender(event.sender) is not None:
             self.deps.logger.debug(
                 "Ignoring agent audio event for voice transcription",
                 event_id=event.event_id,

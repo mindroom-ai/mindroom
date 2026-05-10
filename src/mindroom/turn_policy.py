@@ -12,6 +12,7 @@ from mindroom.authorization import (
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, is_automation_source_kind
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
@@ -28,7 +29,6 @@ from mindroom.hooks import (
     render_enrichment_block,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.matrix.identity import MatrixID, is_agent_id
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams import (
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
+    from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
 
 
@@ -287,8 +288,9 @@ class TurnPolicy:
             return responder_ids
 
         filtered_responders = []
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         for responder_id in responder_ids:
-            entity_name = responder_id.agent_name(self.deps.runtime.config, self.deps.runtime_paths)
+            entity_name = registry.current_entity_name_for_user_id(responder_id.full_id)
             if entity_name in self.deps.runtime.config.teams or entity_name in materializable_agent_names:
                 filtered_responders.append(responder_id)
         return filtered_responders
@@ -344,8 +346,8 @@ class TurnPolicy:
         if team_config is None:
             return None
         configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
-        config_ids = self.deps.runtime.config.get_ids(self.deps.runtime_paths)
-        team_agents = [config_ids[agent_name] for agent_name in team_config.agents]
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
         team_resolution = resolve_configured_team(
             self.deps.agent_name,
             team_agents,
@@ -553,7 +555,8 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        agent_matrix_id = self.deps.runtime.config.get_ids(self.deps.runtime_paths)[self.deps.agent_name]
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        agent_matrix_id = registry.current_id(self.deps.agent_name)
         agent_is_responder_candidate = agent_matrix_id.full_id in {agent.full_id for agent in available_agents_in_room}
         if (
             context.planning_thread_history_unavailable
@@ -639,10 +642,10 @@ class TurnPolicy:
             return False
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        if is_automation_source_kind(source_envelope.source_kind) or is_agent_id(
-            source_envelope.sender_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        if (
+            is_automation_source_kind(source_envelope.source_kind)
+            or registry.current_entity_name_for_user_id(source_envelope.sender_id) is not None
         ):
             return False
         policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind

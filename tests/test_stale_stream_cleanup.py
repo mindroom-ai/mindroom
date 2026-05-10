@@ -34,12 +34,13 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-BOT_USER_ID = "@mindroom_test_agent:example.com"
-OTHER_BOT_USER_ID = "@mindroom_other:example.com"
+BOT_USER_ID = "@actual_test_agent:localhost"
+OTHER_BOT_USER_ID = "@actual_other:localhost"
 ROOM_ID = "!room:example.com"
 NOW_MS = 1_000_000
 STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_000
@@ -52,7 +53,8 @@ OTHER_USER_ID = "@other-user:example.com"
 
 
 def _make_config(tmp_path: Path) -> Config:
-    return bind_runtime_paths(
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
         Config(
             agents={
                 "test_agent": {
@@ -67,8 +69,14 @@ def _make_config(tmp_path: Path) -> Config:
             authorization={"default_room_access": True, "agent_reply_permissions": {}},
             mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
         ),
-        test_runtime_paths(tmp_path),
+        runtime_paths,
     )
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "actual_router", "test_agent": "actual_test_agent", "other": "actual_other"},
+    )
+    return config
 
 
 def _make_message_event(
@@ -621,7 +629,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
     second_content = mock_send.await_args_list[1].args[2]
     assert first_content["body"] == f"@Test Agent {AUTO_RESUME_MESSAGE}"
     assert first_content["m.mentions"] == {
-        "user_ids": [config.get_ids(runtime_paths_for(config))["test_agent"].full_id],
+        "user_ids": [entity_ids(config, runtime_paths_for(config))["test_agent"].full_id],
     }
     assert first_content["m.relates_to"]["rel_type"] == "m.thread"
     assert first_content["m.relates_to"]["event_id"] == "$thread-one"
@@ -1136,7 +1144,7 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
 async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_path: Path) -> None:
     """Cleanup should fetch the exact reply chain until it reaches the original human requester."""
     config = _make_config(tmp_path)
-    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    other_agent_user_id = entity_ids(config, runtime_paths_for(config))["other"].full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
@@ -1204,7 +1212,7 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
 async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Path) -> None:
     """Requester resolution should use canonical visible content for fetched edit events."""
     config = _make_config(tmp_path)
-    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    other_agent_user_id = entity_ids(config, runtime_paths_for(config))["other"].full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
@@ -1287,7 +1295,7 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
 async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolution(tmp_path: Path) -> None:
     """Scanned edit ancestors should still fetch the exact event when the raw wrapper hides the reply edge."""
     config = _make_config(tmp_path)
-    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    other_agent_user_id = entity_ids(config, runtime_paths_for(config))["other"].full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
@@ -2224,7 +2232,7 @@ async def test_requester_resolution_exception_degrades_gracefully(tmp_path: Path
 async def test_requester_resolution_respects_max_depth(tmp_path: Path) -> None:
     """Requester resolution should stop after max_depth to prevent unbounded API calls."""
     config = _make_config(tmp_path)
-    other_agent_user_id = config.get_ids(runtime_paths_for(config))["other"].full_id
+    other_agent_user_id = entity_ids(config, runtime_paths_for(config))["other"].full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(

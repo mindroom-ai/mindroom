@@ -27,6 +27,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.identity_helpers import entity_ids
 
 
 @pytest.mark.asyncio
@@ -104,7 +105,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         thread_id="$thread_root",
         thread_history=[],
         replay_guard_history=[],
-        mentioned_agents=[config.get_ids(runtime_paths_for(config))["research"]],
+        mentioned_agents=[entity_ids(config, runtime_paths_for(config))["research"]],
         has_non_agent_mentions=False,
         requires_model_history_refresh=False,
     )
@@ -198,8 +199,8 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         thread_history=[],
         replay_guard_history=[],
         mentioned_agents=[
-            config.get_ids(runtime_paths_for(config))["general"],
-            config.get_ids(runtime_paths_for(config))["research"],
+            entity_ids(config, runtime_paths_for(config))["general"],
+            entity_ids(config, runtime_paths_for(config))["research"],
         ],
         has_non_agent_mentions=False,
         requires_model_history_refresh=False,

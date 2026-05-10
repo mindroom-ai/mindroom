@@ -12,7 +12,6 @@ from mindroom.bot import TeamBot, create_bot_for_entity
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -23,16 +22,20 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
+from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    return bind_runtime_paths(
-        config,
-        orchestrator_runtime_paths(
-            tmp_path,
-            config_path=tmp_path / "config.yaml",
-        ),
+    runtime_paths = orchestrator_runtime_paths(
+        tmp_path,
+        config_path=tmp_path / "config.yaml",
     )
+    bound_config = bind_runtime_paths(
+        config,
+        runtime_paths,
+    )
+    persist_entity_accounts(bound_config, runtime_paths)
+    return bound_config
 
 
 @pytest.fixture
@@ -143,8 +146,8 @@ def test_team_bot_uses_defaults_streaming_setting(
     assert team_bot is not None
     assert team_bot.enable_streaming is False
     assert team_bot.team_agents == [
-        MatrixID.from_agent("agent1", domain, runtime_paths),
-        MatrixID.from_agent("agent2", domain, runtime_paths),
+        fixture_entity_matrix_id("agent1", domain, runtime_paths),
+        fixture_entity_matrix_id("agent2", domain, runtime_paths),
     ]
 
 
@@ -156,7 +159,7 @@ def test_team_bot_uses_persisted_member_usernames(
     """Team bots should resolve configured members through live persisted usernames."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
     runtime_paths = runtime_paths_for(config_with_rooms)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_agent1", "mindroom_agent1_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
     state.add_account("agent_agent2", "mindroom_agent2_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
     state.save(runtime_paths=runtime_paths)

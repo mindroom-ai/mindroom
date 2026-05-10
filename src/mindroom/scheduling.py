@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
     HookRegistry,
@@ -773,7 +774,12 @@ async def _parse_workflow_schedule(
         current_time = datetime.now(UTC)
 
     assert available_agents, "No agents or teams available for scheduling"
-    agent_list = ", ".join(f"@{a.username}" for a in available_agents)
+    registry = entity_identity_registry(config, runtime_paths)
+    agent_list = ", ".join(
+        f"@{entity_name}"
+        for agent_id in available_agents
+        if (entity_name := registry.current_entity_name_for_user_id(agent_id.full_id, include_router=False)) is not None
+    )
 
     prompt = config.render_prompt(
         "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
@@ -1303,7 +1309,13 @@ def _extract_mentioned_agents_from_text(
 
     for user_id in mentioned_user_ids:
         matrix_id = MatrixID.parse(user_id)
-        if matrix_id.agent_name(config, runtime_paths) and matrix_id not in mentioned_agents:
+        if (
+            entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
+                matrix_id.full_id,
+                include_router=False,
+            )
+            and matrix_id not in mentioned_agents
+        ):
             mentioned_agents.append(matrix_id)
 
     return mentioned_agents
@@ -1402,11 +1414,12 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         # Provide helpful suggestions
         suggestions: list[str] = []
+        registry = entity_identity_registry(config, runtime_paths)
         for agent in validation_result.invalid_agents:
-            agent_name = agent.agent_name(config, runtime_paths)
+            agent_name = registry.current_entity_name_for_user_id(agent.full_id, include_router=False)
             if agent_name:
                 # Entity exists but is not available in this room/thread.
-                suggestions.append(f"{agent.full_id} is not available in this {scope}")
+                suggestions.append(f"@{agent_name} is not available in this {scope}")
             else:
                 suggestions.append(f"{agent.full_id} does not exist")
 

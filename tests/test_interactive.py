@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 
 @pytest.fixture
@@ -47,6 +48,11 @@ class TestInteractiveFunctions:
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
             runtime_paths,
+        )
+        persist_entity_accounts(
+            self.config,
+            runtime_paths,
+            usernames={"router": "actual_router", "test_agent": "actual_test_agent"},
         )
 
     def teardown_method(self) -> None:

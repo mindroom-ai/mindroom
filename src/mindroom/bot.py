@@ -20,6 +20,7 @@ from mindroom.approval_inbound import (
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.dispatch_source import is_automation_source_kind
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -40,7 +41,6 @@ from mindroom.hooks import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
-from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -57,7 +57,7 @@ from mindroom.matrix.sync_certification import (
     sync_cache_write_diagnostics,
 )
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
-from mindroom.matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
+from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
@@ -125,6 +125,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -220,7 +221,7 @@ def create_bot_for_entity(
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms, runtime_paths)
-        config_ids = config.get_ids(runtime_paths)
+        config_ids = entity_identity_registry(config, runtime_paths).current_ids
         team_matrix_ids = [config_ids[agent_name] for agent_name in team_config.agents]
         return TeamBot(
             agent_user=agent_user,
@@ -354,12 +355,10 @@ class AgentBot:
 
     def _init_runtime_components(self) -> None:
         """Initialize runtime-only helpers that depend on bound instance methods."""
-        runtime_matrix_id = self.config.get_ids(self.runtime_paths).get(self.agent_name)
-        if self.agent_user.user_id:
-            runtime_matrix_id = self.matrix_id
-        elif runtime_matrix_id is None:
+        if not self.agent_user.user_id:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
-            raise KeyError(msg)
+            raise PermanentMatrixStartupError(msg)
+        runtime_matrix_id = self.matrix_id
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -877,22 +876,11 @@ class AgentBot:
         await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def ensure_user_account(self) -> None:
-        """Ensure this agent has a Matrix user account.
-
-        This method makes the agent responsible for its own user account creation,
-        moving this responsibility from the orchestrator to the agent itself.
-        """
-        # If we already have a user_id (e.g., provided by tests or config), assume account exists
-        if self.agent_user.user_id:
+        """Verify that orchestrator account preparation supplied this bot's account."""
+        if self.agent_user.user_id and self.agent_user.password:
             return
-        # Create or retrieve the Matrix user account
-        self.agent_user = await create_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-            self.agent_name,
-            self.agent_user.display_name,  # Use existing display name if available
-            runtime_paths=self.runtime_paths,
-        )
-        self.logger.info("ensured_matrix_user_account", user_id=self.agent_user.user_id)
+        msg = f"Matrix account for {self.agent_name!r} was not prepared before bot startup"
+        raise PermanentMatrixStartupError(msg)
 
     async def _set_avatar_if_available(self) -> None:
         """Set avatar for the agent if an avatar file exists."""
@@ -1589,7 +1577,10 @@ class AgentBot:
             return
 
         if event.key == "🛑":
-            sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
+            sender_agent_name = entity_identity_registry(
+                self.config,
+                self.runtime_paths,
+            ).current_entity_name_for_user_id(event.sender)
             tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 self.logger.info(
@@ -1659,7 +1650,7 @@ class AgentBot:
             return False
         if is_automation_source_kind(source_envelope.source_kind):
             return False
-        if is_agent_id(source_envelope.sender_id, self.config, self.runtime_paths):
+        if entity_identity_registry(self.config, self.runtime_paths).is_managed_user_id(source_envelope.sender_id):
             return False
         return self.has_active_response_for_target(target)
 
@@ -2060,8 +2051,10 @@ class TeamBot(AgentBot):
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
         )
+        registry = entity_identity_registry(self.config, self.runtime_paths)
         agent_names = [
-            mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in team_resolution.eligible_members
+            registry.current_entity_name_for_user_id(mid.full_id, include_router=False) or mid.username
+            for mid in team_resolution.eligible_members
         ]
         session_id = resolved_target.session_id
         execution_identity = self._tool_runtime_support.build_execution_identity(

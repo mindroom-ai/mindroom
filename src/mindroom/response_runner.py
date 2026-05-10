@@ -18,13 +18,13 @@ from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_res
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import HistoryScope, strip_transient_enrichment_from_session
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_system_enrichment_block
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
@@ -226,11 +226,11 @@ def _timestamp_thread_history_user_turns(
 ) -> list[ResolvedVisibleMessage]:
     """Add local timestamps to user-authored thread history entries."""
     timestamped_history: list[ResolvedVisibleMessage] = []
+    registry = entity_identity_registry(config, runtime_paths)
     for message in thread_history:
-        is_user_turn = isinstance(message.content.get(ORIGINAL_SENDER_KEY), str) or not is_agent_id(
-            message.sender,
-            config,
-            runtime_paths,
+        is_user_turn = (
+            isinstance(message.content.get(ORIGINAL_SENDER_KEY), str)
+            or registry.current_entity_name_for_user_id(message.sender) is None
         )
         if not is_user_turn:
             timestamped_history.append(message)
@@ -933,9 +933,9 @@ class ResponseRunner:
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
         mode = TeamMode.COORDINATE if team_request.team_mode == "coordinate" else TeamMode.COLLABORATE
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_names = [
-            mid.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or mid.username
-            for mid in team_request.team_agents
+            registry.current_entity_name_for_user_id(mid.full_id) or mid.username for mid in team_request.team_agents
         ]
         self.deps.runtime.config.assert_team_agents_supported(
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],

@@ -6,7 +6,7 @@ import re
 
 from mindroom.constants import RuntimePaths, runtime_matrix_server_name, runtime_mindroom_namespace
 
-AGENT_USERNAME_PREFIX = "mindroom_"
+_AGENT_USERNAME_PREFIX = "mindroom_"
 _NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]{4,32}$")
 
 
@@ -23,22 +23,22 @@ def _normalize_namespace(namespace: str | None) -> str | None:
     return normalized
 
 
-def mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
+def _mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     """Return the configured installation namespace for one explicit runtime context."""
     return _normalize_namespace(runtime_mindroom_namespace(runtime_paths))
 
 
 def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> str:
     """Build the Matrix username localpart for an agent-like entity."""
-    namespace = mindroom_namespace(runtime_paths)
+    namespace = _mindroom_namespace(runtime_paths)
     if namespace:
-        return f"{AGENT_USERNAME_PREFIX}{agent_name}_{namespace}"
-    return f"{AGENT_USERNAME_PREFIX}{agent_name}"
+        return f"{_AGENT_USERNAME_PREFIX}{agent_name}_{namespace}"
+    return f"{_AGENT_USERNAME_PREFIX}{agent_name}"
 
 
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
-    namespace = mindroom_namespace(runtime_paths)
+    namespace = _mindroom_namespace(runtime_paths)
     if not namespace:
         return room_key
     return f"{room_key}_{namespace}"
@@ -54,7 +54,7 @@ def managed_room_key_from_alias_localpart(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Extract the configured managed room key from an alias localpart."""
-    namespace = mindroom_namespace(runtime_paths)
+    namespace = _mindroom_namespace(runtime_paths)
     if not namespace:
         return alias_localpart
 

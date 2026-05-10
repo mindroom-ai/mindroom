@@ -65,6 +65,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,10 +82,8 @@ def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> Ru
 
 def _test_config() -> Config:
     """Create a self-contained test config with standard agents."""
-    from tests.conftest import bind_runtime_paths  # noqa: PLC0415
-
     runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
-    return bind_runtime_paths(
+    return _bind_runtime_paths(
         Config(
             agents={
                 "general": AgentConfig(
@@ -131,7 +130,13 @@ def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
     """Bind explicit RuntimePaths to a test config."""
     from tests.conftest import bind_runtime_paths  # noqa: PLC0415
 
-    return bind_runtime_paths(config, runtime_paths)
+    bound_config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(
+        bound_config,
+        runtime_paths,
+        usernames={alias: f"mindroom_{alias}" for alias in ["router", *bound_config.agents, *bound_config.teams]},
+    )
+    return bound_config
 
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
@@ -230,7 +235,7 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
         ),
         runtime_paths,
     )
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
     state.save(runtime_paths=runtime_paths)
 

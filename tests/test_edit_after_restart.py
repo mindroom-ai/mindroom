@@ -15,6 +15,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,7 +53,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Create a typed agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
-        user_id=config.get_ids(runtime_paths)["test_agent"].full_id,
+        user_id=entity_ids(config, runtime_paths)["test_agent"].full_id,
         display_name="Test Agent",
         password="test_password",  # noqa: S106
     )
@@ -162,7 +163,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Create a typed agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
-        user_id=config.get_ids(runtime_paths)["test_agent"].full_id,
+        user_id=entity_ids(config, runtime_paths)["test_agent"].full_id,
         display_name="Test Agent",
         password="test_password",  # noqa: S106
     )

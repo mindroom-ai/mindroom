@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
@@ -31,6 +32,7 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 
 def _mid(name: str) -> MatrixID:
@@ -39,7 +41,10 @@ def _mid(name: str) -> MatrixID:
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound workflow config."""
-    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    bound_config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound_config, runtime_paths)
+    return bound_config
 
 
 def _conversation_cache(
@@ -61,7 +66,7 @@ def _event_cache() -> AsyncMock:
 @pytest.fixture
 def mock_config() -> Config:
     """Create a runtime-bound config with test agents."""
-    return _runtime_bound_config(
+    config = _runtime_bound_config(
         Config(
             agents={
                 "general": AgentConfig(display_name="General"),
@@ -74,6 +79,12 @@ def mock_config() -> Config:
             models={"default": ModelConfig(provider="test", id="test-model")},
         ),
     )
+    persist_entity_accounts(
+        config,
+        runtime_paths_for(config),
+        usernames={alias: alias for alias in ["router", *config.agents]},
+    )
+    return config
 
 
 class TestCronSchedule:
@@ -294,13 +305,13 @@ class TestParseWorkflowSchedule:
             available_agents=[
                 _mid("general"),
                 _mid("research"),
-                _mid("mindroom_finance"),
-                MatrixID(username="mindroom_analyst", domain="localhost"),
+                _mid("finance"),
+                _mid("analyst"),
             ],
         )
 
         prompt = mock_agent.arun.call_args.args[0]
-        assert "Available agents and teams: @general, @research, @mindroom_finance, @mindroom_analyst" in prompt
+        assert "Available agents and teams: @general, @research, @finance, @analyst" in prompt
         assert "@@" not in prompt
 
     @patch("mindroom.model_loading.get_model_instance")
@@ -405,6 +416,11 @@ class TestExecuteScheduledWorkflow:
                 models={"default": ModelConfig(provider="test", id="test-model")},
             ),
         )
+        persist_entity_accounts(
+            config,
+            runtime_paths_for(config),
+            usernames={alias: alias for alias in ["router", *config.agents]},
+        )
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -444,8 +460,9 @@ class TestExecuteScheduledWorkflow:
         assert call_args.args[1] == "!room:server"
         content = call_args.args[2]
         assert content["body"].startswith("⏰ [Automated Task]\n")
-        assert config.get_ids(runtime_paths_for(config))["research"].full_id in content["body"]
-        assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
+        registry = entity_identity_registry(config, runtime_paths_for(config))
+        assert registry.current_id("research").full_id in content["body"]
+        assert registry.current_id("analyst").full_id in content["body"]
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
@@ -460,6 +477,11 @@ class TestExecuteScheduledWorkflow:
                 },
                 models={"default": ModelConfig(provider="test", id="test-model")},
             ),
+        )
+        persist_entity_accounts(
+            config,
+            runtime_paths_for(config),
+            usernames={alias: alias for alias in ["router", *config.agents]},
         )
         workflow = ScheduledWorkflow(
             schedule_type="once",
@@ -494,8 +516,9 @@ class TestExecuteScheduledWorkflow:
         mock_send.assert_awaited_once()
         content = mock_send.await_args.args[2]
         assert "⏰ [Automated Task]" not in content["body"]
-        assert config.get_ids(runtime_paths_for(config))["research"].full_id in content["body"]
-        assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
+        registry = entity_identity_registry(config, runtime_paths_for(config))
+        assert registry.current_id("research").full_id in content["body"]
+        assert registry.current_id("analyst").full_id in content["body"]
         assert "m.relates_to" not in content
         assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
@@ -743,10 +766,15 @@ class TestIntegrationWithScheduling:
                 router=RouterConfig(model="default"),
             ),
         )
+        persist_entity_accounts(
+            config,
+            runtime_paths_for(config),
+            usernames={"router": "router", "research": "research"},
+        )
 
         # Create a mock room with research agent using the correct MatrixID
         room = nio.MatrixRoom("!room:server", "@bot:server")
-        research_matrix_id = config.get_ids(runtime_paths_for(config))["research"].full_id
+        research_matrix_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("research").full_id
         room.users[research_matrix_id] = nio.RoomMember(
             user_id=research_matrix_id,
             display_name="Research",

@@ -18,11 +18,11 @@ from mindroom.dispatch_thread_context import (
     planning_history_for,
     planning_history_unavailable_for,
 )
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
+    from mindroom.matrix.identity import MatrixID
 
 
 _SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
@@ -259,7 +260,8 @@ class ConversationResolver:
             else None
         )
         config = self.deps.runtime.config
-        source_kind_sender_is_trusted = extract_agent_name(event.sender, config, self.deps.runtime_paths) is not None
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
+        source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = content.get("com.mindroom.source_kind")
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
@@ -363,6 +365,7 @@ class ConversationResolver:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
 
         return MessageEnvelope(
             source_event_id=event.event_id,
@@ -375,7 +378,7 @@ class ConversationResolver:
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
             mentioned_agents=tuple(
-                agent_id.agent_name(config, self.deps.runtime_paths) or agent_id.username
+                registry.current_entity_name_for_user_id(agent_id.full_id) or agent_id.username
                 for agent_id in context.mentioned_agents
             ),
             agent_name=agent_name or self.deps.agent_name,

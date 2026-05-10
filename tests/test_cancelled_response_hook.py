@@ -53,6 +53,7 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -139,7 +140,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    team_member = config.get_ids(runtime_paths)["code"]
+    team_member = entity_ids(config, runtime_paths)["code"]
     bot = TeamBot(
         team_user,
         tmp_path,

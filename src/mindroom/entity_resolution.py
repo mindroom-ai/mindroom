@@ -11,8 +11,6 @@ from mindroom.matrix.identity import MatrixID, managed_account_key, managed_acco
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -25,7 +23,9 @@ def configured_bot_usernames_for_room(
 ) -> set[str]:
     """Return bot username localparts configured for one Matrix room."""
     configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
-    config_ids = entity_matrix_ids(config, runtime_paths)
+    if not configured_names:
+        return set()
+    config_ids = entity_identity_registry(config, runtime_paths).current_ids
     configured_bots = {config_ids[entity_name].username for entity_name in configured_names}
 
     if configured_bots:
@@ -64,27 +64,25 @@ def configured_routable_entity_ids_for_room(
 ) -> list[MatrixID]:
     """Return non-router agent and team IDs statically configured for one room."""
     configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
-    config_ids = entity_matrix_ids(config, runtime_paths)
+    config_ids = entity_identity_registry(config, runtime_paths).current_ids
     return [config_ids[name] for name in configured_names]
 
 
-def matrix_domain(runtime_paths: RuntimePaths) -> str:
+def _matrix_domain(runtime_paths: RuntimePaths) -> str:
     """Return the Matrix domain for one explicit runtime context."""
     homeserver = runtime_matrix_homeserver(runtime_paths)
     return extract_server_name_from_homeserver(homeserver, runtime_paths)
 
 
-def entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
-    """Return Matrix IDs for configured agents, teams, and the router."""
-    return _entity_matrix_id_map(config, runtime_paths, _entity_matrix_id)
-
-
 @dataclass(frozen=True)
-class EntityMatrixIdentity:
-    """Current configured entity IDs plus stale bootstrap-ID predicates."""
+class EntityIdentityRegistry:
+    """Current configured entity aliases mapped to actual persisted Matrix IDs."""
 
     current_ids: dict[str, MatrixID]
-    bootstrap_ids: dict[str, MatrixID]
+
+    def current_id(self, entity_name: str) -> MatrixID:
+        """Return one configured entity's current persisted Matrix ID."""
+        return self.current_ids[entity_name]
 
     def current_entity_name_for_user_id(self, user_id: str, *, include_router: bool = True) -> str | None:
         """Return the configured entity currently represented by one Matrix user ID."""
@@ -95,53 +93,62 @@ class EntityMatrixIdentity:
                 return entity_name
         return None
 
-    def is_stale_localpart(self, entity_name: str, localpart: str) -> bool:
-        """Return whether a localpart is this entity's old generated localpart."""
-        generated_localpart = self.bootstrap_ids[entity_name].username
-        if localpart.lower() != generated_localpart.lower():
-            return False
-        return self.current_ids[entity_name].username.lower() != localpart.lower()
+    def is_managed_user_id(self, user_id: str, *, include_router: bool = True) -> bool:
+        """Return whether a Matrix user ID belongs to a current configured entity."""
+        return self.current_entity_name_for_user_id(user_id, include_router=include_router) is not None
 
-    def is_stale_user_id(self, user_id: str) -> bool:
-        """Return whether a user ID is an old generated ID for any configured entity."""
-        return any(
-            bootstrap_id.full_id == user_id and self.current_ids[entity_name].full_id != user_id
-            for entity_name, bootstrap_id in self.bootstrap_ids.items()
-        )
+    @property
+    def internal_sender_ids(self) -> frozenset[str]:
+        """Return current Matrix IDs trusted as managed internal senders."""
+        return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
 
-def entity_matrix_identity(config: Config, runtime_paths: RuntimePaths) -> EntityMatrixIdentity:
-    """Return current entity IDs with generated-ID staleness checks."""
-    return EntityMatrixIdentity(
-        current_ids=entity_matrix_ids(config, runtime_paths),
-        bootstrap_ids=_entity_matrix_id_map(config, runtime_paths, MatrixID.from_agent),
-    )
+def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
+    """Return current persisted Matrix identities for configured runtime entities."""
+    current_ids = _persisted_entity_id_map(config, runtime_paths)
+    _validate_unique_entity_ids(current_ids)
+    return EntityIdentityRegistry(current_ids=current_ids)
 
 
-def _entity_matrix_id_map(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    build_id: Callable[[str, str, RuntimePaths], MatrixID],
-) -> dict[str, MatrixID]:
-    domain = matrix_domain(runtime_paths)
-    mapping = {agent_name: build_id(agent_name, domain, runtime_paths) for agent_name in config.agents}
-    mapping[ROUTER_AGENT_NAME] = build_id(ROUTER_AGENT_NAME, domain, runtime_paths)
-    mapping.update({team_name: build_id(team_name, domain, runtime_paths) for team_name in config.teams})
-    return mapping
+def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
+    domain = _matrix_domain(runtime_paths)
+    return {
+        entity_name: _persisted_entity_matrix_id(entity_name, domain, runtime_paths)
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
+    }
 
 
-def _entity_matrix_id(entity_name: str, domain: str, runtime_paths: RuntimePaths) -> MatrixID:
+def _persisted_entity_matrix_id(entity_name: str, domain: str, runtime_paths: RuntimePaths) -> MatrixID:
     persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
-    if persisted_user_id is not None:
-        return MatrixID.parse(persisted_user_id)
-    return MatrixID.from_agent(entity_name, domain, runtime_paths)
+    if persisted_user_id is None:
+        msg = f"Matrix account for configured entity {entity_name!r} has not been prepared"
+        raise RuntimeError(msg)
+    return MatrixID.parse(persisted_user_id)
+
+
+def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:
+    owners_by_user_id: dict[str, str] = {}
+    duplicates: list[tuple[str, str, str]] = []
+    for entity_name, matrix_id in current_ids.items():
+        previous_owner = owners_by_user_id.get(matrix_id.full_id)
+        if previous_owner is not None:
+            duplicates.append((matrix_id.full_id, previous_owner, entity_name))
+            continue
+        owners_by_user_id[matrix_id.full_id] = entity_name
+    if duplicates:
+        formatted = ", ".join(
+            f"{user_id} shared by {first_entity!r} and {second_entity!r}"
+            for user_id, first_entity, second_entity in duplicates
+        )
+        msg = f"Configured entities must have unique Matrix IDs: {formatted}"
+        raise RuntimeError(msg)
 
 
 def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Return the configured internal user's full Matrix ID."""
     if config.mindroom_user is None:
         return None
-    return MatrixID.from_username(config.mindroom_user.username, matrix_domain(runtime_paths)).full_id
+    return MatrixID.from_username(config.mindroom_user.username, _matrix_domain(runtime_paths)).full_id
 
 
 def resolve_agent_thread_mode(

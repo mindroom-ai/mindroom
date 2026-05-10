@@ -15,6 +15,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, _cancel_failure_reason
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
     EntityStartResults,
@@ -32,6 +33,7 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
+    TEST_PASSWORD,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
     orchestrator_runtime_paths,
@@ -882,7 +884,26 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         patch("mindroom.orchestrator.stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator.sync_forever_with_restart"),
-        patch("mindroom.orchestrator.create_temp_user") as mock_create_temp_user,
+        patch.object(
+            _MultiAgentOrchestrator,
+            "_prepare_entity_accounts",
+            new=AsyncMock(
+                return_value={
+                    "router": AgentMatrixUser(
+                        agent_name="router",
+                        user_id="@mindroom_router:localhost",
+                        display_name="Router",
+                        password=TEST_PASSWORD,
+                    ),
+                    "agent1": AgentMatrixUser(
+                        agent_name="agent1",
+                        user_id="@mindroom_agent1:localhost",
+                        display_name="Agent 1",
+                        password=TEST_PASSWORD,
+                    ),
+                },
+            ),
+        ),
         patch("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
@@ -925,7 +946,6 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         mock_new_bot = AsyncMock()
         mock_new_bot.start = AsyncMock()
         mock_create_bot.return_value = mock_new_bot
-        mock_create_temp_user.return_value = MagicMock()
 
         # Run update_config
         await orchestrator.update_config()
@@ -953,7 +973,26 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.stop_entities"),
-        patch("mindroom.orchestrator.create_temp_user") as mock_create_temp_user,
+        patch.object(
+            _MultiAgentOrchestrator,
+            "_prepare_entity_accounts",
+            new=AsyncMock(
+                return_value={
+                    "router": AgentMatrixUser(
+                        agent_name="router",
+                        user_id="@mindroom_router:localhost",
+                        display_name="Router",
+                        password=TEST_PASSWORD,
+                    ),
+                    "coach": AgentMatrixUser(
+                        agent_name="coach",
+                        user_id="@mindroom_coach:localhost",
+                        display_name="Coach",
+                        password=TEST_PASSWORD,
+                    ),
+                },
+            ),
+        ),
         patch.object(_MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
@@ -1017,15 +1056,15 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
             return bot
 
         mock_create_bot.side_effect = make_bot
-        mock_create_temp_user.return_value = MagicMock()
 
         # --- act ---
         try:
             await orchestrator.update_config()
         finally:
-            for task in [general_task, router_task]:
+            for task in list(orchestrator._sync_tasks.values()):
                 task.cancel()
-            await asyncio.gather(general_task, router_task, return_exceptions=True)
+            await asyncio.gather(*orchestrator._sync_tasks.values(), return_exceptions=True)
+            await orchestrator._close_runtime_support_services()
 
         # --- assert: create_bot_for_entity called exactly once for "coach" ---
         coach_calls = [c for c in mock_create_bot.call_args_list if c[0][0] == "coach"]

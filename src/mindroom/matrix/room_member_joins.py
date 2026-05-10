@@ -12,8 +12,8 @@ from weakref import WeakValueDictionary
 import nio
 
 from mindroom.constants import safe_replace
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import extract_agent_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -137,7 +137,7 @@ def room_member_join_from_event(
 
     user_id = event.state_key
     if (
-        extract_agent_name(user_id, config, runtime_paths) is not None
+        entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
         or user_id in config.bot_accounts
         or user_id == config.get_mindroom_user_id(runtime_paths)
     ):

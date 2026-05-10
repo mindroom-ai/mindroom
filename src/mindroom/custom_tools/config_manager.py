@@ -22,6 +22,7 @@ from mindroom.config.main import (
     load_config_or_user_error,
 )
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -457,10 +458,12 @@ class ConfigManagerTools(Toolkit):
         if room is None:
             return "Agents in This Room", []
 
+        registry = entity_identity_registry(config, self.runtime_paths)
         available_agent_names = {
             agent_name
             for matrix_id in get_available_agents_in_room(room, config, self.runtime_paths)
-            if (agent_name := matrix_id.agent_name(config, self.runtime_paths)) is not None
+            if (agent_name := registry.current_entity_name_for_user_id(matrix_id.full_id, include_router=False))
+            is not None
         }
         agent_entries = [(name, agent) for name, agent in all_agents if name in available_agent_names]
         return "Agents in This Room", agent_entries

@@ -7,6 +7,7 @@ These tests ensure that fixed bugs don't resurface, particularly:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,13 +16,19 @@ import pytest
 from agno.models.ollama import Ollama
 
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
+from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
+from mindroom.routing import suggest_agent_for_message
+from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -32,6 +39,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids, entity_name_for_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -72,16 +80,181 @@ def setup_test_bot(
         except KeyError:
             config = _runtime_bound_config(config, storage_path)
 
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    for alias in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+        account_key = managed_account_key(alias)
+        if account_key in state.accounts:
+            continue
+        username = (
+            MatrixID.parse(agent.user_id).username
+            if alias == agent.agent_name and agent.user_id is not None
+            else f"mindroom_{alias}"
+        )
+        state.add_account(account_key, username, TEST_PASSWORD, domain=config.get_domain(runtime_paths))
+    state.save(runtime_paths=runtime_paths)
+
     bot = AgentBot(
         agent,
         storage_path,
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=runtime_paths,
         rooms=[room_id],
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
     return install_runtime_cache_support(bot)
+
+
+@pytest.mark.asyncio
+@patch("mindroom.routing.suggest_agent", new_callable=AsyncMock)
+async def test_suggest_agent_for_message_returns_aliases_for_actual_ids(
+    mock_suggest_agent: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """Routing should expose configured aliases even when Matrix IDs have drifted."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "news": AgentConfig(display_name="News"),
+                "facts": AgentConfig(display_name="Facts"),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(
+        config,
+        runtime_paths,
+        usernames={"router": "actual_router", "news": "actual_news", "facts": "actual_facts"},
+    )
+    mock_suggest_agent.return_value = "news"
+
+    result = await suggest_agent_for_message(
+        "what happened?",
+        [ids["news"], ids["facts"]],
+        config,
+        runtime_paths,
+        [make_visible_message(sender="@actual_facts:localhost", body="Prior context")],
+    )
+
+    assert result == "news"
+    mock_suggest_agent.assert_awaited_once()
+    assert mock_suggest_agent.await_args.args[1] == ["news", "facts"]
+    assert mock_suggest_agent.await_args.args[4][0].sender == "facts"
+
+
+def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path) -> None:
+    """Active-response follow-up classification should not trust stale generated-looking IDs."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "research": AgentConfig(display_name="Research"),
+                "news": AgentConfig(display_name="News"),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(
+        config,
+        runtime_paths,
+        usernames={"router": "actual_router", "research": "actual_research", "news": "actual_news"},
+    )
+    policy = TurnPolicy(
+        TurnPolicyDeps(
+            runtime=SimpleNamespace(config=config, orchestrator=None, client=None),
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="research",
+            matrix_id=ids["research"],
+        ),
+    )
+    context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=True,
+        thread_id="$thread",
+        thread_history=[],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$msg")
+
+    def envelope(sender_id: str) -> MessageEnvelope:
+        return MessageEnvelope(
+            source_event_id="$msg",
+            room_id="!room:localhost",
+            target=target,
+            requester_id=sender_id,
+            sender_id=sender_id,
+            body="follow up",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="research",
+            source_kind="message",
+        )
+
+    assert policy._should_queue_follow_up_in_active_response_thread(
+        context=context,
+        target=target,
+        source_envelope=envelope("@mindroom_news:localhost"),
+        has_active_response_for_target=lambda _target: True,
+    )
+    assert not policy._should_queue_follow_up_in_active_response_thread(
+        context=context,
+        target=target,
+        source_envelope=envelope("@actual_news:localhost"),
+        has_active_response_for_target=lambda _target: True,
+    )
+
+
+def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path) -> None:
+    """Team responder filtering should map actual IDs to aliases and drop unknown IDs."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "worker": AgentConfig(display_name="Worker"),
+                "idle": AgentConfig(display_name="Idle"),
+            },
+            teams={"squad": TeamConfig(agents=["worker"], display_name="Squad", role="Coordinate worker responses")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(
+        config,
+        runtime_paths,
+        usernames={
+            "router": "actual_router",
+            "worker": "actual_worker",
+            "idle": "actual_idle",
+            "squad": "actual_squad",
+        },
+    )
+    policy = TurnPolicy(
+        TurnPolicyDeps(
+            runtime=SimpleNamespace(config=config, orchestrator=None, client=None),
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="worker",
+            matrix_id=ids["worker"],
+        ),
+    )
+
+    filtered = policy.filter_materializable_responders(
+        [
+            ids["worker"],
+            ids["idle"],
+            ids["squad"],
+            MatrixID.from_username("mindroom_missing", "localhost"),
+        ],
+        materializable_agent_names={"worker"},
+    )
+
+    assert filtered == [ids["worker"], ids["squad"]]
 
 
 @pytest.fixture
@@ -323,7 +496,7 @@ class TestRoutingRegression:
         )
 
         runtime_paths = runtime_paths_for(test_config)
-        state = MatrixState()
+        state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_news", "mindroom_news_oldns", "pw", domain=test_config.get_domain(runtime_paths))
         state.save(runtime_paths=runtime_paths)
 
@@ -456,7 +629,10 @@ class TestRoutingRegression:
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
         runtime_paths = runtime_paths_for(test_config)
-        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["news", "facts"]
+        assert [entity_name_for_id(agent, test_config, runtime_paths) for agent in available_agents] == [
+            "news",
+            "facts",
+        ]
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_agent_for_message")
@@ -635,7 +811,10 @@ class TestRoutingRegression:
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
         runtime_paths = runtime_paths_for(test_config)
-        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["research", "facts"]
+        assert [entity_name_for_id(agent, test_config, runtime_paths) for agent in available_agents] == [
+            "research",
+            "facts",
+        ]
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.resolve_agent_knowledge_access")

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.agent_descriptions import describe_agent
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
@@ -136,7 +137,12 @@ async def suggest_agent_for_message(
     objects to plain agent or team names and resolves sender identities in
     thread context.
     """
-    entity_names = [name for mid in available_agents if (name := mid.agent_name(config, runtime_paths)) is not None]
+    registry = entity_identity_registry(config, runtime_paths)
+    entity_names = [
+        name
+        for mid in available_agents
+        if (name := registry.current_entity_name_for_user_id(mid.full_id, include_router=False)) is not None
+    ]
 
     # Resolve Matrix sender IDs to readable names for thread context
     resolved_context = None
@@ -145,8 +151,8 @@ async def suggest_agent_for_message(
         for msg in thread_context:
             sender = msg.sender
             if sender.startswith("@") and ":" in sender:
-                sender_id = MatrixID.parse(sender)
-                sender = sender_id.agent_name(config, runtime_paths) or sender_id.domain
+                sender_name = registry.current_entity_name_for_user_id(sender)
+                sender = sender_name if sender_name is not None else MatrixID.parse(sender).domain
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
     return await suggest_agent(message, entity_names, config, runtime_paths, resolved_context)

@@ -41,8 +41,10 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, test_runtime_paths
+from mindroom.thread_utils import get_agents_in_thread
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, make_visible_message, test_runtime_paths
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -57,6 +59,28 @@ async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistory
     """Inject a concrete event cache for test-local calls into the real helper."""
     kwargs.setdefault("event_cache", _event_cache())
     return await matrix_client_module.fetch_thread_history(*args, **kwargs)
+
+
+def test_thread_agent_detection_uses_actual_persisted_ids(tmp_path: Path) -> None:
+    """Thread continuation should use current actual Matrix IDs and ignore generated fallbacks."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        runtime_paths,
+    )
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "actual_router", "general": "actual_general"},
+    )
+    history = [
+        make_visible_message(sender="@actual_general:localhost", body="Current agent reply"),
+        make_visible_message(sender="@mindroom_general:localhost", body="Stale generated-looking reply"),
+    ]
+
+    agents = get_agents_in_thread(history, config, runtime_paths)
+
+    assert [agent.full_id for agent in agents] == ["@actual_general:localhost"]
 
 
 def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
@@ -2170,6 +2194,7 @@ class TestThreadHistoryCache:
             Config(agents={"general": AgentConfig(display_name="General Agent")}),
             runtime_paths,
         )
+        persist_entity_accounts(config, runtime_paths)
         coordinator = EventCacheWriteCoordinator(logger=MagicMock(), background_task_owner=object())
         runtime = BotRuntimeState(
             client=client,

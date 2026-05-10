@@ -242,6 +242,7 @@ path = "mindroom.tool_approval"
 depends_on = [
     "mindroom.approval_manager",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
 ]
@@ -381,6 +382,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.execution_preparation",
     "mindroom.history",
     "mindroom.knowledge",
@@ -611,6 +613,7 @@ path = "mindroom.custom_tools.subagents"
 depends_on = [
     "mindroom.agent_descriptions",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
@@ -631,6 +634,7 @@ path = "mindroom.edit_regenerator"
 depends_on = [
     "mindroom.coalescing",
     "mindroom.conversation_resolver",
+    "mindroom.entity_resolution",
     "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
@@ -643,6 +647,7 @@ path = "mindroom.execution_preparation"
 depends_on = [
     "mindroom.ai_runtime",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.history",
     "mindroom.matrix.client_visible_messages",
     "mindroom.streaming",
@@ -871,6 +876,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.entity_resolution",
     "mindroom.history",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
@@ -920,6 +926,7 @@ visibility = ["mindroom.response_runner"]
 path = "mindroom.routing"
 depends_on = [
     "mindroom.agent_descriptions",
+    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
@@ -938,6 +945,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.cancellation",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.execution_preparation",
     "mindroom.history",
     "mindroom.history.interrupted_replay",
@@ -981,6 +989,7 @@ depends_on = [
     "mindroom.git_urls",
     "mindroom.history.types",
     "mindroom.logging_config",
+    "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
     "mindroom.prompt_templates",
@@ -1303,6 +1312,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.conversation_cache"
 depends_on = [
+    "mindroom.entity_resolution",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
@@ -1441,6 +1451,7 @@ visibility = [
 path = "mindroom.matrix.client_visible_messages"
 depends_on = [
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.matrix.event_info",
     "mindroom.matrix.identity",
     "mindroom.matrix.message_content",
@@ -1537,6 +1548,7 @@ depends_on = [
 path = "mindroom.matrix.stale_stream_cleanup"
 depends_on = [
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_visible_messages",
@@ -1552,6 +1564,7 @@ path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
     "mindroom.dispatch_thread_context",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
@@ -1568,6 +1581,7 @@ path = "mindroom.conversation_state_writer"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.history",
     "mindroom.runtime_protocols",
 ]
@@ -1585,6 +1599,7 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
@@ -1766,6 +1781,7 @@ depends_on = [
     "mindroom.commands.config_confirmation",
     "mindroom.commands.parsing",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.handled_turns",
     "mindroom.logging_config",
     "mindroom.matrix.event_info",
@@ -1789,6 +1805,7 @@ depends_on = [
 path = "mindroom.scheduling"
 depends_on = [
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.matrix.client_delivery",
     "mindroom.model_loading",
@@ -1944,6 +1961,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.credentials_sync",
+    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.model_loading",
     "mindroom.matrix.media",
@@ -2015,6 +2033,7 @@ depends_on = [
     "mindroom.dispatch_replay_guard",
     "mindroom.dispatch_source",
     "mindroom.dispatch_thread_context",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
@@ -2072,6 +2091,7 @@ path = "mindroom.turn_policy"
 depends_on = [
     "mindroom.authorization",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.identity",

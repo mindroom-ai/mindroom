@@ -26,8 +26,8 @@ from mindroom.approval_manager import (
     TransportSenderProvider,
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -188,7 +188,7 @@ def resolve_tool_approval_approver(
     """Return the human requester allowed to resolve one approval request."""
     if requester_id is None or not requester_id.startswith("@") or ":" not in requester_id:
         return None
-    if is_agent_id(requester_id, config, runtime_paths):
+    if entity_identity_registry(config, runtime_paths).is_managed_user_id(requester_id):
         return None
     if requester_id in config.bot_accounts:
         return None

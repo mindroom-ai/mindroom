@@ -25,6 +25,14 @@ from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import should_agent_respond
 from mindroom.turn_policy import ResponseAction, TurnPolicy, TurnPolicyDeps
 from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import entity_ids, persist_entity_accounts
+
+
+def _bind_runtime_config(config: Config, runtime_root: Path | None = None) -> Config:
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    bound_config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
+    return bound_config
 
 
 def _message(
@@ -47,8 +55,7 @@ class TestAgentResponseLogic:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-        self.config = bind_runtime_paths(
+        self.config = _bind_runtime_config(
             Config(
                 agents={
                     "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
@@ -60,17 +67,15 @@ class TestAgentResponseLogic:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
-            runtime_paths,
         )
         self.config.authorization.default_room_access = True
         self.runtime_paths = runtime_paths_for(self.config)
-        # Helper for generating agent IDs with correct domain
         self.domain = self.config.get_domain(self.runtime_paths)
         self.sender = f"@user:{self.domain}"
 
     def agent_id(self, agent_name: str) -> str:
-        """Generate agent Matrix ID with correct domain."""
-        return f"@mindroom_{agent_name}:{self.domain}"
+        """Return the current persisted Matrix ID for a configured entity."""
+        return entity_ids(self.config, self.runtime_paths)[agent_name].full_id
 
     def test_mentioned_agent_always_responds(self) -> None:
         """If an agent is mentioned, it should always respond."""
@@ -137,8 +142,9 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
-        team_id = config.get_ids(runtime_paths)["ops"]
+        team_id = entity_ids(config, runtime_paths)["ops"]
         runtime = MagicMock()
         runtime.config = config
         runtime.orchestrator = None
@@ -184,8 +190,9 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
-        team_id = config.get_ids(runtime_paths)["ops"]
+        team_id = entity_ids(config, runtime_paths)["ops"]
         runtime = MagicMock()
         runtime.config = config
         runtime.orchestrator = None
@@ -476,6 +483,7 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator", "research"], config)
         thread_history = [
@@ -509,6 +517,7 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
+        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
 
         should_respond = should_agent_respond(
@@ -881,6 +890,7 @@ class TestAgentResponseLogic:
             bot_accounts=["@telegram:localhost"],
         )
         config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         config.authorization.default_room_access = True
         room = create_mock_room("!room:localhost", ["calculator"], config)
@@ -927,7 +937,7 @@ class TestAgentResponseLogic:
             config=self.config,
             runtime_paths=self.runtime_paths,
             mentioned_agents=[
-                self.config.get_ids(runtime_paths_for(self.config))["research"],
+                entity_ids(self.config, runtime_paths_for(self.config))["research"],
             ],  # ResearchAgent is mentioned
             sender_id=self.sender,
         )

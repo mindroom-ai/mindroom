@@ -16,9 +16,9 @@ from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import fixture_entity_matrix_id
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -65,7 +65,7 @@ class TestTeamRoomMembership:
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
         team_matrix_ids = [
-            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+            fixture_entity_matrix_id("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
         ]
         bot = TeamBot(
             agent_user=team_user,
@@ -126,7 +126,7 @@ class TestTeamRoomMembership:
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
         team_matrix_ids = [
-            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+            fixture_entity_matrix_id("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
         ]
         bot = TeamBot(
             agent_user=team_user,
@@ -201,7 +201,7 @@ class TestTeamRoomMembership:
             tmp_path,
         )
         team_matrix_ids = [
-            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+            fixture_entity_matrix_id("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
         ]
         bot = TeamBot(
             agent_user=team_user,

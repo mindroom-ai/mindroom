@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
@@ -130,10 +131,15 @@ def _format_welcome_message(
 ) -> str:
     """Generate the welcome message text for resolved responder candidates."""
     entity_list = []
-    for entity_id in candidate_entities:
-        entity_name = cast("str", entity_id.agent_name(config, runtime_paths))
+    candidate_entity_ids = list(candidate_entities)
+    registry = entity_identity_registry(config, runtime_paths) if candidate_entity_ids else None
+    for entity_id in candidate_entity_ids:
+        assert registry is not None
+        entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
+        if entity_name is None:
+            continue
         description = _format_agent_description(entity_name, config)
-        entity_entry = f"• **@{entity_id.username}**"
+        entity_entry = f"• **@{entity_name}**"
         if description:
             entity_entry += f": {description}"
         entity_list.append(entity_entry)
@@ -151,7 +157,7 @@ def _format_welcome_message(
     quick_commands = "\n".join(get_compact_command_entries(format_code=True))
     welcome_msg += (
         "💬 **How to interact:**\n"
-        "• Mention an agent or team with @ to get their attention using a listed username or configured name\n"
+        "• Mention an agent or team with @ to get their attention using its configured alias\n"
         "• Use `!help` to see available commands\n"
         "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
         "• Multiple agents can collaborate when you mention them together; mention a team directly for its team workflow\n"

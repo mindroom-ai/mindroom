@@ -157,6 +157,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.conftest import replace_turn_policy_deps as shared_replace_turn_policy_deps
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -408,10 +409,12 @@ def _response_request(
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for bot tests."""
-    return bind_runtime_paths(
+    bound_config = bind_runtime_paths(
         config,
         test_runtime_paths(runtime_root),
     )
+    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
+    return bound_config
 
 
 def _mock_managed_bot(config: Config) -> MagicMock:
@@ -738,8 +741,8 @@ def _room_file_event(
     )
 
 
-def test_agent_bot_init_defers_matrix_id_access_until_after_user_id_is_populated(tmp_path: Path) -> None:
-    """Bot init should not parse an empty Matrix user ID while wiring helper deps."""
+def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None:
+    """Runtime bot construction requires the orchestrator account-preparation barrier."""
     agent_user = AgentMatrixUser(
         agent_name="calculator",
         password=TEST_PASSWORD,
@@ -755,12 +758,8 @@ def test_agent_bot_init_defers_matrix_id_access_until_after_user_id_is_populated
         tmp_path,
     )
 
-    bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-    agent_user.user_id = "@mindroom_calculator:localhost"
-    bot.client = AsyncMock()
-    bot.client.user_id = agent_user.user_id
-    assert bot._conversation_resolver._matrix_id().full_id == "@mindroom_calculator:localhost"
+    with pytest.raises(PermanentMatrixStartupError, match="Missing Matrix ID for 'calculator'"):
+        AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
 
 @asynccontextmanager
@@ -3000,7 +2999,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = config.get_ids(runtime_paths_for(config))
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
         with (
             patch(
                 "mindroom.delivery_gateway.send_message_result",
@@ -3051,7 +3050,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = config.get_ids(runtime_paths_for(config))
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
         with (
             patch(
@@ -3100,7 +3099,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = config.get_ids(runtime_paths_for(config))
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
 
         with (
@@ -3162,7 +3161,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = config.get_ids(runtime_paths_for(config))
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
         timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
 
@@ -3233,7 +3232,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths,
         )
-        matrix_ids = config.get_ids(runtime_paths)
+        matrix_ids = entity_ids(config, runtime_paths)
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             room_id="!test:localhost",
@@ -3299,7 +3298,7 @@ class TestAgentBot:
         """Non-team fallback should deliver directly without response lifecycle hooks."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        team_member = config.get_ids(runtime_paths)["general"]
+        team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
             mock_agent_user,
             tmp_path,
@@ -3852,7 +3851,7 @@ class TestAgentBot:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = config.get_ids(runtime_paths_for(config))
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
         interactive_response = """```interactive
 {"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
 ```"""
@@ -5673,7 +5672,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        team_member = config.get_ids(runtime_paths)["general"]
+        team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
             mock_agent_user,
             tmp_path,
@@ -5762,7 +5761,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        team_member = config.get_ids(runtime_paths)["general"]
+        team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
             mock_agent_user,
             tmp_path,
@@ -5865,7 +5864,7 @@ class TestAgentBot:
 
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        team_member = config.get_ids(runtime_paths)["general"]
+        team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
             mock_agent_user,
             tmp_path,
@@ -7282,7 +7281,6 @@ class TestAgentBot:
         )
 
         with (
-            patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
@@ -7290,8 +7288,8 @@ class TestAgentBot:
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
@@ -7427,7 +7425,6 @@ class TestAgentBot:
         assert attachment_record is not None
 
         with (
-            patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
@@ -7439,8 +7436,8 @@ class TestAgentBot:
             ) as mock_register_file,
         ):
             mock_get_available.return_value = [
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
@@ -7810,14 +7807,13 @@ class TestAgentBot:
         image_event.source = {"content": {"body": "image.jpg"}}
 
         with (
-            patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
                 return_value=[
-                    config.get_ids(runtime_paths_for(config))["calculator"],
-                    config.get_ids(runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                    entity_ids(config, runtime_paths_for(config))["general"],
                 ],
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
@@ -7890,12 +7886,11 @@ class TestAgentBot:
         image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$skip_img")
 
         with (
-            patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
                 "mindroom.turn_policy.responder_candidate_entities_for_room",
-                return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
+                return_value=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
@@ -8024,7 +8019,6 @@ class TestAgentBot:
         )
 
         with (
-            patch("mindroom.bot.extract_agent_name", return_value="router"),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch(
@@ -8096,8 +8090,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!dm:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: MagicMock(),
         }
 
         with patch("mindroom.turn_policy.decide_team_formation", new_callable=AsyncMock) as mock_decide:
@@ -8117,7 +8111,7 @@ class TestAgentBot:
 
         assert mock_decide.await_count == 1
         assert mock_decide.call_args.kwargs["available_agents_in_room"] == [
-            config.get_ids(runtime_paths_for(config))["calculator"],
+            entity_ids(config, runtime_paths_for(config))["calculator"],
         ]
         assert mock_decide.call_args.kwargs["materializable_agent_names"] == {"calculator"}
 
@@ -8212,8 +8206,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
@@ -8221,8 +8215,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8266,9 +8260,9 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["research"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["research"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=False,
@@ -8276,8 +8270,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["research"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["research"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8323,8 +8317,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["alpha"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
@@ -8332,8 +8326,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8380,8 +8374,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
@@ -8389,8 +8383,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8434,8 +8428,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["research"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["research"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=False,
@@ -8479,15 +8473,15 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths)["calculator"].full_id: MagicMock(),
-            config.get_ids(runtime_paths)["research"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths)["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths)["research"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
             is_thread=False,
             thread_id=None,
             thread_history=[],
-            mentioned_agents=[config.get_ids(runtime_paths)["calculator"]],
+            mentioned_agents=[entity_ids(config, runtime_paths)["calculator"]],
             has_non_agent_mentions=False,
         )
 
@@ -8527,7 +8521,7 @@ class TestAgentBot:
         runtime_paths = runtime_paths_for(config)
         team_user = AgentMatrixUser(
             agent_name="ops",
-            user_id=config.get_ids(runtime_paths)["ops"].full_id,
+            user_id=entity_ids(config, runtime_paths)["ops"].full_id,
             display_name="Ops Team",
             password=TEST_PASSWORD,
         )
@@ -8536,21 +8530,21 @@ class TestAgentBot:
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[config.get_ids(runtime_paths)["calculator"]],
+            team_agents=[entity_ids(config, runtime_paths)["calculator"]],
             team_mode="coordinate",
         )
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths)["ops"].full_id: MagicMock(),
-            config.get_ids(runtime_paths)["research"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths)["ops"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths)["research"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
             is_thread=False,
             thread_id=None,
             thread_history=[],
-            mentioned_agents=[config.get_ids(runtime_paths)["ops"]],
+            mentioned_agents=[entity_ids(config, runtime_paths)["ops"]],
             has_non_agent_mentions=False,
         )
 
@@ -8584,8 +8578,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["alpha"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
@@ -8593,8 +8587,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8606,22 +8600,22 @@ class TestAgentBot:
                     return_value=TeamResolution(
                         intent=TeamIntent.EXPLICIT_MEMBERS,
                         requested_members=[
-                            config.get_ids(runtime_paths_for(config))["alpha"],
-                            config.get_ids(runtime_paths_for(config))["calculator"],
+                            entity_ids(config, runtime_paths_for(config))["alpha"],
+                            entity_ids(config, runtime_paths_for(config))["calculator"],
                         ],
                         member_statuses=[
                             TeamResolutionMember(
-                                agent=config.get_ids(runtime_paths_for(config))["alpha"],
+                                agent=entity_ids(config, runtime_paths_for(config))["alpha"],
                                 name="alpha",
                                 status=TeamMemberStatus.NOT_MATERIALIZABLE,
                             ),
                             TeamResolutionMember(
-                                agent=config.get_ids(runtime_paths_for(config))["calculator"],
+                                agent=entity_ids(config, runtime_paths_for(config))["calculator"],
                                 name="calculator",
                                 status=TeamMemberStatus.ELIGIBLE,
                             ),
                         ],
-                        eligible_members=[config.get_ids(runtime_paths_for(config))["calculator"]],
+                        eligible_members=[entity_ids(config, runtime_paths_for(config))["calculator"]],
                         outcome=TeamOutcome.REJECT,
                         reason="Team request includes agent 'alpha' that is not available right now.",
                     ),
@@ -8661,8 +8655,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["alpha"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
@@ -8670,8 +8664,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8683,22 +8677,22 @@ class TestAgentBot:
                     return_value=TeamResolution(
                         intent=TeamIntent.EXPLICIT_MEMBERS,
                         requested_members=[
-                            config.get_ids(runtime_paths_for(config))["alpha"],
-                            config.get_ids(runtime_paths_for(config))["calculator"],
+                            entity_ids(config, runtime_paths_for(config))["alpha"],
+                            entity_ids(config, runtime_paths_for(config))["calculator"],
                         ],
                         member_statuses=[
                             TeamResolutionMember(
-                                agent=config.get_ids(runtime_paths_for(config))["alpha"],
+                                agent=entity_ids(config, runtime_paths_for(config))["alpha"],
                                 name="alpha",
                                 status=TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
                             ),
                             TeamResolutionMember(
-                                agent=config.get_ids(runtime_paths_for(config))["calculator"],
+                                agent=entity_ids(config, runtime_paths_for(config))["calculator"],
                                 name="calculator",
                                 status=TeamMemberStatus.ELIGIBLE,
                             ),
                         ],
-                        eligible_members=[config.get_ids(runtime_paths_for(config))["calculator"]],
+                        eligible_members=[entity_ids(config, runtime_paths_for(config))["calculator"]],
                         outcome=TeamOutcome.REJECT,
                         reason="Team request includes private agent 'alpha'; private agents cannot participate in teams yet",
                     ),
@@ -8744,8 +8738,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["alpha"].full_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: MagicMock(),
         }
         context = MessageContext(
             am_i_mentioned=True,
@@ -8753,8 +8747,8 @@ class TestAgentBot:
             thread_id=None,
             thread_history=[],
             mentioned_agents=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             has_non_agent_mentions=False,
         )
@@ -8849,7 +8843,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         room.users = {
             bot.matrix_id.full_id: MagicMock(),
             ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
@@ -8944,7 +8938,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -9022,7 +9016,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
@@ -9086,7 +9080,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         room.users = {
             bot.matrix_id.full_id: MagicMock(),
             ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
@@ -9162,7 +9156,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         room.users = {
             bot.matrix_id.full_id: MagicMock(),
             ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
@@ -9234,7 +9228,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
             user_id=ids[ROUTER_AGENT_NAME].full_id,
@@ -9319,7 +9313,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
             user_id=ids[ROUTER_AGENT_NAME].full_id,
@@ -9393,7 +9387,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         bot_user = AgentMatrixUser(
             agent_name="synth",
             user_id=ids["synth"].full_id,
@@ -9484,7 +9478,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         bot_user = AgentMatrixUser(
             agent_name="synth",
             user_id=ids["synth"].full_id,
@@ -9548,7 +9542,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         bot_user = AgentMatrixUser(
             agent_name="synth",
             user_id=ids["synth"].full_id,
@@ -9613,7 +9607,7 @@ class TestAgentBot:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        ids = config.get_ids(runtime_paths)
+        ids = entity_ids(config, runtime_paths)
         bot_user = AgentMatrixUser(
             agent_name="synth",
             user_id=ids["synth"].full_id,
@@ -9685,7 +9679,7 @@ class TestAgentBot:
             password=TEST_PASSWORD,
         )
         bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        ids = config.get_ids(runtime_paths_for(config))
+        ids = entity_ids(config, runtime_paths_for(config))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
@@ -10050,7 +10044,7 @@ class TestAgentBot:
         assert context.thread_history == dispatch_history
         assert context.requires_model_history_refresh is False
         trusted_sender_ids = frozenset(
-            matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
+            matrix_id.full_id for matrix_id in entity_ids(config, runtime_paths_for(config)).values()
         )
         mock_history.assert_awaited_once_with(
             bot.client,
@@ -11440,7 +11434,7 @@ class TestAgentBot:
             display_name="Team Bot",
             password=TEST_PASSWORD,
         )
-        team_member = config.get_ids(runtime_paths)["general"]
+        team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
             team_user,
             tmp_path,
@@ -12466,7 +12460,7 @@ class TestAgentBot:
         # other participating agent in the room fixture as well.
         mock_room.users = {
             mock_agent_user.user_id: MagicMock(),
-            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: MagicMock(),
         }
 
         # Test 1: Thread with only this agent - should respond without mention
@@ -12568,8 +12562,8 @@ class TestAgentBot:
             _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
             _visible_message(sender=mock_agent_user.user_id, body="My response", timestamp=124, event_id="prev2"),
             _visible_message(
-                sender=config.get_ids(runtime_paths_for(config))["general"].full_id
-                if "general" in config.get_ids(runtime_paths_for(config))
+                sender=entity_ids(config, runtime_paths_for(config))["general"].full_id
+                if "general" in entity_ids(config, runtime_paths_for(config))
                 else "@mindroom_general:localhost",
                 body="Another agent response",
                 timestamp=125,
@@ -12718,7 +12712,7 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
         router_bot = MagicMock()
@@ -12769,7 +12763,7 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
         router_bot = MagicMock()
@@ -12808,14 +12802,14 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
         router_bot = MagicMock()
         router_bot.client = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot}
 
-        state = MatrixState()
+        state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, "legacy_internal_user", "legacy-password")
         state.save(runtime_paths=orchestrator.runtime_paths)
 
@@ -12853,7 +12847,7 @@ class TestMultiAgentOrchestrator:
         invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
         invited_rooms_path.write_text('[\n  "!ad-hoc:localhost"\n]\n', encoding="utf-8")
 
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
         router_bot = MagicMock()
@@ -12885,7 +12879,7 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
         bot = AsyncMock()
@@ -12922,7 +12916,7 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
 
         router_bot = AsyncMock()
@@ -13050,6 +13044,20 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+            patch.object(
+                _MultiAgentOrchestrator,
+                "_prepare_entity_accounts",
+                new=AsyncMock(
+                    return_value={
+                        ROUTER_AGENT_NAME: AgentMatrixUser(
+                            agent_name=ROUTER_AGENT_NAME,
+                            user_id="@mindroom_router:localhost",
+                            display_name="Router",
+                            password=TEST_PASSWORD,
+                        ),
+                    },
+                ),
+            ),
             patch.object(_MultiAgentOrchestrator, "_create_managed_bot"),
         ):
             orchestrator = _MultiAgentOrchestrator(
@@ -13070,7 +13078,6 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_initialize_degrades_when_shared_event_cache_init_fails(self, tmp_path: Path) -> None:
         """Initialize should keep starting bots when the shared event cache cannot open."""
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -13085,6 +13092,7 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=config),
@@ -14871,7 +14879,20 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch("mindroom.orchestrator.create_temp_user", return_value=MagicMock()),
+            patch.object(
+                orchestrator,
+                "_prepare_entity_accounts",
+                new=AsyncMock(
+                    return_value={
+                        "coach": AgentMatrixUser(
+                            agent_name="coach",
+                            user_id="@mindroom_coach:localhost",
+                            display_name="CoachAgent",
+                            password=TEST_PASSWORD,
+                        ),
+                    },
+                ),
+            ),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
@@ -14954,7 +14975,20 @@ class TestMultiAgentOrchestrator:
                 return_value=set(),
             ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch("mindroom.orchestrator.create_temp_user", return_value=MagicMock()),
+            patch.object(
+                orchestrator,
+                "_prepare_entity_accounts",
+                new=AsyncMock(
+                    return_value={
+                        "coach": AgentMatrixUser(
+                            agent_name="coach",
+                            user_id="@mindroom_coach:localhost",
+                            display_name="CoachAgent",
+                            password=TEST_PASSWORD,
+                        ),
+                    },
+                ),
+            ),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),

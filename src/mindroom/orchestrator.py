@@ -45,7 +45,12 @@ from mindroom.matrix.stale_stream_cleanup import (
     cleanup_stale_streaming_messages,
 )
 from mindroom.matrix.state import load_rooms, resolve_room_aliases
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, create_agent_user
+from mindroom.matrix.users import (
+    INTERNAL_USER_ACCOUNT_KEY,
+    INTERNAL_USER_AGENT_NAME,
+    AgentMatrixUser,
+    create_agent_user,
+)
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
@@ -88,7 +93,6 @@ from .orchestration.runtime import (
     cancel_sync_task,
     cancel_task,
     create_logged_task,
-    create_temp_user,
     is_permanent_startup_error,
     retry_delay_seconds,
     run_with_retry,
@@ -731,14 +735,46 @@ class _MultiAgentOrchestrator:
         """Return configured entity names with the router first."""
         return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
 
-    def _create_managed_bot(self, entity_name: str, config: Config) -> AgentBot | TeamBot:
+    @staticmethod
+    def _entity_display_name(config: Config, entity_name: str) -> str:
+        """Return the Matrix display name for one configured managed entity."""
+        if entity_name == ROUTER_AGENT_NAME:
+            return "RouterAgent"
+        if entity_name in config.agents:
+            return config.agents[entity_name].display_name
+        if entity_name in config.teams:
+            return config.teams[entity_name].display_name
+        return entity_name
+
+    async def _prepare_entity_accounts(
+        self,
+        config: Config,
+        entity_names: Iterable[str],
+    ) -> dict[str, AgentMatrixUser]:
+        """Ensure managed Matrix accounts exist before runtime bot construction."""
+        homeserver = constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths)
+        users: dict[str, AgentMatrixUser] = {}
+        for entity_name in entity_names:
+            users[entity_name] = await create_agent_user(
+                homeserver,
+                entity_name,
+                self._entity_display_name(config, entity_name),
+                runtime_paths=self.runtime_paths,
+            )
+        return users
+
+    def _create_managed_bot(
+        self,
+        entity_name: str,
+        config: Config,
+        agent_user: AgentMatrixUser,
+    ) -> AgentBot | TeamBot:
         """Create and register one runtime-managed bot."""
-        temp_user = create_temp_user(entity_name, config)
         bot = cast(
             "AgentBot | TeamBot",
             create_bot_for_entity(
                 entity_name,
-                temp_user,
+                agent_user,
                 config,
                 self.runtime_paths,
                 self.storage_path,
@@ -925,8 +961,9 @@ class _MultiAgentOrchestrator:
         start_sync_tasks: bool,
     ) -> EntityStartResults:
         """Create configured entities and try to start them once."""
-        for entity_name in entity_names:
-            self._create_managed_bot(entity_name, config)
+        entity_users = await self._prepare_entity_accounts(config, sorted(entity_names))
+        for entity_name in sorted(entity_names):
+            self._create_managed_bot(entity_name, config, entity_users[entity_name])
         return await self._start_entities_once(entity_names, start_sync_tasks=start_sync_tasks)
 
     async def initialize(self) -> None:
@@ -943,8 +980,10 @@ class _MultiAgentOrchestrator:
         await self._sync_mcp_manager(config)
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
-        for entity_name in self._configured_entity_names(config):
-            self._create_managed_bot(entity_name, config)
+        entity_names = self._configured_entity_names(config)
+        entity_users = await self._prepare_entity_accounts(config, entity_names)
+        for entity_name in entity_names:
+            self._create_managed_bot(entity_name, config, entity_users[entity_name])
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 

@@ -21,7 +21,7 @@ from mindroom.cancellation import (
     classify_cancel_source,
     request_task_cancel,
 )
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import (
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
@@ -29,7 +29,6 @@ from mindroom.matrix.health import (
     matrix_versions_url,
     response_has_matrix_versions,
 )
-from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_state import set_runtime_starting
 from mindroom.startup_errors import PermanentStartupError
 
@@ -40,7 +39,6 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -67,7 +65,6 @@ __all__ = [
     "cancel_task",
     "classify_cancel_source",
     "create_logged_task",
-    "create_temp_user",
     "is_permanent_startup_error",
     "is_sync_restart_cancel",
     "log_cancelled_response",
@@ -463,25 +460,6 @@ class EntityStartResults:
     started_bots: list[AgentBot | TeamBot] = field(default_factory=list)
     retryable_entities: list[str] = field(default_factory=list)
     permanently_failed_entities: list[str] = field(default_factory=list)
-
-
-def create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
-    """Create a temporary user object that will be updated by ensure_user_account."""
-    if entity_name == ROUTER_AGENT_NAME:
-        display_name = "RouterAgent"
-    elif entity_name in config.agents:
-        display_name = config.agents[entity_name].display_name
-    elif entity_name in config.teams:
-        display_name = config.teams[entity_name].display_name
-    else:
-        display_name = entity_name
-
-    return AgentMatrixUser(
-        agent_name=entity_name,
-        user_id="",  # Populated later by ensure_user_account.
-        display_name=display_name,
-        password="",  # Populated later by ensure_user_account.
-    )
 
 
 async def cancel_sync_task(

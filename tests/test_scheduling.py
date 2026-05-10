@@ -37,6 +37,7 @@ from mindroom.scheduling import (
     scheduled_task_read_sort_key,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -66,6 +67,7 @@ def _scheduling_runtime(
     *,
     client: AsyncMock | None = None,
     config: object | None = None,
+    runtime_paths: object | None = None,
     room: object | None = None,
     conversation_cache: AsyncMock | None = None,
     event_cache: AsyncMock | None = None,
@@ -73,7 +75,7 @@ def _scheduling_runtime(
     return SchedulingRuntime(
         client=client or AsyncMock(),
         config=config or MagicMock(),
-        runtime_paths=_runtime_paths(),
+        runtime_paths=runtime_paths or _runtime_paths(),
         room=room or MagicMock(),
         conversation_cache=conversation_cache or _conversation_cache(),
         event_cache=event_cache or _event_cache(),
@@ -1644,6 +1646,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
     room.members_synced = False
+    runtime_paths = _runtime_paths()
     config = bind_runtime_paths(
         Config(
             agents={
@@ -1655,10 +1658,15 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
             },
             models={"default": ModelConfig(provider="test", id="test-model")},
         ),
-        _runtime_paths(),
+        runtime_paths,
     )
-    room.users = {f"@mindroom_router:{config.get_domain(_runtime_paths())}": MagicMock()}
-    runtime = _scheduling_runtime(client=client, config=config, room=room)
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "mindroom_router_oldns", "assistant": "mindroom_assistant_oldns"},
+    )
+    room.users = {f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}": MagicMock()}
+    runtime = _scheduling_runtime(client=client, config=config, runtime_paths=runtime_paths, room=room)
     parse_result = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -1670,8 +1678,8 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
         {
             "joined": {
-                f"@mindroom_router:{config.get_domain(_runtime_paths())}": {"display_name": "Router"},
-                f"@mindroom_assistant:{config.get_domain(_runtime_paths())}": {"display_name": "Assistant"},
+                f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}": {"display_name": "Router"},
+                f"@mindroom_assistant_oldns:{config.get_domain(runtime_paths)}": {"display_name": "Assistant"},
             },
         },
         room_id="!test:server",
@@ -1689,7 +1697,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
             runtime=runtime,
             room_id="!test:server",
             thread_id=None,
-            scheduled_by=f"@alice:{config.get_domain(_runtime_paths())}",
+            scheduled_by=f"@alice:{config.get_domain(runtime_paths)}",
             full_text="in 5 minutes check logs",
         )
 

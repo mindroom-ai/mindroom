@@ -8,10 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room
+from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.entity_resolution import (
+    configured_routable_entity_ids_for_room,
+    entity_identity_registry,
+    mindroom_user_id,
+)
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import MatrixID, active_internal_sender_ids
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 
@@ -20,9 +23,18 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.identity import MatrixID
 
 
 logger = get_logger(__name__)
+
+
+def _current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return current runtime-owned Matrix IDs trusted for authorization decisions."""
+    sender_ids = set(entity_identity_registry(config, runtime_paths).internal_sender_ids)
+    if internal_user_id := mindroom_user_id(config, runtime_paths):
+        sender_ids.add(internal_user_id)
+    return frozenset(sender_ids)
 
 
 def _room_permission_lookup_keys(
@@ -81,7 +93,7 @@ def is_authorized_sender(
 
     """
     # Always allow active internal identities owned by this runtime.
-    if sender_id in active_internal_sender_ids(config, runtime_paths):
+    if sender_id in _current_internal_sender_ids(config, runtime_paths):
         return True
 
     # Resolve bridge aliases to canonical user ID before permission checks.
@@ -136,7 +148,7 @@ def is_sender_allowed_for_agent_reply(
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    if sender_id in active_internal_sender_ids(config, runtime_paths):
+    if sender_id in _current_internal_sender_ids(config, runtime_paths):
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
@@ -155,7 +167,7 @@ def get_effective_sender_id_for_reply_permissions(
     transcriptions, scheduled task fires, etc.) and include the original sender
     in event content. For trusted internal senders, use that embedded sender.
     """
-    is_internal_mindroom_sender = sender_id in active_internal_sender_ids(config, runtime_paths)
+    is_internal_mindroom_sender = sender_id in _current_internal_sender_ids(config, runtime_paths)
     if not is_internal_mindroom_sender:
         return sender_id
     if not event_source:
@@ -178,10 +190,11 @@ def filter_agents_by_sender_permissions(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return only agents that may reply to *sender_id* per config rules."""
+    registry = entity_identity_registry(config, runtime_paths)
     result: list[MatrixID] = []
     for agent in agents:
-        name = agent.agent_name(config, runtime_paths)
-        if name and is_sender_allowed_for_agent_reply(sender_id, name, config, runtime_paths):
+        name = registry.current_entity_name_for_user_id(agent.full_id, include_router=False)
+        if name is not None and is_sender_allowed_for_agent_reply(sender_id, name, config, runtime_paths):
             result.append(agent)
     return result
 
@@ -192,12 +205,12 @@ def _available_agents_from_member_ids(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return non-router agent IDs present in one membership snapshot."""
+    registry = entity_identity_registry(config, runtime_paths)
     agents: list[MatrixID] = []
     for member_id in member_ids:
-        mid = MatrixID.parse(member_id)
-        agent_name = mid.agent_name(config, runtime_paths)
-        if agent_name and agent_name != ROUTER_AGENT_NAME:
-            agents.append(mid)
+        agent_name = registry.current_entity_name_for_user_id(member_id, include_router=False)
+        if agent_name is not None:
+            agents.append(registry.current_id(agent_name))
     return sorted(agents, key=lambda x: x.full_id)
 
 

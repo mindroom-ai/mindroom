@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.entity_resolution import configured_bot_usernames_for_room, entity_matrix_ids
+from mindroom.entity_resolution import configured_bot_usernames_for_room, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
@@ -53,7 +53,7 @@ def _load_all_persisted_invited_rooms(
 ) -> dict[str, set[str]]:
     """Load persisted invited rooms for invite-accepting entities, keyed by bot username."""
     invited_rooms_by_bot: dict[str, set[str]] = {}
-    config_ids = entity_matrix_ids(config, runtime_paths)
+    config_ids = entity_identity_registry(config, runtime_paths).current_ids
 
     for entity_name in invited_room_entity_names(config):
         if not should_persist_invited_rooms(config, entity_name):
@@ -109,6 +109,7 @@ async def _cleanup_orphaned_bots_in_room(
     # Get configured bots for this room
     configured_bots = configured_bot_usernames_for_room(config, room_id, runtime_paths)
     known_bot_usernames = _get_all_known_bot_usernames(runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
     if persisted_invited_rooms_by_bot is None:
         persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
@@ -116,7 +117,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
-        agent_name = matrix_id.agent_name(config, runtime_paths)
+        agent_name = registry.current_entity_name_for_user_id(user_id)
         is_configured_current_bot = agent_name is not None and matrix_id.username in configured_bots
 
         # Check if this is a mindroom bot and shouldn't be in this room

@@ -11,14 +11,14 @@ import pytest
 import mindroom.matrix.message_content as message_content_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_WARMUP_SUFFIX_KEY, RuntimePaths
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
     message_preview,
     resolve_visible_event_source,
     thread_root_body_preview,
 )
-from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import (
     _download_mxc_text,
     extract_and_resolve_message,
@@ -32,6 +32,11 @@ from mindroom.matrix.visible_body import (
     visible_content_from_content,
 )
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
+
+
+def _trusted_entity_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    return entity_identity_registry(config, runtime_paths).internal_sender_ids
 
 
 def _make_message_event(
@@ -442,7 +447,8 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
-        state = MatrixState()
+        persist_entity_accounts(config, runtime_paths)
+        state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
         state.save(runtime_paths=runtime_paths)
 
@@ -459,7 +465,7 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=_trusted_entity_sender_ids(config, runtime_paths),
             )
             == "hello\n\n⏳ Preparing isolated worker..."
         )
@@ -471,8 +477,9 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
-        state = MatrixState()
-        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="legacy.example.com")
+        persist_entity_accounts(config, runtime_paths, usernames={"general": "mindroom_general_oldns"})
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=config.get_domain(runtime_paths))
         state.save(runtime_paths=runtime_paths)
         current_domain = config.get_domain(runtime_paths)
 
@@ -489,7 +496,7 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=_trusted_entity_sender_ids(config, runtime_paths),
             )
             == "hello"
         )
@@ -501,9 +508,10 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
-        state = MatrixState()
+        persist_entity_accounts(config, runtime_paths, usernames={"general": "mindroom_general_v2"})
+        state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "mindroom_general_v1", "pw", domain="legacy.example.com")
-        state.add_account("agent_general", "mindroom_general_v2", "pw", domain="current.example.com")
+        state.add_account("agent_general", "mindroom_general_v2", "pw", domain=config.get_domain(runtime_paths))
         state.save(runtime_paths=runtime_paths)
 
         event_source = {
@@ -519,7 +527,7 @@ class TestResolvedMessageExtraction:
             visible_body_from_event_source(
                 event_source,
                 "hello",
-                trusted_sender_ids=active_internal_sender_ids(config, runtime_paths),
+                trusted_sender_ids=_trusted_entity_sender_ids(config, runtime_paths),
             )
             == "hello\n\n⏳ Preparing isolated worker..."
         )
@@ -532,6 +540,11 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(
+            config,
+            runtime_paths,
+            usernames={"router": "mindroom_router", "general": "mindroom_general"},
+        )
         current_domain = config.get_domain(runtime_paths)
         event_source = {
             "sender": f"@mindroom_general:{current_domain}",
@@ -561,6 +574,11 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(
+            config,
+            runtime_paths,
+            usernames={"router": "mindroom_router", "general": "mindroom_general"},
+        )
         current_domain = config.get_domain(runtime_paths)
 
         body, content = await extract_visible_edit_body(
@@ -600,6 +618,11 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(
+            config,
+            runtime_paths,
+            usernames={"router": "mindroom_router", "general": "mindroom_general"},
+        )
         current_domain = config.get_domain(runtime_paths)
         event = _make_message_event(
             body="Original root",
@@ -648,6 +671,11 @@ class TestResolvedMessageExtraction:
             test_runtime_paths(tmp_path),
         )
         runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(
+            config,
+            runtime_paths,
+            usernames={"router": "mindroom_router", "general": "mindroom_general"},
+        )
         event = _make_message_event(
             body="Original root",
             content={"msgtype": "m.text", "body": "Original root"},

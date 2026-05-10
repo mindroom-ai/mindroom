@@ -14,11 +14,12 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
 from mindroom.config.agent import AgentConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.subagents import SubAgentsTools
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.state import MatrixState
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -72,11 +73,6 @@ def _make_config(
     config.get_domain = MagicMock(return_value="localhost")
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
-    config.get_ids = MagicMock(
-        side_effect=lambda runtime_paths: {
-            agent_name: MatrixID.from_agent(agent_name, "localhost", runtime_paths) for agent_name in config.agents
-        },
-    )
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
     return config
 
@@ -99,6 +95,8 @@ def _make_context(
         return thread_id
 
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    effective_config = config or _make_config()
+    _persist_entity_accounts(effective_config, runtime_paths)
     conversation_cache = AsyncMock()
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     conversation_cache.notify_outbound_message = Mock()
@@ -110,7 +108,7 @@ def _make_context(
         resolved_thread_id=thread_id,
         requester_id=requester_id,
         client=MagicMock(),
-        config=config or _make_config(),
+        config=effective_config,
         runtime_paths=runtime_paths,
         event_cache=make_event_cache_mock(),
         conversation_cache=conversation_cache,
@@ -118,6 +116,24 @@ def _make_context(
         reply_to_event_id=None,
         storage_path=tmp_path,
     )
+
+
+def _persist_entity_accounts(
+    config: MagicMock,
+    runtime_paths: RuntimePaths,
+    *,
+    usernames: dict[str, str] | None = None,
+) -> None:
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    overrides = usernames or {}
+    for entity_name in ["router", *config.agents, *config.teams]:
+        state.add_account(
+            managed_account_key(entity_name),
+            overrides.get(entity_name, f"actual_{entity_name}"),
+            "pw",
+            domain=config.get_domain(runtime_paths),
+        )
+    state.save(runtime_paths=runtime_paths)
 
 
 def _stub_spawn_followups(
@@ -343,20 +359,15 @@ async def test_sessions_send_relays_original_sender(
 
 
 @pytest.mark.asyncio
-async def test_sessions_send_agent_id_uses_current_matrix_username(
+async def test_sessions_send_agent_id_uses_current_matrix_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """sessions_send should target the live Matrix username after account drift."""
+    """sessions_send should target the live persisted Matrix ID after account drift."""
     send_mock = AsyncMock(return_value="$evt")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
     ctx = _make_context(tmp_path)
-    ctx.config.get_ids.side_effect = None
-    ctx.config.get_ids.return_value = {
-        "openclaw": MatrixID.from_username("mindroom_openclaw", "localhost"),
-        "code": MatrixID.from_username("mindroom_code_oldns", "localhost"),
-        "research": MatrixID.from_username("mindroom_research", "localhost"),
-    }
+    _persist_entity_accounts(ctx.config, ctx.runtime_paths, usernames={"code": "actual_code_live"})
 
     with tool_runtime_context(ctx):
         payload = json.loads(await SubAgentsTools().sessions_send(message="do it", agent_id="code"))
@@ -365,7 +376,7 @@ async def test_sessions_send_agent_id_uses_current_matrix_username(
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,
-        text="@mindroom_code_oldns do it",
+        text="@actual_code_live:localhost do it",
         thread_id=ctx.thread_id,
         original_sender=ctx.requester_id,
     )
@@ -602,28 +613,23 @@ async def test_sessions_spawn_relays_original_sender(
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,
-        text="@mindroom_openclaw do thing",
+        text="@actual_openclaw:localhost do thing",
         thread_id=None,
         original_sender=ctx.requester_id,
     )
 
 
 @pytest.mark.asyncio
-async def test_sessions_spawn_uses_current_matrix_username(
+async def test_sessions_spawn_uses_current_matrix_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """sessions_spawn should target the live Matrix username after account drift."""
+    """sessions_spawn should target the live persisted Matrix ID after account drift."""
     send_mock = AsyncMock(return_value="$event")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
     _stub_spawn_followups(monkeypatch)
     ctx = _make_context(tmp_path)
-    ctx.config.get_ids.side_effect = None
-    ctx.config.get_ids.return_value = {
-        "openclaw": MatrixID.from_username("mindroom_openclaw", "localhost"),
-        "code": MatrixID.from_username("mindroom_code_oldns", "localhost"),
-        "research": MatrixID.from_username("mindroom_research", "localhost"),
-    }
+    _persist_entity_accounts(ctx.config, ctx.runtime_paths, usernames={"code": "actual_code_live"})
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -640,7 +646,7 @@ async def test_sessions_spawn_uses_current_matrix_username(
     send_mock.assert_awaited_once_with(
         ctx,
         room_id=ctx.room_id,
-        text="@mindroom_code_oldns do thing",
+        text="@actual_code_live:localhost do thing",
         thread_id=None,
         original_sender=ctx.requester_id,
     )

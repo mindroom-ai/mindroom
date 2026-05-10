@@ -23,6 +23,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -30,12 +31,19 @@ if TYPE_CHECKING:
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for team tests."""
-    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    bound_config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(
+        bound_config,
+        runtime_paths,
+        usernames={alias: f"mindroom_{alias}" for alias in ["router", *bound_config.agents, *bound_config.teams]},
+    )
+    return bound_config
 
 
 def _agent_names(ids: list[object], config: Config) -> list[str]:
     runtime_paths = runtime_paths_for(config)
-    return [mid.agent_name(config, runtime_paths) for mid in ids]
+    return [entity_name_for_id(mid, config, runtime_paths) for mid in ids]
 
 
 # Test fixtures for team agents
@@ -473,7 +481,7 @@ class TestRouterTeamFormation:
 
         # Test DM room with multiple agents and no mentions
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["agent1"],
+            agent=entity_ids(config, runtime_paths_for(config))["agent1"],
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
@@ -494,7 +502,7 @@ class TestRouterTeamFormation:
         # Test DM room with single agent (should not form team)
         room.users = {"@mindroom_agent1:localhost": None}
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["agent1"],
+            agent=entity_ids(config, runtime_paths_for(config))["agent1"],
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -533,16 +541,16 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!dm:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
         }
 
         # Thread has only calculator participating so far
-        agents_in_thread = [config.get_ids(runtime_paths_for(config))["calculator"]]
+        agents_in_thread = [entity_ids(config, runtime_paths_for(config))["calculator"]]
 
         # Should NOT form a team inside a thread with a single agent
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[],
             agents_in_thread=agents_in_thread,
             all_mentioned_in_thread=[],
@@ -581,12 +589,12 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!dm:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["mind"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["mind"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -622,15 +630,15 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!thread:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[],
             agents_in_thread=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
@@ -674,20 +682,20 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!thread:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["meta_team"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["agent_alpha"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["agent_beta"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["agent_gamma"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["meta_team"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["agent_alpha"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["agent_beta"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["agent_gamma"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["agent_gamma"],
+            agent=entity_ids(config, runtime_paths_for(config))["agent_gamma"],
             tagged_agents=[],
             agents_in_thread=[
-                config.get_ids(runtime_paths_for(config))["meta_team"],
-                config.get_ids(runtime_paths_for(config))["agent_alpha"],
-                config.get_ids(runtime_paths_for(config))["agent_beta"],
-                config.get_ids(runtime_paths_for(config))["agent_gamma"],
+                entity_ids(config, runtime_paths_for(config))["meta_team"],
+                entity_ids(config, runtime_paths_for(config))["agent_alpha"],
+                entity_ids(config, runtime_paths_for(config))["agent_beta"],
+                entity_ids(config, runtime_paths_for(config))["agent_gamma"],
             ],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
@@ -731,16 +739,16 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!thread:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             runtime_paths=runtime_paths_for(config),
             message="continue the thread",
@@ -774,14 +782,14 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -821,15 +829,15 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -868,14 +876,14 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths)["calculator"].full_id: None,
+            entity_ids(config, runtime_paths)["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths)["calculator"],
+            agent=entity_ids(config, runtime_paths)["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths)["calculator"],
-                config.get_ids(runtime_paths)["general"],
+                entity_ids(config, runtime_paths)["calculator"],
+                entity_ids(config, runtime_paths)["general"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -885,8 +893,8 @@ class TestRouterTeamFormation:
             room=room,
             use_ai_decision=False,
             available_agents_in_room=[
-                config.get_ids(runtime_paths)["calculator"],
-                config.get_ids(runtime_paths)["general"],
+                entity_ids(config, runtime_paths)["calculator"],
+                entity_ids(config, runtime_paths)["general"],
             ],
             materializable_agent_names={"calculator", "general"},
         )
@@ -916,14 +924,14 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["research"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["research"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -932,7 +940,7 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             use_ai_decision=False,
-            available_agents_in_room=[config.get_ids(runtime_paths_for(config))["calculator"]],
+            available_agents_in_room=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             materializable_agent_names={"calculator"},
         )
 
@@ -970,16 +978,16 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["mind"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["mind"].full_id: None,
         }
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["calculator"],
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["mind"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["mind"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -1016,15 +1024,15 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["alpha"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -1034,8 +1042,8 @@ class TestRouterTeamFormation:
             room=room,
             use_ai_decision=False,
             available_agents_in_room=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             materializable_agent_names={"calculator"},
         )
@@ -1045,7 +1053,7 @@ class TestRouterTeamFormation:
             "alpha": TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
             "calculator": TeamMemberStatus.ELIGIBLE,
         }
-        assert result.eligible_members == [config.get_ids(runtime_paths_for(config))["calculator"]]
+        assert result.eligible_members == [entity_ids(config, runtime_paths_for(config))["calculator"]]
 
     @pytest.mark.asyncio
     async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
@@ -1072,16 +1080,16 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["alpha"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
         }
 
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["general"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -1091,9 +1099,9 @@ class TestRouterTeamFormation:
             room=room,
             use_ai_decision=False,
             available_agents_in_room=[
-                config.get_ids(runtime_paths_for(config))["alpha"],
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["calculator"],
+                entity_ids(config, runtime_paths_for(config))["alpha"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
             materializable_agent_names={"alpha", "calculator"},
         )
@@ -1137,17 +1145,17 @@ class TestRouterTeamFormation:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["code"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["analyst"].full_id: None,
-            config.get_ids(runtime_paths_for(config))["research"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["code"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["analyst"].full_id: None,
+            entity_ids(config, runtime_paths_for(config))["research"].full_id: None,
         }
         result = await decide_team_formation(
-            agent=config.get_ids(runtime_paths_for(config))["general"],
+            agent=entity_ids(config, runtime_paths_for(config))["general"],
             tagged_agents=[
-                config.get_ids(runtime_paths_for(config))["general"],
-                config.get_ids(runtime_paths_for(config))["code"],
-                config.get_ids(runtime_paths_for(config))["analyst"],
+                entity_ids(config, runtime_paths_for(config))["general"],
+                entity_ids(config, runtime_paths_for(config))["code"],
+                entity_ids(config, runtime_paths_for(config))["analyst"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],

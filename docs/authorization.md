@@ -89,7 +89,7 @@ If you keep `mode: single_user_private` (default), managed rooms remain invite-o
 
 ### Required Service Account Permissions
 
-MindRoom applies room join rules and directory visibility using its managing account (typically the router account, e.g. `@mindroom_router:<domain>`).
+MindRoom applies room join rules and directory visibility using its managing account, typically the router entity's persisted Matrix account.
 
 - The managing account must be joined to the room.
 - The managing account must have enough power to send `m.room.join_rules`.

@@ -8,6 +8,7 @@ import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,6 +40,9 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -146,6 +150,29 @@ async def _noop_prepare_user_account(
     del self, config, update_runtime_state
 
 
+async def _noop_prepare_entity_accounts(
+    self: _MultiAgentOrchestrator,
+    config: Config,
+    entity_names: Iterable[str],
+) -> dict[str, AgentMatrixUser]:
+    del self
+    return {
+        entity_name: AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=f"@mindroom_{entity_name}:localhost",
+            display_name=(
+                "RouterAgent"
+                if entity_name == ROUTER_AGENT_NAME
+                else config.agents[entity_name].display_name
+                if entity_name in config.agents
+                else config.teams[entity_name].display_name
+            ),
+            password=TEST_PASSWORD,
+        )
+        for entity_name in entity_names
+    }
+
+
 async def _noop_sync_mcp_manager(
     self: _MultiAgentOrchestrator,
     config: Config,
@@ -212,6 +239,10 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._prepare_user_account",
         _noop_prepare_user_account,
+    )
+    monkeypatch.setattr(
+        "mindroom.orchestrator._MultiAgentOrchestrator._prepare_entity_accounts",
+        _noop_prepare_entity_accounts,
     )
     monkeypatch.setattr(
         "mindroom.orchestrator._MultiAgentOrchestrator._sync_mcp_manager",

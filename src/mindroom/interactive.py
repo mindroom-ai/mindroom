@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import nio
 
 from mindroom.config.matrix import ignore_unverified_devices_for_config
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import bound_log_context, get_logger
-from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
@@ -479,7 +479,7 @@ async def handle_reaction(
             return None
 
         # Ignore reactions from other agents
-        if is_agent_id(event.sender, config, runtime_paths):
+        if entity_identity_registry(config, runtime_paths).is_managed_user_id(event.sender):
             logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
             return None
 

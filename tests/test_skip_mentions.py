@@ -25,7 +25,6 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
@@ -37,6 +36,7 @@ from tests.conftest import (
     sync_bot_runtime_state,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -84,16 +84,18 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
             Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
             test_runtime_paths(tmp_path),
         )
+    runtime_paths = runtime_paths_for(config)
+    current_ids = entity_ids(config, runtime_paths)
     bot = AgentBot(
         agent_user=AgentMatrixUser(
             agent_name="email_agent",
             password=TEST_PASSWORD,
             display_name="Email Agent",
-            user_id="@mindroom_email_agent:localhost",
+            user_id=current_ids["email_agent"].full_id,
         ),
         storage_path=tmp_path,
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=runtime_paths,
     )
     bot.client = AsyncMock()
     bot.client.user_id = bot.agent_user.user_id
@@ -109,6 +111,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
         Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
         test_runtime_paths(tmp_path),
     )
+    persist_entity_accounts(config, runtime_paths_for(config))
     bot = _context_bot(tmp_path, config)
 
     # Mock the format_message_with_mentions to return a dict we can check
@@ -238,7 +241,7 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
     event = nio.RoomMessageText.from_dict(
         {
             "content": {
-                "body": "@mindroom_email_agent:localhost please continue",
+                "body": f"{bot.matrix_id.full_id} please continue",
                 "msgtype": "m.text",
                 "m.mentions": {
                     "user_ids": [bot.matrix_id.full_id],
@@ -259,7 +262,7 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
 
     assert context.am_i_mentioned is True
     assert [agent.full_id for agent in context.mentioned_agents] == [
-        MatrixID.from_agent("email_agent", "localhost", runtime_paths).full_id,
+        entity_ids(config, runtime_paths)["email_agent"].full_id,
     ]
 
 
@@ -270,6 +273,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
         test_runtime_paths(tmp_path),
     )
     runtime_paths = runtime_paths_for(config)
+    persist_entity_accounts(config, runtime_paths)
     before_hooks = AsyncMock()
     after_hooks = AsyncMock()
     response_hooks = MagicMock()

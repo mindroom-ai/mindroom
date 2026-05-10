@@ -22,7 +22,6 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.conftest import (
@@ -35,6 +34,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids, fixture_entity_matrix_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -115,7 +115,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     """Router must not route if the message mentions a predefined team."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
-    ids = config_with_team.get_ids(runtime_paths)
+    ids = entity_ids(config_with_team, runtime_paths)
     # Router bot setup
     # Use config-derived IDs to match domain in this environment
     router_user = AgentMatrixUser(
@@ -150,7 +150,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     """TeamBot should respond with team response when the team is mentioned."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
-    ids = config_with_team.get_ids(runtime_paths)
+    ids = entity_ids(config_with_team, runtime_paths)
     domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
@@ -160,8 +160,8 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     )
     # Convert agent names to MatrixID objects
     team_matrix_ids = [
-        MatrixID.from_agent("a1", domain, runtime_paths),
-        MatrixID.from_agent("a2", domain, runtime_paths),
+        fixture_entity_matrix_id("a1", domain, runtime_paths),
+        fixture_entity_matrix_id("a2", domain, runtime_paths),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -216,7 +216,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     """TeamBot should always schedule conversation memory storage for team replies."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
-    ids = config_with_team.get_ids(runtime_paths)
+    ids = entity_ids(config_with_team, runtime_paths)
     domain = config_with_team.get_domain(runtime_paths)
     config_with_team.memory.backend = "mem0"
     config_with_team.agents["a1"].memory_backend = "file"
@@ -229,8 +229,8 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         password="p",  # noqa: S106
     )
     team_matrix_ids = [
-        MatrixID.from_agent("a1", domain, runtime_paths),
-        MatrixID.from_agent("a2", domain, runtime_paths),
+        fixture_entity_matrix_id("a1", domain, runtime_paths),
+        fixture_entity_matrix_id("a2", domain, runtime_paths),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -304,7 +304,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     """Configured-team rejection during regeneration should edit the existing response."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
-    ids = config_with_team.get_ids(runtime_paths)
+    ids = entity_ids(config_with_team, runtime_paths)
     domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
@@ -313,8 +313,8 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         password="p",  # noqa: S106
     )
     team_matrix_ids = [
-        MatrixID.from_agent("a1", domain, runtime_paths),
-        MatrixID.from_agent("a2", domain, runtime_paths),
+        fixture_entity_matrix_id("a1", domain, runtime_paths),
+        fixture_entity_matrix_id("a2", domain, runtime_paths),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -367,7 +367,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     """TeamBot should treat a plain reply as a plain reply even if it points at a threaded event."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
-    ids = config_with_team.get_ids(runtime_paths)
+    ids = entity_ids(config_with_team, runtime_paths)
     domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
@@ -376,8 +376,8 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         password="p",  # noqa: S106
     )
     team_matrix_ids = [
-        MatrixID.from_agent("a1", domain, runtime_paths),
-        MatrixID.from_agent("a2", domain, runtime_paths),
+        fixture_entity_matrix_id("a1", domain, runtime_paths),
+        fixture_entity_matrix_id("a2", domain, runtime_paths),
     ]
     bot = TeamBot(
         agent_user=team_user,
@@ -440,7 +440,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     """
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
-    ids = config_with_team.get_ids(runtime_paths)
+    ids = entity_ids(config_with_team, runtime_paths)
     domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
@@ -450,8 +450,8 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     )
     # Convert agent names to MatrixID objects
     team_matrix_ids = [
-        MatrixID.from_agent("a1", domain, runtime_paths),
-        MatrixID.from_agent("a2", domain, runtime_paths),
+        fixture_entity_matrix_id("a1", domain, runtime_paths),
+        fixture_entity_matrix_id("a2", domain, runtime_paths),
     ]
     bot = TeamBot(
         agent_user=team_user,

@@ -208,10 +208,10 @@ When running from a source checkout, MindRoom will build the dashboard assets on
 
 In any Matrix client (Element, FluffyChat, etc):
 ```
-You: @mindroom_assistant What can you do?
+You: @assistant What can you do?
 Assistant: I can coordinate our team of specialized agents...
 
-You: @mindroom_research @mindroom_analyst What are the latest AI breakthroughs?
+You: @research @analyst What are the latest AI breakthroughs?
 [Agents collaborate to research and analyze]
 ```
 

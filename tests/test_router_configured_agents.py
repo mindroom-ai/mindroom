@@ -11,20 +11,29 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.identity_helpers import entity_names_for_ids, persist_entity_accounts
 
 
 class TestResponderCandidateSelection:
     """Test responder candidate selection logic."""
 
     @staticmethod
+    def _entity_names(config: Config, matrix_ids: list[MatrixID]) -> list[str | None]:
+        runtime_paths = runtime_paths_for(config)
+        return entity_names_for_ids(matrix_ids, config, runtime_paths)
+
+    @staticmethod
     def _bind_runtime(config: Config) -> Config:
         runtime_root = Path(tempfile.mkdtemp())
-        return bind_runtime_paths(
+        bound = bind_runtime_paths(
             config,
             orchestrator_runtime_paths(runtime_root, config_path=runtime_root / "config.yaml"),
         )
+        persist_entity_accounts(bound, runtime_paths_for(bound))
+        return bound
 
     def setup_method(self) -> None:
         """Set up test config."""
@@ -55,20 +64,20 @@ class TestResponderCandidateSelection:
         runtime_paths = runtime_paths_for(self.config)
         # Test general room - should have calculator and research
         configured = configured_routable_entity_ids_for_room(self.config, "#general:localhost", runtime_paths)
-        configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
+        configured_names = self._entity_names(self.config, configured)
         assert configured_names == ["calculator", "research"]
         assert "writer" not in configured_names
 
         # Test math room - should only have calculator
         configured = configured_routable_entity_ids_for_room(self.config, "#math:localhost", runtime_paths)
-        configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
+        configured_names = self._entity_names(self.config, configured)
         assert configured_names == ["calculator"]
         assert "research" not in configured_names
         assert "writer" not in configured_names
 
         # Test writing room - should only have writer
         configured = configured_routable_entity_ids_for_room(self.config, "#writing:localhost", runtime_paths)
-        configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
+        configured_names = self._entity_names(self.config, configured)
         assert configured_names == ["writer"]
         assert "calculator" not in configured_names
         assert "research" not in configured_names
@@ -92,7 +101,7 @@ class TestResponderCandidateSelection:
 
         # Present-room membership still exposes every joined managed entity.
         available = get_available_agents_in_room(room, self.config, runtime_paths)
-        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        available_names = self._entity_names(self.config, available)
         assert "calculator" in available_names
         assert "research" in available_names
         assert "writer" in available_names  # Present but not configured
@@ -110,7 +119,7 @@ class TestResponderCandidateSelection:
 
         # For responder decisions, use configured entities only.
         configured = configured_routable_entity_ids_for_room(self.config, room.room_id, runtime_paths)
-        configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
+        configured_names = self._entity_names(self.config, configured)
         assert configured_names == ["calculator", "research"]
         assert "writer" not in configured_names
 
@@ -141,7 +150,7 @@ class TestResponderCandidateSelection:
             runtime_paths,
         )
 
-        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        available_names = self._entity_names(self.config, available)
         assert available_names == ["calculator", "research"]
         assert "writer" not in available_names
         client.joined_members.assert_not_awaited()
@@ -150,7 +159,7 @@ class TestResponderCandidateSelection:
     async def test_responder_candidates_use_persisted_configured_entity_ids(self) -> None:
         """Configured-room responders should follow persisted Matrix username drift."""
         runtime_paths = runtime_paths_for(self.config)
-        state = MatrixState()
+        state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "mindroom_calculator_oldns", "pw", domain="localhost")
         state.save(runtime_paths=runtime_paths)
         room = MagicMock()
@@ -173,6 +182,36 @@ class TestResponderCandidateSelection:
         )
 
         assert [mid.full_id for mid in available] == ["@mindroom_calculator_oldns:localhost"]
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_configured_room_responders_use_actual_ids_without_generated_prefix(self) -> None:
+        """Configured rooms should materialize configured aliases to exact persisted Matrix IDs."""
+        runtime_paths = runtime_paths_for(self.config)
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account("agent_calculator", "actual_calculator", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+        room = MagicMock()
+        room.room_id = "#math:localhost"
+        room.members_synced = True
+        room.users = {
+            "@mindroom_calculator:localhost": None,
+            "@actual_calculator:localhost": None,
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await responder_candidate_entities_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        assert [mid.full_id for mid in available] == ["@actual_calculator:localhost"]
+        assert self._entity_names(self.config, available) == ["calculator"]
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -216,7 +255,7 @@ class TestResponderCandidateSelection:
             runtime_paths,
         )
 
-        available_names = [mid.agent_name(config, runtime_paths) for mid in available]
+        available_names = self._entity_names(config, available)
         assert available_names == ["ops"]
         assert "writer" not in available_names
         client.joined_members.assert_not_awaited()
@@ -245,9 +284,40 @@ class TestResponderCandidateSelection:
             runtime_paths,
         )
 
-        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        available_names = self._entity_names(self.config, available)
         assert available_names == ["calculator", "writer"]
         assert "router" not in available_names
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ad_hoc_room_responders_start_from_present_actual_ids(self) -> None:
+        """Ad-hoc rooms should map present actual managed IDs back to configured aliases."""
+        runtime_paths = runtime_paths_for(self.config)
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account("agent_writer", "actual_writer", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+        room = MagicMock()
+        room.room_id = "!adhoc:localhost"
+        room.members_synced = True
+        room.users = {
+            "@actual_writer:localhost": None,
+            "@mindroom_writer:localhost": None,
+            "@mindroom_router:localhost": None,
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await responder_candidate_entities_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        assert [mid.full_id for mid in available] == ["@actual_writer:localhost"]
+        assert self._entity_names(self.config, available) == ["writer"]
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -277,7 +347,7 @@ class TestResponderCandidateSelection:
             runtime_paths,
         )
 
-        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        available_names = self._entity_names(self.config, available)
         assert available_names == ["calculator"]
 
     def test_router_excludes_itself(self) -> None:
@@ -306,12 +376,12 @@ class TestResponderCandidateSelection:
         # Router should be excluded from configured entities
         runtime_paths = runtime_paths_for(config_with_router)
         configured = configured_routable_entity_ids_for_room(config_with_router, room.room_id, runtime_paths)
-        configured_names = [mid.agent_name(config_with_router, runtime_paths) for mid in configured]
+        configured_names = self._entity_names(config_with_router, configured)
         assert configured_names == ["calculator"]
         assert "router" not in configured_names
 
         # Router should be excluded from available agents in room
         available = get_available_agents_in_room(room, config_with_router, runtime_paths)
-        available_names = [mid.agent_name(config_with_router, runtime_paths) for mid in available]
+        available_names = self._entity_names(config_with_router, available)
         assert available_names == ["calculator"]
         assert "router" not in available_names

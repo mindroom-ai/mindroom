@@ -291,7 +291,7 @@ Status: complete (2026-02-03)
 - 2026-02-02: Live skills smoke test performed via Matty (hello + repo-quick-audit) against local OpenAI-compatible server on port 9292.
 - 2026-02-02: Added Phase 4 plan for skill command/dispatch; moved optional enhancements to Phase 5.
 - 2026-02-03: Switched skills to Agno `Skills` + `LocalSkills(validate=False)` with OpenClaw JSON5 metadata normalization; prompt injection now uses Agno `<skills_system>` snippet.
-- 2026-02-03: Live skill test via Matty confirmed `hello` skill usage on `@mindroom_general` (response included `SKILL_USED: hello`).
+- 2026-02-03: Live skill test via Matty confirmed `hello` skill usage through the configured `@general` alias (response included `SKILL_USED: hello`).
 - 2026-02-03: Phase 4 complete: `!skill` command wired with OpenClaw-style dispatch (raw args to tool) and tests for parsing/dispatch.
 - 2026-02-03: Added skill cache + watcher that clears cached skills when SKILL.md files change.
 - 2026-02-03: Added `requires.bins` / `requires.anyBins` gating with debug logs to surface missing binaries.

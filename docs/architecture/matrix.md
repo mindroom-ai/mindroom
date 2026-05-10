@@ -31,16 +31,11 @@ Streaming behavior is configured in `config.yaml` with `defaults.enable_streamin
 
 Each agent, team, and the router gets its own Matrix user.
 
-New accounts bootstrap with the generated `mindroom_` localpart, but persisted Matrix state is authoritative after provisioning and may contain a drifted username.
+The configured alias is the user-facing runtime handle, such as `@assistant` in chat.
 
-```
-@mindroom_assistant:example.com
-@mindroom_router:example.com  (built-in routing agent)
-```
+Provisioning may request generated bootstrap localparts such as `mindroom_assistant` or `mindroom_router`, but persisted Matrix state is authoritative after provisioning and may contain a different username.
 
-After provisioning, persisted Matrix state may replace a generated bootstrap username.
-
-For example, `@mindroom_assistant_oldns:example.com` can become the live assistant account instead of `@mindroom_assistant:example.com`.
+For example, a persisted Matrix account such as `@assistant_live:example.com` can become the live assistant account even if the original provisioning request used `mindroom_assistant`.
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
 
@@ -122,10 +117,10 @@ Agents show typing indicators while processing via `typing_indicator()` context 
 
 Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
 - `@calculator` - Stable configured agent or team key
-- `@mindroom_calculator_oldns` - Current persisted username localpart
-- `@mindroom_calculator_oldns:localhost` - Current full Matrix ID
+- `@calculator_live` - Current persisted username localpart
+- `@calculator_live:localhost` - Current full Matrix ID
 
-Generated bootstrap IDs such as `@mindroom_calculator:localhost` are only valid before persisted state records a different current username.
+Generated bootstrap IDs such as `@mindroom_calculator:localhost` are provisioning details and should not be taught as runtime handles once persisted state records the current username.
 
 Returns content with `m.mentions` and `formatted_body` containing clickable links.
 
@@ -155,19 +150,19 @@ This runs automatically — no manual intervention is needed.
 
 ## Identity Management
 
-The `MatrixID` class handles Matrix user ID parsing and agent identification:
+The `MatrixID` class handles Matrix user ID parsing.
+Runtime entity resolution uses the persisted identity registry, keyed by configured alias:
 
 ```python
-mid = MatrixID.parse("@mindroom_assistant:example.com")
-mid.username  # "mindroom_assistant"
+mid = MatrixID.parse("@assistant_live:example.com")
+mid.username  # "assistant_live"
 mid.domain    # "example.com"
-mid.full_id   # "@mindroom_assistant:example.com"
+mid.full_id   # "@assistant_live:example.com"
 
-# Create the bootstrap Matrix ID from an agent name
-mid = MatrixID.from_agent("assistant", "example.com", runtime_paths)
-
-# Extract agent name from the current persisted Matrix ID
-agent_name = extract_agent_name("@mindroom_code_oldns:localhost", config, runtime_paths)
+# Resolve the current persisted Matrix ID for a configured alias
+registry = entity_identity_registry(config, runtime_paths)
+assistant_id = registry.current_id("assistant")
+agent_name = registry.current_entity_name_for_user_id(assistant_id.full_id)
 ```
 
 ## Root Space

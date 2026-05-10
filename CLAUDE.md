@@ -364,7 +364,7 @@ uv run --python 3.13 matty rooms
 7) Matty smoke test (agent reply in a thread)
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
-uv run --python 3.13 matty send "Lobby" "Hello @mindroom_general:localhost please reply with pong."
+uv run --python 3.13 matty send "Lobby" "Hello @general please reply with pong."
 
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
 uv run --python 3.13 matty threads "Lobby"
@@ -534,10 +534,10 @@ matty messages "room_name" --limit 20  # or: matty m "room_name" -l 20
 #### 3. Send Messages to Agents
 ```bash
 # Direct message
-matty send "room_name" "Hello @mindroom_assistant!"
+matty send "room_name" "Hello @assistant!"
 
 # Multiple agent mentions
-matty send "room_name" "@mindroom_research @mindroom_analyst analyze this topic"
+matty send "room_name" "@research @analyst analyze this topic"
 ```
 
 #### 4. Work with Threads (Agents respond in threads)
@@ -552,7 +552,7 @@ matty thread "room_name" t1  # View thread with ID t1
 matty thread-start "room_name" m2 "Starting discussion with agents"
 
 # Reply in thread
-matty thread-reply "room_name" t1 "@mindroom_assistant continue"
+matty thread-reply "room_name" t1 "@assistant continue"
 ```
 
 ### Typical Agent Testing Workflow
@@ -561,14 +561,14 @@ matty thread-reply "room_name" t1 "@mindroom_assistant continue"
 matty rooms
 
 # 2. Send a message mentioning agents
-matty send "test_room" "@mindroom_assistant What can you do?"
+matty send "test_room" "@assistant What can you do?"
 
 # 3. Check for agent response (agents respond in threads)
 matty threads "test_room"
 matty thread "test_room" t1  # View the thread where agent responded
 
 # 4. Continue conversation in thread
-matty thread-reply "test_room" t1 "@mindroom_research find information about X"
+matty thread-reply "test_room" t1 "@research find information about X"
 ```
 
 ### Important Notes

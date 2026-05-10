@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from tests.conftest import make_event_cache_mock
+from tests.identity_helpers import persist_entity_accounts
 
 WELCOME_QUICK_COMMAND_LINES = [
     "\u2022 `!hi` - Show this welcome message again",
@@ -313,17 +314,20 @@ def test_compact_command_entries_characterize_welcome_subset() -> None:
 async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
     """The welcome quick commands should match the parser-owned compact docs."""
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = Config()
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router_oldns"})
     welcome_message = await generate_welcome_message_for_room(
         None,
         room,
         "@alice:localhost",
-        Config(),
-        _test_runtime_paths(tmp_path),
+        config,
+        runtime_paths,
     )
 
     quick_command_block = "\u26a1 **Quick commands:**\n" + "\n".join(WELCOME_QUICK_COMMAND_LINES)
     assert quick_command_block in welcome_message
-    assert "using a listed username or configured name" in welcome_message
+    assert "using its configured alias" in welcome_message
     assert "@mindroom_assistant" not in welcome_message
 
 
@@ -331,26 +335,37 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
 async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
     """Rooms configured through teams should advertise those team mention targets."""
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    config = Config(
+        agents={"calculator": AgentConfig(display_name="Calculator")},
+        teams={
+            "ops": TeamConfig(
+                display_name="Ops Team",
+                role="Operations escalation team",
+                agents=["calculator"],
+                rooms=["!room:localhost"],
+            ),
+        },
+    )
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={
+            "router": "mindroom_router_oldns",
+            "calculator": "mindroom_calculator_oldns",
+            "ops": "mindroom_ops_oldns",
+        },
+    )
     welcome_message = await generate_welcome_message_for_room(
         None,
         room,
         "@alice:localhost",
-        Config(
-            agents={"calculator": AgentConfig(display_name="Calculator")},
-            teams={
-                "ops": TeamConfig(
-                    display_name="Ops Team",
-                    role="Operations escalation team",
-                    agents=["calculator"],
-                    rooms=["!room:localhost"],
-                ),
-            },
-        ),
-        _test_runtime_paths(tmp_path),
+        config,
+        runtime_paths,
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
-    assert "\u2022 **@mindroom_ops**: Operations escalation team (Team of 1 agent)" in welcome_message
+    assert "\u2022 **@ops**: Operations escalation team (Team of 1 agent)" in welcome_message
 
 
 @pytest.mark.asyncio
@@ -364,8 +379,14 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
             ),
         },
     )
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "mindroom_router_oldns", "code": "mindroom_code_oldns"},
+    )
     room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
-    room.add_member("@mindroom_code:localhost", "Code", None)
+    room.add_member("@mindroom_code_oldns:localhost", "Code", None)
     room.members_synced = True
     send_response = AsyncMock(return_value="$welcome")
     command = Command(type=CommandType.HI, args={}, raw_text="!hi")
@@ -378,7 +399,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
     context = CommandHandlerContext(
         client=AsyncMock(),
         config=config,
-        runtime_paths=_test_runtime_paths(tmp_path),
+        runtime_paths=runtime_paths,
         logger=MagicMock(),
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
@@ -397,7 +418,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
 
     response_text = send_response.await_args.args[0]
     assert "\U0001f9e0 **Available agents and teams in this room:**" in response_text
-    assert "\u2022 **@mindroom_code**: Writes code" in response_text
+    assert "\u2022 **@code**: Writes code" in response_text
     context.client.joined_members.assert_not_awaited()
 
 

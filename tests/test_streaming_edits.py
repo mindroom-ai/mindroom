@@ -24,6 +24,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -61,6 +62,7 @@ def setup_test_bot(
             runtime_paths_for(config)
         except KeyError:
             config = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(config, runtime_paths_for(config))
 
     bot = AgentBot(
         agent,
@@ -340,11 +342,8 @@ class TestStreamingEdits:
         }
 
         # Process edit - calculator should STILL NOT respond (it's an edit from an agent)
-        with patch("mindroom.bot.extract_agent_name") as mock_extract:
-            # Make extract_agent_name return 'helper' for the sender
-            mock_extract.return_value = "helper"
-            await bot._on_message(mock_room, edit_event)
-            await drain_coalescing(bot)
+        await bot._on_message(mock_room, edit_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 

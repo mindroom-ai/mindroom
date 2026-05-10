@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -14,20 +16,26 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.state import MatrixRoom, MatrixState
+from tests.identity_helpers import entity_ids, entity_names_for_ids, persist_entity_accounts
+
+if TYPE_CHECKING:
+    from mindroom.matrix.identity import MatrixID
 
 _BOUND_RUNTIME_PATHS: dict[int, constants.RuntimePaths] = {}
 
 
 def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
+    runtime_root = path.parent if path is not None else Path(tempfile.mkdtemp())
     runtime_paths = constants.resolve_runtime_paths(
-        config_path=(path or Path("config.yaml")),
-        storage_path=Path("mindroom_data"),
+        config_path=(path or runtime_root / "config.yaml"),
+        storage_path=runtime_root / "mindroom_data",
         process_env={
             "MATRIX_HOMESERVER": "https://example.com",
             "MINDROOM_NAMESPACE": "",
         },
     )
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
 
@@ -38,6 +46,11 @@ def _runtime_paths_for(config: Config) -> constants.RuntimePaths:
         msg = "Test config is missing bound RuntimePaths"
         raise KeyError(msg)
     return runtime_paths
+
+
+def _entity_names(config: Config, matrix_ids: list[MatrixID]) -> list[str | None]:
+    runtime_paths = _runtime_paths_for(config)
+    return entity_names_for_ids(matrix_ids, config, runtime_paths)
 
 
 def is_authorized_sender(
@@ -95,6 +108,7 @@ def _isolated_config(tmp_path: Path, **kwargs: object) -> Config:
         },
     )
     bound = Config.validate_with_runtime(Config(**kwargs).authored_model_dump(), runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
 
@@ -104,7 +118,7 @@ async def responder_candidate_entities_for_room(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
-) -> list[mindroom.authorization.MatrixID]:
+) -> list[MatrixID]:
     """Run responder candidate resolution with the test config's bound runtime context."""
     return await mindroom.authorization.responder_candidate_entities_for_room(
         client,
@@ -186,7 +200,7 @@ def test_no_restrictions_only_allows_internal_user(
 
     # Agents should still be allowed
     assert is_authorized_sender(
-        mock_config_no_restrictions.get_ids(_runtime_paths_for(mock_config_no_restrictions))["assistant"].full_id,
+        entity_ids(mock_config_no_restrictions, _runtime_paths_for(mock_config_no_restrictions))["assistant"].full_id,
         mock_config_no_restrictions,
         "!test:server",
     )
@@ -215,12 +229,14 @@ def test_agents_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that configured agents are always allowed regardless of authorized_users."""
     # Configured agents should be allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["assistant"].full_id,
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
+            "assistant"
+        ].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["analyst"].full_id,
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))["analyst"].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -233,7 +249,9 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that configured teams are always allowed regardless of authorized_users."""
     # Configured team should be allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["test_team"].full_id,
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
+            "test_team"
+        ].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -276,7 +294,7 @@ async def test_responder_candidates_refresh_empty_cached_ad_hoc_room() -> None:
         config,
     )
 
-    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    assert _entity_names(config, available) == ["assistant"]
     client.joined_members.assert_awaited_once_with("!test:server")
 
 
@@ -360,7 +378,7 @@ async def test_responder_candidates_refresh_partial_unsynced_ad_hoc_cache() -> N
         config,
     )
 
-    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == [
+    assert _entity_names(config, available) == [
         "assistant",
         "general",
     ]
@@ -397,7 +415,7 @@ async def test_responder_candidates_fall_back_to_cached_visible_agents_on_refres
         config,
     )
 
-    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    assert _entity_names(config, available) == ["assistant"]
     assert room.members_synced is False
     client.joined_members.assert_awaited_once_with("!test:server")
 
@@ -440,8 +458,8 @@ async def test_responder_candidates_update_room_cache_after_refresh() -> None:
         config,
     )
 
-    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in first] == ["assistant"]
-    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in second] == ["assistant"]
+    assert _entity_names(config, first) == ["assistant"]
+    assert _entity_names(config, second) == ["assistant"]
     assert "@mindroom_assistant:example.com" in room.users
     client.joined_members.assert_awaited_once_with("!test:server")
 
@@ -480,7 +498,7 @@ async def test_responder_candidates_preserve_invited_members() -> None:
         config,
     )
 
-    assert [agent.agent_name(config, _runtime_paths_for(config)) for agent in available] == ["assistant"]
+    assert _entity_names(config, available) == ["assistant"]
     assert "@guest:example.com" in room.users
     assert "@guest:example.com" in room.invited_users
 
@@ -489,7 +507,7 @@ def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that the router agent is always allowed."""
     # Router should always be allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))[
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
             ROUTER_AGENT_NAME
         ].full_id,
         mock_config_with_restrictions,
@@ -555,21 +573,25 @@ def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config) ->
 
     # Agents - allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["assistant"].full_id,
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
+            "assistant"
+        ].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
 
     # Teams - allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["test_team"].full_id,
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
+            "test_team"
+        ].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
 
     # Router - allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))[
+        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
             ROUTER_AGENT_NAME
         ].full_id,
         mock_config_with_restrictions,
@@ -1037,7 +1059,7 @@ def test_effective_sender_uses_voice_original_sender_for_router_messages() -> No
     }
 
     assert get_effective_sender_id_for_reply_permissions(
-        config.get_ids(_runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
+        entity_ids(config, _runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
         event_source,
         config,
     ) == ("@alice:example.com")
@@ -1092,7 +1114,7 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
     }
 
     assert get_effective_sender_id_for_reply_permissions(
-        config.get_ids(_runtime_paths_for(config))["assistant"].full_id,
+        entity_ids(config, _runtime_paths_for(config))["assistant"].full_id,
         event_source,
         config,
     ) == ("@alice:example.com")
@@ -1136,7 +1158,7 @@ def test_effective_sender_does_not_trust_removed_persisted_internal_accounts(tmp
         authorization={"default_room_access": True},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1171,7 +1193,7 @@ def test_effective_sender_trusts_persisted_current_internal_accounts(tmp_path: P
         authorization={"default_room_access": True},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1209,7 +1231,7 @@ def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp
         },
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1230,7 +1252,7 @@ def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_pat
         authorization={"default_room_access": False},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1254,7 +1276,7 @@ def test_reply_permissions_do_not_trust_configured_id_after_username_drift(tmp_p
         },
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1275,10 +1297,32 @@ def test_sender_authorization_does_not_trust_configured_id_after_username_drift(
         authorization={"default_room_access": False},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
+    assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
+
+
+def test_sender_authorization_uses_actual_persisted_id_without_generated_fallback(tmp_path: Path) -> None:
+    """Sender classification should trust only the persisted actual Matrix ID after username drift."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": False},
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_assistant", "actual_assistant", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_authorized_sender("@actual_assistant:example.com", config, "!room:example.com") is True
     assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
 
 
@@ -1296,7 +1340,7 @@ def test_effective_sender_ignores_persisted_current_internal_accounts_with_domai
         authorization={"default_room_access": True},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="legacy.example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1331,7 +1375,7 @@ def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp
         authorization={"default_room_access": True},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1356,7 +1400,7 @@ def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_p
         authorization={"default_room_access": True},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1371,7 +1415,7 @@ def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_p
     )
 
     assert [candidate.full_id for candidate in candidates] == ["@mindroom_assistant_oldns:example.com"]
-    assert [candidate.agent_name(config, runtime_paths) for candidate in candidates] == ["assistant"]
+    assert _entity_names(config, candidates) == ["assistant"]
 
 
 def test_configured_team_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:
@@ -1395,7 +1439,7 @@ def test_configured_team_responder_candidates_use_persisted_current_account_ids(
         authorization={"default_room_access": True},
     )
     runtime_paths = _runtime_paths_for(config)
-    state = MatrixState()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_ops", "mindroom_ops_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
@@ -1410,7 +1454,7 @@ def test_configured_team_responder_candidates_use_persisted_current_account_ids(
     )
 
     assert [candidate.full_id for candidate in candidates] == ["@mindroom_ops_oldns:example.com"]
-    assert [candidate.agent_name(config, runtime_paths) for candidate in candidates] == ["ops"]
+    assert _entity_names(config, candidates) == ["ops"]
 
 
 def test_resolve_alias_method() -> None:
@@ -1441,5 +1485,6 @@ def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
     storage_path = tmp_path / "mindroom_data"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
     bound = Config.validate_with_runtime(_config(**config_data).authored_model_dump(), runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound

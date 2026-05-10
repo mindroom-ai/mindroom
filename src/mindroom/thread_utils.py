@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.identity import MatrixID, extract_agent_name
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.visible_body import visible_content_from_content
 
 if TYPE_CHECKING:
@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.identity import MatrixID
+
+
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).
 # Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
@@ -45,7 +48,8 @@ def _extract_mentioned_user_ids(content: dict[str, object]) -> list[str]:
 
 def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
-    return bool(extract_agent_name(sender, config, runtime_paths)) or sender in config.bot_accounts
+    registry = entity_identity_registry(config, runtime_paths)
+    return registry.current_entity_name_for_user_id(sender) is not None or sender in config.bot_accounts
 
 
 def is_router_only_agent_mention(
@@ -59,7 +63,8 @@ def is_router_only_agent_mention(
     if has_non_agent_mentions or not mentioned_agents:
         return False
 
-    mentioned_agent_names = {agent.agent_name(config, runtime_paths) for agent in mentioned_agents}
+    registry = entity_identity_registry(config, runtime_paths)
+    mentioned_agent_names = {registry.current_entity_name_for_user_id(agent.full_id) for agent in mentioned_agents}
     return mentioned_agent_names == {ROUTER_AGENT_NAME}
 
 
@@ -112,23 +117,19 @@ def get_agents_in_thread(
     """
     agents: list[MatrixID] = []
     seen_ids: set[str] = set()
+    registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
         sender = msg.sender
-        agent_name = extract_agent_name(sender, config, runtime_paths)
+        agent_name = registry.current_entity_name_for_user_id(sender, include_router=False)
 
         # Skip router agent and invalid senders
-        if not agent_name or agent_name == ROUTER_AGENT_NAME:
+        if agent_name is None:
             continue
 
         if sender not in seen_ids:
-            try:
-                matrix_id = MatrixID.parse(sender)
-                agents.append(matrix_id)
-                seen_ids.add(sender)
-            except ValueError:
-                # Skip invalid Matrix IDs
-                pass
+            agents.append(registry.current_id(agent_name))
+            seen_ids.add(sender)
 
     return agents
 
@@ -139,11 +140,12 @@ def _agents_from_user_ids(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
+    registry = entity_identity_registry(config, runtime_paths)
     agents: list[MatrixID] = []
     for user_id in user_ids:
-        mid = MatrixID.parse(user_id)
-        if mid.agent_name(config, runtime_paths):
-            agents.append(mid)
+        agent_name = registry.current_entity_name_for_user_id(user_id)
+        if agent_name is not None:
+            agents.append(registry.current_id(agent_name))
     return agents
 
 
@@ -258,7 +260,7 @@ def should_agent_respond(  # noqa: PLR0911
             config,
             runtime_paths,
         )
-    agent_matrix_id = config.get_ids(runtime_paths)[agent_name]
+    agent_matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name)
     available_agent_ids = {agent.full_id for agent in available_agents}
     if agent_matrix_id.full_id not in available_agent_ids:
         return False

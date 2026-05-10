@@ -16,12 +16,25 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.matrix.identity import managed_account_key
+from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for voice handler tests."""
-    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+    bound = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+    _persist_entity_accounts(bound)
+    return bound
+
+
+def _persist_entity_accounts(config: Config) -> None:
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    domain = config.get_domain(runtime_paths)
+    for entity_name in ["router", *config.agents, *config.teams]:
+        state.add_account(managed_account_key(entity_name), f"actual_{entity_name}", "pw", domain=domain)
+    state.save(runtime_paths=runtime_paths)
 
 
 async def _handle_voice_message(
@@ -99,8 +112,8 @@ class TestVoiceHandler:
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
 
-    def test_sanitize_unavailable_mentions_uses_canonical_prefixed_name_precedence(self) -> None:
-        """Voice mention sanitizing should match Matrix mention alias precedence."""
+    def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
+        """Voice mention sanitizing should match exact Matrix mention aliases."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -117,7 +130,7 @@ class TestVoiceHandler:
             runtime_paths=runtime_paths_for(config),
         )
 
-        assert sanitized == "@mindroom_foo help mindroom_mindroom_foo"
+        assert sanitized == "mindroom_foo help @mindroom_mindroom_foo"
 
     @pytest.mark.asyncio
     async def test_voice_handler_ignores_when_disabled(self) -> None:
@@ -181,8 +194,8 @@ class TestVoiceHandler:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!voice:localhost"
         room.users = {
-            f"@mindroom_openclaw:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
-            f"@mindroom_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
+            f"@actual_openclaw:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
+            f"@actual_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
             "@alice:example.com": MagicMock(),
         }
         room.members_synced = True

@@ -52,6 +52,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids
 
 _VISIBLE_MESSAGE_IDS = count(1)
 
@@ -77,7 +78,7 @@ def _get_unseen_messages(
     current_event_id: str | None,
     active_event_ids: set[str],
 ) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
-    response_sender_id = config.get_ids(runtime_paths).get(agent_name)
+    response_sender_id = entity_ids(config, runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
     return _get_unseen_messages_for_sender(
         thread_history,
@@ -346,7 +347,7 @@ class TestUnseenMessagesPartialReplies:
         """Interrupted self replies should no longer be reconstructed through unseen Matrix context."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         thread_history = [
             _make_visible_message(
@@ -376,7 +377,7 @@ class TestUnseenMessagesPartialReplies:
         """Inject still-streaming self replies with the non-duplication warning header."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         thread_history = [
             _make_visible_message(event_id="e1", sender="@user:localhost", body="Hello"),
@@ -410,7 +411,7 @@ class TestUnseenMessagesPartialReplies:
         """Full-thread fallback replay should not reintroduce synthetic notices or stale partial replies."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         sanitized = _sanitize_thread_history_for_replay(
             [
@@ -446,7 +447,7 @@ class TestUnseenMessagesPartialReplies:
         """Interrupted self replies should not trigger unseen-context continuation headers anymore."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         thread_history = [
             _make_visible_message(
@@ -476,7 +477,7 @@ class TestUnseenMessagesPartialReplies:
         """Keep live self partial replies out of seen metadata until they become terminal."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
@@ -504,7 +505,7 @@ class TestUnseenMessagesPartialReplies:
         """After restart, stale self-streaming output should not be reconstructed from Matrix history."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
@@ -533,7 +534,7 @@ class TestUnseenMessagesPartialReplies:
         """Do not inject placeholder-only self replies as meaningful unseen context."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         unseen, partial_reply_kinds, _in_progress_event_ids = _get_unseen_messages(
             [
@@ -560,7 +561,7 @@ class TestUnseenMessagesPartialReplies:
         """Interrupted self replies should not participate in unseen-context seen-ID bookkeeping."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         initial_unseen, initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
@@ -620,7 +621,7 @@ class TestUnseenMessagesPartialReplies:
         """Self partial replies should stay out of unseen context once interrupted replay is persisted elsewhere."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
-        agent_id = config.get_ids(runtime_paths)["helper"].full_id
+        agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
         initial_unseen, _initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [

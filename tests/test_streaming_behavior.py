@@ -83,6 +83,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -146,6 +147,7 @@ def _make_bot_with_shared_knowledge(
         ),
         runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths_for(config))
     bot = AgentBot(
         agent,
         tmp_path,
@@ -228,6 +230,7 @@ class TestStreamingBehavior:
             ),
             runtime_paths,
         )
+        persist_entity_accounts(self.config, runtime_paths_for(self.config))
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
@@ -357,16 +360,10 @@ class TestStreamingBehavior:
         with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
             mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
 
-            # Debug: let's see what happens
             calc_bot.logger.info("processing_initial_message", body=initial_event.body)
 
-            # Add more logging to understand the flow
-            with patch("mindroom.bot.extract_agent_name") as mock_extract:
-                # Make extract_agent_name return 'helper' for the sender
-                mock_extract.return_value = "helper"
-
-                await calc_bot._on_message(mock_room, initial_event)
-                await drain_coalescing(calc_bot)
+            await calc_bot._on_message(mock_room, initial_event)
+            await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0  # Calculator didn't process anything
@@ -387,11 +384,8 @@ class TestStreamingBehavior:
         # Process final message - calculator SHOULD respond now
         with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
             mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
-            with patch("mindroom.bot.extract_agent_name") as mock_extract:
-                # Make extract_agent_name return 'helper' for the sender
-                mock_extract.return_value = "helper"
-                await calc_bot._on_message(mock_room, final_event)
-                await drain_coalescing(calc_bot)
+            await calc_bot._on_message(mock_room, final_event)
+            await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
@@ -4566,6 +4560,7 @@ class TestStreamingConfig:
         )
         runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         config = bind_runtime_paths(config, runtime_paths)
+        persist_entity_accounts(config, runtime_paths)
 
         mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()

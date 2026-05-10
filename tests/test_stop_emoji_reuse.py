@@ -13,12 +13,12 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
 async def _drain_stop_cleanup(stop_manager: StopManager) -> None:
@@ -27,43 +27,54 @@ async def _drain_stop_cleanup(stop_manager: StopManager) -> None:
         await asyncio.gather(*list(stop_manager.cleanup_tasks), return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
-    """Test that 🛑 reaction only acts as stop button during message generation."""
-    # Create a mock agent user
-    agent_user = AgentMatrixUser(
+def _stop_test_config(tmp_path: Path, *, include_helper: bool = False) -> Config:
+    agents: dict[str, dict[str, object]] = {
+        "test_agent": {"display_name": "Test Agent", "rooms": ["!test:example.com"]},
+    }
+    if include_helper:
+        agents["helper"] = {"display_name": "Helper Agent", "rooms": ["!test:example.com"]}
+    config = bind_runtime_paths(
+        Config(agents=agents, authorization={"default_room_access": True}),
+        test_runtime_paths(tmp_path),
+    )
+    persist_entity_accounts(config, runtime_paths_for(config))
+    return config
+
+
+def _stop_test_agent_user(config: Config) -> AgentMatrixUser:
+    matrix_id = entity_ids(config, runtime_paths_for(config))["test_agent"]
+    return AgentMatrixUser(
         agent_name="test_agent",
-        user_id="@test_agent:example.com",
+        user_id=matrix_id.full_id,
         display_name="Test Agent",
         password="test_password",  # noqa: S106
     )
 
-    # Create the bot with a config that has empty reply permissions
-    config = MagicMock()
-    config.authorization.agent_reply_permissions = {}
+
+@pytest.mark.asyncio
+async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
+    """Test that 🛑 reaction only acts as stop button during message generation."""
+    config = _stop_test_config(tmp_path)
+    agent_user = _stop_test_agent_user(config)
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
     # Set up the bot with necessary mocks
     bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
     bot._send_response = AsyncMock(return_value="$stopping:example.com")
     bot._generate_response = AsyncMock(return_value="$response:example.com")
 
     # Create a room and reaction event
-    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 
     # Create a 🛑 reaction event
     reaction_event = nio.ReactionEvent.from_dict(
@@ -119,35 +130,24 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_present(tmp_path: Path) -> None:
     """Tracked Agno runs should hard-cancel immediately and clean up Agno state in the background."""
-    agent_user = AgentMatrixUser(
-        agent_name="test_agent",
-        user_id="@test_agent:example.com",
-        display_name="Test Agent",
-        password="test_password",  # noqa: S106
-    )
-
-    config = MagicMock()
-    config.authorization.agent_reply_permissions = {}
+    config = _stop_test_config(tmp_path)
+    agent_user = _stop_test_agent_user(config)
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
     bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
     bot._send_response = AsyncMock(return_value="$stopping:example.com")
 
-    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
     reaction_event = nio.ReactionEvent.from_dict(
         {
             "content": {
@@ -190,35 +190,24 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
 @pytest.mark.asyncio
 async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> None:
     """Threaded stop acknowledgements should preserve the tracked thread target."""
-    agent_user = AgentMatrixUser(
-        agent_name="test_agent",
-        user_id="@test_agent:example.com",
-        display_name="Test Agent",
-        password="test_password",  # noqa: S106
-    )
-
-    config = MagicMock()
-    config.authorization.agent_reply_permissions = {}
+    config = _stop_test_config(tmp_path)
+    agent_user = _stop_test_agent_user(config)
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
     bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
     bot._send_response = AsyncMock(return_value="$stopping:example.com")
 
-    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
     reaction_event = nio.ReactionEvent.from_dict(
         {
             "content": {
@@ -638,37 +627,41 @@ async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -
 @pytest.mark.asyncio
 async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
     """Test that 🛑 reactions from agents fall through to other handlers."""
-    # Create a mock agent user
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": {"display_name": "Test Agent", "rooms": ["!test:localhost"]},
+                "helper": {"display_name": "Helper Agent", "rooms": ["!test:localhost"]},
+            },
+            authorization={"default_room_access": True},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    persist_entity_accounts(config, runtime_paths_for(config))
+    ids = entity_ids(config, runtime_paths_for(config))
+
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
-        user_id="@test_agent:example.com",
+        user_id=ids["test_agent"].full_id,
         display_name="Test Agent",
         password="test_password",  # noqa: S106
     )
-
-    # Create the bot with a config that has empty reply permissions
-    config = MagicMock()
-    config.authorization.agent_reply_permissions = {}
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
-        runtime_paths=resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path,
-            process_env={},
-        ),
-        rooms=["!test:example.com"],
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
     )
 
     # Set up the bot
     bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@test_agent:example.com"
+    bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
 
-    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)
 
     # Create a 🛑 reaction from ANOTHER AGENT
     reaction_event = nio.ReactionEvent.from_dict(
@@ -681,16 +674,14 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
                 },
             },
             "event_id": "$reaction:example.com",
-            "sender": "@mindroom_helper:example.com",  # Another agent
+            "sender": ids["helper"].full_id,
             "origin_server_ts": 1000000,
             "type": "m.reaction",
-            "room_id": "!test:example.com",
+            "room_id": "!test:localhost",
         },
     )
 
-    # Mock extract_agent_name to return that this is an agent
     with (
-        patch("mindroom.bot.extract_agent_name", return_value="helper"),
         patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction,
         patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
     ):
@@ -718,13 +709,6 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> None:
     """Disallowed senders must not trigger stop or send confirmation via 🛑 reaction."""
-    agent_user = AgentMatrixUser(
-        agent_name="test_agent",
-        user_id="@mindroom_test_agent:example.com",
-        display_name="Test Agent",
-        password="test_password",  # noqa: S106
-    )
-
     config = bind_runtime_paths(
         Config(
             agents={
@@ -740,6 +724,8 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
         ),
         orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
+    persist_entity_accounts(config, runtime_paths_for(config))
+    agent_user = _stop_test_agent_user(config)
 
     bot = AgentBot(
         agent_user=agent_user,
@@ -749,11 +735,11 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
         rooms=["!test:example.com"],
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.user_id = "@mindroom_test_agent:example.com"
+    bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
 
-    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 
     # Track a message as being generated
     task = MagicMock()

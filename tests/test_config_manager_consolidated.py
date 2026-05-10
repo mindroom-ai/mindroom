@@ -23,6 +23,7 @@ from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
+from tests.identity_helpers import persist_entity_accounts
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -169,12 +170,22 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
         cm = _config_manager(config_path)
+        persist_entity_accounts(
+            config,
+            cm.runtime_paths,
+            usernames={
+                "router": "mindroom_router_oldns",
+                "present": "mindroom_present_oldns",
+                "also_present": "mindroom_also_present_oldns",
+                "elsewhere": "mindroom_elsewhere_oldns",
+            },
+        )
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
-            config.get_ids(cm.runtime_paths)["present"].full_id: None,
-            config.get_ids(cm.runtime_paths)["also_present"].full_id: None,
+            "@mindroom_present_oldns:localhost": None,
+            "@mindroom_also_present_oldns:localhost": None,
         }
         runtime_context = ToolRuntimeContext(
             agent_name="present",

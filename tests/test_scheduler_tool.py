@@ -12,14 +12,17 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
-from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
 def _bind_runtime_paths(config: Config) -> Config:
-    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    bound = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
+    return bound
 
 
 def _make_context(config: Config, *, matrix_admin: object | None = None) -> ToolRuntimeContext:
@@ -49,11 +52,7 @@ def test_extract_mentioned_agents_from_text() -> None:
         config,
         runtime_paths_for(config),
     )
-    expected_agent = MatrixID.from_agent(
-        "general",
-        config.get_domain(runtime_paths_for(config)),
-        runtime_paths_for(config),
-    )
+    expected_agent = entity_ids(config, runtime_paths_for(config))["general"]
     assert result == [expected_agent]
 
 

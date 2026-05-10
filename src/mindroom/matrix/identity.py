@@ -6,14 +6,12 @@ import ipaddress
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
-from mindroom import matrix_identifiers
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.matrix.state import managed_account_usernames
+from mindroom.matrix.state import matrix_state_for_runtime
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 _CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
@@ -21,9 +19,6 @@ _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 
 __all__ = [
     "MatrixID",
-    "active_internal_sender_ids",
-    "extract_agent_name",
-    "is_agent_id",
     "managed_account_key",
     "managed_account_user_id",
     "parse_current_matrix_user_id",
@@ -39,22 +34,10 @@ class MatrixID:
     username: str
     domain: str
 
-    AGENT_PREFIX: ClassVar[str] = matrix_identifiers.AGENT_USERNAME_PREFIX
-
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
         """Parse a Matrix ID like @mindroom_calculator:localhost."""
         return _parse_matrix_id(matrix_id)
-
-    @classmethod
-    def from_agent(
-        cls,
-        agent_name: str,
-        domain: str,
-        runtime_paths: RuntimePaths,
-    ) -> MatrixID:
-        """Create a MatrixID for an agent."""
-        return cls(username=matrix_identifiers.agent_username_localpart(agent_name, runtime_paths), domain=domain)
 
     @classmethod
     def from_username(cls, username: str, domain: str) -> MatrixID:
@@ -65,25 +48,6 @@ class MatrixID:
     def full_id(self) -> str:
         """Get the full Matrix ID like @mindroom_calculator:localhost."""
         return f"@{self.username}:{self.domain}"
-
-    def agent_name(self, config: Config, runtime_paths: RuntimePaths) -> str | None:
-        """Extract agent name if this is one current live managed agent-like ID.
-
-        Live internal sender trust only applies on the current runtime domain.
-        Persisted current managed usernames are recognised there, even if they drift.
-        """
-        if self.domain != config.get_domain(runtime_paths) or not self.username.startswith(self.AGENT_PREFIX):
-            return None
-
-        persisted_usernames = managed_account_usernames(runtime_paths)
-        for account_key, active_name in _active_managed_agent_account_names(config).items():
-            expected_username = persisted_usernames.get(account_key) or matrix_identifiers.agent_username_localpart(
-                active_name,
-                runtime_paths,
-            )
-            if expected_username == self.username:
-                return active_name
-        return None
 
     def __str__(self) -> str:
         """Return the full Matrix ID string representation."""
@@ -243,25 +207,6 @@ def _valid_port(port: str | None) -> bool:
     return port is None or (1 <= len(port) <= 5 and port.isdecimal() and int(port) <= 65535)
 
 
-def is_agent_id(matrix_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Quick check if a Matrix ID is an agent."""
-    return extract_agent_name(matrix_id, config, runtime_paths) is not None
-
-
-def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> str | None:
-    """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
-
-    Returns agent name (e.g., 'calculator') or None if not an agent.
-    """
-    if not sender_id.startswith("@") or ":" not in sender_id:
-        return None
-    try:
-        mid = MatrixID.parse(sender_id)
-    except ValueError:
-        return None
-    return mid.agent_name(config, runtime_paths)
-
-
 def managed_account_key(entity_name: str) -> str:
     """Return the Matrix state account key for a managed agent-like entity."""
     return f"agent_{entity_name}"
@@ -269,55 +214,7 @@ def managed_account_key(entity_name: str) -> str:
 
 def managed_account_user_id(account_key: str, domain: str, runtime_paths: RuntimePaths) -> str | None:
     """Return a persisted managed account's full Matrix user ID."""
-    username = managed_account_usernames(runtime_paths).get(account_key)
-    if username is None:
+    account = matrix_state_for_runtime(runtime_paths).get_account(account_key)
+    if account is None:
         return None
-    return MatrixID.from_username(username, domain).full_id
-
-
-def _active_managed_account_keys(config: Config) -> frozenset[str]:
-    """Return persisted Matrix account keys for currently active managed accounts."""
-    account_keys = {managed_account_key(ROUTER_AGENT_NAME)}
-    account_keys.update(managed_account_key(agent_name) for agent_name in config.agents)
-    account_keys.update(managed_account_key(team_name) for team_name in config.teams)
-    if config.mindroom_user is not None:
-        account_keys.add(managed_account_key("user"))
-    return frozenset(account_keys)
-
-
-def _active_managed_agent_account_names(config: Config) -> dict[str, str]:
-    """Return active persisted Matrix account keys mapped to agent/team/router names."""
-    account_names = {managed_account_key(ROUTER_AGENT_NAME): ROUTER_AGENT_NAME}
-    account_names.update({managed_account_key(agent_name): agent_name for agent_name in config.agents})
-    account_names.update({managed_account_key(team_name): team_name for team_name in config.teams})
-    return account_names
-
-
-def _configured_active_account_sender_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
-    """Return configured sender IDs for active managed accounts.
-
-    These are only used as bootstrap fallbacks before a persisted username exists.
-    """
-    current_domain = config.get_domain(runtime_paths)
-    sender_ids = {
-        account_key: MatrixID.from_agent(agent_name, current_domain, runtime_paths).full_id
-        for account_key, agent_name in _active_managed_agent_account_names(config).items()
-    }
-    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
-    if mindroom_user_id is not None:
-        sender_ids[managed_account_key("user")] = mindroom_user_id
-    return sender_ids
-
-
-def active_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return sender IDs trusted for live authorization and relay decisions."""
-    sender_ids: set[str] = set()
-    current_domain = config.get_domain(runtime_paths)
-    configured_sender_ids = _configured_active_account_sender_ids(config, runtime_paths)
-    for account_key in _active_managed_account_keys(config):
-        user_id = managed_account_user_id(account_key, current_domain, runtime_paths)
-        if user_id is None:
-            sender_ids.add(configured_sender_ids[account_key])
-            continue
-        sender_ids.add(user_id)
-    return frozenset(sender_ids)
+    return MatrixID.from_username(account.username, account.domain or domain).full_id

@@ -6,16 +6,15 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.entity_resolution import EntityMatrixIdentity, entity_matrix_identity
+from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
-from mindroom.matrix_identifiers import mindroom_namespace
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
-_ENTITY_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
+_ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
 
 
@@ -58,12 +57,14 @@ def parse_mentions_in_text(
 
     """
     tokens = _scan_mention_tokens(text)
-    identity = entity_matrix_identity(config, runtime_paths)
+    if not tokens:
+        return text, [], text
+
+    registry = entity_identity_registry(config, runtime_paths)
     replacements = _resolve_mention_tokens(
         tokens,
-        identity=identity,
+        registry=registry,
         config=config,
-        runtime_paths=runtime_paths,
     )
 
     mentioned_user_ids: list[str] = []
@@ -139,18 +140,16 @@ def _mention_localpart(mention_text: str) -> str:
 def _resolve_mention_tokens(
     tokens: list[_MentionToken],
     *,
-    identity: EntityMatrixIdentity,
+    registry: EntityIdentityRegistry,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> list[_MentionReplacement]:
     """Resolve scanned tokens into render-ready replacements."""
     replacements: list[_MentionReplacement] = []
     for token in tokens:
         resolution = _resolve_mention_token(
             token,
-            identity=identity,
+            registry=registry,
             config=config,
-            runtime_paths=runtime_paths,
         )
         if resolution is None:
             continue
@@ -169,30 +168,28 @@ def _resolve_mention_tokens(
 def _resolve_mention_token(
     token: _MentionToken,
     *,
-    identity: EntityMatrixIdentity,
+    registry: EntityIdentityRegistry,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
     """Resolve one scanned mention token into an entity or literal-user target."""
     if token.explicit_user_id is not None:
         return _resolve_explicit_matrix_id_token(
             token,
-            identity=identity,
+            registry=registry,
             config=config,
         )
     return _resolve_entity_alias_token(
         token.localpart,
         has_server_name=token.has_server_name,
-        identity=identity,
+        registry=registry,
         config=config,
-        runtime_paths=runtime_paths,
     )
 
 
 def _resolve_explicit_matrix_id_token(
     token: _MentionToken,
     *,
-    identity: EntityMatrixIdentity,
+    registry: EntityIdentityRegistry,
     config: Config,
 ) -> _MentionResolution | None:
     """Resolve one explicit full MXID token."""
@@ -201,14 +198,12 @@ def _resolve_explicit_matrix_id_token(
         msg = "Explicit MXID token is missing explicit_user_id"
         raise ValueError(msg)
 
-    if entity_name := identity.current_entity_name_for_user_id(explicit_user_id, include_router=False):
+    if entity_name := registry.current_entity_name_for_user_id(explicit_user_id, include_router=False):
         return _entity_mention_resolution(
             entity_name,
-            identity=identity,
+            registry=registry,
             config=config,
         )
-    if identity.is_stale_user_id(explicit_user_id):
-        return None
     return _literal_user_resolution(explicit_user_id)
 
 
@@ -216,17 +211,16 @@ def _resolve_entity_alias_token(
     localpart: str,
     *,
     has_server_name: bool,
-    identity: EntityMatrixIdentity,
+    registry: EntityIdentityRegistry,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
     """Resolve one alias-style token to a local configured agent or team, if any."""
-    if has_server_name and not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
+    if has_server_name:
         return None
-    if entity_name := _find_matching_entity_name_for_localpart(localpart, identity, runtime_paths):
+    if entity_name := _find_matching_entity_name_for_localpart(localpart, registry, config):
         return _entity_mention_resolution(
             entity_name,
-            identity=identity,
+            registry=registry,
             config=config,
         )
     return None
@@ -235,12 +229,12 @@ def _resolve_entity_alias_token(
 def _entity_mention_resolution(
     entity_name: str,
     *,
-    identity: EntityMatrixIdentity,
+    registry: EntityIdentityRegistry,
     config: Config,
 ) -> _MentionResolution:
     """Return rendering data for one resolved local agent or team mention."""
     entity_config = config.agents.get(entity_name) or config.teams[entity_name]
-    resolved_user_id = identity.current_ids[entity_name].full_id
+    resolved_user_id = registry.current_id(entity_name).full_id
     return _MentionResolution(
         plain_text=resolved_user_id,
         markdown_text=f"[@{entity_config.display_name}](https://matrix.to/#/{resolved_user_id})",
@@ -277,24 +271,17 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
 
 def _find_matching_entity_name_for_localpart(
     localpart: str,
-    identity: EntityMatrixIdentity,
-    runtime_paths: RuntimePaths,
+    registry: EntityIdentityRegistry,
+    config: Config,
 ) -> str | None:
     """Return the configured agent or team name matched by one localpart string, if any."""
-    if _is_reserved_user_alias_localpart(localpart):
-        return None
-
     lower_localpart = localpart.lower()
-    candidate_names = {
-        candidate_name.lower() for candidate_name in _localpart_candidate_names(localpart, runtime_paths)
-    }
 
-    for entity_name, current_id in identity.current_ids.items():
+    for entity_name in [*config.agents, *config.teams]:
         if entity_name == ROUTER_AGENT_NAME:
             continue
-        if current_id.username.lower() == lower_localpart:
-            return entity_name
-        if entity_name.lower() in candidate_names and not identity.is_stale_localpart(entity_name, localpart):
+        if entity_name.lower() == lower_localpart:
+            registry.current_id(entity_name)
             return entity_name
     return None
 
@@ -307,45 +294,9 @@ def resolve_entity_name_for_mention_localpart(
     """Return the configured agent or team name matched by one Matrix mention localpart."""
     return _find_matching_entity_name_for_localpart(
         localpart,
-        entity_matrix_identity(config, runtime_paths),
-        runtime_paths,
+        entity_identity_registry(config, runtime_paths),
+        config,
     )
-
-
-def _localpart_candidate_names(localpart: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Build ordered candidate entity names from one mention localpart."""
-    name = localpart
-    prefix: str | None = None
-
-    if localpart.lower().startswith(MatrixID.AGENT_PREFIX):
-        prefix = MatrixID.AGENT_PREFIX
-        name = localpart[len(prefix) :]
-
-    candidate_names = [name]
-    stripped_name: str | None = None
-
-    namespace = mindroom_namespace(runtime_paths)
-    if namespace:
-        suffix = f"_{namespace}"
-        if name.lower().endswith(suffix):
-            stripped_name = name[: -len(suffix)]
-            if stripped_name:
-                candidate_names.append(stripped_name)
-            else:
-                stripped_name = None
-
-    if prefix:
-        candidate_names.append(f"{prefix}{name}")
-        if stripped_name:
-            candidate_names.append(f"{prefix}{stripped_name}")
-    return candidate_names
-
-
-def _is_reserved_user_alias_localpart(localpart: str) -> bool:
-    name = localpart
-    if name.lower().startswith(MatrixID.AGENT_PREFIX):
-        name = name[len(MatrixID.AGENT_PREFIX) :]
-    return name.lower().startswith("user_")
 
 
 def _range_overlaps_existing(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:

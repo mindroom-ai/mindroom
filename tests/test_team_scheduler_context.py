@@ -17,7 +17,6 @@ from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
@@ -33,10 +32,13 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.matrix.identity import MatrixID
 
 
 @asynccontextmanager
@@ -60,6 +62,7 @@ def _response_envelope() -> MessageEnvelope:
 
 
 def _make_bot(tmp_path: Path) -> AgentBot:
+    runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={
@@ -69,11 +72,12 @@ def _make_bot(tmp_path: Path) -> AgentBot:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         ),
-        test_runtime_paths(tmp_path),
+        runtime_paths,
     )
+    persist_entity_accounts(config, runtime_paths)
     agent_user = AgentMatrixUser(
         agent_name="general",
-        user_id="@mindroom_general:localhost",
+        user_id=entity_ids(config, runtime_paths)["general"].full_id,
         display_name="General Agent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -94,22 +98,16 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     return install_runtime_cache_support(bot)
 
 
+def _team_agents(bot: AgentBot) -> list[MatrixID]:
+    ids = entity_ids(bot.config, runtime_paths_for(bot.config))
+    return [ids["general"], ids["research"]]
+
+
 @pytest.mark.asyncio
 async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
-    team_agents = [
-        MatrixID.from_agent(
-            "general",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-        MatrixID.from_agent(
-            "research",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-    ]
+    team_agents = _team_agents(bot)
     response_run_id: str | None = None
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
@@ -157,18 +155,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path) -> None:
     """Generic team interruptions should replace the thinking placeholder with an interruption note."""
     bot = _make_bot(tmp_path)
-    team_agents = [
-        MatrixID.from_agent(
-            "general",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-        MatrixID.from_agent(
-            "research",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-    ]
+    team_agents = _team_agents(bot)
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
         response_function = kwargs["response_function"]
@@ -221,18 +208,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
 async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_note(tmp_path: Path) -> None:
     """Sync restarts should mark team placeholders as interrupted, not user-cancelled."""
     bot = _make_bot(tmp_path)
-    team_agents = [
-        MatrixID.from_agent(
-            "general",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-        MatrixID.from_agent(
-            "research",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-    ]
+    team_agents = _team_agents(bot)
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
         response_function = kwargs["response_function"]
@@ -285,18 +261,7 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
 async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
-    team_agents = [
-        MatrixID.from_agent(
-            "general",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-        MatrixID.from_agent(
-            "research",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-    ]
+    team_agents = _team_agents(bot)
     response_run_id: str | None = None
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
@@ -353,18 +318,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: Path) -> None:
     """Late cancellation should still cancel the team path while post-effects are running."""
     bot = _make_bot(tmp_path)
-    team_agents = [
-        MatrixID.from_agent(
-            "general",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-        MatrixID.from_agent(
-            "research",
-            bot.config.get_domain(runtime_paths_for(bot.config)),
-            runtime_paths_for(bot.config),
-        ),
-    ]
+    team_agents = _team_agents(bot)
     started = asyncio.Event()
     release = asyncio.Event()
 

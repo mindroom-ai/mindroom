@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
-from mindroom.matrix.identity import extract_agent_name
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -127,7 +127,8 @@ class EditRegenerator:
             return
         original_event_id = event_info.original_event_id
 
-        sender_agent_name = extract_agent_name(event.sender, self.deps.runtime.config, self.deps.runtime_paths)
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        sender_agent_name = registry.current_entity_name_for_user_id(event.sender)
         if sender_agent_name:
             self._logger().debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
             return

@@ -34,7 +34,7 @@ from mindroom.history.interrupted_replay import _build_interrupted_replay_run, b
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
@@ -54,6 +54,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -131,7 +132,9 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
             "MINDROOM_NAMESPACE": "",
         },
     )
-    return bind_runtime_paths(config, runtime_paths)
+    bound = bind_runtime_paths(config, runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
+    return bound
 
 
 @contextmanager
@@ -392,7 +395,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             is_thread=True,
             thread_id=stored_target.resolved_thread_id,
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            mentioned_agents=[fixture_entity_matrix_id("test_agent", "example.com", runtime_paths_for(config))],
         )
         # Process the edit event
         await bot._on_message(room, edit_event)
@@ -511,7 +514,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
             is_thread=True,
             thread_id="$original:example.com",
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            mentioned_agents=[fixture_entity_matrix_id("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
         )
         mock_emit_hooks.return_value = False
@@ -810,7 +813,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     )
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    team_member = config.get_ids(runtime_paths)["worker"]
+    team_member = entity_ids(config, runtime_paths)["worker"]
     bot = TeamBot(
         agent_user=agent_user,
         storage_path=tmp_path,
@@ -942,7 +945,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             is_thread=True,
             thread_id=stored_target.resolved_thread_id,
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
+            mentioned_agents=[fixture_entity_matrix_id("test_team", "example.com", runtime_paths)],
         )
 
         await bot._on_message(room, edit_event)
@@ -1196,6 +1199,81 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_path: Path) -> None:
+    """Edit sender classification should use actual persisted IDs without generated fallback."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path, agent_names=("test_agent", "helper_agent"))
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_helper_agent", "actual_helper_agent", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
+    replace_edit_regenerator_deps(bot)
+    replace_turn_policy_deps(bot)
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
+
+    actual_edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* agent edit",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "agent edit", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+            },
+            "event_id": "$actual_edit:example.com",
+            "sender": "@actual_helper_agent:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    stale_generated_edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* stale generated edit",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "stale generated edit", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+            },
+            "event_id": "$generated_edit:example.com",
+            "sender": "@mindroom_helper_agent:example.com",
+            "origin_server_ts": 1000002,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+
+    with patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context:
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_history=[],
+            thread_id=None,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        await bot._on_message(room, actual_edit_event)
+        mock_context.assert_not_called()
+
+        await bot._on_message(room, stale_generated_edit_event)
+        mock_context.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edit(
     tmp_path: Path,
 ) -> None:
@@ -1440,7 +1518,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             is_thread=True,
             thread_id=stored_target.resolved_thread_id,
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            mentioned_agents=[fixture_entity_matrix_id("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
         )
 
@@ -1559,7 +1637,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             is_thread=True,
             thread_id=stored_target.resolved_thread_id,
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            mentioned_agents=[fixture_entity_matrix_id("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
         )
 
@@ -1680,7 +1758,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             is_thread=True,
             thread_id=stored_target.resolved_thread_id,
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_agent", "example.com", runtime_paths_for(config))],
+            mentioned_agents=[fixture_entity_matrix_id("test_agent", "example.com", runtime_paths_for(config))],
             has_non_agent_mentions=False,
         )
 
@@ -2273,7 +2351,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
     )
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    team_member = config.get_ids(runtime_paths)["worker"]
+    team_member = entity_ids(config, runtime_paths)["worker"]
     session_id = create_session_id("!test:example.com", None)
 
     bot = TeamBot(
@@ -2376,7 +2454,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
             is_thread=False,
             thread_id=None,
             thread_history=[],
-            mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
+            mentioned_agents=[fixture_entity_matrix_id("test_team", "example.com", runtime_paths)],
             has_non_agent_mentions=False,
             requires_model_history_refresh=False,
         )

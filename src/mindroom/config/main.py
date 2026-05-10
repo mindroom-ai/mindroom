@@ -49,13 +49,17 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_config_relative_path,
+    runtime_matrix_homeserver,
 )
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.logging_config import get_logger
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import (
+    agent_username_localpart,
+    extract_server_name_from_homeserver,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
@@ -68,7 +72,6 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from mindroom.entity_resolution import MatrixID
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -827,14 +830,19 @@ class Config(BaseModel):
         if runtime_paths is None:
             return self
         reserved_localparts: dict[str, str] = {}
-        for entity_name, entity_id in self.get_ids(runtime_paths).items():
+        entity_names = [ROUTER_AGENT_NAME, *self.agents, *self.teams]
+        persisted_accounts = matrix_state_for_runtime(runtime_paths).accounts
+        for entity_name in entity_names:
             if entity_name == ROUTER_AGENT_NAME:
                 label = f"router '{ROUTER_AGENT_NAME}'"
             elif entity_name in self.agents:
                 label = f"agent '{entity_name}'"
             else:
                 label = f"team '{entity_name}'"
-            reserved_localparts[entity_id.username] = label
+            reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
+            account = persisted_accounts.get(f"agent_{entity_name}")
+            if account is not None:
+                reserved_localparts[account.username] = label
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"
@@ -867,26 +875,14 @@ class Config(BaseModel):
 
     def get_domain(self, runtime_paths: RuntimePaths) -> str:
         """Extract the Matrix domain for one explicit runtime context."""
-        from mindroom.entity_resolution import matrix_domain  # noqa: PLC0415
-
-        return matrix_domain(runtime_paths)
-
-    def get_ids(self, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
-        """Get MatrixID objects for all agents and teams.
-
-        Returns:
-            Dictionary mapping agent/team names to their MatrixID objects.
-
-        """
-        from mindroom.entity_resolution import entity_matrix_ids  # noqa: PLC0415
-
-        return entity_matrix_ids(self, runtime_paths)
+        homeserver = runtime_matrix_homeserver(runtime_paths)
+        return extract_server_name_from_homeserver(homeserver, runtime_paths)
 
     def get_mindroom_user_id(self, runtime_paths: RuntimePaths) -> str | None:
         """Get the full Matrix user ID for the configured internal user."""
-        from mindroom.entity_resolution import mindroom_user_id  # noqa: PLC0415
-
-        return mindroom_user_id(self, runtime_paths)
+        if self.mindroom_user is None:
+            return None
+        return f"@{self.mindroom_user.username}:{self.get_domain(runtime_paths)}"
 
     @classmethod
     def validate_with_runtime(
