@@ -9,7 +9,7 @@ from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
@@ -178,8 +178,9 @@ async def generate_welcome_message_for_room(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Generate a welcome message from the same responder candidates used by routing."""
-    candidate_entities = []
-    if sender_id is not None:
+    if sender_id is None:
+        candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
+    else:
         candidate_entities = await responder_candidate_entities_for_room(client, room, sender_id, config, runtime_paths)
     return _format_welcome_message(candidate_entities, config, runtime_paths)
 

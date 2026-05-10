@@ -369,6 +369,59 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Path) -> None:
+    """Senderless configured-room welcomes should advertise static room responders."""
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    room.add_member("@mindroom_research_oldns:localhost", "Research", None)
+    room.members_synced = True
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="Code",
+                role="Writes code",
+                rooms=["!room:localhost"],
+            ),
+            "research": AgentConfig(
+                display_name="Research",
+                role="Finds sources",
+            ),
+        },
+        teams={
+            "ops": TeamConfig(
+                display_name="Ops Team",
+                role="Operations escalation team",
+                agents=["code"],
+                rooms=["!room:localhost"],
+            ),
+        },
+    )
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={
+            "router": "mindroom_router_oldns",
+            "code": "mindroom_code_oldns",
+            "research": "mindroom_research_oldns",
+            "ops": "mindroom_ops_oldns",
+        },
+    )
+
+    welcome_message = await generate_welcome_message_for_room(
+        None,
+        room,
+        None,
+        config,
+        runtime_paths,
+    )
+
+    assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
+    assert "\u2022 **@code**: Writes code" in welcome_message
+    assert "\u2022 **@ops**: Operations escalation team (Team of 1 agent)" in welcome_message
+    assert "@research" not in welcome_message
+
+
+@pytest.mark.asyncio
 async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None:
     """Ad-hoc room welcomes should advertise the same live responders routing can target."""
     config = Config(
