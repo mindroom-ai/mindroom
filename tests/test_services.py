@@ -207,7 +207,7 @@ def test_service_help_is_registered() -> None:
     assert "status" in result.output
 
 
-@patch("mindroom.cli.service.get_service_manager")
+@patch("mindroom.cli.service._get_service_manager")
 def test_service_status_not_installed(mock_get_manager: MagicMock) -> None:
     """Service status renders a not-installed service without logs."""
     mock_manager = MagicMock(spec=ServiceManager)
@@ -221,7 +221,7 @@ def test_service_status_not_installed(mock_get_manager: MagicMock) -> None:
     assert "not installed" in result.output
 
 
-@patch("mindroom.cli.service.get_service_manager")
+@patch("mindroom.cli.service._get_service_manager")
 def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
     """Service install -y installs without interactive prompts."""
     mock_manager = MagicMock(spec=ServiceManager)

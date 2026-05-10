@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -58,6 +60,42 @@ def _invoke_with_runtime(
     if env:
         command_env.update(env)
     return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
+
+
+def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
+    """Importing the CLI should not preload runtime config/history dependencies."""
+    blocked_modules = [
+        "mindroom.config.main",
+        "mindroom.history",
+        "mindroom.history.runtime",
+        "mindroom.agent_storage",
+        "sqlalchemy",
+        "agno.db.sqlite.async_sqlite",
+    ]
+    script = (
+        "import json\n"
+        "import sys\n"
+        "import mindroom.cli.main\n"
+        f"blocked_modules = {blocked_modules!r}\n"
+        "print(json.dumps([name for name in blocked_modules if name in sys.modules]))\n"
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    python_path = str(repo_root / "src")
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{python_path}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == []
 
 
 def test_format_config_search_locations_numbers_paths_and_statuses(
@@ -694,7 +732,7 @@ class TestConfigInit:
     ) -> None:
         """Provider .env templates should derive required keys from the canonical provider mapping."""
         monkeypatch.setattr(
-            config_cli,
+            config_cli.constants,
             "env_key_for_provider",
             lambda provider: "OPENAI_API_KEY" if provider == "openrouter" else None,
         )
@@ -2257,7 +2295,7 @@ class TestConnect:
         monkeypatch.setattr("mindroom.cli.main.socket.gethostname", lambda: "devbox")
 
         monkeypatch.setattr(
-            "mindroom.cli.main.httpx.post",
+            "mindroom.cli.main._httpx_post",
             lambda *_a, **_kw: httpx.Response(
                 200,
                 json={
@@ -2319,7 +2357,7 @@ class TestConnect:
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr(
-            "mindroom.cli.main.httpx.post",
+            "mindroom.cli.main._httpx_post",
             lambda *_a, **_kw: httpx.Response(
                 200,
                 json={
@@ -2362,7 +2400,7 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         monkeypatch.setattr(
-            "mindroom.cli.main.httpx.post",
+            "mindroom.cli.main._httpx_post",
             lambda *_a, **_kw: httpx.Response(
                 200,
                 json={
@@ -2420,7 +2458,7 @@ class TestConnect:
                 },
             )
 
-        monkeypatch.setattr("mindroom.cli.main.httpx.post", _fake_post)
+        monkeypatch.setattr("mindroom.cli.main._httpx_post", _fake_post)
 
         result = _invoke_with_runtime(["connect", "--pair-code", "ABCD-EFGH", "--no-persist-env"], cfg)
 
@@ -2446,7 +2484,7 @@ class TestConnect:
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr(
-            "mindroom.cli.main.httpx.post",
+            "mindroom.cli.main._httpx_post",
             lambda *_a, **_kw: httpx.Response(
                 200,
                 json={
@@ -2478,7 +2516,6 @@ class TestConnect:
         """Connect should pass MATRIX_SSL_VERIFY through to httpx.post."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        monkeypatch.setattr("mindroom.cli.main.constants.runtime_matrix_ssl_verify", lambda *_args, **_kwargs: False)
 
         called: dict[str, object] = {}
 
@@ -2495,7 +2532,7 @@ class TestConnect:
                 },
             )
 
-        monkeypatch.setattr("mindroom.cli.main.httpx.post", _fake_post)
+        monkeypatch.setattr("mindroom.cli.main._httpx_post", _fake_post)
 
         result = _invoke_with_runtime(
             [
@@ -2507,6 +2544,7 @@ class TestConnect:
                 "--no-persist-env",
             ],
             cfg,
+            env={"MATRIX_SSL_VERIFY": "false"},
         )
 
         assert result.exit_code == 0
@@ -2534,7 +2572,7 @@ class TestLocalStackSetup:
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
-            "mindroom.cli.local_stack.httpx.get",
+            "mindroom.cli.local_stack._httpx_get",
             lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
         )
         monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
@@ -2588,7 +2626,7 @@ class TestLocalStackSetup:
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
-            "mindroom.cli.local_stack.httpx.get",
+            "mindroom.cli.local_stack._httpx_get",
             lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
         )
         monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
@@ -2615,7 +2653,7 @@ class TestLocalStackSetup:
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
-            "mindroom.cli.local_stack.httpx.get",
+            "mindroom.cli.local_stack._httpx_get",
             lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
         )
         monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)

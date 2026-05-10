@@ -9,8 +9,6 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from mindroom.services.manager import get_service_manager
-
 if TYPE_CHECKING:
     from mindroom.services.config import ServiceManager
 
@@ -32,9 +30,16 @@ Supported platforms:
 )
 
 
+def _get_service_manager() -> ServiceManager:
+    """Load the platform service manager only when service commands run."""
+    from mindroom.services.manager import get_service_manager as load_service_manager  # noqa: PLC0415
+
+    return load_service_manager()
+
+
 def _manager_or_exit() -> ServiceManager:
     try:
-        return get_service_manager()
+        return _get_service_manager()
     except RuntimeError as exc:
         _err_console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1) from None

@@ -9,15 +9,7 @@ import sys
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
-import httpx
 import typer
-
-import mindroom.cli.connect as cli_connect
-from mindroom import __version__, constants
-from mindroom.constants import ensure_writable_config_path
-from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
-from mindroom.frontend_assets import ensure_frontend_dist_dir
-from mindroom.startup_errors import PermanentStartupError
 
 from .banner import make_banner
 from .config import (
@@ -29,16 +21,16 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
-from .doctor import doctor
 from .local_stack import local_stack_setup
 from .service import service_app
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.constants import RuntimePaths
+    import httpx
 
-from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -63,9 +55,24 @@ app.add_typer(avatars_app, name="avatars")
 app.add_typer(service_app, name="service")
 
 
+def _httpx_post(
+    url: str,
+    *,
+    json: Mapping[str, object],
+    timeout: float,
+    verify: bool,
+) -> httpx.Response:
+    """Call httpx.post without importing httpx during CLI help rendering."""
+    import httpx  # noqa: PLC0415
+
+    return httpx.post(url, json=json, timeout=timeout, verify=verify)
+
+
 @app.command()
 def version() -> None:
     """Show the current version of Mindroom."""
+    from mindroom import __version__  # noqa: PLC0415
+
     console.print(f"Mindroom version: [bold]{__version__}[/bold]")
     console.print("AI agents that live in Matrix")
 
@@ -123,6 +130,9 @@ def run(
 
 def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
+
     ensure_writable_config_path(runtime_paths=runtime_paths)
 
     config_path = runtime_paths.config_path
@@ -151,6 +161,8 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
+    from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
+
     runtime_paths = activate_cli_runtime(storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
@@ -161,6 +173,8 @@ async def _run(
     console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
+        from mindroom.frontend_assets import ensure_frontend_dist_dir  # noqa: PLC0415
+
         frontend_dir = ensure_frontend_dist_dir(runtime_paths)
         display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
         if frontend_dir is None:
@@ -196,7 +210,12 @@ async def _run(
         raise
 
 
-app.command()(doctor)
+@app.command()
+def doctor() -> None:
+    """Check your environment for common issues."""
+    from .doctor import doctor as doctor_command  # noqa: PLC0415
+
+    doctor_command()
 
 
 @avatars_app.command("generate")
@@ -208,6 +227,8 @@ def avatars_generate(
     ),
 ) -> None:
     """Generate missing managed avatar files in the workspace."""
+    from mindroom.error_handling import AvatarGenerationError  # noqa: PLC0415
+
     runtime_paths = activate_cli_runtime()
     _load_active_config_or_exit(runtime_paths)
 
@@ -229,6 +250,8 @@ def avatars_sync(
     ),
 ) -> None:
     """Sync configured room and root-space avatars to Matrix using the initialized router account."""
+    from mindroom.error_handling import AvatarSyncError  # noqa: PLC0415
+
     runtime_paths = activate_cli_runtime()
     _load_active_config_or_exit(runtime_paths)
 
@@ -279,6 +302,9 @@ def connect(
     ),
 ) -> None:
     """Pair this local MindRoom install with the hosted provisioning service."""
+    import mindroom.cli.connect as cli_connect  # noqa: PLC0415
+    from mindroom import constants  # noqa: PLC0415
+
     normalized_pair_code = pair_code.strip().upper()
     if not cli_connect.is_valid_pair_code(normalized_pair_code):
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
@@ -301,7 +327,7 @@ def connect(
             client_name=normalized_client_name,
             client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
             matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
-            post_request=httpx.post,
+            post_request=_httpx_post,
         )
     except (TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -399,6 +425,8 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
 
 
 def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> None:
+    from mindroom import constants  # noqa: PLC0415
+
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
