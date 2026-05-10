@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -286,10 +286,8 @@ async def test_responder_candidates_refresh_empty_cached_ad_hoc_room() -> None:
         },
     )
     client = AsyncMock()
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.users = {"@mindroom_router:example.com": MagicMock()}
-    room.members_synced = False
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
     client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
         {
             "joined": {
@@ -514,6 +512,58 @@ async def test_responder_candidates_preserve_invited_members() -> None:
     assert _entity_names(config, available) == ["assistant"]
     assert "@guest:example.com" in room.users
     assert "@guest:example.com" in room.invited_users
+
+
+@pytest.mark.asyncio
+async def test_responder_candidates_exclude_invited_managed_members_after_refresh() -> None:
+    """Invited managed responders must not become ad-hoc candidates after joined-member refresh."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+            "analyst": {
+                "display_name": "Analyst",
+                "role": "Test analyst",
+                "rooms": ["test_room"],
+            },
+        },
+    )
+    client = AsyncMock()
+    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
+    room.add_member("@mindroom_router:example.com", "Router", None)
+    room.add_member("@mindroom_analyst:example.com", "Analyst", None, invited=True)
+    room.members_synced = False
+    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {
+            "joined": {
+                "@mindroom_router:example.com": {"display_name": "Router"},
+                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
+            },
+        },
+        room_id="!test:server",
+    )
+
+    first = await responder_candidate_entities_for_room(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+    second = await responder_candidate_entities_for_room(
+        client,
+        room,
+        "@alice:example.com",
+        config,
+    )
+
+    assert _entity_names(config, first) == ["assistant"]
+    assert _entity_names(config, second) == ["assistant"]
+    assert "@mindroom_analyst:example.com" in room.users
+    assert "@mindroom_analyst:example.com" in room.invited_users
+    client.joined_members.assert_awaited_once_with("!test:server")
 
 
 def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:

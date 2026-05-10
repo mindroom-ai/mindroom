@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 
 from mindroom.authorization import get_available_responders_in_room, responder_candidate_entities_for_room
@@ -139,6 +140,33 @@ class TestResponderCandidateSelection:
             "@mindroom_writer:localhost": None,  # Present but not configured
             "@user:localhost": None,
         }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await responder_candidate_entities_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        available_names = self._entity_names(self.config, available)
+        assert available_names == ["calculator", "research"]
+        assert "writer" not in available_names
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_responder_candidates_match_live_canonical_alias_without_persisted_room_state(self) -> None:
+        """Live canonical aliases should keep configured-room responder boundaries static."""
+        runtime_paths = runtime_paths_for(self.config)
+        room = nio.MatrixRoom("!general:localhost", "@mindroom_router:localhost")
+        room.canonical_alias = "#general:localhost"
+        room.add_member("@mindroom_calculator:localhost", "Calculator", None)
+        room.add_member("@mindroom_research:localhost", "Research Assistant", None)
+        room.add_member("@mindroom_writer:localhost", "Writer", None)
+        room.add_member("@user:localhost", "User", None)
+        room.members_synced = True
         client = AsyncMock()
         client.joined_members = AsyncMock()
 

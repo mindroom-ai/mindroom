@@ -215,7 +215,13 @@ def get_available_responders_in_room(
 
     The router is excluded because it is not a regular conversation participant.
     """
-    return _available_responders_from_member_ids(room.users, config, runtime_paths)
+    return _available_responders_from_member_ids(_joined_member_ids(room), config, runtime_paths)
+
+
+def _joined_member_ids(room: nio.MatrixRoom) -> Iterable[str]:
+    """Return cached room members that are joined rather than merely invited."""
+    invited_user_ids = set(room.invited_users)
+    return (user_id for user_id in room.users if user_id not in invited_user_ids)
 
 
 def _get_available_responders_for_sender(
@@ -249,6 +255,7 @@ def _apply_authoritative_joined_members(
         cached_user = room.users.get(member.user_id)
         if (
             cached_user is not None
+            and not cached_user.invited
             and cached_user.display_name == member.display_name
             and cached_user.avatar_url == member.avatar_url
         ):
@@ -330,7 +337,14 @@ def _configured_responder_candidates_for_room(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID] | None:
     """Return configured-room responder candidates, or None for ad-hoc rooms."""
-    configured_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
+    room_alias = room.canonical_alias
+    room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
+    configured_entities = configured_routable_entity_ids_for_room(
+        config,
+        room.room_id,
+        runtime_paths,
+        room_aliases=room_aliases,
+    )
     if not configured_entities:
         return None
     return filter_responders_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)

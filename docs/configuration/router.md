@@ -75,7 +75,8 @@ That welcome message lists:
 - How to interact with agents and teams (mentions, commands)
 - Quick command reference
 
-Startup welcomes with no requester send the general interaction guidance and quick command reference without an available-responder list.
+Startup welcomes with no requester list configured room responders when the room is statically configured.
+Startup welcomes for ad-hoc rooms send the general interaction guidance and quick command reference without an available-responder list.
 
 Use `!hi` in any room to see the welcome message again.
 

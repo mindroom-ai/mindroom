@@ -159,7 +159,7 @@ agents:
 
 ### Configuration Fields
 
-- **agent_name**: The configured identifier used for agent config and aliases; generated `@mindroom_<agent_name>:<server>` IDs are bootstrap defaults before persisted Matrix state records the live username.
+- **agent_name**: The configured identifier used for agent config and aliases; provisioning may propose a `mindroom_<agent_name>` username when an account is missing, but runtime identity always comes from persisted Matrix account state.
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
 - **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides (see Available Tools below and [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration))
@@ -565,7 +565,8 @@ agents:
 ## Using Agents in the Multi-Agent System
 
 Each agent has its own Matrix account.
-Persisted Matrix state is the source of truth for the account username after provisioning, so generated `@mindroom_<agent>` IDs are only bootstrap examples.
+Persisted Matrix state is the source of truth for each agent's runtime Matrix identity after provisioning or login.
+Generated `mindroom_<agent>` usernames are provisioning proposals only when an account is missing.
 To interact with an agent:
 
 1. **Mention the agent by its configured name**: `@agentname`

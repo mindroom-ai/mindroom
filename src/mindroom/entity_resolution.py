@@ -7,10 +7,20 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
-from mindroom.matrix_identifiers import extract_server_name_from_homeserver
+from mindroom.matrix.identity import (
+    MatrixID,
+    managed_account_key,
+    managed_account_user_id,
+)
+from mindroom.matrix_identifiers import (
+    extract_server_name_from_homeserver,
+    managed_room_key_from_alias_localpart,
+    room_alias_localpart,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -30,9 +40,16 @@ def configured_bot_user_ids_for_room(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
 ) -> set[str]:
     """Return bot Matrix user IDs configured for one Matrix room."""
-    configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    configured_names = configured_routable_entity_names_for_room(
+        config,
+        room_id,
+        runtime_paths,
+        room_aliases=room_aliases,
+    )
     if not configured_names:
         return set()
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
@@ -48,32 +65,100 @@ def configured_routable_entity_names_for_room(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
 ) -> list[str]:
     """Return non-router agent and team names statically configured for one room."""
+    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
     configured_names: list[str] = []
 
     for agent_name, agent_config in config.agents.items():
         if agent_name == ROUTER_AGENT_NAME:
             continue
-        resolved_rooms = matrix_state.resolve_room_aliases(agent_config.rooms, runtime_paths)
-        if room_id in resolved_rooms:
+        if _room_refs_match(agent_config.rooms, room_identifiers, runtime_paths):
             configured_names.append(agent_name)
 
     for team_name, team_config in config.teams.items():
-        resolved_rooms = matrix_state.resolve_room_aliases(team_config.rooms, runtime_paths)
-        if room_id in resolved_rooms:
+        if _room_refs_match(team_config.rooms, room_identifiers, runtime_paths):
             configured_names.append(team_name)
 
     return configured_names
+
+
+def _room_refs_match(
+    configured_room_refs: list[str],
+    room_identifiers: set[str],
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether authored room refs match any known identifier for a live room."""
+    if room_identifiers.intersection(configured_room_refs):
+        return True
+    resolved_refs = matrix_state.resolve_room_aliases(configured_room_refs, runtime_paths)
+    return bool(room_identifiers.intersection(resolved_refs))
+
+
+def _room_reference_identifiers(
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
+) -> set[str]:
+    """Return room ID, alias, and managed key identifiers for one live room."""
+    identifiers: list[str] = []
+
+    def add(identifier: str | None) -> None:
+        if identifier:
+            identifiers.append(identifier)
+
+    add(room_id)
+    if room_id.startswith("#"):
+        _add_room_alias_identifiers(identifiers, room_id, runtime_paths)
+    for room_alias in room_aliases:
+        _add_room_alias_identifiers(identifiers, room_alias, runtime_paths)
+
+    matched_identifiers = set(identifiers)
+    state = matrix_state.matrix_state_for_runtime(runtime_paths)
+    for room_key, room in state.rooms.items():
+        persisted_identifiers = {room_key, room.room_id, room.alias}
+        if not matched_identifiers.intersection(persisted_identifiers):
+            continue
+        add(room_key)
+        add(room.room_id)
+        _add_room_alias_identifiers(identifiers, room.alias, runtime_paths)
+        matched_identifiers = set(identifiers)
+
+    return set(identifiers)
+
+
+def _add_room_alias_identifiers(
+    identifiers: list[str],
+    room_alias: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    identifiers.append(room_alias)
+    localpart = room_alias_localpart(room_alias)
+    if localpart is None:
+        return
+    identifiers.append(localpart)
+    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
+    if managed_room_key is not None:
+        identifiers.append(managed_room_key)
 
 
 def configured_routable_entity_ids_for_room(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
 ) -> list[MatrixID]:
     """Return non-router agent and team IDs statically configured for one room."""
-    configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    configured_names = configured_routable_entity_names_for_room(
+        config,
+        room_id,
+        runtime_paths,
+        room_aliases=room_aliases,
+    )
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
     return [config_ids[name] for name in configured_names]
 
