@@ -464,7 +464,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 1_000_000
+        assert config["models"]["default"]["context_window"] == 258_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
         assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
@@ -494,7 +494,7 @@ class TestConfigInit:
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 1_000_000
+        assert config["models"]["default"]["context_window"] == 258_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
 
     @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
@@ -662,7 +662,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == "gpt-5.4"
-        assert config["models"]["default"]["context_window"] == 1_000_000
+        assert config["models"]["default"]["context_window"] == 258_000
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
         """Config init --provider anthropic prepopulates Anthropic defaults."""
@@ -713,7 +713,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "codex"
         assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 1_000_000
+        assert config["models"]["default"]["context_window"] == 258_000
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
 
