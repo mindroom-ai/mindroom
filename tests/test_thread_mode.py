@@ -93,6 +93,21 @@ def _agent_bot(
     return bot
 
 
+def _matrix_room(
+    room_id: str,
+    *,
+    name: str | None = None,
+    members: tuple[str, ...] = (),
+    members_synced: bool = True,
+) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_test:localhost")
+    room.name = name
+    for member_id in members:
+        room.add_member(member_id, None, None)
+    room.members_synced = members_synced
+    return room
+
+
 def _install_static_logger_deps(bot: AgentBot, logger: MagicMock) -> None:
     """Rebuild extracted collaborators with one fixed logger dependency."""
     bot._conversation_cache.logger = logger
@@ -440,8 +455,7 @@ class TestRouterHandoffThreadMode:
             captured_content.update(content)
             return delivered_matrix_event("$reply", content)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
 
         # Mixed agent modes keep the router itself in thread mode.
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
@@ -481,8 +495,7 @@ class TestRouterHandoffThreadMode:
             captured_content.update(content)
             return delivered_matrix_event("$reply", content)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
 
         with (
             patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="coder")),
@@ -621,9 +634,7 @@ class TestExtractMessageContextRoomMode:
         bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.name = "Test Room"
+        room = _matrix_room("!room:localhost", name="Test Room")
 
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event123"
@@ -678,13 +689,9 @@ class TestExtractMessageContextRoomMode:
             return_value=thread_context,
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.name = "Room Override"
+        room = _matrix_room("!room:localhost", name="Room Override")
 
-        other_room = MagicMock(spec=nio.MatrixRoom)
-        other_room.room_id = "!other:localhost"
-        other_room.name = "No Override"
+        other_room = _matrix_room("!other:localhost", name="No Override")
 
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event123"
@@ -772,8 +779,7 @@ class TestExtractMessageContextRoomMode:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event123"
         event.sender = "@user:localhost"
@@ -966,8 +972,7 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -1257,8 +1262,7 @@ class TestCommandThreadContextRoomMode:
             return_value=MessageTarget.resolve("!room:localhost", None, "$event123"),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -1318,8 +1322,7 @@ class TestCommandThreadContextRoomMode:
         resolve_target = AsyncMock(side_effect=AssertionError("command dispatch re-resolved target"))
         unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = resolve_target
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$event123",
@@ -1384,8 +1387,7 @@ class TestExtractedModuleLoggerRebinding:
         bot.logger = original_logger
         bot.logger = rebound_logger
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event123"
         event.sender = "@user:localhost"
@@ -1701,8 +1703,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
         sync_bot_runtime_state(bot)
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$reply:localhost",
@@ -1753,9 +1754,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.name = "Direct Thread Room"
+        room = _matrix_room("!room:localhost", name="Direct Thread Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$reply:localhost",

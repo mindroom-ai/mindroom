@@ -178,6 +178,22 @@ def _make_client_mock(*, user_id: str = "@mindroom_general:localhost") -> AsyncM
     return client
 
 
+def _matrix_room(
+    room_id: str = "!test:localhost",
+    *,
+    own_user_id: str = "@mindroom_general:localhost",
+    name: str | None = None,
+    members: tuple[str, ...] = (),
+    members_synced: bool = True,
+) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id=room_id, own_user_id=own_user_id)
+    room.name = name
+    for member_id in members:
+        room.add_member(member_id, None, None)
+    room.members_synced = members_synced
+    return room
+
+
 def _text_event(
     *,
     event_id: str,
@@ -4048,8 +4064,7 @@ class TestThreadingBehavior:
         thread_reply_id = "$thread_reply:localhost"
         plain_reply_id = "$plain_reply:localhost"
         audio_event_id = "$audio_reply:localhost"
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = room_id
+        room = _matrix_room(room_id)
         real_event_cache = SqliteEventCache(bot.storage_path / "media-ingress-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
@@ -7683,9 +7698,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_extract_context_edit_uses_thread_from_new_content(self, bot: AgentBot) -> None:
         """Edit events should resolve thread context from m.new_content thread relation."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -7727,9 +7740,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_extract_context_edit_resolves_thread_from_original_event(self, bot: AgentBot) -> None:
         """Edits without nested thread metadata should still resolve to the edited message thread."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -7788,9 +7799,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_stays_room_level(self, bot: AgentBot) -> None:
         """Edits of plain room-root messages should not be promoted into thread context."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -7854,9 +7863,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Plain replies to explicit thread messages should stay in that thread."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -7904,9 +7911,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Plain replies to the explicit thread root should stay in that thread."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -7966,9 +7971,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """A plain reply chain should stay threaded when it eventually reaches a threaded ancestor."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8068,9 +8071,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """A plain reply should inherit thread membership transitively through a promoted plain reply."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8134,9 +8135,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
         """Edits of a thread root should stay threaded once any child reply taught the cache that thread."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         real_event_cache = SqliteEventCache(bot.storage_path / "root-edit-thread-cache.db")
         await real_event_cache.initialize()
@@ -8220,9 +8219,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Edits of thread roots should stay threaded when authoritative history proves child replies exist."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8286,9 +8283,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Edits of promoted plain replies should stay threaded without a warmed event-thread mapping."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8372,9 +8367,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Root-edit fallback should require child events before treating a message as threaded."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8438,9 +8431,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Advisory thread-id lookup failures should not break plain edit context resolution."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8509,9 +8500,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Plain replies should inherit thread context transitively from earlier threaded messages."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8665,9 +8654,7 @@ class TestThreadingBehavior:
     ) -> None:
         """Dispatch policy context should inherit an existing explicit thread across plain replies."""
         message_content_module._mxc_cache.clear()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {
@@ -8747,9 +8734,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Dispatch resolution should select the bounded full read through one cache helper."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -8802,9 +8787,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Degraded root proof should demote an indeterminate plain-reply candidate to room-level dispatch."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -8884,9 +8867,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Proof-unavailable candidates without reusable history must demote without repeating the failed read."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -8944,9 +8925,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Related-event lookup failures should demote while keeping the candidate root for dispatch."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -8984,9 +8963,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """M_NOT_FOUND related-event lookups should demote while keeping the candidate root for dispatch."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9028,9 +9005,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Advisory context extraction should not fail closed for missing/redacted related events."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9069,9 +9044,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """A room-level inbound message may start a delivery thread without existing thread context."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9105,9 +9078,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Empty bounded history should not promote plain replies to threads."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9169,9 +9140,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Degraded dispatch candidates must be demoted before policy without strict proof."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9244,9 +9213,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Degraded dispatch history can prove targets but not planning context."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9393,8 +9360,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
         """Ingress coalescing should attribute any thread proof refreshes it triggers."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
+        room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9445,8 +9411,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_keeps_lookup_failure_candidate(self, bot: AgentBot) -> None:
         """Lookup-failed plain replies should still coalesce by candidate root."""
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
+        room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
                 "content": {
@@ -9910,9 +9875,7 @@ class TestThreadingBehavior:
         bot.event_cache = _runtime_event_cache()
         bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
-        room.name = "Test Room"
+        room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
             {

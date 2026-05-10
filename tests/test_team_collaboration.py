@@ -5,8 +5,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.bot import AgentBot
@@ -44,6 +45,14 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 def _agent_names(ids: list[object], config: Config) -> list[str]:
     runtime_paths = runtime_paths_for(config)
     return [entity_name_for_id(mid, config, runtime_paths) for mid in ids]
+
+
+def _matrix_room(room_id: str, user_ids: list[str]) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id, "@test-user:localhost")
+    room.members_synced = True
+    for user_id in user_ids:
+        room.add_member(user_id, None, None)
+    return room
 
 
 # Test fixtures for team agents
@@ -457,8 +466,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_team_formation(self) -> None:
         """Test that multiple agents in a DM room form a team when no one is mentioned."""
-        import nio  # noqa: PLC0415
-
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
         from mindroom.config.main import Config  # noqa: PLC0415
         from mindroom.config.models import ModelConfig  # noqa: PLC0415
@@ -474,10 +481,8 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!dm:localhost"
         ids = entity_ids(config, runtime_paths_for(config))
-        room.users = {ids["agent1"].full_id: None, ids["agent2"].full_id: None}
+        room = _matrix_room("!dm:localhost", [ids["agent1"].full_id, ids["agent2"].full_id])
 
         # Test DM room with multiple agents and no mentions
         result = await decide_team_formation(
@@ -500,7 +505,7 @@ class TestRouterTeamFormation:
         assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
-        room.users = {ids["agent1"].full_id: None}
+        room = _matrix_room("!dm:localhost", [ids["agent1"].full_id])
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["agent1"],
             tagged_agents=[],
@@ -520,8 +525,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
         """In a DM with multiple agents, a thread with a single agent should not form a team."""
-        import nio  # noqa: PLC0415
-
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
         from mindroom.config.main import Config  # noqa: PLC0415
         from mindroom.config.models import ModelConfig  # noqa: PLC0415
@@ -538,12 +541,13 @@ class TestRouterTeamFormation:
         )
 
         # DM room with multiple agents
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!dm:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
-        }
+        room = _matrix_room(
+            "!dm:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
+                entity_ids(config, runtime_paths_for(config))["general"].full_id,
+            ],
+        )
 
         # Thread has only calculator participating so far
         agents_in_thread = [entity_ids(config, runtime_paths_for(config))["calculator"]]
@@ -568,8 +572,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
         """DM fallback should degrade to the remaining supported single agent."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -586,12 +588,13 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!dm:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["mind"].full_id: None,
-        }
+        room = _matrix_room(
+            "!dm:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
+                entity_ids(config, runtime_paths_for(config))["mind"].full_id,
+            ],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -613,8 +616,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_unavailable_agents_degrade_to_individual(self) -> None:
         """Implicit thread continuation should not reject when one historical agent is off-room."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -627,11 +628,10 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!thread:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-        }
+        room = _matrix_room(
+            "!thread:localhost",
+            [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -656,8 +656,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_ignores_configured_team_participants(self) -> None:
         """Implicit thread teams must ignore configured team bots instead of treating them as leaf members."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -679,14 +677,15 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!thread:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["meta_team"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["agent_alpha"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["agent_beta"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["agent_gamma"].full_id: None,
-        }
+        room = _matrix_room(
+            "!thread:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["meta_team"].full_id,
+                entity_ids(config, runtime_paths_for(config))["agent_alpha"].full_id,
+                entity_ids(config, runtime_paths_for(config))["agent_beta"].full_id,
+                entity_ids(config, runtime_paths_for(config))["agent_gamma"].full_id,
+            ],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["agent_gamma"],
@@ -722,8 +721,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:
         """Implicit thread mentions should degrade instead of surfacing explicit-request rejection."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -736,11 +733,10 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!thread:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-        }
+        room = _matrix_room(
+            "!thread:localhost",
+            [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -765,8 +761,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
         """Explicit team requests must reject members that are not available in the room."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -779,11 +773,10 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -812,8 +805,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
         """Explicit sender visibility of [] must not fall back to room-visible agents."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -826,12 +817,13 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
+                entity_ids(config, runtime_paths_for(config))["general"].full_id,
+            ],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -858,8 +850,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_agents_use_supplied_responder_boundary_over_room_cache(self) -> None:
         """Supplied responder candidates are authoritative for explicit team requests."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -873,11 +863,7 @@ class TestRouterTeamFormation:
         )
         runtime_paths = runtime_paths_for(config)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths)["calculator"].full_id: None,
-        }
+        room = _matrix_room("!room:localhost", [entity_ids(config, runtime_paths)["calculator"].full_id])
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths)["calculator"],
@@ -906,8 +892,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
         """Explicit rejects should preserve the full requested-member failure state."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -921,11 +905,10 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [entity_ids(config, runtime_paths_for(config))["calculator"].full_id],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -956,8 +939,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
         """Mixed shared/private mentions should reject the whole ad hoc team request."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -975,13 +956,14 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["mind"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
+                entity_ids(config, runtime_paths_for(config))["general"].full_id,
+                entity_ids(config, runtime_paths_for(config))["mind"].full_id,
+            ],
+        )
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
             tagged_agents=[
@@ -1003,8 +985,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:
         """Explicit rejects should keep requested-member eligibility separate from delivery ownership."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -1021,12 +1001,13 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["alpha"].full_id,
+                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
+            ],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -1058,8 +1039,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
         """Mixed reject causes should explain the actual member failures instead of flattening them."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -1077,13 +1056,14 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["alpha"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["calculator"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["alpha"].full_id,
+                entity_ids(config, runtime_paths_for(config))["general"].full_id,
+                entity_ids(config, runtime_paths_for(config))["calculator"].full_id,
+            ],
+        )
 
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["calculator"],
@@ -1118,8 +1098,6 @@ class TestRouterTeamFormation:
         self,
     ) -> None:
         """Ad hoc team formation must reject explicit member sets that reach private agents."""
-        import nio  # noqa: PLC0415
-
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = _runtime_bound_config(
@@ -1142,14 +1120,15 @@ class TestRouterTeamFormation:
             ),
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            entity_ids(config, runtime_paths_for(config))["general"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["code"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["analyst"].full_id: None,
-            entity_ids(config, runtime_paths_for(config))["research"].full_id: None,
-        }
+        room = _matrix_room(
+            "!room:localhost",
+            [
+                entity_ids(config, runtime_paths_for(config))["general"].full_id,
+                entity_ids(config, runtime_paths_for(config))["code"].full_id,
+                entity_ids(config, runtime_paths_for(config))["analyst"].full_id,
+                entity_ids(config, runtime_paths_for(config))["research"].full_id,
+            ],
+        )
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["general"],
             tagged_agents=[

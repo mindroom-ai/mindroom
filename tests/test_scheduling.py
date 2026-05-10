@@ -63,6 +63,19 @@ def _conversation_cache(
     return access
 
 
+def _matrix_room(
+    room_id: str,
+    *,
+    members: tuple[str, ...] = (),
+    members_synced: bool = True,
+) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_router:server")
+    for member_id in members:
+        room.add_member(member_id, None, None)
+    room.members_synced = members_synced
+    return room
+
+
 def _scheduling_runtime(
     *,
     client: AsyncMock | None = None,
@@ -1643,9 +1656,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 async def test_schedule_task_uses_configured_room_boundary_without_membership_refresh() -> None:
     """Configured schedule rooms should use the static responder boundary without membership refresh."""
     client = AsyncMock()
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.members_synced = False
+    room = _matrix_room("!test:server", members_synced=False)
     runtime_paths = _runtime_paths()
     config = bind_runtime_paths(
         Config(
@@ -1665,7 +1676,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
         runtime_paths,
         usernames={"router": "mindroom_router_oldns", "assistant": "mindroom_assistant_oldns"},
     )
-    room.users = {f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}": MagicMock()}
+    room.add_member(f"@mindroom_router_oldns:{config.get_domain(runtime_paths)}", "Router", None)
     runtime = _scheduling_runtime(client=client, config=config, runtime_paths=runtime_paths, room=room)
     parse_result = ScheduledWorkflow(
         schedule_type="once",
@@ -1710,8 +1721,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
 async def test_schedule_task_rejects_mentions_outside_existing_thread_scope() -> None:
     """Existing-thread schedules should validate parsed mentions against thread-scoped responders."""
     client = AsyncMock()
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
+    room = _matrix_room("!test:server")
     runtime_paths = _runtime_paths()
     config = bind_runtime_paths(
         Config(

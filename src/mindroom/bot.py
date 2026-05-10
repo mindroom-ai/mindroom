@@ -19,7 +19,6 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -73,7 +72,7 @@ from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
-from .conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
+from .conversation_resolver import ConversationResolver, ConversationResolverDeps
 from .conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from .delivery_gateway import (
     DeliveryGateway,
@@ -249,9 +248,6 @@ def create_bot_for_entity(
 
     msg = f"Entity '{entity_name}' not found in configuration."
     raise ValueError(msg)
-
-
-type _MessageContext = MessageContext
 
 
 class AgentBot:
@@ -1647,24 +1643,6 @@ class AgentBot:
         """Delegate one inbound media event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="media")
         await self._turn_controller.handle_media_event(room, event)
-
-    def _should_queue_follow_up_in_active_response_thread(
-        self,
-        *,
-        context: _MessageContext,
-        target: MessageTarget | None,
-        source_envelope: MessageEnvelope | None,
-    ) -> bool:
-        """Return whether one human follow-up should enter the queued-response path."""
-        if target is None or source_envelope is None or not context.is_thread:
-            return False
-        if context.mentioned_agents or context.has_non_agent_mentions:
-            return False
-        if is_automation_source_kind(source_envelope.source_kind):
-            return False
-        if entity_identity_registry(self.config, self.runtime_paths).is_managed_user_id(source_envelope.sender_id):
-            return False
-        return self.has_active_response_for_target(target)
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
         """Return whether an agent can issue Matrix message actions."""

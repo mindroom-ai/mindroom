@@ -23,6 +23,21 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 
+def _add_room_users(room: nio.MatrixRoom, user_ids: list[str]) -> None:
+    room.members_synced = True
+    for user_id in user_ids:
+        room.add_member(user_id, None, None)
+
+
+def _matrix_room(config: Config, room_id: str = "!room:localhost", user_ids: list[str] | None = None) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id, "@test-user:localhost")
+    if user_ids is None:
+        runtime_paths = runtime_paths_for(config)
+        user_ids = [agent_id.full_id for agent_id in entity_ids(config, runtime_paths).values() if agent_id is not None]
+    _add_room_users(room, user_ids)
+    return room
+
+
 async def _select_team_mode_for_test(message: str, agent_names: list[str], config: Config) -> TeamMode:
     return await _select_team_mode(message, agent_names, config, runtime_paths_for(config))
 
@@ -38,11 +53,12 @@ async def decide_team_formation_for_test(**kwargs: object) -> TeamResolution:
         runtime_paths = runtime_paths_for(config)
     kwargs["runtime_paths"] = runtime_paths
     room = kwargs.get("room")
-    if isinstance(config, Config) and isinstance(room, MagicMock) and "users" not in room.__dict__:
+    if isinstance(config, Config) and isinstance(room, nio.MatrixRoom) and not room.users:
         # Team-formation tests should default to all configured agents being visible in the room.
-        room.users = {
-            agent_id.full_id: None for agent_id in entity_ids(config, runtime_paths).values() if agent_id is not None
-        }
+        _add_room_users(
+            room,
+            [agent_id.full_id for agent_id in entity_ids(config, runtime_paths).values() if agent_id is not None],
+        )
     return await decide_team_formation(**kwargs)
 
 
@@ -235,7 +251,7 @@ class TestShouldFormTeam:
                 ],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[],
-                room=MagicMock(spec=nio.MatrixRoom),
+                room=_matrix_room(mock_config),
                 message="Send email then call",
                 config=mock_config,
                 use_ai_decision=True,
@@ -262,7 +278,7 @@ class TestShouldFormTeam:
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=MagicMock(spec=nio.MatrixRoom),
+            room=_matrix_room(mock_config),
             message="Send email then call",
             config=mock_config,
             use_ai_decision=False,
@@ -284,7 +300,7 @@ class TestShouldFormTeam:
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=MagicMock(spec=nio.MatrixRoom),
+            room=_matrix_room(mock_config),
             message=None,  # No message provided
             config=mock_config,
             use_ai_decision=True,
@@ -306,7 +322,7 @@ class TestShouldFormTeam:
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=MagicMock(spec=nio.MatrixRoom),
+            room=_matrix_room(mock_config),
             message="Send email then call",
             config=None,  # No config provided
             runtime_paths=runtime_paths_for(mock_config),
@@ -326,7 +342,7 @@ class TestShouldFormTeam:
             tagged_agents=[entity_ids(mock_config, runtime_paths_for(mock_config))["email"]],  # Only one agent
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=MagicMock(spec=nio.MatrixRoom),
+            room=_matrix_room(mock_config),
             message="Send an email",
             config=None,
             runtime_paths=runtime_paths_for(mock_config),
@@ -351,7 +367,7 @@ class TestShouldFormTeam:
                     entity_ids(mock_config, runtime_paths_for(mock_config))["analyst"],
                 ],
                 all_mentioned_in_thread=[],
-                room=MagicMock(spec=nio.MatrixRoom),
+                room=_matrix_room(mock_config),
                 message="Continue the analysis",
                 config=mock_config,
                 use_ai_decision=True,
@@ -376,7 +392,7 @@ class TestShouldFormTeam:
                     entity_ids(mock_config, runtime_paths_for(mock_config))["phone"],
                     entity_ids(mock_config, runtime_paths_for(mock_config))["research"],
                 ],
-                room=MagicMock(spec=nio.MatrixRoom),
+                room=_matrix_room(mock_config),
                 message="Let's continue",
                 config=mock_config,
                 use_ai_decision=True,
@@ -412,7 +428,7 @@ class TestIntegrationScenarios:
                     ],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
-                    room=MagicMock(spec=nio.MatrixRoom),
+                    room=_matrix_room(mock_config),
                     message="Email me the details, then call me to discuss",
                     config=mock_config,
                     use_ai_decision=True,
@@ -444,7 +460,7 @@ class TestIntegrationScenarios:
                     ],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
-                    room=MagicMock(spec=nio.MatrixRoom),
+                    room=_matrix_room(mock_config),
                     message="What are your thoughts on this approach?",
                     config=mock_config,
                     use_ai_decision=True,
@@ -465,7 +481,7 @@ class TestIntegrationScenarios:
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=MagicMock(spec=nio.MatrixRoom),
+            room=_matrix_room(mock_config),
             runtime_paths=runtime_paths_for(mock_config),
         )
 

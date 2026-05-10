@@ -34,6 +34,19 @@ def _persist_voice_handler_accounts(config: Config) -> None:
     persist_actual_entity_accounts(config, runtime_paths, password=TEST_VOICE_ACCOUNT_PASSWORD)
 
 
+def _matrix_room(
+    room_id: str,
+    *,
+    members: tuple[str, ...] = (),
+    members_synced: bool = True,
+) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_router:localhost")
+    for member_id in members:
+        room.add_member(member_id, None, None)
+    room.members_synced = members_synced
+    return room
+
+
 async def _handle_voice_message(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
@@ -188,14 +201,15 @@ class TestVoiceHandler:
         )
 
         client = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!voice:localhost"
-        room.users = {
-            f"@actual_openclaw:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
-            f"@actual_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
-            "@alice:example.com": MagicMock(),
-        }
-        room.members_synced = True
+        domain = config.get_domain(runtime_paths_for(config))
+        room = _matrix_room(
+            "!voice:localhost",
+            members=(
+                f"@actual_openclaw:{domain}",
+                f"@actual_router:{domain}",
+                "@alice:example.com",
+            ),
+        )
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.event_id = "$voice"
         event.sender = "@alice:example.com"
@@ -269,10 +283,7 @@ class TestVoiceHandler:
         """Failed normalization should not leave stale in-flight task entries behind."""
         config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
         client = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:server"
-        room.users = {"@alice:example.com": MagicMock()}
-        room.members_synced = True
+        room = _matrix_room("!test:server", members=("@alice:example.com",))
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.event_id = "$voice123"
         event.sender = "@alice:example.com"
@@ -305,10 +316,7 @@ class TestVoiceHandler:
         """Canceling one waiter should not cancel the shared normalization task for others."""
         config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
         client = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:server"
-        room.users = {"@alice:example.com": MagicMock()}
-        room.members_synced = True
+        room = _matrix_room("!test:server", members=("@alice:example.com",))
         event = MagicMock(spec=nio.RoomMessageAudio)
         event.event_id = "$voice123"
         event.sender = "@alice:example.com"
