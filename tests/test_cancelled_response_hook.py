@@ -140,13 +140,11 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    team_member = entity_ids(config, runtime_paths)["code"]
     bot = TeamBot(
         team_user,
         tmp_path,
         config=config,
         runtime_paths=runtime_paths,
-        team_agents=[team_member],
         team_mode="coordinate",
     )
     wrap_extracted_collaborators(bot)
@@ -386,7 +384,7 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
                 prompt="   ",
                 user_id="@user:localhost",
             ),
-            team_agents=list(bot.team_agents),
+            team_agents=[entity_ids(bot.config, runtime_paths_for(bot.config))["code"]],
             team_mode=bot.team_mode,
         )
 

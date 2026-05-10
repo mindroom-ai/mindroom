@@ -417,6 +417,42 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bound_config
 
 
+def _configured_team_test_config(runtime_root: Path) -> Config:
+    """Return a runtime-bound config with one configured team for TeamBot tests."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+            },
+            teams={
+                "support_team": TeamConfig(
+                    display_name="Support Team",
+                    role="Coordinate test responses",
+                    agents=["general"],
+                    rooms=["!test:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        runtime_root,
+    )
+
+
+def _configured_team_user(config: Config, runtime_paths: RuntimePaths) -> AgentMatrixUser:
+    """Return the Matrix user for the configured TeamBot test team."""
+    team_name = "support_team"
+    ids = entity_ids(config, runtime_paths)
+    team_config = config.teams[team_name]
+    return AgentMatrixUser(
+        agent_name=team_name,
+        user_id=ids[team_name].full_id,
+        display_name=team_config.display_name or team_name,
+        password=TEST_PASSWORD,
+    )
+
+
 def _mock_managed_bot(config: Config) -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
@@ -3417,19 +3453,17 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_delivers_without_after_response(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Non-team fallback should deliver directly without response lifecycle hooks."""
-        config = self._config_for_storage(tmp_path)
+        config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
-            mock_agent_user,
+            _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[team_member],
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
@@ -3488,6 +3522,89 @@ class TestAgentBot:
         bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_not_awaited()
         bot._delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
         assert delivery_resolution == "$existing"
+
+    @pytest.mark.asyncio
+    async def test_configured_team_response_resolves_current_member_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Configured TeamBot responses should use the current persisted member IDs."""
+        config = _configured_team_test_config(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        initial_ids = entity_ids(config, runtime_paths)
+        stale_member = initial_ids["general"]
+        bot = TeamBot(
+            _configured_team_user(config, runtime_paths),
+            tmp_path,
+            config=config,
+            runtime_paths=runtime_paths,
+            team_mode="coordinate",
+        )
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
+
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account(
+            "agent_general",
+            "actual_general_live",
+            TEST_PASSWORD,
+            domain=config.get_domain(runtime_paths),
+        )
+        state.save(runtime_paths=runtime_paths)
+        current_member = entity_ids(config, runtime_paths)["general"]
+        assert stale_member.full_id != current_member.full_id
+
+        captured_member_ids: list[list[str]] = []
+
+        def capture_resolve_configured_team(
+            team_name: str,
+            team_members: list[Any],
+            mode: TeamMode,
+            config_arg: Config,
+            runtime_paths_arg: RuntimePaths,
+            *,
+            materializable_agent_names: set[str] | None = None,
+        ) -> TeamResolution:
+            assert team_name == "support_team"
+            assert mode is TeamMode.COORDINATE
+            assert config_arg is config
+            assert runtime_paths_arg == runtime_paths
+            assert materializable_agent_names == {"general"}
+            captured_member_ids.append([member.full_id for member in team_members])
+            return TeamResolution(
+                intent=TeamIntent.CONFIGURED_TEAM,
+                requested_members=team_members,
+                member_statuses=[
+                    TeamResolutionMember(
+                        agent=current_member,
+                        name="general",
+                        status=TeamMemberStatus.NOT_MATERIALIZABLE,
+                    ),
+                ],
+                eligible_members=[],
+                outcome=TeamOutcome.REJECT,
+                reason="not materializable",
+            )
+
+        bot._send_response = AsyncMock(return_value="$reject")
+
+        with (
+            patch.object(bot._turn_policy, "materializable_agent_names", return_value={"general"}),
+            patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
+        ):
+            result = await bot._generate_response(
+                room_id="!test:localhost",
+                prompt="Team, summarize this thread",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
+
+        assert captured_member_ids == [[current_member.full_id]]
+        assert stale_member.full_id not in captured_member_ids[0]
+        assert result == "$reject"
 
     @pytest.mark.asyncio
     async def test_deliver_generated_response_redacts_suppressed_placeholder(
@@ -5766,7 +5883,6 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_generate_team_response_queues_memory_before_helper_failure(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Team memory should be queued before the shared helper runs."""
@@ -5795,15 +5911,14 @@ class TestAgentBot:
             msg = "boom"
             raise RuntimeError(msg)
 
-        config = self._config_for_storage(tmp_path)
+        config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
-            mock_agent_user,
+            _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[team_member],
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
@@ -5853,7 +5968,6 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Team replies should reuse the shared thread-summary helper for summary gating."""
@@ -5884,15 +5998,14 @@ class TestAgentBot:
             for i in range(4)
         ]
 
-        config = self._config_for_storage(tmp_path)
+        config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
-            mock_agent_user,
+            _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[team_member],
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
@@ -5957,7 +6070,6 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_team_generate_response_keeps_streamed_visible_reply_when_before_response_suppresses(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """TeamBot must keep a visible streamed reply even if before_response tries to suppress it afterwards."""
@@ -5987,15 +6099,14 @@ class TestAgentBot:
             scheduled_names.append(name)
             return task
 
-        config = self._config_for_storage(tmp_path)
+        config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
-            mock_agent_user,
+            _configured_team_user(config, runtime_paths),
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[team_member],
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
@@ -8652,7 +8763,6 @@ class TestAgentBot:
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[entity_ids(config, runtime_paths)["calculator"]],
             team_mode="coordinate",
         )
         room = MagicMock(spec=nio.MatrixRoom)
@@ -11556,13 +11666,11 @@ class TestAgentBot:
             display_name="Team Bot",
             password=TEST_PASSWORD,
         )
-        team_member = entity_ids(config, runtime_paths)["general"]
         bot = TeamBot(
             team_user,
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_agents=[team_member],
             team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)

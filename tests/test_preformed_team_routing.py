@@ -34,7 +34,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, fixture_entity_matrix_id
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -151,25 +151,18 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
-    domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
         user_id=ids["t1"].full_id,
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    # Convert agent names to MatrixID objects
-    team_matrix_ids = [
-        fixture_entity_matrix_id("a1", domain, runtime_paths),
-        fixture_entity_matrix_id("a2", domain, runtime_paths),
-    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )
@@ -217,7 +210,6 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
-    domain = config_with_team.get_domain(runtime_paths)
     config_with_team.memory.backend = "mem0"
     config_with_team.agents["a1"].memory_backend = "file"
     config_with_team.agents["a2"].memory_backend = "file"
@@ -228,17 +220,12 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    team_matrix_ids = [
-        fixture_entity_matrix_id("a1", domain, runtime_paths),
-        fixture_entity_matrix_id("a2", domain, runtime_paths),
-    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )
@@ -305,24 +292,18 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
-    domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
         user_id=ids["t1"].full_id,
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    team_matrix_ids = [
-        fixture_entity_matrix_id("a1", domain, runtime_paths),
-        fixture_entity_matrix_id("a2", domain, runtime_paths),
-    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )
@@ -368,24 +349,18 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
-    domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
         user_id=ids["t1"].full_id,
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    team_matrix_ids = [
-        fixture_entity_matrix_id("a1", domain, runtime_paths),
-        fixture_entity_matrix_id("a2", domain, runtime_paths),
-    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )
@@ -441,25 +416,18 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
-    domain = config_with_team.get_domain(runtime_paths)
     team_user = AgentMatrixUser(
         agent_name="t1",
         user_id=ids["t1"].full_id,
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    # Convert agent names to MatrixID objects
-    team_matrix_ids = [
-        fixture_entity_matrix_id("a1", domain, runtime_paths),
-        fixture_entity_matrix_id("a2", domain, runtime_paths),
-    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )

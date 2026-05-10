@@ -22,7 +22,7 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
-from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.identity_helpers import persist_entity_accounts
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -115,7 +115,6 @@ def test_team_bot_uses_defaults_streaming_setting(
     """Team bots should inherit defaults.enable_streaming from config."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
     runtime_paths = runtime_paths_for(config_with_rooms)
-    domain = config_with_rooms.get_domain(runtime_paths)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
     def mock_resolve_room_aliases(
@@ -145,10 +144,6 @@ def test_team_bot_uses_defaults_streaming_setting(
 
     assert team_bot is not None
     assert team_bot.enable_streaming is False
-    assert team_bot.team_agents == [
-        fixture_entity_matrix_id("agent1", domain, runtime_paths),
-        fixture_entity_matrix_id("agent2", domain, runtime_paths),
-    ]
 
 
 def test_team_bot_uses_persisted_member_usernames(
@@ -187,7 +182,7 @@ def test_team_bot_uses_persisted_member_usernames(
     )
 
     assert isinstance(team_bot, TeamBot)
-    assert [member.full_id for member in team_bot.team_agents] == [
+    assert [member.full_id for member in team_bot.current_configured_team_agents()] == [
         "@mindroom_agent1_oldns:localhost",
         "@mindroom_agent2_oldns:localhost",
     ]

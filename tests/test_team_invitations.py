@@ -18,7 +18,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.identity_helpers import fixture_entity_matrix_id
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -63,17 +62,12 @@ class TestTeamRoomMembership:
 
         # Create the team bot with configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        # Convert agent names to MatrixID objects
-        team_matrix_ids = [
-            fixture_entity_matrix_id("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
-        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
-            team_agents=team_matrix_ids,
             team_mode="round_robin",
             team_model=None,
             enable_streaming=False,
@@ -124,17 +118,12 @@ class TestTeamRoomMembership:
 
         # Create the team bot with no configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
-        # Convert agent names to MatrixID objects
-        team_matrix_ids = [
-            fixture_entity_matrix_id("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
-        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
-            team_agents=team_matrix_ids,
             team_mode="round_robin",
             team_model=None,
             enable_streaming=False,
@@ -200,15 +189,11 @@ class TestTeamRoomMembership:
             ),
             tmp_path,
         )
-        team_matrix_ids = [
-            fixture_entity_matrix_id("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
-        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            team_agents=team_matrix_ids,
             team_mode="round_robin",
             team_model=None,
             enable_streaming=False,

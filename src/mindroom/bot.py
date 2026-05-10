@@ -222,8 +222,6 @@ def create_bot_for_entity(
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms, runtime_paths)
-        config_ids = entity_identity_registry(config, runtime_paths).current_ids
-        team_matrix_ids = [config_ids[agent_name] for agent_name in team_config.agents]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
@@ -231,7 +229,6 @@ def create_bot_for_entity(
             runtime_paths=runtime_paths,
             rooms=rooms,
             config_path=config_path,
-            team_agents=team_matrix_ids,
             team_mode=team_config.mode,
             team_model=team_config.model,
             enable_streaming=enable_streaming,
@@ -1938,7 +1935,6 @@ class TeamBot(AgentBot):
     """A bot that represents a team of agents working together."""
 
     # Team configuration
-    team_agents: list[MatrixID]
     team_mode: str
     team_model: str | None
 
@@ -1951,7 +1947,6 @@ class TeamBot(AgentBot):
         rooms: list[str] | None = None,
         config_path: Path | None = None,
         *,
-        team_agents: list[MatrixID] | None = None,
         team_mode: str = "coordinate",
         team_model: str | None = None,
         enable_streaming: bool = True,
@@ -1966,7 +1961,6 @@ class TeamBot(AgentBot):
             config_path=config_path,
             enable_streaming=enable_streaming,
         )
-        self.team_agents = [] if team_agents is None else team_agents
         self.team_mode = team_mode
         self.team_model = team_model
 
@@ -1974,6 +1968,12 @@ class TeamBot(AgentBot):
     def agent(self) -> Agent | None:
         """Teams don't have individual agents, return None."""
         return None
+
+    def current_configured_team_agents(self) -> list[MatrixID]:
+        """Return this configured team's current persisted member Matrix IDs."""
+        team_config = self.config.teams[self.agent_name]
+        registry = entity_identity_registry(self.config, self.runtime_paths)
+        return [registry.current_id(agent_name) for agent_name in team_config.agents]
 
     async def _generate_response(
         self,
@@ -2034,7 +2034,7 @@ class TeamBot(AgentBot):
         materializable_agent_names = self._turn_policy.materializable_agent_names()
         team_resolution = resolve_configured_team(
             self.agent_name,
-            self.team_agents,
+            self.current_configured_team_agents(),
             configured_mode,
             self.config,
             self.runtime_paths,

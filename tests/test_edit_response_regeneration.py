@@ -54,7 +54,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist_entity_accounts
+from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -813,14 +813,12 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     )
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    team_member = entity_ids(config, runtime_paths)["worker"]
     bot = TeamBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
-        team_agents=[team_member],
         team_mode="coordinate",
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
@@ -2351,7 +2349,6 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
     )
     config = _team_test_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    team_member = entity_ids(config, runtime_paths)["worker"]
     session_id = create_session_id("!test:example.com", None)
 
     bot = TeamBot(
@@ -2360,7 +2357,6 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
-        team_agents=[team_member],
         team_mode="coordinate",
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
