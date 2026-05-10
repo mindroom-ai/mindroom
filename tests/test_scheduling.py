@@ -37,7 +37,7 @@ from mindroom.scheduling import (
     scheduled_task_read_sort_key,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock
-from tests.identity_helpers import persist_entity_accounts
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -1704,3 +1704,64 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     assert task_id == "task1234"
     assert "Scheduled" in message
     client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_task_rejects_mentions_outside_existing_thread_scope() -> None:
+    """Existing-thread schedules should validate parsed mentions against thread-scoped responders."""
+    client = AsyncMock()
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    runtime_paths = _runtime_paths()
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": AgentConfig(display_name="Assistant", role="Test assistant"),
+                "writer": AgentConfig(display_name="Writer", role="Test writer"),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(
+        config,
+        runtime_paths,
+        usernames={"assistant": "actual_assistant", "writer": "actual_writer"},
+    )
+    thread_message = MagicMock()
+    thread_message.sender = ids["assistant"].full_id
+    runtime = _scheduling_runtime(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        room=room,
+        conversation_cache=_conversation_cache(thread_history=[thread_message]),
+    )
+    parse_result = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="@writer check logs",
+        description="check logs",
+        room_id="!test:server",
+        thread_id="$thread",
+    )
+
+    with (
+        patch(
+            "mindroom.scheduling.responder_candidate_entities_for_room",
+            new=AsyncMock(return_value=[ids["assistant"], ids["writer"]]),
+        ),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
+        patch("mindroom.scheduling._save_pending_scheduled_task", new=AsyncMock()) as save_task,
+    ):
+        task_id, message = await schedule_task(
+            runtime=runtime,
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:localhost",
+            full_text="in 5 minutes ask writer to check logs",
+        )
+
+    assert task_id is None
+    assert "@writer is not available in this thread" in message
+    save_task.assert_not_awaited()

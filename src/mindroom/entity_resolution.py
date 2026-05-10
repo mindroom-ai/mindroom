@@ -15,21 +15,23 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
+_INTERNAL_USER_ENTITY_NAME = "user"
 
-def configured_bot_usernames_for_room(
+
+def configured_bot_user_ids_for_room(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
 ) -> set[str]:
-    """Return bot username localparts configured for one Matrix room."""
+    """Return bot Matrix user IDs configured for one Matrix room."""
     configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
     if not configured_names:
         return set()
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
-    configured_bots = {config_ids[entity_name].username for entity_name in configured_names}
+    configured_bots = {config_ids[entity_name].full_id for entity_name in configured_names}
 
     if configured_bots:
-        configured_bots.add(config_ids[ROUTER_AGENT_NAME].username)
+        configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
 
     return configured_bots
 
@@ -148,7 +150,18 @@ def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Return the configured internal user's full Matrix ID."""
     if config.mindroom_user is None:
         return None
-    return MatrixID.from_username(config.mindroom_user.username, _matrix_domain(runtime_paths)).full_id
+    domain = _matrix_domain(runtime_paths)
+    return (
+        managed_account_user_id(
+            managed_account_key(_INTERNAL_USER_ENTITY_NAME),
+            domain,
+            runtime_paths,
+        )
+        or MatrixID.from_username(
+            config.mindroom_user.username,
+            domain,
+        ).full_id
+    )
 
 
 def resolve_agent_thread_mode(

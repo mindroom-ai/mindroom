@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -192,7 +192,10 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
     """Stop bots that depend on changed MCP servers before manager sync removes those servers."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
-    orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
+        "code": MagicMock(spec=AgentBot),
+    }
     updated_config = Config.validate_with_runtime(
         {
             "agents": {

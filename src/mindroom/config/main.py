@@ -86,9 +86,10 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "subagents",
     "matrix_message",
 )
+_INTERNAL_USER_ACCOUNT_KEY = "agent_user"
 
 
-def _persisted_agent_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
+def _persisted_account_fields(runtime_paths: RuntimePaths) -> dict[str, tuple[str, str | None]]:
     state_file = matrix_state_file(runtime_paths=runtime_paths)
     if not state_file.exists():
         return {}
@@ -98,16 +99,29 @@ def _persisted_agent_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
     accounts = data.get("accounts")
     if not isinstance(accounts, dict):
         return {}
-    usernames: dict[str, str] = {}
+    account_fields: dict[str, tuple[str, str | None]] = {}
     for account_key, account_data in accounts.items():
         if not isinstance(account_key, str) or not account_key.startswith("agent_"):
             continue
         if not isinstance(account_data, dict):
             continue
         username = account_data.get("username")
+        domain = account_data.get("domain")
         if isinstance(username, str):
-            usernames[account_key] = username
-    return usernames
+            account_fields[account_key] = (username, domain if isinstance(domain, str) else None)
+    return account_fields
+
+
+def _persisted_agent_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
+    return {key: username for key, (username, _domain) in _persisted_account_fields(runtime_paths).items()}
+
+
+def _persisted_account_user_id(account_key: str, fallback_domain: str, runtime_paths: RuntimePaths) -> str | None:
+    account_fields = _persisted_account_fields(runtime_paths).get(account_key)
+    if account_fields is None:
+        return None
+    username, domain = account_fields
+    return f"@{username}:{domain or fallback_domain}"
 
 
 logger = get_logger(__name__)
@@ -905,7 +919,15 @@ class Config(BaseModel):
         """Get the full Matrix user ID for the configured internal user."""
         if self.mindroom_user is None:
             return None
-        return f"@{self.mindroom_user.username}:{self.get_domain(runtime_paths)}"
+        domain = self.get_domain(runtime_paths)
+        return (
+            _persisted_account_user_id(
+                _INTERNAL_USER_ACCOUNT_KEY,
+                domain,
+                runtime_paths,
+            )
+            or f"@{self.mindroom_user.username}:{domain}"
+        )
 
     @classmethod
     def validate_with_runtime(

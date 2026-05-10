@@ -1280,7 +1280,7 @@ def test_reply_permissions_do_not_trust_configured_id_after_username_drift(tmp_p
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
-    assert is_sender_allowed_for_agent_reply("@mindroom_assistant:example.com", "assistant", config) is False
+    assert is_sender_allowed_for_agent_reply("@actual_assistant:example.com", "assistant", config) is False
 
 
 def test_sender_authorization_does_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
@@ -1301,7 +1301,7 @@ def test_sender_authorization_does_not_trust_configured_id_after_username_drift(
     state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
     state.save(runtime_paths=runtime_paths)
 
-    assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
+    assert is_authorized_sender("@actual_assistant:example.com", config, "!room:example.com") is False
 
 
 def test_sender_authorization_uses_actual_persisted_id_without_generated_fallback(tmp_path: Path) -> None:
@@ -1326,8 +1326,8 @@ def test_sender_authorization_uses_actual_persisted_id_without_generated_fallbac
     assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
 
 
-def test_effective_sender_ignores_persisted_current_internal_accounts_with_domain_drift(tmp_path: Path) -> None:
-    """Old-domain sender IDs must not stay trusted for live relay authorization."""
+def test_effective_sender_trusts_persisted_current_internal_accounts_with_nondefault_domain(tmp_path: Path) -> None:
+    """Relay authorization should trust the actual persisted account domain."""
     config = _isolated_config(
         tmp_path,
         agents={
@@ -1357,7 +1357,7 @@ def test_effective_sender_ignores_persisted_current_internal_accounts_with_domai
             event_source,
             config,
         )
-        == "@mindroom_assistant_oldns:legacy.example.com"
+        == "@alice:example.com"
     )
 
 

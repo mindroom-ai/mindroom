@@ -762,10 +762,8 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.ensure_all_rooms_exist") as mock_ensure_rooms,
         patch("mindroom.orchestrator.ensure_user_in_rooms") as mock_ensure_user,
-        patch("mindroom.orchestrator.create_agent_user") as mock_create_user,
     ):
         # Setup mocks
-        mock_create_user.return_value = MagicMock()
         mock_ensure_rooms.return_value = {}
         mock_ensure_user.return_value = None
 
@@ -790,6 +788,22 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         # Create orchestrator
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator._prepare_entity_accounts = AsyncMock(
+            return_value={
+                "router": AgentMatrixUser(
+                    agent_name="router",
+                    user_id="@mindroom_router:localhost",
+                    display_name="RouterAgent",
+                    password=TEST_PASSWORD,
+                ),
+                "test_agent": AgentMatrixUser(
+                    agent_name="test_agent",
+                    user_id="@mindroom_test_agent:localhost",
+                    display_name="Test Agent",
+                    password=TEST_PASSWORD,
+                ),
+            },
+        )
 
         assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 

@@ -388,6 +388,35 @@ class TestHelperFunctions:
         assert migrated_data["accounts"]["agent_general"]["domain"] == self.config.get_domain(runtime_paths)
         assert "known_user_ids" not in migrated_data["accounts"]["agent_general"]
 
+    def test_matrix_state_load_preserves_persisted_account_domain(self, tmp_path: Path) -> None:
+        """Loading current state must preserve actual provisioned account domains."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            yaml.safe_dump(
+                {
+                    "accounts": {
+                        "agent_general": {
+                            "username": "actual_general",
+                            "password": "pw",
+                            "domain": "matrix.example",
+                        },
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        state = MatrixState.load(runtime_paths=runtime_paths)
+
+        assert state.accounts["agent_general"].domain == "matrix.example"
+        assert managed_account_user_id("agent_general", self.config.get_domain(runtime_paths), runtime_paths) == (
+            "@actual_general:matrix.example"
+        )
+
     def test_matrix_state_load_migrates_without_advisory_lock(
         self,
         tmp_path: Path,

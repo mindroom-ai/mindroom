@@ -708,8 +708,8 @@ async def test_orphan_cleanup_preserves_router_persisted_invited_room(
         AsyncMock(return_value=["@mindroom_router:localhost"]),
     )
     monkeypatch.setattr(
-        "mindroom.matrix.room_cleanup._get_all_known_bot_usernames",
-        lambda _runtime_paths: {"mindroom_router"},
+        "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+        lambda _config, _runtime_paths: {"@mindroom_router:localhost"},
     )
     monkeypatch.setattr("mindroom.matrix.room_cleanup.is_dm_room", AsyncMock(return_value=False))
     client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())

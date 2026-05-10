@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.entity_resolution import configured_bot_usernames_for_room, entity_identity_registry
+from mindroom.entity_resolution import configured_bot_user_ids_for_room, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
@@ -23,7 +23,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_persist_invited_rooms,
 )
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.matrix.state import managed_account_usernames, matrix_state_for_runtime
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
@@ -33,16 +33,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _get_all_known_bot_usernames(runtime_paths: RuntimePaths) -> set[str]:
-    """Get all current persisted bot usernames from matrix_state.yaml.
-
-    Returns:
-        Set of current bot usernames
-
-    """
+def _get_all_known_bot_user_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Get all current persisted bot Matrix user IDs from matrix_state.yaml."""
+    domain = config.get_domain(runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     return {
-        username
-        for key, username in managed_account_usernames(runtime_paths).items()
+        MatrixID.from_username(account.username, account.domain or domain).full_id
+        for key, account in state.accounts.items()
+        if key.startswith("agent_")
         if key != INTERNAL_USER_ACCOUNT_KEY
     }
 
@@ -51,7 +49,7 @@ def _load_all_persisted_invited_rooms(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> dict[str, set[str]]:
-    """Load persisted invited rooms for invite-accepting entities, keyed by bot username."""
+    """Load persisted invited rooms for invite-accepting entities, keyed by bot Matrix user ID."""
     invited_rooms_by_bot: dict[str, set[str]] = {}
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
 
@@ -61,7 +59,7 @@ def _load_all_persisted_invited_rooms(
 
         rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, entity_name))
         if rooms:
-            invited_rooms_by_bot[config_ids[entity_name].username] = rooms
+            invited_rooms_by_bot[config_ids[entity_name].full_id] = rooms
 
     return invited_rooms_by_bot
 
@@ -82,10 +80,10 @@ async def _cleanup_orphaned_bots_in_room(
         room_id: The room to check
         config: Current configuration
         runtime_paths: Explicit runtime context for Matrix state and identity resolution
-        persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot username
+        persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot Matrix user ID
 
     Returns:
-        List of bot usernames that were kicked
+        List of bot Matrix user IDs that were kicked
 
     """
     # Never evict bots from the root space — the router is the creator/admin
@@ -107,8 +105,8 @@ async def _cleanup_orphaned_bots_in_room(
         return []
 
     # Get configured bots for this room
-    configured_bots = configured_bot_usernames_for_room(config, room_id, runtime_paths)
-    known_bot_usernames = _get_all_known_bot_usernames(runtime_paths)
+    configured_bot_ids = configured_bot_user_ids_for_room(config, room_id, runtime_paths)
+    known_bot_user_ids = _get_all_known_bot_user_ids(config, runtime_paths)
     registry = entity_identity_registry(config, runtime_paths)
     if persisted_invited_rooms_by_bot is None:
         persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
@@ -118,14 +116,15 @@ async def _cleanup_orphaned_bots_in_room(
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
         agent_name = registry.current_entity_name_for_user_id(user_id)
-        is_configured_current_bot = agent_name is not None and matrix_id.username in configured_bots
+        is_configured_current_bot = agent_name is not None and user_id in configured_bot_ids
 
         # Check if this is a mindroom bot and shouldn't be in this room
-        if matrix_id.username in known_bot_usernames and not is_configured_current_bot:
-            if room_id in persisted_invited_rooms_by_bot.get(matrix_id.username, set()):
+        if user_id in known_bot_user_ids and not is_configured_current_bot:
+            if room_id in persisted_invited_rooms_by_bot.get(user_id, set()):
                 logger.debug(
                     "orphaned_bot_cleanup_preserved_persisted_invited_room",
                     agent=matrix_id.username,
+                    user_id=user_id,
                     room_id=room_id,
                 )
                 continue
@@ -133,8 +132,9 @@ async def _cleanup_orphaned_bots_in_room(
             logger.info(
                 "orphaned_bot_found",
                 agent=matrix_id.username,
+                user_id=user_id,
                 room_id=room_id,
-                configured_bots=sorted(configured_bots),
+                configured_bots=sorted(configured_bot_ids),
             )
 
             # Kick the bot
@@ -142,7 +142,7 @@ async def _cleanup_orphaned_bots_in_room(
 
             if isinstance(kick_response, nio.RoomKickResponse):
                 logger.info("orphaned_bot_kicked", agent=matrix_id.username, room_id=room_id, user_id=user_id)
-                kicked_bots.append(matrix_id.username)
+                kicked_bots.append(user_id)
             else:
                 logger.error(
                     "orphaned_bot_kick_failed",
@@ -166,7 +166,7 @@ async def cleanup_all_orphaned_bots(
     in the rooms that need cleaning.
 
     Returns:
-        Dictionary mapping room IDs to lists of kicked bot usernames
+        Dictionary mapping room IDs to lists of kicked bot Matrix user IDs
 
     """
     # Track what we're doing

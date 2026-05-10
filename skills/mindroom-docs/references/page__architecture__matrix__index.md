@@ -108,17 +108,18 @@ Agents set their Matrix presence with status messages containing model and role 
 
 ## Typing Indicators
 
-Agents show typing indicators while processing via `typing_indicator()` context manager. The indicator auto-refreshes at `min(timeout/2, 15)` seconds to remain visible during long operations.
+Agents show typing indicators while processing via `typing_indicator()` context manager.
+The indicator auto-refreshes at `min(timeout/2, 15)` seconds to remain visible during long operations.
 
 ## Mentions
 
 Mentions are parsed via `format_message_with_mentions()` which handles multiple formats:
 
 - `@calculator` - Stable configured agent or team key
-- `@calculator_live` - Current persisted username localpart
-- `@calculator_live:localhost` - Current full Matrix ID
+- `@actual_calculator:localhost` - Current full Matrix ID
 
-Generated bootstrap IDs such as `@mindroom_calculator:localhost` are provisioning details and should not be taught as runtime handles once persisted state records the current username.
+Bare Matrix account localparts such as `@actual_calculator` are not runtime handles.
+Generated bootstrap IDs such as `@mindroom_calculator:localhost` are provisioning details and should not be taught as runtime handles once persisted state records the current Matrix ID.
 
 Returns content with `m.mentions` and `formatted_body` containing clickable links.
 

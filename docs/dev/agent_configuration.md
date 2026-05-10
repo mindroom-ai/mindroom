@@ -568,7 +568,7 @@ Each agent has its own Matrix account.
 Persisted Matrix state is the source of truth for the account username after provisioning, so generated `@mindroom_<agent>` IDs are only bootstrap examples.
 To interact with an agent:
 
-1. **Mention the agent by its configured name or current Matrix username**: `@agentname` or the username shown in the room
+1. **Mention the agent by its configured name**: `@agentname`
    - Example: `@code what is 25 * 4?`
 
 2. **In threads**: Agents continue responding based on thread context, but multi-human threads require an explicit current `@mention`

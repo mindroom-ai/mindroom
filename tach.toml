@@ -798,7 +798,16 @@ depends_on = ["mindroom.matrix.client_session", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.matrix.room_cleanup"
-depends_on = ["mindroom.entity_resolution", "mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.state", "mindroom.matrix.users"]
+depends_on = [
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.invited_rooms_store",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
+    "mindroom.matrix.users",
+]
 
 [[modules]]
 path = "mindroom.matrix.rooms"
@@ -989,7 +998,6 @@ depends_on = [
     "mindroom.git_urls",
     "mindroom.history.types",
     "mindroom.logging_config",
-    "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
     "mindroom.prompt_templates",

@@ -1401,7 +1401,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(
         workflow_result.message,
-        sender_visible_room_agents,
+        available_agents,
         config,
         runtime_paths,
     )

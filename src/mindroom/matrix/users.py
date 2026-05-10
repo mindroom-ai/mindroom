@@ -627,7 +627,7 @@ async def create_agent_user(
         homeserver: The Matrix homeserver URL
         agent_name: The internal agent name (e.g., 'calculator')
         agent_display_name: The display name for the agent (e.g., 'CalculatorAgent')
-        username: Optional explicit Matrix username localpart to use
+        username: Optional Matrix username localpart to request when creating a missing account
         runtime_paths: Optional explicit runtime context for env and SSL resolution
 
     Returns:
@@ -638,20 +638,7 @@ async def create_agent_user(
     existing_creds = _get_agent_credentials(agent_name, runtime_paths)
     preferred_username = username
 
-    if (
-        agent_name == INTERNAL_USER_AGENT_NAME
-        and preferred_username is not None
-        and existing_creds
-        and existing_creds["username"] != preferred_username
-    ):
-        msg = (
-            "mindroom_user.username cannot be changed after first startup "
-            f"(existing: '{existing_creds['username']}', configured: '{preferred_username}'). "
-            "Keep the existing username and change mindroom_user.display_name instead."
-        )
-        raise matrix_startup_error(msg, permanent=True)
-
-    if existing_creds and (preferred_username is None or existing_creds["username"] == preferred_username):
+    if existing_creds:
         username_value = existing_creds["username"]
         password_value = existing_creds["password"]
         if username_value is None or password_value is None:

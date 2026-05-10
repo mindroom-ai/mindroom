@@ -41,7 +41,7 @@ def persist_entity_accounts(
         account_key = managed_account_key(entity_name)
         if account_key in state.accounts and entity_name not in usernames:
             continue
-        username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths=runtime_paths))
+        username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
         state.add_account(account_key, username, password, domain=domain)
     state.save(runtime_paths=runtime_paths)
 
@@ -72,5 +72,5 @@ def entity_name_for_id(matrix_id: MatrixID, config: ConfigLike, runtime_paths: R
 
 
 def fixture_entity_matrix_id(entity_name: str, domain: str, runtime_paths: RuntimePaths) -> MatrixID:
-    """Build a generated-looking Matrix ID only for tests that persist that fixture."""
-    return MatrixID.from_username(agent_username_localpart(entity_name, runtime_paths=runtime_paths), domain)
+    """Build the default persisted Matrix ID used by test identity fixtures."""
+    return MatrixID.from_username(agent_username_localpart(entity_name, runtime_paths), domain)

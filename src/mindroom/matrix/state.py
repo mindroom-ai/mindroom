@@ -157,12 +157,6 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
     return None
 
 
-def managed_account_usernames(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
-    """Return current persisted managed Matrix usernames keyed by state account key."""
-    state = matrix_state_for_runtime(runtime_paths)
-    return {key: account.username for key, account in state.accounts.items() if key.startswith("agent_")}
-
-
 def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
     """Return one cache key that invalidates when the state file changes."""
     if not state_file.exists():
@@ -198,7 +192,7 @@ def _migrate_accounts_to_current_schema(state: MatrixState, *, current_domain: s
     """Normalize persisted accounts to the current on-disk schema."""
     changed = False
     for account in state.accounts.values():
-        if account.domain != current_domain:
+        if account.domain is None:
             account.domain = current_domain
             changed = True
     return changed

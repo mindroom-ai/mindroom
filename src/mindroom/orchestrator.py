@@ -18,7 +18,7 @@ from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entit
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import configured_bot_usernames_for_room
+from mindroom.entity_resolution import configured_bot_user_ids_for_room, entity_identity_registry
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
@@ -33,7 +33,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
-from mindroom.matrix.identity import MatrixID, managed_account_user_id
+from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -761,6 +761,10 @@ class _MultiAgentOrchestrator:
                 self._entity_display_name(config, entity_name),
                 runtime_paths=self.runtime_paths,
             )
+        try:
+            entity_identity_registry(config, self.runtime_paths)
+        except RuntimeError as exc:
+            raise PermanentStartupError(str(exc)) from exc
         return users
 
     def _create_managed_bot(
@@ -961,6 +965,8 @@ class _MultiAgentOrchestrator:
         start_sync_tasks: bool,
     ) -> EntityStartResults:
         """Create configured entities and try to start them once."""
+        if not entity_names:
+            return EntityStartResults()
         entity_users = await self._prepare_entity_accounts(config, sorted(entity_names))
         for entity_name in sorted(entity_names):
             self._create_managed_bot(entity_name, config, entity_users[entity_name])
@@ -1373,6 +1379,8 @@ class _MultiAgentOrchestrator:
 
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
+        if plan.new_entities:
+            await self._prepare_entity_accounts(new_config, plan.new_entities)
 
         if plugin_changes:
             pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
@@ -1636,18 +1644,16 @@ class _MultiAgentOrchestrator:
         self,
         room_id: str,
         current_members: set[str],
-        configured_bots: Iterable[str],
-        server_name: str,
+        configured_bot_ids: Iterable[str],
     ) -> None:
         """Invite all configured bots for a room."""
-        for bot_username in configured_bots:
-            bot_user_id = MatrixID.from_username(bot_username, server_name).full_id
+        for bot_user_id in configured_bot_ids:
             await self._invite_user_if_missing(
                 room_id,
                 bot_user_id,
                 current_members,
-                success_message=f"Invited {bot_username} to room {room_id}",
-                failure_message=f"Failed to invite {bot_username} to room {room_id}",
+                success_message=f"Invited {bot_user_id} to room {room_id}",
+                failure_message=f"Failed to invite {bot_user_id} to room {room_id}",
             )
 
     async def _ensure_room_invitations(self) -> None:
@@ -1670,10 +1676,6 @@ class _MultiAgentOrchestrator:
         if not joined_rooms:
             return
 
-        server_name = extract_server_name_from_homeserver(
-            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-            runtime_paths=self.runtime_paths,
-        )
         authorized_user_ids = get_authorized_user_ids_to_invite(config)
         authorized_user_ids = await self._invite_internal_user_to_rooms(
             config,
@@ -1682,13 +1684,13 @@ class _MultiAgentOrchestrator:
         )
 
         for room_id in joined_rooms:
-            configured_bots = configured_bot_usernames_for_room(config, room_id, self.runtime_paths)
+            configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
             if not configured_bots:
                 continue
 
             current_members = await get_room_members(router_bot.client, room_id)
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
-            await self._invite_configured_bots_to_room(room_id, current_members, configured_bots, server_name)
+            await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
 
         logger.info("Ensured room invitations for all configured agents and authorized users")
 

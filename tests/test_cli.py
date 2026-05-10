@@ -290,23 +290,39 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with("Alice Smith")
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_rejects_changing_existing_username(
+    async def test_ensure_user_account_uses_existing_persisted_identity(
         self,
         tmp_path: Path,
+        mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Internal username cannot be changed after initial account bootstrap."""
+        """Internal user config username is only a proposal when no account exists yet."""
+        mock_context, mock_client = mock_matrix_client
         state = MatrixState()
-        state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
+        state.add_account(
+            INTERNAL_USER_ACCOUNT_KEY,
+            "actual_mindroom_user",
+            "existing_password",
+            domain="matrix.example",
+        )
 
         custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
 
         runtime_paths = _runtime_paths(tmp_path)
         state.save(runtime_paths=runtime_paths)
-        with patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"):
+        with (
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
+        ):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
 
-            with pytest.raises(ValueError, match="cannot be changed"):
-                await orchestrator._ensure_user_account(custom_config)
+            await orchestrator._ensure_user_account(custom_config)
+
+        persisted_state = MatrixState.load(runtime_paths=runtime_paths)
+        account = persisted_state.accounts[INTERNAL_USER_ACCOUNT_KEY]
+        assert account.username == "actual_mindroom_user"
+        assert account.domain == "matrix.example"
+        assert custom_config.get_mindroom_user_id(runtime_paths) == "@actual_mindroom_user:matrix.example"
+        mock_client.register.assert_not_called()
 
 
 def test_mindroom_user_username_normalizes_single_leading_at() -> None:

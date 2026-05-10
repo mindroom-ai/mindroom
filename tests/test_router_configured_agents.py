@@ -167,7 +167,7 @@ class TestResponderCandidateSelection:
         room.members_synced = True
         room.users = {
             "@mindroom_calculator_oldns:localhost": None,
-            "@mindroom_writer:localhost": None,
+            "@actual_writer:localhost": None,
             "@user:localhost": None,
         }
         client = AsyncMock()

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.entity_resolution import configured_bot_usernames_for_room, entity_identity_registry
+from mindroom.entity_resolution import configured_bot_user_ids_for_room, entity_identity_registry
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_configured_bot_usernames_for_room_includes_agents_teams_and_router(tmp_path: Path) -> None:
-    """Room membership resolution returns agent, team, and router bot usernames."""
+def test_configured_bot_user_ids_for_room_includes_agents_teams_and_router(tmp_path: Path) -> None:
+    """Room membership resolution returns agent, team, and router bot user IDs."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -46,17 +46,17 @@ def test_configured_bot_usernames_for_room_includes_agents_teams_and_router(tmp_
     state.add_account("agent_team", "mindroom_team", "pw", domain="localhost")
     state.save(runtime_paths=runtime_paths)
 
-    usernames = configured_bot_usernames_for_room(config, "!room:server", runtime_paths)
+    user_ids = configured_bot_user_ids_for_room(config, "!room:server", runtime_paths)
 
-    assert usernames == {
-        f"mindroom_{ROUTER_AGENT_NAME}",
-        "mindroom_general",
-        "mindroom_team",
+    assert user_ids == {
+        f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
+        "@mindroom_general:localhost",
+        "@mindroom_team:localhost",
     }
 
 
-def test_configured_bot_usernames_for_room_uses_persisted_current_usernames(tmp_path: Path) -> None:
-    """Room membership usernames should resolve through live persisted account usernames."""
+def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_path: Path) -> None:
+    """Room membership user IDs should resolve through live persisted account user IDs."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -79,17 +79,17 @@ def test_configured_bot_usernames_for_room_uses_persisted_current_usernames(tmp_
     )
     runtime_paths = runtime_paths_for(config)
     state = MatrixState()
-    state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router_oldns", "pw", domain="localhost")
-    state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.add_account("agent_team", "mindroom_team_oldns", "pw", domain="localhost")
+    state.add_account(f"agent_{ROUTER_AGENT_NAME}", "actual_router", "pw", domain="matrix.example")
+    state.add_account("agent_general", "actual_general", "pw", domain="matrix.example")
+    state.add_account("agent_team", "actual_team", "pw", domain="matrix.example")
     state.save(runtime_paths=runtime_paths)
 
-    usernames = configured_bot_usernames_for_room(config, "!room:server", runtime_paths)
+    user_ids = configured_bot_user_ids_for_room(config, "!room:server", runtime_paths)
 
-    assert usernames == {
-        "mindroom_router_oldns",
-        "mindroom_general_oldns",
-        "mindroom_team_oldns",
+    assert user_ids == {
+        "@actual_router:matrix.example",
+        "@actual_general:matrix.example",
+        "@actual_team:matrix.example",
     }
 
 

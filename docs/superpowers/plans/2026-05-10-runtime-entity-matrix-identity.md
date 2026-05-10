@@ -1,7 +1,7 @@
 # Runtime Entity Matrix Identity Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
-> Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status:** Implemented in this PR.
+> The checkboxes below are historical execution scaffolding, not current TODOs.
 
 **Goal:** Make runtime identity use only `configured entity alias -> actual persisted Matrix ID`, with generated usernames limited to account provisioning and config-time collision checks.
 
@@ -43,7 +43,7 @@ Startup ordering, actual provisioned Matrix ID persistence, wrapper identity hel
 - Duplicate persisted Matrix IDs across router, agents, and teams are invalid.
 - Configured-room responder boundaries are alias-first and then converted to actual Matrix IDs.
 - Ad-hoc room responder boundaries use present actual managed Matrix IDs and map them back through the same registry.
-- Tests must not use generated IDs as runtime identity shortcuts.
+- Tests must not use generated IDs as runtime identity shortcuts without persisted Matrix state.
 - Any remaining generated-ID example must be classified as provisioning-only, actual persisted fixture, or docs explaining initial provisioning.
 
 ## Runtime Phases

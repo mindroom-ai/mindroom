@@ -658,7 +658,7 @@ def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) 
         account_key = managed_account_key(entity_name)
         if account_key in state.accounts:
             continue
-        username = agent_username_localpart(entity_name, runtime_paths=runtime_paths)
+        username = agent_username_localpart(entity_name, runtime_paths)
         state.add_account(account_key, username, TEST_PASSWORD, domain=domain)
         changed = True
     if changed:

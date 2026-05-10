@@ -841,28 +841,29 @@ class TestAgentUserCreation:
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_internal_user_rejects_username_change(
+    async def test_create_internal_user_reuses_existing_credentials_when_config_username_changes(
         self,
         mock_get_creds: MagicMock,
         mock_register: AsyncMock,
         tmp_path: Path,
     ) -> None:
-        """Internal username cannot change once credentials already exist."""
+        """Existing internal user credentials remain authoritative after config username edits."""
         mock_get_creds.return_value = {
             "username": DEFAULT_INTERNAL_USERNAME,
             "password": "existing_pass",
         }
 
         runtime_paths = _runtime_paths(tmp_path)
-        with pytest.raises(PermanentMatrixStartupError, match="cannot be changed"):
-            await create_agent_user(
-                "http://localhost:8008",
-                INTERNAL_USER_AGENT_NAME,
-                "MindRoomUser",
-                runtime_paths,
-                username="alice_internal",
-            )
+        agent_user = await create_agent_user(
+            "http://localhost:8008",
+            INTERNAL_USER_AGENT_NAME,
+            "MindRoomUser",
+            runtime_paths,
+            username="alice_internal",
+        )
 
+        assert agent_user.user_id == "@mindroom_user:localhost"
+        assert agent_user.password == "existing_pass"  # noqa: S105
         mock_register.assert_not_called()
 
 
