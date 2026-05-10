@@ -205,7 +205,7 @@ test-front:
 # Run core backend tests (pytest) with optional arguments
 test-backend *args:
     uv sync --all-extras
-    uv run pytest {{args}}
+    uv run --all-extras pytest {{args}}
 
 # Check for public symbols that should be private
 check-module-privacy:

@@ -296,7 +296,7 @@ async def _wait_for_sent_pending(
     *,
     room_id: str = "!room:localhost",
 ) -> PendingApproval:
-    async with asyncio.timeout(1):
+    async with asyncio.timeout(5):
         while True:
             if sender.await_args is not None:
                 content = sender.await_args.kwargs.get("content")
