@@ -19,6 +19,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -1293,7 +1294,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     assert captured_content["com.mindroom.source_kind"] == "hook_dispatch"
-    expected_requester = bot.config.get_mindroom_user_id(bot.runtime_paths)
+    expected_requester = mindroom_user_id(bot.config, bot.runtime_paths)
     if expected_requester is None:
         assert ORIGINAL_SENDER_KEY not in captured_content
     else:

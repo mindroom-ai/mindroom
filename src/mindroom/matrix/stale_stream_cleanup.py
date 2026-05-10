@@ -23,7 +23,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
-from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
@@ -1030,7 +1030,7 @@ def _is_internal_sender(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether the sender is one of MindRoom's own Matrix accounts."""
-    return sender_id in _current_internal_sender_ids(config, runtime_paths)
+    return sender_id in current_internal_sender_ids(config, runtime_paths)
 
 
 def _cleanup_trusted_sender_ids(
@@ -1040,17 +1040,9 @@ def _cleanup_trusted_sender_ids(
     runtime_paths: RuntimePaths,
 ) -> frozenset[str]:
     """Return the exact sender IDs cleanup may trust for canonical visible-body metadata."""
-    trusted_sender_ids = set(_current_internal_sender_ids(config, runtime_paths))
+    trusted_sender_ids = set(current_internal_sender_ids(config, runtime_paths))
     trusted_sender_ids.add(bot_user_id)
     return frozenset(trusted_sender_ids)
-
-
-def _current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return current managed Matrix sender IDs plus the internal user."""
-    sender_ids = set(entity_identity_registry(config, runtime_paths).internal_sender_ids)
-    if (internal_user_id := mindroom_user_id(config, runtime_paths)) is not None:
-        sender_ids.add(internal_user_id)
-    return frozenset(sender_ids)
 
 
 def _effective_requester_for_message(

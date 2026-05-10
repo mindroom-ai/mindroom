@@ -9,14 +9,14 @@ If STT is unavailable, disabled, or fails, the audio still remains available as 
 When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
-1. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
-1. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
-1. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
-1. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-1. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
-1. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
-1. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-1. The responding entity receives the original audio attachment alongside the normalized prompt.
+2. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
+3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
+6. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
+7. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
+8. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
+9. The responding entity receives the original audio attachment alongside the normalized prompt.
 
 ## Configuration
 
@@ -93,10 +93,10 @@ If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment
 The intelligence component uses an AI model to analyze transcriptions and format them properly:
 
 1. **Agent and team mentions** - Converts spoken agent or team names to listed `@agent` or `@team` mentions
-1. **Mention sanitization** - Mentions of agents or teams not available in the current room have their `@` stripped so the responder is not falsely targeted
-1. **Command patterns** - Identifies and formats `!command` syntax
-1. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
-1. **Smart formatting** - Handles speech recognition errors and natural language variations
+2. **Mention sanitization** - Mentions of agents or teams not available in the current room have their `@` stripped so the responder is not falsely targeted
+3. **Command patterns** - Identifies and formats `!command` syntax
+4. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
+5. **Smart formatting** - Handles speech recognition errors and natural language variations
 
 ### Intelligence Model
 
@@ -171,7 +171,7 @@ If multiple eligible responders remain and the audio does not already target one
 By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event.
 The router handoff message appears only when the router must disambiguate between multiple eligible responders.
 If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event.
-Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event agents actually answer.
+Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event responders actually answer.
 
 ### Attachment access
 
@@ -196,32 +196,34 @@ Reply-permission checks still use the original human sender, not a later router 
 
 ## Environment Variables
 
-| Variable         | Description                                                          |
-| ---------------- | -------------------------------------------------------------------- |
+| Variable | Description |
+|----------|-------------|
 | `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
 
 ## Text-to-Speech Tools
 
-MindRoom also supports text-to-speech (TTS) through agent tools. These are separate from voice message transcription and allow agents to generate audio responses:
+MindRoom also supports text-to-speech (TTS) through agent tools.
+These are separate from voice message transcription and allow agents to generate audio responses:
 
 - **OpenAI** - Speech synthesis via `openai` tool
 - **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
 
-See the [Tools documentation](https://docs.mindroom.chat/tools/index.md) for configuration details.
+See the [Tools documentation](tools/index.md) for configuration details.
 
 ## Voice Fallback (No STT Available)
 
 When STT is unavailable, disabled, or transcription fails, MindRoom falls back to raw audio passthrough:
 
 1. The voice message audio is downloaded and saved locally as an attachment
-1. The normalized text becomes `🎤 [Attached voice message]`
-1. The raw audio is registered as an attachment ID available to agents and teams in the room or thread context
-1. When an agent or team responds, it automatically receives the raw audio as an Agno `Audio` object
+2. The normalized text becomes `🎤 [Attached voice message]`
+3. The raw audio is registered as an attachment ID available to agents and teams in the room or thread context
+4. When an agent or team responds, it automatically receives the raw audio as an Agno `Audio` object
 
 This means voice messages still reach responders even without STT.
-Agents or teams with audio-capable models can process the raw audio directly, and tool-using responders can retrieve the file by attachment ID. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
+Agents or teams with audio-capable models can process the raw audio directly, and tool-using responders can retrieve the file by attachment ID.
+Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](attachments.md).
 
 ## Limitations
 

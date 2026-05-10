@@ -479,7 +479,7 @@ class TurnPolicy:
                 runtime_paths=self.deps.runtime_paths,
                 available_agents_in_room=available_agents,
             ):
-                self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
+                self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
                 plan = _DispatchPlan(kind="ignore", ignore_reason="router")
             elif len(available_agents) == 1:
                 self.deps.logger.info("Skipping routing: only one responder candidate")

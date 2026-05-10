@@ -447,7 +447,7 @@ class TestRouterHandoffThreadMode:
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
-            patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="assistant")),
+            patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="assistant")),
             patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
@@ -485,7 +485,7 @@ class TestRouterHandoffThreadMode:
         room.room_id = "!room:localhost"
 
         with (
-            patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="coder")),
+            patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="coder")),
             patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",

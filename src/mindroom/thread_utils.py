@@ -178,7 +178,7 @@ def thread_requires_explicit_agent_targeting(
     available_agents_in_room: Sequence[MatrixID] | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
-    sender_visible_agents = authorization.filter_agents_by_sender_permissions(
+    sender_visible_agents = authorization.filter_responders_by_sender_permissions(
         get_agents_in_thread(thread_history, config, runtime_paths),
         sender_id,
         config,
@@ -284,7 +284,7 @@ def should_agent_respond(  # noqa: PLR0911
     # For threads, continue only if we're the single participating agent
     # that may reply to this sender within this room's responder boundary.
     agents_in_thread = get_agents_in_thread(thread_history, config, runtime_paths)
-    agents_in_thread = authorization.filter_agents_by_sender_permissions(
+    agents_in_thread = authorization.filter_responders_by_sender_permissions(
         agents_in_thread,
         sender_id,
         config,

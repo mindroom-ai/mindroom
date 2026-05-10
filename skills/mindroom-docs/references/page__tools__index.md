@@ -32,27 +32,27 @@ defaults:
 `defaults.tools` are merged into each agent's own `tools` list with duplicates removed.
 Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
 When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both.
-See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order.
+See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration) for the full override syntax and merge order.
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
-See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and naming rules.
+See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
 
 ## Browse By Topic
 
-- [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
-- [Web Search](https://docs.mindroom.chat/tools/web-search/) - Search engines and search APIs.
-- [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) - Crawlers, extractors, browser automation, and page-reading tools.
-- [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
-- [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
-- [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
-- [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
-- [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, and task managers.
-- [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
-- [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
-- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
-- [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
+- [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
+- [Data & Databases](data-and-databases.md) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
+- [Web Search](web-search.md) - Search engines and search APIs.
+- [Web Scraping & Browser](web-scraping-and-browser.md) - Crawlers, extractors, browser automation, and page-reading tools.
+- [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
+- [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
+- [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
+- [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
+- [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, and task managers.
+- [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
+- [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
+- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
+- [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.
 
 ## Tool Presets And Implied Tools
 
@@ -80,7 +80,7 @@ Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use 
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
 The current worker-routed defaults are `file`, `shell`, `python`, and `coding`.
-Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for deployment details and worker-scope behavior.
+Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment details and worker-scope behavior.
 
 ## Shared-Only Integrations
 
@@ -95,8 +95,8 @@ Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable that behavior.
 
 ## Related Docs
 
-- [MCP](https://docs.mindroom.chat/mcp/) - Configure native MCP client servers and expose them as MindRoom tools.
-- [Plugins](https://docs.mindroom.chat/plugins/) - Extend MindRoom with custom tools and skills.
-- [Attachments](https://docs.mindroom.chat/attachments/) - Attachment lifecycle and context scoping.
-- [Scheduling](https://docs.mindroom.chat/scheduling/) - Chat command scheduling and task behavior.
-- [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) - `openclaw_compat` preset and workspace portability.
+- [MCP](../mcp.md) - Configure native MCP client servers and expose them as MindRoom tools.
+- [Plugins](../plugins.md) - Extend MindRoom with custom tools and skills.
+- [Attachments](../attachments.md) - Attachment lifecycle and context scoping.
+- [Scheduling](../scheduling.md) - Chat command scheduling and task behavior.
+- [OpenClaw Workspace Import](../openclaw.md) - `openclaw_compat` preset and workspace portability.

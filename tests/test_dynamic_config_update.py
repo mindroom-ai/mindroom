@@ -177,6 +177,8 @@ class TestDynamicConfigUpdate:
 
         orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
+        persist_entity_accounts(initial_config, orchestrator.runtime_paths)
+        persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         general_bot = _mock_agent_bot(initial_config)
         general_bot._set_presence_with_model_info = AsyncMock()
@@ -531,6 +533,7 @@ class TestDynamicConfigUpdate:
 
         orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
+        persist_entity_accounts(updated_config, orchestrator.runtime_paths)
         mock_bot = _mock_agent_bot(initial_config)
         mock_bot._set_presence_with_model_info = AsyncMock()
         orchestrator.agent_bots["general"] = mock_bot

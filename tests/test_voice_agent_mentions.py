@@ -11,10 +11,9 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.identity import managed_account_key
-from mindroom.matrix.state import MatrixState
 from mindroom.voice_handler import _process_transcription, _sanitize_unavailable_mentions
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 
 def _voice_config(agent_display_names: dict[str, str]) -> Config:
@@ -30,23 +29,13 @@ def _voice_config(agent_display_names: dict[str, str]) -> Config:
         runtime_paths,
     )
     config.voice.intelligence.model = "test-model"
-    _persist_entity_accounts(config)
+    _persist_voice_accounts(config)
     return config
 
 
-def _persist_entity_accounts(config: Config, *, usernames: dict[str, str] | None = None) -> None:
+def _persist_voice_accounts(config: Config, *, usernames: dict[str, str] | None = None) -> None:
     runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    domain = config.get_domain(runtime_paths)
-    overrides = usernames or {}
-    for entity_name in ["router", *config.agents, *config.teams]:
-        state.add_account(
-            managed_account_key(entity_name),
-            overrides.get(entity_name, f"actual_{entity_name}"),
-            "pw",
-            domain=domain,
-        )
-    state.save(runtime_paths=runtime_paths)
+    persist_entity_accounts(config, runtime_paths, usernames=usernames or actual_entity_usernames(config))
 
 
 async def _process_transcription_for_test(transcription: str, config: Config, **kwargs: object) -> str:
@@ -161,7 +150,7 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
 async def test_voice_prompt_uses_persisted_current_username_drift() -> None:
     """Voice mention hints should use the live managed Matrix username."""
     config = _voice_config({"home": "HomeAssistant"})
-    _persist_entity_accounts(config, usernames={"home": "actual_home_live"})
+    _persist_voice_accounts(config, usernames={"home": "actual_home_live"})
 
     captured_prompt = None
 
@@ -267,7 +256,7 @@ async def test_voice_transcription_preserves_bare_persisted_localpart() -> None:
             "code": "CodeAgent",
         },
     )
-    _persist_entity_accounts(config, usernames={"code": "actual_code_live"})
+    _persist_voice_accounts(config, usernames={"code": "actual_code_live"})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -299,7 +288,7 @@ async def test_voice_transcription_strips_unavailable_full_persisted_mxid() -> N
             "code": "CodeAgent",
         },
     )
-    _persist_entity_accounts(config, usernames={"code": "actual_code_live"})
+    _persist_voice_accounts(config, usernames={"code": "actual_code_live"})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -326,9 +315,16 @@ async def test_voice_transcription_strips_unavailable_full_persisted_mxid() -> N
     ("text", "allowed_entities", "configured_entities", "expected"),
     [
         ("@code review this", {"openclaw"}, {"openclaw", "code"}, "code review this"),
+        ("@code. review this", {"openclaw"}, {"openclaw", "code"}, "code. review this"),
         ("@mindroom_code review this", {"openclaw"}, {"openclaw", "code"}, "@mindroom_code review this"),
         ("@code:localhost review this", {"openclaw"}, {"openclaw", "code"}, "@code:localhost review this"),
         ("@code:server.com review this", {"openclaw"}, {"openclaw", "code"}, "@code:server.com review this"),
+        (
+            "@actual_code:localhost. review this",
+            {"openclaw"},
+            {"openclaw", "code"},
+            "actual_code:localhost. review this",
+        ),
         (
             "@mindroom_code:remote.example review this",
             {"openclaw"},

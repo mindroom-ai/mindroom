@@ -20,7 +20,7 @@ from mindroom.teams import (
     decide_team_formation,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.identity_helpers import entity_ids, entity_name_for_id, persist_entity_accounts
+from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 
 async def _select_team_mode_for_test(message: str, agent_names: list[str], config: Config) -> TeamMode:
@@ -98,7 +98,7 @@ def mock_config(tmp_path):
     persist_entity_accounts(
         config,
         runtime_paths,
-        usernames={alias: f"mindroom_{alias}" for alias in ["router", *config.agents, *config.teams]},
+        usernames=actual_entity_usernames(config),
     )
     return config
 

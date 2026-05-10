@@ -24,7 +24,7 @@ from aioresponses import aioresponses
 import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config, load_config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths, safe_replace
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
@@ -37,15 +37,13 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
-from mindroom.matrix.identity import managed_account_key
-from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -651,27 +649,7 @@ def bind_runtime_paths(
 
 def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) -> None:
     """Prepare managed Matrix accounts for tests that bind runtime config."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    domain = config.get_domain(runtime_paths)
-    changed = False
-    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
-        account_key = managed_account_key(entity_name)
-        if account_key in state.accounts:
-            continue
-        username = agent_username_localpart(entity_name, runtime_paths)
-        state.add_account(account_key, username, TEST_PASSWORD, domain=domain)
-        changed = True
-    if config.mindroom_user is not None and managed_account_key("user") not in state.accounts:
-        state.add_account(
-            managed_account_key("user"),
-            config.mindroom_user.username,
-            TEST_PASSWORD,
-            requested_username=config.mindroom_user.username,
-            domain=domain,
-        )
-        changed = True
-    if changed:
-        state.save(runtime_paths=runtime_paths)
+    persist_entity_accounts(config, runtime_paths)
 
 
 def bind_mock_config_cache(mock_config: MagicMock, runtime_root: Path) -> Path:

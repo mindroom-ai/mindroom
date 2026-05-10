@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.plugin_identity import validate_plugin_name
@@ -794,7 +795,7 @@ def _requester_id_for_hook_send(
     if requester_id is not None:
         return requester_id
     if trigger_dispatch:
-        return context.config.get_mindroom_user_id(context.runtime_paths)
+        return mindroom_user_id(context.config, context.runtime_paths)
     return None
 
 

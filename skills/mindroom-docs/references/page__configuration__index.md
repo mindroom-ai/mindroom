@@ -21,7 +21,7 @@ mindroom config validate --path /path/to/config.yaml
 ## MCP Servers
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block.
-See [MCP](https://docs.mindroom.chat/mcp/) for transport-specific config, tool naming, examples, and agent setup.
+See [MCP](../mcp.md) for transport-specific config, tool naming, examples, and agent setup.
 
 ## Tool Approval
 
@@ -90,7 +90,7 @@ Set the API key for each provider you use in `config.yaml`:
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
-See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
+See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
 
 ### Codex CLI Subscription Auth
 
@@ -117,7 +117,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for authenticating `/v1/*` requests | _(none — locked without this or the flag below)_ |
 | `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | _(unset — locked)_ |
 
-See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) for the full auth matrix.
+See [OpenAI-Compatible API](../openai-api.md) for the full auth matrix.
 
 ### Provisioning / Pairing
 
@@ -158,7 +158,7 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
 
-See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
+See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
 
 ### SaaS-Only
 
@@ -408,7 +408,7 @@ voice:
 # Internal MindRoom user account (optional, omit for hosted/public profiles)
 # When present, defaults are: username: mindroom_user, display_name: MindRoomUser
 mindroom_user:
-  username: mindroom_user          # Set before first startup (bootstrap request localpart only)
+  username: mindroom_user          # Set before first startup (account-creation request localpart only)
   display_name: MindRoomUser       # Can be changed later
 
 # Matrix room onboarding/discoverability (optional)
@@ -568,25 +568,25 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 ## Internal User Username
 
 - Configure `mindroom_user.username` with the Matrix localpart to request before first startup.
-- After the account is created, `mindroom_user.username` is locked as the bootstrap request and cannot be changed in-place.
+- After the account is created, `mindroom_user.username` is locked as the account-creation request and cannot be changed in-place.
 - Hosted provisioning can return a different actual Matrix ID; MindRoom persists that actual ID and uses it for runtime authorization.
 - You can safely change `mindroom_user.display_name` at any time.
 
 ## Sections
 
-- [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
-- [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
-- [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
-- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/) - Configure dynamic tool bundles that agents load on demand
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
-- [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
-- [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
-- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
-- [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
-- [Authorization](https://docs.mindroom.chat/authorization/) - Configure user and room access control
-- [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Configure the root Matrix Space for managed rooms
-- [Skills](https://docs.mindroom.chat/skills/) - Skill format, gating, and allowlists
-- [Plugins](https://docs.mindroom.chat/plugins/) - Plugin manifest and tool/skill loading
+- [Agents](agents.md) - Configure individual AI agents
+- [Models](models.md) - Configure AI model providers
+- [Teams](teams.md) - Configure multi-agent collaboration
+- [Toolkits](toolkits.md) - Configure dynamic tool bundles that agents load on demand
+- [Cultures](cultures.md) - Configure shared agent cultures
+- [Router](router.md) - Configure message routing
+- [Memory](../memory.md) - Configure memory providers and behavior
+- [Knowledge Bases](../knowledge.md) - Configure file-backed knowledge bases
+- [Voice](../voice.md) - Configure speech-to-text voice processing
+- [Authorization](../authorization.md) - Configure user and room access control
+- [Matrix Space](../matrix-space.md) - Configure the root Matrix Space for managed rooms
+- [Skills](../skills.md) - Skill format, gating, and allowlists
+- [Plugins](../plugins.md) - Plugin manifest and tool/skill loading
 
 ## Notes
 
@@ -596,14 +596,14 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
 - Approval-gated tools require the router to be joined to the Matrix room.
 - In ad-hoc invited rooms accepted through `accept_invites`, approval only works if the router is already joined to that room.
-- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
-- `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
+- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](agents.md))
+- `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](agents.md))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
-- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
+- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config

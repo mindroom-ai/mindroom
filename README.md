@@ -38,7 +38,7 @@ MindRoom agents:
 - **Work everywhere** - Via bridges to Slack, Telegram, Discord, WhatsApp, IRC, email
 - **Remember everything** - Persistent memory across all platforms
 - **Collaborate naturally** - Multiple agents working together in threads
-- **Respect boundaries** - You control which agent sees what data
+- **Respect boundaries** - You control which responder sees what data
 
 ## Built on Proven Infrastructure
 
@@ -223,7 +223,7 @@ If your client or bridge only sends plain replies, MindRoom keeps them in an exi
 Plain replies that never reach threaded context still stay plain replies.
 
 1. **Mentioned agents and teams respond** - Tag them to get their attention
-2. **Single responder continues** - One agent or team in thread? It keeps responding
+2. **Single responder continues** - One agent or team in a thread keeps responding
 3. **Multiple agents collaborate** - Mention multiple agents when you want an ad-hoc collaboration
 4. **Smart routing** - System picks the best agent or team for new threads
 
@@ -273,7 +273,7 @@ models:
     id: claude-sonnet-4-6
 
 mindroom_user:
-  username: mindroom_user  # Set this before first run; the bootstrap request is immutable after account creation
+  username: mindroom_user  # Set this before first run; the account-creation request is immutable after account creation
   display_name: MindRoomUser
 
 defaults:
@@ -363,7 +363,7 @@ memory:
       model: sentence-transformers/all-MiniLM-L6-v2
 
 mindroom_user:
-  username: mindroom_user  # Set this before first run; the bootstrap request is immutable after account creation
+  username: mindroom_user  # Set this before first run; the account-creation request is immutable after account creation
   display_name: MindRoomUser
 
 authorization:
@@ -374,7 +374,7 @@ authorization:
 ```
 
 `mindroom_user.username` can only be set before the internal user account is created.
-MindRoom records it as the bootstrap username request; if hosted provisioning returns a different actual Matrix ID, runtime authorization uses that persisted actual ID.
+MindRoom records it as the account-creation username request; if hosted provisioning returns a different actual Matrix ID, runtime authorization uses that persisted actual ID.
 After first startup, change `mindroom_user.display_name` if you only want a different visible name.
 
 ## Deployment Options

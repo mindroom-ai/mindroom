@@ -16,25 +16,22 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.matrix.identity import managed_account_key
-from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import persist_actual_entity_accounts
+
+TEST_VOICE_ACCOUNT_PASSWORD = "pw"  # noqa: S105
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for voice handler tests."""
     bound = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
-    _persist_entity_accounts(bound)
+    _persist_voice_handler_accounts(bound)
     return bound
 
 
-def _persist_entity_accounts(config: Config) -> None:
+def _persist_voice_handler_accounts(config: Config) -> None:
     runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    domain = config.get_domain(runtime_paths)
-    for entity_name in ["router", *config.agents, *config.teams]:
-        state.add_account(managed_account_key(entity_name), f"actual_{entity_name}", "pw", domain=domain)
-    state.save(runtime_paths=runtime_paths)
+    persist_actual_entity_accounts(config, runtime_paths, password=TEST_VOICE_ACCOUNT_PASSWORD)
 
 
 async def _handle_voice_message(

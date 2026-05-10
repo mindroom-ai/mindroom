@@ -9,10 +9,10 @@ from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
+from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
 
@@ -40,28 +40,18 @@ def _bind_config(
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-    _persist_entity_accounts(bound, runtime_paths)
+    _persist_mentions_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
 
 
-def _persist_entity_accounts(
+def _persist_mentions_accounts(
     config: Config,
     runtime_paths: constants_mod.RuntimePaths,
     *,
     usernames: dict[str, str] | None = None,
 ) -> None:
-    overrides = usernames or {}
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    domain = config.get_domain(runtime_paths)
-    for entity_name in ["router", *config.agents, *config.teams]:
-        state.add_account(
-            managed_account_key(entity_name),
-            overrides.get(entity_name, f"actual_{entity_name}"),
-            "pw",
-            domain=domain,
-        )
-    state.save(runtime_paths=runtime_paths)
+    persist_entity_accounts(config, runtime_paths, usernames=usernames or actual_entity_usernames(config))
 
 
 def _make_config(runtime_paths: constants_mod.RuntimePaths) -> Config:

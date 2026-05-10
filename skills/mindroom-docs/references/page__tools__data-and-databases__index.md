@@ -476,7 +476,7 @@ google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 
 - `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
 - The provider requests Drive read-only access plus OpenID email/profile scopes.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
 
 ## [`google_sheets`]
 
@@ -524,7 +524,7 @@ read_sheet(
 ### Notes
 
 - `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
 - The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
 ## [`openbb`]
@@ -656,7 +656,7 @@ get_news("TSLA", limit=10)
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
-- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
+- [Tools Overview](index.md)
+- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
+- [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)

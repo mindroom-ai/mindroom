@@ -14,6 +14,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -207,6 +208,8 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         },
         _runtime_paths(tmp_path),
     )
+    persist_entity_accounts(orchestrator.config, orchestrator.runtime_paths)
+    persist_entity_accounts(updated_config, orchestrator.runtime_paths)
     call_order: list[str] = []
 
     async def fake_stop_entities(*_args: object, **_kwargs: object) -> None:

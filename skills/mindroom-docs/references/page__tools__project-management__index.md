@@ -453,6 +453,6 @@ search_zendesk("Matrix onboarding")
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Dashboard](https://docs.mindroom.chat/dashboard/)
+- [Tools Overview](index.md)
+- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Dashboard](../dashboard.md)

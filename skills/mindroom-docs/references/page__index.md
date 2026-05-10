@@ -141,39 +141,39 @@ mindroom run
 
 ## Documentation
 
-- [Getting Started](https://docs.mindroom.chat/getting-started/) - Installation and first steps
-- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) - Run only `uvx mindroom` locally against hosted Matrix
-- [Configuration](https://docs.mindroom.chat/configuration/) - All configuration options
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
-- [Dashboard](https://docs.mindroom.chat/dashboard/) - Web UI for configuration
-- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) - Use agents from any OpenAI-compatible client
-- [Tools](https://docs.mindroom.chat/tools/) - Available tool integrations
-- [OpenClaw Import](https://docs.mindroom.chat/openclaw/) - Reuse OpenClaw workspace files in MindRoom
-- [MCP](https://docs.mindroom.chat/mcp/) - Configure native MCP client servers and expose their tools to agents
-- [Skills](https://docs.mindroom.chat/skills/) - OpenClaw-compatible skills system
-- [Plugins](https://docs.mindroom.chat/plugins/) - Extend with custom tools, OAuth providers, and skills
-- [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure RAG-backed document indexing
-- [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
-- [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
-- [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
-- [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
-- [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
-- [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
-- [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
-- [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
-- [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
-- [Architecture](https://docs.mindroom.chat/architecture/) - How it works under the hood
-- [Deployment](https://docs.mindroom.chat/deployment/) - Docker and Kubernetes deployment
-- [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
-- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) - Isolate code-execution tools in a sandbox
-- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
-- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Single-user OAuth setup
-- [CLI Reference](https://docs.mindroom.chat/cli/) - Command-line interface
-- [Support](https://docs.mindroom.chat/support/) - Contact and troubleshooting help
-- [Privacy Policy](https://docs.mindroom.chat/privacy/) - Privacy and data handling information
-- [Terms of Service](https://docs.mindroom.chat/terms/) - Terms for using MindRoom services and clients
+- [Getting Started](getting-started.md) - Installation and first steps
+- [Hosted Matrix Deployment](deployment/hosted-matrix.md) - Run only `uvx mindroom` locally against hosted Matrix
+- [Configuration](configuration/index.md) - All configuration options
+- [Cultures](configuration/cultures.md) - Configure shared agent cultures
+- [Dashboard](dashboard.md) - Web UI for configuration
+- [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
+- [Tools](tools/index.md) - Available tool integrations
+- [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
+- [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
+- [Skills](skills.md) - OpenClaw-compatible skills system
+- [Plugins](plugins.md) - Extend with custom tools, OAuth providers, and skills
+- [OAuth Framework](oauth-framework.md) - Build scoped OAuth-backed tool integrations
+- [Knowledge Bases](knowledge.md) - Configure RAG-backed document indexing
+- [Memory System](memory.md) - How agent memory works
+- [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
+- [Voice Messages](voice.md) - Voice message transcription
+- [Image Messages](images.md) - Image analysis with vision models
+- [File & Video Attachments](attachments.md) - Context-scoped file and video handling
+- [Streaming Responses](streaming.md) - Progressive message edits with presence-based gating
+- [Chat Commands](chat-commands.md) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
+- [Interactive Q&A](interactive.md) - Clickable multiple-choice questions via Matrix reactions
+- [Authorization](authorization.md) - User and room access control
+- [Matrix Space](matrix-space.md) - Optional root Matrix Space for grouping managed rooms
+- [Architecture](architecture/index.md) - How it works under the hood
+- [Deployment](deployment/index.md) - Docker and Kubernetes deployment
+- [Bridges](deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix
+- [Sandbox Proxy](deployment/sandbox-proxy.md) - Isolate code-execution tools in a sandbox
+- [Google Services OAuth](deployment/google-services-oauth.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Individual)](deployment/google-services-user-oauth.md) - Single-user OAuth setup
+- [CLI Reference](cli.md) - Command-line interface
+- [Support](support.md) - Contact and troubleshooting help
+- [Privacy Policy](privacy.md) - Privacy and data handling information
+- [Terms of Service](terms.md) - Terms for using MindRoom services and clients
 
 ## License
 

@@ -445,6 +445,7 @@ class TestBotTaskRestoration:
                 mock_client = AsyncMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
@@ -497,6 +498,7 @@ class TestBotTaskRestoration:
                 mock_client = AsyncMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
@@ -1834,7 +1836,7 @@ class TestRouterSkipsSingleAgent:
 
         bot._turn_controller._execute_router_relay.assert_not_called()
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: thread already requires explicit agent targeting" in info_calls
+        assert "Skipping routing: thread already requires explicit responder targeting" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_even_with_single_agent(self) -> None:
@@ -2063,7 +2065,7 @@ class TestRouterSkipsSingleAgent:
         # Voice transcriptions should work: router skips routing but doesn't interfere
         # This is a regression test to ensure voice works in single-responder rooms.
         assert not bot._turn_controller._execute_router_relay.called, (
-            "Router should skip routing for voice in single-agent room"
+            "Router should skip routing for voice in single-responder room"
         )
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
         assert "Skipping routing: only one responder candidate" in info_calls

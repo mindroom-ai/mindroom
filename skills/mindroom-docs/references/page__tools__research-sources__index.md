@@ -20,7 +20,7 @@ All four tools are `setup_type: none`, so they work out of the box and do not re
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so these tools have no dedicated dashboard auth flow.
 Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 MindRoom does not add Matrix runtime-context behavior or worker-routing overrides for these tools.
-Use [Web Search](https://docs.mindroom.chat/tools/web-search/) instead when you need broader web discovery, news search, or provider-backed search APIs.
+Use [Web Search](web-search.md) instead when you need broader web discovery, news search, or provider-backed search APIs.
 
 ## [`arxiv`]
 
@@ -60,7 +60,7 @@ read_arxiv_papers(["2103.03404v1"], pages_to_read=3)
 
 - `read_arxiv_papers()` expects ArXiv IDs such as `2103.03404v1`, not a free-text search query.
 - If `download_dir` is not set, the upstream toolkit writes PDFs to its default local `arxiv_pdfs` directory before parsing them.
-- Use `duckduckgo`, `googlesearch`, or `exa` from [Web Search](https://docs.mindroom.chat/tools/web-search/) when you need broader search beyond ArXiv papers.
+- Use `duckduckgo`, `googlesearch`, or `exa` from [Web Search](web-search.md) when you need broader search beyond ArXiv papers.
 
 ## [`wikipedia`]
 
@@ -96,7 +96,7 @@ search_wikipedia("Matrix protocol")
 
 - `knowledge` is not a normal string option at runtime, so the usual MindRoom configuration is just `- wikipedia`.
 - Search uses the upstream `wikipedia.summary()` call, so ambiguous topics work best with a specific query.
-- Use [Web Search](https://docs.mindroom.chat/tools/web-search/) when you need multiple result links or broader web coverage instead of one encyclopedia summary.
+- Use [Web Search](web-search.md) when you need multiple result links or broader web coverage instead of one encyclopedia summary.
 
 ## [`pubmed`]
 
@@ -177,10 +177,10 @@ get_user_details("pg")
 
 - This tool uses public Hacker News endpoints and does not need credentials.
 - `get_top_hackernews_stories()` is best for front-page monitoring and lightweight discussion sourcing, not full web search.
-- Pair it with [Web Search](https://docs.mindroom.chat/tools/web-search/) or [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) when you want to follow story links and inspect the linked pages themselves.
+- Pair it with [Web Search](web-search.md) or [Web Scraping & Browser](web-scraping-and-browser.md) when you want to follow story links and inspect the linked pages themselves.
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Web Search](https://docs.mindroom.chat/tools/web-search/)
-- [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/)
+- [Tools Overview](index.md)
+- [Web Search](web-search.md)
+- [Web Scraping & Browser](web-scraping-and-browser.md)

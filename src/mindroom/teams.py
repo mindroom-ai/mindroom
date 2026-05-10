@@ -32,7 +32,7 @@ from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent
 from mindroom.ai import build_matrix_run_metadata, resolve_run_correlation_id
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
-from mindroom.authorization import get_available_agents_in_room
+from mindroom.authorization import get_available_responders_in_room
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -785,7 +785,7 @@ def _select_team_request(
 
     available_agents = available_agents_in_room
     if available_agents is None:
-        available_agents = get_available_agents_in_room(room, config, runtime_paths)
+        available_agents = get_available_responders_in_room(room, config, runtime_paths)
     normalized_available_agents = _normalize_team_request_members(available_agents, config, runtime_paths)
     if len(normalized_available_agents) <= 1:
         return _SelectedTeamRequest(None, [])
@@ -857,7 +857,7 @@ def _evaluate_team_members(
         room_visible_ids = {
             agent_id.full_id
             for agent_id in _normalize_team_request_members(
-                get_available_agents_in_room(room, config, runtime_paths),
+                get_available_responders_in_room(room, config, runtime_paths),
                 config,
                 runtime_paths,
             )

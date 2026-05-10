@@ -48,7 +48,7 @@ authorization:
 
 # Optional: configure the internal MindRoom user identity (omit for hosted/public profiles)
 mindroom_user:
-  username: mindroom_user          # Set before first startup (bootstrap request cannot be changed later)
+  username: mindroom_user          # Set before first startup (account-creation request cannot be changed later)
   display_name: MindRoomUser
 
 # Optional: room onboarding/discoverability policy
@@ -69,7 +69,7 @@ matrix_room_access:
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
 
-`mindroom_user.username` is a one-time bootstrap request used to create the internal Matrix account.
+`mindroom_user.username` is a one-time account-creation request used to create the internal Matrix account.
 After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.
 If hosted provisioning returns a different actual Matrix ID, MindRoom persists and authorizes that actual ID.
 
@@ -125,7 +125,8 @@ Examples: `@alice:matrix.org`, `@bob:example.com`, `@admin:company.internal`
 
 Authorization checks are performed in order:
 
-1. **Internal system user** - When `mindroom_user` is configured and its Matrix account has been prepared, the persisted actual internal user ID is always authorized. When omitted (hosted/public profiles), this check is skipped.
+1. **Internal system user** - When `mindroom_user` is configured and its Matrix account has been prepared, the persisted actual internal user ID is always authorized.
+When omitted (hosted/public profiles), this check is skipped.
 2. **MindRoom agents/teams/router** - Configured agents, teams, and the router are authorized
 3. **Alias resolution** - If the sender matches a bridge alias in `aliases`, it is resolved to the canonical user ID for the remaining checks
 4. **Global users** - Users in `global_users` have access to all rooms
@@ -156,9 +157,9 @@ authorization:
 
 In this example, messages from `@telegram_123:example.com` are treated as `@alice:example.com` (global access), and messages from `@telegram_789:example.com` are treated as `@bob:example.com` (access to `!room1:example.com` only).
 
-## Per-Agent Reply Permissions
+## Per-Responder Reply Permissions
 
-Use `authorization.agent_reply_permissions` to restrict which users each agent can reply to.
+Use `authorization.agent_reply_permissions` to restrict which users each responder can reply to.
 
 - The map key is an entity name: agent name, team name, `router`, or `*`.
 - The `*` key is a default rule for entities that do not have an explicit entry.

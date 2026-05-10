@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mindroom.authorization import is_authorized_sender
 from mindroom.config.main import Config
+from mindroom.entity_resolution import mindroom_user_id
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -52,4 +53,4 @@ def test_authorization_check_uses_updated_config() -> None:
     assert is_authorized_sender("@bob:example.com", config, "!test:server", runtime_paths)
 
     # Configured internal system user should always be authorized
-    assert is_authorized_sender(config.get_mindroom_user_id(runtime_paths), config, "!test:server", runtime_paths)
+    assert is_authorized_sender(mindroom_user_id(config, runtime_paths), config, "!test:server", runtime_paths)

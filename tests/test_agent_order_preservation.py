@@ -14,7 +14,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.teams import TeamMode, TeamOutcome, decide_team_formation
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, get_all_mentioned_agents_in_thread
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
-from tests.identity_helpers import entity_ids, entity_name_for_id, persist_entity_accounts
+from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 
 @pytest.fixture
@@ -64,9 +64,14 @@ def mock_config() -> Config:
     persist_entity_accounts(
         config,
         runtime_paths,
-        usernames={alias: f"mindroom_{alias}" for alias in ["router", *config.agents, *config.teams]},
+        usernames=actual_entity_usernames(config),
     )
     return config
+
+
+def _entity_user_ids(config: Config) -> dict[str, str]:
+    runtime_paths = runtime_paths_for(config)
+    return {name: matrix_id.full_id for name, matrix_id in entity_ids(config, runtime_paths).items() if matrix_id}
 
 
 class TestAgentOrderPreservation:
@@ -75,14 +80,14 @@ class TestAgentOrderPreservation:
     def test_check_agent_mentioned_preserves_order(self, mock_config: Config) -> None:
         """Test that check_agent_mentioned preserves the order from user_ids."""
         runtime_paths = runtime_paths_for(mock_config)
-        domain = mock_config.get_domain(runtime_paths)
+        ids = _entity_user_ids(mock_config)
         event_source = {
             "content": {
                 "m.mentions": {
                     "user_ids": [
-                        f"@mindroom_phone:{domain}",
-                        f"@mindroom_email:{domain}",
-                        f"@mindroom_research:{domain}",
+                        ids["phone"],
+                        ids["email"],
+                        ids["research"],
                     ],
                 },
             },
@@ -97,13 +102,13 @@ class TestAgentOrderPreservation:
     def test_get_agents_in_thread_preserves_order(self, mock_config: Config) -> None:
         """Test that get_agents_in_thread preserves order of first participation."""
         runtime_paths = runtime_paths_for(mock_config)
-        domain = mock_config.get_domain(runtime_paths)
+        ids = _entity_user_ids(mock_config)
         thread_history = [
-            make_visible_message(sender=f"@mindroom_research:{domain}", body="Starting research"),
-            make_visible_message(sender=f"@mindroom_email:{domain}", body="Sending email"),
-            make_visible_message(sender=f"@mindroom_phone:{domain}", body="Making call"),
-            make_visible_message(sender=f"@mindroom_email:{domain}", body="Another email"),
-            make_visible_message(sender=f"@mindroom_analyst:{domain}", body="Analyzing"),
+            make_visible_message(sender=ids["research"], body="Starting research"),
+            make_visible_message(sender=ids["email"], body="Sending email"),
+            make_visible_message(sender=ids["phone"], body="Making call"),
+            make_visible_message(sender=ids["email"], body="Another email"),
+            make_visible_message(sender=ids["analyst"], body="Analyzing"),
         ]
 
         agents = get_agents_in_thread(thread_history, mock_config, runtime_paths)
@@ -116,11 +121,11 @@ class TestAgentOrderPreservation:
     def test_get_agents_in_thread_excludes_router(self, mock_config: Config) -> None:
         """Test that router agent is excluded from thread participants."""
         runtime_paths = runtime_paths_for(mock_config)
-        domain = mock_config.get_domain(runtime_paths)
+        ids = _entity_user_ids(mock_config)
         thread_history = [
-            make_visible_message(sender=f"@mindroom_email:{domain}", body="Email"),
-            make_visible_message(sender=f"@mindroom_{ROUTER_AGENT_NAME}:{domain}", body="Routing"),
-            make_visible_message(sender=f"@mindroom_phone:{domain}", body="Phone"),
+            make_visible_message(sender=ids["email"], body="Email"),
+            make_visible_message(sender=ids[ROUTER_AGENT_NAME], body="Routing"),
+            make_visible_message(sender=ids["phone"], body="Phone"),
         ]
 
         agents = get_agents_in_thread(thread_history, mock_config, runtime_paths)
@@ -134,27 +139,27 @@ class TestAgentOrderPreservation:
     def test_get_all_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
         """Test that get_all_mentioned_agents_in_thread preserves order of first mention."""
         runtime_paths = runtime_paths_for(mock_config)
-        domain = mock_config.get_domain(runtime_paths)
+        ids = _entity_user_ids(mock_config)
         thread_history = [
             make_visible_message(
                 body="First message",
                 content={
                     "body": "First message",
-                    "m.mentions": {"user_ids": [f"@mindroom_phone:{domain}", f"@mindroom_email:{domain}"]},
+                    "m.mentions": {"user_ids": [ids["phone"], ids["email"]]},
                 },
             ),
             make_visible_message(
                 body="Second message",
                 content={
                     "body": "Second message",
-                    "m.mentions": {"user_ids": [f"@mindroom_research:{domain}", f"@mindroom_phone:{domain}"]},
+                    "m.mentions": {"user_ids": [ids["research"], ids["phone"]]},
                 },
             ),
             make_visible_message(
                 body="Third message",
                 content={
                     "body": "Third message",
-                    "m.mentions": {"user_ids": [f"@mindroom_analyst:{domain}", f"@mindroom_email:{domain}"]},
+                    "m.mentions": {"user_ids": [ids["analyst"], ids["email"]]},
                 },
             ),
         ]
@@ -169,7 +174,7 @@ class TestAgentOrderPreservation:
     def test_no_duplicates_in_mentioned_agents(self, mock_config: Config) -> None:
         """Test that duplicates are removed while preserving order."""
         runtime_paths = runtime_paths_for(mock_config)
-        domain = mock_config.get_domain(runtime_paths)
+        ids = _entity_user_ids(mock_config)
         thread_history = [
             make_visible_message(
                 body="Message 1",
@@ -177,9 +182,9 @@ class TestAgentOrderPreservation:
                     "body": "Message 1",
                     "m.mentions": {
                         "user_ids": [
-                            f"@mindroom_email:{domain}",
-                            f"@mindroom_phone:{domain}",
-                            f"@mindroom_email:{domain}",
+                            ids["email"],
+                            ids["phone"],
+                            ids["email"],
                         ],
                     },
                 },
@@ -190,9 +195,9 @@ class TestAgentOrderPreservation:
                     "body": "Message 2",
                     "m.mentions": {
                         "user_ids": [
-                            f"@mindroom_phone:{domain}",
-                            f"@mindroom_research:{domain}",
-                            f"@mindroom_email:{domain}",
+                            ids["phone"],
+                            ids["research"],
+                            ids["email"],
                         ],
                     },
                 },
@@ -216,18 +221,18 @@ class TestAgentOrderPreservation:
     def test_order_matters_for_coordinate_mode(self, mock_config: Config) -> None:
         """Test that order preservation is important for sequential execution."""
         runtime_paths = runtime_paths_for(mock_config)
-        domain = mock_config.get_domain(runtime_paths)
+        ids = _entity_user_ids(mock_config)
         event_source1 = {
             "content": {
                 "m.mentions": {
-                    "user_ids": [f"@mindroom_email:{domain}", f"@mindroom_phone:{domain}"],
+                    "user_ids": [ids["email"], ids["phone"]],
                 },
             },
         }
         event_source2 = {
             "content": {
                 "m.mentions": {
-                    "user_ids": [f"@mindroom_phone:{domain}", f"@mindroom_email:{domain}"],
+                    "user_ids": [ids["phone"], ids["email"]],
                 },
             },
         }

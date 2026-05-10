@@ -12,7 +12,7 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
-from mindroom.authorization import get_available_agents_in_room
+from mindroom.authorization import get_available_responders_in_room
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import (
@@ -461,7 +461,7 @@ class ConfigManagerTools(Toolkit):
         registry = entity_identity_registry(config, self.runtime_paths)
         available_agent_names = {
             agent_name
-            for matrix_id in get_available_agents_in_room(room, config, self.runtime_paths)
+            for matrix_id in get_available_responders_in_room(room, config, self.runtime_paths)
             if (agent_name := registry.current_entity_name_for_user_id(matrix_id.full_id, include_router=False))
             is not None
         }

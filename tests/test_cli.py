@@ -11,6 +11,7 @@ import pytest
 from mindroom import constants as constants_mod
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -322,7 +323,7 @@ class TestUserAccountManagement:
         account = persisted_state.accounts[INTERNAL_USER_ACCOUNT_KEY]
         assert account.username == "actual_mindroom_user"
         assert account.domain == "matrix.example"
-        assert custom_config.get_mindroom_user_id(runtime_paths) == "@actual_mindroom_user:matrix.example"
+        assert mindroom_user_id(custom_config, runtime_paths) == "@actual_mindroom_user:matrix.example"
         mock_client.register.assert_not_called()
 
 
@@ -373,60 +374,12 @@ def test_mindroom_user_username_rejects_agent_collision(tmp_path: Path) -> None:
         )
 
 
-def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_path: Path) -> None:
-    """Internal user localpart must not collide with current persisted agent localparts."""
-    runtime_paths = _runtime_paths(tmp_path)
-    state = MatrixState()
-    state.add_account("agent_assistant", "mindroom_user", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
-
-    with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
-        Config.model_validate(
-            {
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "Test assistant",
-                        "rooms": ["test_room"],
-                    },
-                },
-                "mindroom_user": {"username": "mindroom_user", "display_name": "Alice"},
-            },
-            context={"runtime_paths": runtime_paths},
-        )
-
-
-def test_mindroom_user_username_allows_prepared_agent_with_different_actual_username(tmp_path: Path) -> None:
-    """Internal user validation should not reserve an agent's obsolete proposed username after account prep."""
-    runtime_paths = _runtime_paths(tmp_path)
-    state = MatrixState()
-    state.add_account("agent_assistant", "actual_assistant", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
-
-    config = Config.model_validate(
-        {
-            "agents": {
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "Test assistant",
-                    "rooms": ["test_room"],
-                },
-            },
-            "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
-        },
-        context={"runtime_paths": runtime_paths},
-    )
-
-    assert config.mindroom_user is not None
-    assert config.mindroom_user.username == "mindroom_assistant"
-
-
 def test_mindroom_user_none_validates_and_returns_none_id() -> None:
     """Config with mindroom_user omitted should validate and return None user ID."""
     config = Config()
     assert config.mindroom_user is None
     runtime_paths = constants_mod.resolve_runtime_paths(process_env={"MINDROOM_NAMESPACE": ""})
-    assert config.get_mindroom_user_id(runtime_paths) is None
+    assert mindroom_user_id(config, runtime_paths) is None
 
 
 def test_agent_and_team_names_must_not_overlap() -> None:
@@ -450,3 +403,27 @@ def test_agent_and_team_names_must_not_overlap() -> None:
             },
             models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         )
+
+
+@pytest.mark.parametrize("section", ["agents", "teams"])
+def test_agent_and_team_names_reject_internal_user_entity_name(section: str) -> None:
+    """The internal MindRoom user account key is not a configurable responder alias."""
+    config_data = {
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+            },
+        },
+        "teams": {},
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+    }
+    config_data[section]["user"] = {
+        "display_name": "User",
+        "role": "Reserved entity",
+    }
+    if section == "teams":
+        config_data[section]["user"]["agents"] = ["assistant"]
+
+    with pytest.raises(ValueError, match="reserved internal entity names: user"):
+        Config(**config_data)

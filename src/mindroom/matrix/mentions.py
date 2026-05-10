@@ -217,7 +217,7 @@ def _resolve_entity_alias_token(
     """Resolve one alias-style token to a local configured agent or team, if any."""
     if has_server_name:
         return None
-    if entity_name := _find_matching_entity_name_for_localpart(localpart, registry, config):
+    if entity_name := _find_matching_entity_name_for_localpart(localpart, config):
         return _entity_mention_resolution(
             entity_name,
             registry=registry,
@@ -271,7 +271,6 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
 
 def _find_matching_entity_name_for_localpart(
     localpart: str,
-    registry: EntityIdentityRegistry,
     config: Config,
 ) -> str | None:
     """Return the configured agent or team name matched by one localpart string, if any."""
@@ -281,7 +280,6 @@ def _find_matching_entity_name_for_localpart(
         if entity_name == ROUTER_AGENT_NAME:
             continue
         if entity_name.lower() == lower_localpart:
-            registry.current_id(entity_name)
             return entity_name
     return None
 
@@ -289,12 +287,10 @@ def _find_matching_entity_name_for_localpart(
 def resolve_entity_name_for_mention_localpart(
     localpart: str,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return the configured agent or team name matched by one Matrix mention localpart."""
     return _find_matching_entity_name_for_localpart(
         localpart,
-        entity_identity_registry(config, runtime_paths),
         config,
     )
 

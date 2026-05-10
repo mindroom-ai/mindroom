@@ -78,6 +78,24 @@ def configured_routable_entity_ids_for_room(
     return [config_ids[name] for name in configured_names]
 
 
+def managed_entity_power_user_ids_for_room(
+    room_key: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return managed bot Matrix IDs that should receive create-time room power."""
+    config_ids = entity_identity_registry(config, runtime_paths).current_ids
+    entity_ids = [config_ids[ROUTER_AGENT_NAME].full_id]
+
+    for agent_name, agent_config in config.agents.items():
+        if room_key in agent_config.rooms:
+            entity_ids.append(config_ids[agent_name].full_id)
+    for team_name, team_config in config.teams.items():
+        if room_key in team_config.rooms:
+            entity_ids.append(config_ids[team_name].full_id)
+    return entity_ids
+
+
 def _matrix_domain(runtime_paths: RuntimePaths) -> str:
     """Return the Matrix domain for one explicit runtime context."""
     homeserver = runtime_matrix_homeserver(runtime_paths)
@@ -183,6 +201,14 @@ def mindroom_user_id(config: Config, runtime_paths: RuntimePaths) -> str | None:
         domain,
         runtime_paths,
     )
+
+
+def current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return current runtime-owned Matrix IDs trusted as internal senders."""
+    sender_ids = set(entity_identity_registry(config, runtime_paths).internal_sender_ids)
+    if internal_user_id := mindroom_user_id(config, runtime_paths):
+        sender_ids.add(internal_user_id)
+    return frozenset(sender_ids)
 
 
 def resolve_agent_thread_mode(

@@ -41,7 +41,7 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 
 `subagents` exposes `agents_list()`, `sessions_spawn()`, `sessions_send()`, and `list_sessions()`.
 All four calls return JSON strings with a `status` field, a `tool` field, and operation-specific payload data.
-`agents_list()` returns the configured agent IDs and the current agent name.
+`agents_list()` returns configured agent names usable as `agent_id` values and the current agent name.
 `sessions_spawn(task, summary, tag, label=None, agent_id=None)` requires a non-empty task plus a normalized summary and tag.
 `sessions_spawn()` posts a fresh room-level Matrix message that mentions the target agent, then treats the resulting event ID as the root of a new isolated session thread.
 After the spawn succeeds, it writes the requested thread summary and tag through the lower-level thread summary and thread tag APIs.

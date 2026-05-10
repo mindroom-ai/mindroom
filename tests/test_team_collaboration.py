@@ -23,7 +23,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, entity_name_for_id, persist_entity_accounts
+from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -36,7 +36,7 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
     persist_entity_accounts(
         bound_config,
         runtime_paths,
-        usernames={alias: f"mindroom_{alias}" for alias in ["router", *bound_config.agents, *bound_config.teams]},
+        usernames=actual_entity_usernames(bound_config),
     )
     return bound_config
 
@@ -52,7 +52,7 @@ def mock_research_agent() -> AgentMatrixUser:
     """Create a mock research agent."""
     return AgentMatrixUser(
         agent_name="research",
-        user_id="@mindroom_research:localhost",
+        user_id="@actual_research:localhost",
         display_name="ResearchAgent",
         password=TEST_PASSWORD,
     )
@@ -63,7 +63,7 @@ def mock_analyst_agent() -> AgentMatrixUser:
     """Create a mock analyst agent."""
     return AgentMatrixUser(
         agent_name="analyst",
-        user_id="@mindroom_analyst:localhost",
+        user_id="@actual_analyst:localhost",
         display_name="AnalystAgent",
         password=TEST_PASSWORD,
     )
@@ -74,7 +74,7 @@ def mock_code_agent() -> AgentMatrixUser:
     """Create a mock code agent."""
     return AgentMatrixUser(
         agent_name="code",
-        user_id="@mindroom_code:localhost",
+        user_id="@actual_code:localhost",
         display_name="CodeAgent",
         password=TEST_PASSWORD,
     )
@@ -85,7 +85,7 @@ def mock_security_agent() -> AgentMatrixUser:
     """Create a mock security agent."""
     return AgentMatrixUser(
         agent_name="security",
-        user_id="@mindroom_security:localhost",
+        user_id="@actual_security:localhost",
         display_name="SecurityAgent",
         password=TEST_PASSWORD,
     )
@@ -474,10 +474,10 @@ class TestRouterTeamFormation:
             ),
         )
 
-        # Mock room with multiple agents
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!dm:localhost"
-        room.users = {"@mindroom_agent1:localhost": None, "@mindroom_agent2:localhost": None}
+        ids = entity_ids(config, runtime_paths_for(config))
+        room.users = {ids["agent1"].full_id: None, ids["agent2"].full_id: None}
 
         # Test DM room with multiple agents and no mentions
         result = await decide_team_formation(
@@ -500,7 +500,7 @@ class TestRouterTeamFormation:
         assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
-        room.users = {"@mindroom_agent1:localhost": None}
+        room.users = {ids["agent1"].full_id: None}
         result = await decide_team_formation(
             agent=entity_ids(config, runtime_paths_for(config))["agent1"],
             tagged_agents=[],

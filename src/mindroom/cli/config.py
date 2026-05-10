@@ -49,8 +49,8 @@ _ProviderPreset = Literal["anthropic", "codex", "openai", "openrouter", "vertexa
 
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str, int]] = {
     "anthropic": ("anthropic", "claude-sonnet-4-6", 1_000_000),
-    "codex": ("codex", "gpt-5.5", 1_000_000),
-    "openai": ("openai", "gpt-5.4", 1_000_000),
+    "codex": ("codex", "gpt-5.5", 258_000),
+    "openai": ("openai", "gpt-5.4", 258_000),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6", 1_000_000),
     "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6", 1_000_000),
 }

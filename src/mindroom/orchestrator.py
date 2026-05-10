@@ -766,11 +766,15 @@ class _MultiAgentOrchestrator:
                 self._entity_display_name(config, entity_name),
                 runtime_paths=self.runtime_paths,
             )
+        self._validate_entity_accounts(config)
+        return users
+
+    def _validate_entity_accounts(self, config: Config) -> None:
+        """Validate persisted Matrix identities for all configured runtime entities."""
         try:
             entity_identity_registry(config, self.runtime_paths)
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
-        return users
 
     def _create_managed_bot(
         self,
@@ -986,13 +990,13 @@ class _MultiAgentOrchestrator:
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         await self._prepare_user_account(config, update_runtime_state=True)
+        entity_names = self._configured_entity_names(config)
+        entity_users = await self._prepare_entity_accounts(config, entity_names)
         self.config = config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         await self._sync_event_cache_service(config)
         self._configure_approval_store_transport()
-        entity_names = self._configured_entity_names(config)
-        entity_users = await self._prepare_entity_accounts(config, entity_names)
         for entity_name in entity_names:
             self._create_managed_bot(entity_name, config, entity_users[entity_name])
 
@@ -1194,6 +1198,7 @@ class _MultiAgentOrchestrator:
     async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
         """Handle config loading before the runtime has an active config."""
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
+        await self._prepare_entity_accounts(new_config, self._configured_entity_names(new_config))
         self.config = new_config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
@@ -1363,6 +1368,16 @@ class _MultiAgentOrchestrator:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
 
+    async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
+        """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
+        if plan.mindroom_user_changed:
+            await self._prepare_user_account(new_config, update_runtime_state=not self.running)
+        entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
+        if entities_requiring_account_check:
+            await self._prepare_entity_accounts(new_config, entities_requiring_account_check)
+        elif plan.mindroom_user_changed:
+            self._validate_entity_accounts(new_config)
+
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
@@ -1382,10 +1397,7 @@ class _MultiAgentOrchestrator:
         if plugin_changes:
             plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(self.agent_bots))
 
-        if plan.mindroom_user_changed:
-            await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        if plan.added_entities:
-            await self._prepare_entity_accounts(new_config, plan.added_entities)
+        await self._prepare_accounts_for_config_update(new_config, plan)
 
         if plugin_changes:
             pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
@@ -1697,7 +1709,7 @@ class _MultiAgentOrchestrator:
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
             await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
 
-        logger.info("Ensured room invitations for all configured agents and authorized users")
+        logger.info("Ensured room invitations for all configured responders and authorized users")
 
     async def stop(self) -> None:
         """Stop all agent bots."""

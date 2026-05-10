@@ -578,5 +578,5 @@ get_meeting("81234567890")
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - For `aws_ses` when you want an alternative outbound-email provider.
+- [Tools Overview](index.md)
+- [Automation & Platforms](automation-and-platforms.md) - For `aws_ses` when you want an alternative outbound-email provider.

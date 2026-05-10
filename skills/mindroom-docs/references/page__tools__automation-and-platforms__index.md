@@ -372,7 +372,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
-- [Project Management](https://docs.mindroom.chat/tools/project-management/)
-- [MCP](https://docs.mindroom.chat/mcp/)
+- [Tools Overview](index.md)
+- [Execution & Coding](execution-and-coding.md)
+- [Project Management](project-management.md)
+- [MCP](../mcp.md)

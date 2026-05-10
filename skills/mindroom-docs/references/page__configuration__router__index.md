@@ -19,11 +19,11 @@ router:
 
 The router has three configuration options:
 
-| Option                   | Type   | Default     | Description                                                                                                                                                                                 |
-| ------------------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                          |
-| `accept_invites`         | bool   | `true`      | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup                                    |
-| `startup_thread_prewarm` | bool   | `true`      | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `model` | string | `"default"` | Model to use for routing decisions |
+| `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `startup_thread_prewarm` | bool | `true` | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
@@ -32,11 +32,11 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
 
 1. If the thread already requires explicit targeting, MindRoom stays silent until someone mentions an agent or team
-1. If exactly one eligible responder remains, that agent or team handles the message directly
-1. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
-1. Based on the candidate entities' roles, tools, and instructions, it selects the best match
-1. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
-1. The mentioned agent or team sees the mention and responds in the thread
+2. If exactly one eligible responder remains, that agent or team handles the message directly
+3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
+4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
+5. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
+6. The mentioned agent or team sees the mention and responds in the thread
 
 For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`, then are filtered by the sender's per-entity reply permissions.
 For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
@@ -101,7 +101,7 @@ When the responder is already clear, normalized audio follows the normal direct 
 By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
-See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
+See [Voice Messages](../voice.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 
@@ -127,10 +127,10 @@ This prevents MindRoom entities from injecting themselves into human-to-human co
 The rules are:
 
 1. **Mentioned eligible agents or teams respond** — an explicit `@agent` or `@team` bypasses AI routing, but room configuration and reply permissions still apply.
-1. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
-1. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
-1. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
-1. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
+2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
+3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
+4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
+5. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
 
 #### Bot accounts
 

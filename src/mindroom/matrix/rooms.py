@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import resolve_avatar_path
+from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.avatar import check_and_set_avatar
@@ -23,10 +24,13 @@ from mindroom.matrix.client_room_admin import (
     join_room,
     leave_room,
 )
-from mindroom.matrix.client_session import matrix_client
-from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
+from mindroom.matrix.users import (
+    INTERNAL_USER_ACCOUNT_KEY,
+    INTERNAL_USER_AGENT_NAME,
+    AgentMatrixUser,
+    login_agent_user,
+)
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
@@ -352,8 +356,6 @@ async def ensure_all_rooms_exist(
         Dict mapping room keys to room IDs
 
     """
-    from mindroom.agents import get_agent_ids_for_room  # noqa: PLC0415
-
     room_ids = {}
 
     # Get all configured rooms
@@ -366,7 +368,7 @@ async def ensure_all_rooms_exist(
             continue
 
         # Get power users for this room
-        power_users = get_agent_ids_for_room(room_key, config, runtime_paths)
+        power_users = managed_entity_power_user_ids_for_room(room_key, config, runtime_paths)
 
         # Ensure room exists
         try:
@@ -496,34 +498,36 @@ async def ensure_user_in_rooms(
         logger.warning("No user account found, skipping user room membership")
         return
 
-    server_name = extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
-    user_id = managed_account_user_id(INTERNAL_USER_ACCOUNT_KEY, server_name, runtime_paths)
-    if user_id is None:
-        logger.warning("No user account found, skipping user room membership")
-        return
-
-    # Create a client for the user to join rooms
-    async with matrix_client(homeserver, runtime_paths, user_id=user_id) as user_client:
-        # Login as the user
-        login_response = await user_client.login(password=user_account.password)
-        if not isinstance(login_response, nio.LoginResponse):
-            logger.error("matrix_user_login_failed", user_id=user_id, error=str(login_response))
-            return
-
-        logger.info("matrix_user_logged_in", user_id=user_id)
+    server_name = user_account.domain or extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
+    user_id = f"@{user_account.username}:{server_name}"
+    user_client = await login_agent_user(
+        homeserver,
+        AgentMatrixUser(
+            agent_name=INTERNAL_USER_AGENT_NAME,
+            user_id=user_id,
+            display_name=INTERNAL_USER_AGENT_NAME,
+            password=user_account.password,
+            device_id=user_account.device_id,
+            access_token=user_account.access_token,
+        ),
+        runtime_paths,
+    )
+    try:
+        logger.info("matrix_user_logged_in", user_id=user_client.user_id)
 
         for room_key, room_id in room_ids.items():
-            # Try to join the room (will work if invited or room is public)
             join_success = await join_room(user_client, room_id)
             if join_success:
-                logger.info("matrix_user_joined_room", user_id=user_id, room_id=room_id, room_key=room_key)
+                logger.info("matrix_user_joined_room", user_id=user_client.user_id, room_id=room_id, room_key=room_key)
             else:
                 logger.warning(
                     "matrix_user_room_join_failed",
-                    user_id=user_id,
+                    user_id=user_client.user_id,
                     room_id=room_id,
                     room_key=room_key,
                 )
+    finally:
+        await user_client.close()
 
 
 _DM_ROOM_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}

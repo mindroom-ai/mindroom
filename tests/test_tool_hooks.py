@@ -31,6 +31,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_RECEIVED,
@@ -2136,7 +2137,7 @@ async def test_tool_approval_rejects_internal_mindroom_user_requester(tmp_path: 
     )
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    internal_user_id = mindroom_user_id(config, runtime_paths)
     assert internal_user_id is not None
     internal_execution_identity = replace(_execution_identity(), requester_id=internal_user_id)
     bridge = build_tool_hook_bridge(

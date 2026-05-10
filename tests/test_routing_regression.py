@@ -19,7 +19,6 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -27,7 +26,7 @@ from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.routing import suggest_agent_for_message
+from mindroom.routing import suggest_responder_for_message
 from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
@@ -39,7 +38,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, entity_name_for_id
+from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -81,18 +80,16 @@ def setup_test_bot(
             config = _runtime_bound_config(config, storage_path)
 
     runtime_paths = runtime_paths_for(config)
+    usernames = actual_entity_usernames(config)
     state = MatrixState.load(runtime_paths=runtime_paths)
-    for alias in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
-        account_key = managed_account_key(alias)
-        if account_key in state.accounts:
-            continue
-        username = (
-            MatrixID.parse(agent.user_id).username
-            if alias == agent.agent_name and agent.user_id is not None
-            else f"mindroom_{alias}"
-        )
-        state.add_account(account_key, username, TEST_PASSWORD, domain=config.get_domain(runtime_paths))
-    state.save(runtime_paths=runtime_paths)
+    for alias in [*config.agents, *config.teams, "router"]:
+        if managed_account_key(alias) in state.accounts:
+            usernames.pop(alias, None)
+    if agent.user_id is not None:
+        account_key = managed_account_key(agent.agent_name)
+        if account_key not in state.accounts:
+            usernames[agent.agent_name] = MatrixID.parse(agent.user_id).username
+    persist_entity_accounts(config, runtime_paths, usernames=usernames)
 
     bot = AgentBot(
         agent,
@@ -107,9 +104,9 @@ def setup_test_bot(
 
 
 @pytest.mark.asyncio
-@patch("mindroom.routing.suggest_agent", new_callable=AsyncMock)
-async def test_suggest_agent_for_message_returns_aliases_for_actual_ids(
-    mock_suggest_agent: AsyncMock,
+@patch("mindroom.routing.suggest_responder", new_callable=AsyncMock)
+async def test_suggest_responder_for_message_returns_aliases_for_actual_ids(
+    mock_suggest_responder: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """Routing should expose configured aliases even when Matrix IDs have drifted."""
@@ -129,9 +126,9 @@ async def test_suggest_agent_for_message_returns_aliases_for_actual_ids(
         runtime_paths,
         usernames={"router": "actual_router", "news": "actual_news", "facts": "actual_facts"},
     )
-    mock_suggest_agent.return_value = "news"
+    mock_suggest_responder.return_value = "news"
 
-    result = await suggest_agent_for_message(
+    result = await suggest_responder_for_message(
         "what happened?",
         [ids["news"], ids["facts"]],
         config,
@@ -140,9 +137,9 @@ async def test_suggest_agent_for_message_returns_aliases_for_actual_ids(
     )
 
     assert result == "news"
-    mock_suggest_agent.assert_awaited_once()
-    assert mock_suggest_agent.await_args.args[1] == ["news", "facts"]
-    assert mock_suggest_agent.await_args.args[4][0].sender == "facts"
+    mock_suggest_responder.assert_awaited_once()
+    assert mock_suggest_responder.await_args.args[1] == ["news", "facts"]
+    assert mock_suggest_responder.await_args.args[4][0].sender == "facts"
 
 
 def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path) -> None:
@@ -285,10 +282,10 @@ class TestRoutingRegression:
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
@@ -313,7 +310,7 @@ class TestRoutingRegression:
 
         # Mock AI responses
         mock_ai_response.return_value = "I can help with that research!"
-        mock_suggest_agent.return_value = "news"  # Router would pick news
+        mock_suggest_responder.return_value = "news"  # Router would pick news
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -354,14 +351,14 @@ class TestRoutingRegression:
         await drain_coalescing(news_bot)
         assert news_bot.client.room_send.call_count == 0
         # Router should NOT have been called
-        assert mock_suggest_agent.call_count == 0
+        assert mock_suggest_responder.call_count == 0
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
@@ -411,7 +408,7 @@ class TestRoutingRegression:
 
         # Mock AI responses
         mock_ai_response.return_value = "I can help with that!"
-        mock_suggest_agent.return_value = "research"  # Router picks research
+        mock_suggest_responder.return_value = "research"  # Router picks research
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -447,7 +444,7 @@ class TestRoutingRegression:
         await drain_coalescing(router_bot)
 
         # Router SHOULD have been called
-        mock_suggest_agent.assert_called_once()
+        mock_suggest_responder.assert_called_once()
         # Router bot should send the routing message
         assert router_bot.client.room_send.call_count == 1  # Router doesn't use stop button
 
@@ -460,10 +457,10 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_relay_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -508,7 +505,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_agent.side_effect = AssertionError("AI router should not run for one candidate")
+        mock_suggest_responder.side_effect = AssertionError("AI router should not run for one candidate")
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_789"
@@ -541,17 +538,17 @@ class TestRoutingRegression:
             requester_user_id="@bob:localhost",
         )
 
-        mock_suggest_agent.assert_not_awaited()
+        mock_suggest_responder.assert_not_awaited()
         router_bot.client.room_send.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_news_oldns:localhost could you help with this?"
         assert content["m.mentions"]["user_ids"] == ["@mindroom_news_oldns:localhost"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_filters_by_agent_reply_permissions_with_multiple_allowed(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -597,7 +594,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_agent.return_value = "news"
+        mock_suggest_responder.return_value = "news"
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_789_multi"
@@ -626,8 +623,8 @@ class TestRoutingRegression:
         await router_bot._on_message(mock_room, message_event)
         await drain_coalescing(router_bot)
 
-        mock_suggest_agent.assert_called_once()
-        available_agents = mock_suggest_agent.call_args.args[1]
+        mock_suggest_responder.assert_called_once()
+        available_agents = mock_suggest_responder.call_args.args[1]
         runtime_paths = runtime_paths_for(test_config)
         assert [entity_name_for_id(agent, test_config, runtime_paths) for agent in available_agents] == [
             "news",
@@ -635,10 +632,10 @@ class TestRoutingRegression:
         ]
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_reply_permissions_block_router_response(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -681,7 +678,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_agent.return_value = "research"
+        mock_suggest_responder.return_value = "research"
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_791"
@@ -709,14 +706,14 @@ class TestRoutingRegression:
         await router_bot._on_message(mock_room, message_event)
         await drain_coalescing(router_bot)
 
-        mock_suggest_agent.assert_not_called()
+        mock_suggest_responder.assert_not_called()
         router_bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_routes_when_thread_agents_are_disallowed_for_sender(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -763,7 +760,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_agent.return_value = "research"
+        mock_suggest_responder.return_value = "research"
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_790"
@@ -808,8 +805,8 @@ class TestRoutingRegression:
             await router_bot._on_message(mock_room, message_event)
             await drain_coalescing(router_bot)
 
-        mock_suggest_agent.assert_called_once()
-        available_agents = mock_suggest_agent.call_args.args[1]
+        mock_suggest_responder.assert_called_once()
+        available_agents = mock_suggest_responder.call_args.args[1]
         runtime_paths = runtime_paths_for(test_config)
         assert [entity_name_for_id(agent, test_config, runtime_paths) for agent in available_agents] == [
             "research",

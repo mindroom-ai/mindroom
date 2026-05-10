@@ -85,7 +85,7 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
 )
-from mindroom.routing import suggest_agent_for_message
+from mindroom.routing import suggest_responder_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
     is_router_only_agent_mention,
@@ -1197,13 +1197,13 @@ class TurnController:
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
             if len(available_agents) == 1:
-                suggested_agent = self._managed_entity_name_for_sender(available_agents[0].full_id)
+                suggested_entity = self._managed_entity_name_for_sender(available_agents[0].full_id)
                 self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
             else:
                 self.deps.logger.info("Handling AI routing", event_id=event.event_id)
 
                 routing_text = message or event.body
-                suggested_agent = await suggest_agent_for_message(
+                suggested_entity = await suggest_responder_for_message(
                     routing_text,
                     available_agents,
                     self.deps.runtime.config,
@@ -1211,7 +1211,7 @@ class TurnController:
                     thread_history,
                 )
 
-        if not suggested_agent:
+        if not suggested_entity:
             response_text = (
                 "⚠️ I couldn't determine which agent or team should help with this. "
                 "Please try mentioning an agent or team directly with @ or rephrase your request."
@@ -1219,15 +1219,15 @@ class TurnController:
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
         else:
-            response_text = f"@{suggested_agent} could you help with this?"
+            response_text = f"@{suggested_entity} could you help with this?"
 
         target_thread_mode = (
             self.deps.runtime.config.get_entity_thread_mode(
-                suggested_agent,
+                suggested_entity,
                 self.deps.runtime_paths,
                 room_id=room.room_id,
             )
-            if suggested_agent
+            if suggested_entity
             else None
         )
         resolved_target = self.deps.resolver.build_message_target(
@@ -1284,10 +1284,10 @@ class TurnController:
         )
         with bound_log_context(**resolved_target.log_context):
             if event_id:
-                self.deps.logger.info("Routed to agent", suggested_agent=suggested_agent)
+                self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
                 self._mark_source_events_responded(tracked_handled_turn.with_response_event_id(event_id))
             else:
-                self.deps.logger.error("Failed to route to agent", agent=suggested_agent)
+                self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
 
     def _router_handled_turn_outcome(
         self,

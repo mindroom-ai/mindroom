@@ -48,7 +48,6 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    matrix_state_file,
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
@@ -76,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+_RESERVED_ENTITY_NAMES = frozenset({"user"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -86,42 +86,6 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "subagents",
     "matrix_message",
 )
-_INTERNAL_USER_ACCOUNT_KEY = "agent_user"
-
-
-def _persisted_account_fields(runtime_paths: RuntimePaths) -> dict[str, tuple[str, str | None]]:
-    state_file = matrix_state_file(runtime_paths=runtime_paths)
-    if not state_file.exists():
-        return {}
-    data = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        return {}
-    accounts = data.get("accounts")
-    if not isinstance(accounts, dict):
-        return {}
-    account_fields: dict[str, tuple[str, str | None]] = {}
-    for account_key, account_data in accounts.items():
-        if not isinstance(account_key, str) or not account_key.startswith("agent_"):
-            continue
-        if not isinstance(account_data, dict):
-            continue
-        username = account_data.get("username")
-        domain = account_data.get("domain")
-        if isinstance(username, str):
-            account_fields[account_key] = (username, domain if isinstance(domain, str) else None)
-    return account_fields
-
-
-def _persisted_agent_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
-    return {key: username for key, (username, _domain) in _persisted_account_fields(runtime_paths).items()}
-
-
-def _persisted_account_user_id(account_key: str, fallback_domain: str, runtime_paths: RuntimePaths) -> str | None:
-    account_fields = _persisted_account_fields(runtime_paths).get(account_key)
-    if account_fields is None:
-        return None
-    username, domain = account_fields
-    return f"@{username}:{domain or fallback_domain}"
 
 
 logger = get_logger(__name__)
@@ -469,6 +433,12 @@ class Config(BaseModel):
         overlapping_names = sorted(set(self.agents) & set(self.teams))
         if overlapping_names:
             msg = f"Agent and team names must be distinct, overlapping keys: {', '.join(overlapping_names)}"
+            raise ValueError(msg)
+        reserved_entity_names = sorted((set(self.agents) | set(self.teams)) & _RESERVED_ENTITY_NAMES)
+        if reserved_entity_names:
+            msg = (
+                f"Agent and team names must not use reserved internal entity names: {', '.join(reserved_entity_names)}"
+            )
             raise ValueError(msg)
         for server_id in self.mcp_servers:
             normalize_mcp_server_id(server_id)
@@ -869,19 +839,14 @@ class Config(BaseModel):
             return self
         reserved_localparts: dict[str, str] = {}
         entity_names = [ROUTER_AGENT_NAME, *self.agents, *self.teams]
-        persisted_usernames = _persisted_agent_usernames(runtime_paths)
         for entity_name in entity_names:
-            account_key = f"agent_{entity_name}"
             if entity_name == ROUTER_AGENT_NAME:
                 label = f"router '{ROUTER_AGENT_NAME}'"
             elif entity_name in self.agents:
                 label = f"agent '{entity_name}'"
             else:
                 label = f"team '{entity_name}'"
-            if account_key not in persisted_usernames:
-                reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
-            if username := persisted_usernames.get(account_key):
-                reserved_localparts[username] = label
+            reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"
@@ -916,17 +881,6 @@ class Config(BaseModel):
         """Extract the Matrix domain for one explicit runtime context."""
         homeserver = runtime_matrix_homeserver(runtime_paths)
         return extract_server_name_from_homeserver(homeserver, runtime_paths)
-
-    def get_mindroom_user_id(self, runtime_paths: RuntimePaths) -> str | None:
-        """Get the full Matrix user ID for the configured internal user."""
-        if self.mindroom_user is None:
-            return None
-        domain = self.get_domain(runtime_paths)
-        return _persisted_account_user_id(
-            _INTERNAL_USER_ACCOUNT_KEY,
-            domain,
-            runtime_paths,
-        )
 
     @classmethod
     def validate_with_runtime(

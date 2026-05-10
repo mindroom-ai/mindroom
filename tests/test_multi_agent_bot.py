@@ -7515,7 +7515,7 @@ class TestAgentBot:
 
         with (
             patch(
-                "mindroom.turn_controller.suggest_agent_for_message",
+                "mindroom.turn_controller.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -7593,7 +7593,7 @@ class TestAgentBot:
 
         with (
             patch(
-                "mindroom.turn_controller.suggest_agent_for_message",
+                "mindroom.turn_controller.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -7731,7 +7731,7 @@ class TestAgentBot:
                 return_value=TeamResolution.none(),
             ),
             patch(
-                "mindroom.turn_controller.suggest_agent_for_message",
+                "mindroom.turn_controller.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -14358,6 +14358,7 @@ class TestMultiAgentOrchestrator:
             mindroom_user_changed=False,
             new_config=new_config,
             changed_mcp_servers=set(),
+            configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
             added_entities=set(),

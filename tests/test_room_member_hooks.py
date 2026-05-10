@@ -16,6 +16,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
@@ -650,7 +651,7 @@ async def test_room_member_joined_ignores_bot_accounts_and_agents(tmp_path: Path
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
     )
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
-    internal_user_id = bot.config.get_mindroom_user_id(bot.runtime_paths)
+    internal_user_id = mindroom_user_id(bot.config, bot.runtime_paths)
     assert internal_user_id is not None
 
     await bot._on_room_member(_room(), _room_member_event(event_id="$bridge", user_id="@bridge:localhost"))

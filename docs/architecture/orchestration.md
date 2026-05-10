@@ -30,7 +30,10 @@ main() entry
 │ 3. Create "user" │
 │    Matrix account│
 │    (mindroom_user)│
-│ 4. Create bots   │
+│ 4. Prepare       │
+│    entity Matrix │
+│    accounts      │
+│ 5. Create bots   │
 │    for entities  │
 └────────┬─────────┘
          │
@@ -70,9 +73,9 @@ main() entry
 **Key details:**
 
 - **Entity order**: Router first, then agents, then teams
-- **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents/users, bots join
+- **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents, teams, and users, then bots join
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry
-- **Internal user identity**: `mindroom_user.username` is bootstrap-only; only `display_name` should change later
+- **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
 ## Hot Reload
 
@@ -133,7 +136,7 @@ When no agent or team is mentioned, routing selects the appropriate agent or tea
 
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
-**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_agent_for_message()` only when multiple candidates remain.
+**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_responder_for_message()` only when multiple candidates remain.
 In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required.
 Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 

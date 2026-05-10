@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
@@ -401,11 +401,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def _trusted_sender_ids(self) -> frozenset[str]:
         """Return the exact internal sender IDs allowed to override canonical visible-body reads."""
-        registry = entity_identity_registry(self.runtime.config, self.runtime.runtime_paths)
-        sender_ids = set(registry.internal_sender_ids)
-        if (internal_user_id := mindroom_user_id(self.runtime.config, self.runtime.runtime_paths)) is not None:
-            sender_ids.add(internal_user_id)
-        return frozenset(sender_ids)
+        return current_internal_sender_ids(self.runtime.config, self.runtime.runtime_paths)
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:

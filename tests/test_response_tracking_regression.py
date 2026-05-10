@@ -231,10 +231,10 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
         tmp_path: Path,
@@ -266,8 +266,8 @@ class TestResponseTrackingRegression:
         mock_send_response.event_id = "$router_response_123"
         bot.client.room_send.return_value = mock_send_response
 
-        # Mock suggest_agent to return "research"
-        mock_suggest_agent.return_value = "research"
+        # Mock suggest_responder to return "research"
+        mock_suggest_responder.return_value = "research"
 
         # Create a regular message (no mentions)
         message_event = MagicMock(spec=nio.RoomMessageText)
@@ -322,7 +322,7 @@ class TestResponseTrackingRegression:
 
         # Reset mock
         bot.client.room_send.reset_mock()
-        mock_suggest_agent.reset_mock()
+        mock_suggest_responder.reset_mock()
 
         # Process same message again (simulating restart)
         await bot._turn_controller._execute_router_relay(

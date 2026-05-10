@@ -1,17 +1,18 @@
 # Image Messages
 
-MindRoom can process images sent to Matrix rooms, passing them to vision-capable AI models for analysis.
+MindRoom can process images sent to Matrix rooms, passing them to vision-capable agents and teams for analysis.
 
 ## Overview
 
 When a user sends an image in a Matrix room:
 
-1. The agent determines whether it should respond (via mention, thread participation, or DM)
+1. The responder determines whether it should answer (via mention, thread participation, or DM)
 2. The image is downloaded and decrypted (if E2E encrypted)
 3. The image is wrapped as an `agno.media.Image` and passed to the AI model
-4. The agent responds with its analysis
+4. The responder replies with its analysis
 
-Image support works automatically for all agents -- no configuration is needed. The AI model must support vision (e.g., Claude, GPT-5.4).
+Image support works automatically for agents and teams -- no configuration is needed.
+The selected model must support vision (e.g., Claude, GPT-5.4).
 
 ## Supported Formats
 
@@ -36,14 +37,14 @@ If the declared MIME type in the Matrix event does not match the detected byte s
                                               │
                                               v
                                         ┌─────────────┐
-                                        │ Agent       │
-                                        │ Responds    │
+                                        │ Responder   │
+                                        │ Replies     │
                                         └─────────────┘
 ```
 
 ## Usage
 
-Send an image in a Matrix room and mention the agent in the caption:
+Send an image in a Matrix room and mention the agent or team in the caption:
 
 - **With caption**: `@assistant What does this diagram show?` -- the caption is used as the prompt
 - **Without caption**: The agent receives `[Attached image]` as the prompt and describes what it sees
@@ -60,7 +61,7 @@ This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/
 
 Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
 In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls.
-See [Attachments](https://docs.mindroom.chat/attachments/) for details on retention and context scoping.
+See [Attachments](attachments.md) for details on retention and context scoping.
 
 ## Encryption
 

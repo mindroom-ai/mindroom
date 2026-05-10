@@ -2445,9 +2445,9 @@ class TestAutoRouting:
     """Tests for auto-routing via model='auto'."""
 
     def test_auto_routes_to_suggested_agent(self, app_client: TestClient) -> None:
-        """Auto model routes to the agent suggested by suggest_agent()."""
+        """Auto model routes to the agent suggested by suggest_responder()."""
         with (
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
             mock_route.return_value = "code"
@@ -2468,9 +2468,9 @@ class TestAutoRouting:
         assert data["choices"][0]["message"]["content"] == "Here is your code"
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
-        """When suggest_agent returns None, falls back to first agent."""
+        """When suggest_responder returns None, falls back to first agent."""
         with (
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
             mock_route.return_value = None
@@ -2489,9 +2489,9 @@ class TestAutoRouting:
         assert response.json()["model"] == "general"
 
     def test_auto_passes_thread_history(self, app_client: TestClient) -> None:
-        """Auto-routing passes thread_history to suggest_agent for context."""
+        """Auto-routing passes thread_history to suggest_responder for context."""
         with (
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
             mock_route.return_value = "general"
@@ -2509,7 +2509,7 @@ class TestAutoRouting:
                 },
             )
 
-            # suggest_agent receives runtime_paths before the optional thread history.
+            # suggest_responder receives runtime_paths before the optional thread history.
             call_args = mock_route.call_args
             assert call_args[0][0] == "Write code"  # prompt
             thread_history = call_args[0][4]
@@ -2525,7 +2525,7 @@ class TestAutoRouting:
             yield RunContentEvent(content="Streamed!")
 
         with (
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
         ):
             mock_route.return_value = "research"
@@ -2565,7 +2565,7 @@ class TestAutoRouting:
         initialize_api_app(app, runtime_paths)
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             TestClient(app) as client,
         ):
             mock_route.return_value = None
@@ -2583,7 +2583,7 @@ class TestAutoRouting:
     def test_auto_session_id_uses_resolved_agent(self, app_client: TestClient) -> None:
         """Session ID derivation uses the resolved agent name, not 'auto'."""
         with (
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
             mock_route.return_value = "code"
@@ -2606,12 +2606,12 @@ class TestAutoRouting:
             assert "auto" not in session_id
 
     def test_auto_routing_exception_falls_back(self, app_client: TestClient) -> None:
-        """If suggest_agent raises an exception, it should still fall back gracefully."""
+        """If suggest_responder raises an exception, it should still fall back gracefully."""
         with (
-            patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
+            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
-            # suggest_agent catches exceptions internally and returns None
+            # suggest_responder catches exceptions internally and returns None
             mock_route.return_value = None
             mock_ai.return_value = "Fallback response"
 

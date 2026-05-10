@@ -6,7 +6,7 @@ MindRoom uses [mautrix](https://docs.mau.fi/bridges/) bridges to connect externa
 
 | Bridge | Platform | Mode | Status |
 |--------|----------|------|--------|
-| [Telegram](https://docs.mindroom.chat/deployment/bridges/telegram/) | Telegram | Puppet (login as yourself) | Available |
+| [Telegram](telegram.md) | Telegram | Puppet (login as yourself) | Available |
 | Slack | Slack | - | Planned |
 | Email | IMAP/SMTP | - | Planned |
 

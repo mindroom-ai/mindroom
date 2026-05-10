@@ -80,8 +80,7 @@ timezone: America/Los_Angeles
 
 - **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported.
 
-Cancel the existing task and create a new one instead.
-
+  Cancel the existing task and create a new one instead.
 - **Conditional workflows are polling** — event-like schedules (`If ...`, `When ...`) are converted to recurring cron polls, not real event subscriptions.
 
 ## Persistence

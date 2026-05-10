@@ -30,7 +30,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
@@ -2263,7 +2263,7 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
         runtime_paths,
     )
     persist_entity_accounts(config, runtime_paths, usernames={"router": "actual_router", "code": "actual_code"})
-    internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    internal_user_id = mindroom_user_id(config, runtime_paths)
     agent_user_id = entity_identity_registry(config, runtime_paths).current_id("code").full_id
 
     assert resolve_tool_approval_approver(config, runtime_paths, None) is None

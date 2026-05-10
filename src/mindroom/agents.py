@@ -1360,24 +1360,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     return agent
 
 
-def get_agent_ids_for_room(
-    room_key: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-) -> list[str]:
-    """Get all bot Matrix IDs assigned to a specific room."""
-    config_ids = entity_identity_registry(config, runtime_paths).current_ids
-    agent_ids = [config_ids[ROUTER_AGENT_NAME].full_id]
-
-    for agent_name, agent_cfg in config.agents.items():
-        if room_key in agent_cfg.rooms:
-            agent_ids.append(config_ids[agent_name].full_id)
-    for team_name, team_cfg in config.teams.items():
-        if room_key in team_cfg.rooms:
-            agent_ids.append(config_ids[team_name].full_id)
-    return agent_ids
-
-
 def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
     """Get the list of room aliases that an entity (agent/team) should be in.
 
@@ -1409,7 +1391,6 @@ __all__ = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
-    "get_agent_ids_for_room",
     "get_agent_toolkit_names",
     "get_rooms_for_entity",
     "remove_run_by_event_id",

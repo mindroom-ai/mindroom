@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 _VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?P<localpart>[A-Za-z0-9._=/+\-]+)(?::(?P<domain>[A-Za-z0-9.\-:\[\]]+))?",
 )
+_VOICE_MENTION_TRAILING_PUNCTUATION = ".,!?;"
 
 
 @dataclass(frozen=True)
@@ -513,30 +514,33 @@ def _sanitize_unavailable_mentions(
     registry = entity_identity_registry(config, runtime_paths)
 
     def _replace(match: re.Match[str]) -> str:
-        configured_name = _voice_mention_entity_name(match, registry, config, runtime_paths)
+        raw_token = match.group(0)
+        token = raw_token.rstrip(_VOICE_MENTION_TRAILING_PUNCTUATION)
+        trailing_punctuation = raw_token[len(token) :]
+        configured_name = _voice_mention_entity_name(token, registry, config)
         if configured_name is None:
-            return match.group(0)
+            return raw_token
         if configured_name.lower() in allowed_lower:
-            return match.group(0)
+            return raw_token
         # Strip only '@', preserving exact matched token shape (mindroom_ prefix/domain suffix/case).
-        return match.group(0)[1:]
+        return f"{token[1:]}{trailing_punctuation}"
 
     return _VOICE_MENTION_PATTERN.sub(_replace, text)
 
 
 def _voice_mention_entity_name(
-    match: re.Match[str],
+    token: str,
     registry: EntityIdentityRegistry,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> str | None:
     """Resolve one voice-normalizer mention token using Matrix mention semantics."""
-    token = match.group(0)
-    if match.group("domain") is not None:
+    body = token[1:]
+    localpart, separator, _domain = body.partition(":")
+    if separator:
         try:
             user_id = parse_current_matrix_user_id(token)
         except ValueError:
             return None
         return registry.current_entity_name_for_user_id(user_id, include_router=False)
 
-    return resolve_entity_name_for_mention_localpart(match.group("localpart"), config, runtime_paths)
+    return resolve_entity_name_for_mention_localpart(localpart, config)

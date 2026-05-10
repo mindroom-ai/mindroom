@@ -9950,7 +9950,7 @@ class TestThreadingBehavior:
         )
 
         with (
-            patch("mindroom.turn_controller.suggest_agent_for_message", AsyncMock(return_value="general")),
+            patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="general")),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_latest_thread_event_id_if_needed",
                 AsyncMock(return_value="$latest:localhost"),

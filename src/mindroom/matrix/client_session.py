@@ -126,7 +126,10 @@ async def login(
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
-        logger.info("matrix_login_succeeded", user_id=user_id)
+        client.user_id = response.user_id
+        client.device_id = response.device_id
+        client.access_token = response.access_token
+        logger.info("matrix_login_succeeded", user_id=response.user_id)
         return client
     await client.close()
     msg = f"Failed to login {user_id}: {response}"
@@ -147,7 +150,10 @@ async def restore_login(
 
     response = await client.whoami()
     if isinstance(response, nio.WhoamiResponse):
-        logger.info("matrix_login_restored", user_id=user_id, device_id=device_id)
+        client.user_id = response.user_id
+        if response.device_id:
+            client.device_id = response.device_id
+        logger.info("matrix_login_restored", user_id=response.user_id, device_id=client.device_id)
         return client
 
     await client.close()

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mindroom.authorization import get_available_agents_in_room, responder_candidate_entities_for_room
+from mindroom.authorization import get_available_responders_in_room, responder_candidate_entities_for_room
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -86,8 +86,8 @@ class TestResponderCandidateSelection:
         configured = configured_routable_entity_ids_for_room(self.config, "#unknown:localhost", runtime_paths)
         assert configured == []
 
-    def test_get_available_agents_returns_all_in_room(self) -> None:
-        """Test that get_available_agents_in_room returns all agents present."""
+    def test_get_available_responders_returns_all_in_room(self) -> None:
+        """Present-room membership exposes every joined managed responder."""
         runtime_paths = runtime_paths_for(self.config)
         # Mock room with agents that are both configured and not configured
         room = MagicMock()
@@ -100,7 +100,7 @@ class TestResponderCandidateSelection:
         }
 
         # Present-room membership still exposes every joined managed entity.
-        available = get_available_agents_in_room(room, self.config, runtime_paths)
+        available = get_available_responders_in_room(room, self.config, runtime_paths)
         available_names = self._entity_names(self.config, available)
         assert "calculator" in available_names
         assert "research" in available_names
@@ -123,7 +123,7 @@ class TestResponderCandidateSelection:
         assert configured_names == ["calculator", "research"]
         assert "writer" not in configured_names
 
-        available = get_available_agents_in_room(room, self.config, runtime_paths)
+        available = get_available_responders_in_room(room, self.config, runtime_paths)
         assert len(available) == 3  # All agents in room
 
     @pytest.mark.asyncio
@@ -381,7 +381,7 @@ class TestResponderCandidateSelection:
         assert "router" not in configured_names
 
         # Router should be excluded from available agents in room
-        available = get_available_agents_in_room(room, config_with_router, runtime_paths)
+        available = get_available_responders_in_room(room, config_with_router, runtime_paths)
         available_names = self._entity_names(config_with_router, available)
         assert available_names == ["calculator"]
         assert "router" not in available_names

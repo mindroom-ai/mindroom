@@ -50,7 +50,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.routing import suggest_agent
+from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
     build_materialized_team_instance,
@@ -785,7 +785,7 @@ async def _resolve_auto_route(
             error_type="server_error",
         )
 
-    routed = await suggest_agent(prompt, available, config, runtime_paths, thread_history)
+    routed = await suggest_responder(prompt, available, config, runtime_paths, thread_history)
     if routed is None:
         routed = available[0]
         logger.warning("Auto-routing failed, falling back", agent=routed)

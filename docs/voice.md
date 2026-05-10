@@ -175,7 +175,7 @@ If multiple eligible responders remain and the audio does not already target one
 By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event.
 The router handoff message appears only when the router must disambiguate between multiple eligible responders.
 If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event.
-Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event agents actually answer.
+Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event responders actually answer.
 
 ### Attachment access
 
@@ -206,7 +206,8 @@ Reply-permission checks still use the original human sender, not a later router 
 
 ## Text-to-Speech Tools
 
-MindRoom also supports text-to-speech (TTS) through agent tools. These are separate from voice message transcription and allow agents to generate audio responses:
+MindRoom also supports text-to-speech (TTS) through agent tools.
+These are separate from voice message transcription and allow agents to generate audio responses:
 
 - **OpenAI** - Speech synthesis via `openai` tool
 - **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool

@@ -9,10 +9,11 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import agent_username_localpart
-from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+_DEFAULT_TEST_PASSWORD = "mock_test_password"  # noqa: S105
 
 
 class ConfigLike(Protocol):
@@ -31,19 +32,47 @@ def persist_entity_accounts(
     runtime_paths: RuntimePaths,
     *,
     usernames: Mapping[str, str] | None = None,
-    password: str = TEST_PASSWORD,
+    password: str = _DEFAULT_TEST_PASSWORD,
 ) -> None:
-    """Persist actual Matrix accounts for configured runtime entities in tests."""
+    """Persist managed Matrix accounts for tests that need prepared runtime identity."""
     usernames = usernames or {}
     state = MatrixState.load(runtime_paths=runtime_paths)
     domain = config.get_domain(runtime_paths)
+    changed = False
     for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
         account_key = managed_account_key(entity_name)
         if account_key in state.accounts and entity_name not in usernames:
             continue
         username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
         state.add_account(account_key, username, password, domain=domain)
-    state.save(runtime_paths=runtime_paths)
+        changed = True
+    mindroom_user = vars(config).get("mindroom_user")
+    if mindroom_user is not None and managed_account_key("user") not in state.accounts:
+        state.add_account(
+            managed_account_key("user"),
+            mindroom_user.username,
+            password,
+            requested_username=mindroom_user.username,
+            domain=domain,
+        )
+        changed = True
+    if changed:
+        state.save(runtime_paths=runtime_paths)
+
+
+def actual_entity_usernames(config: ConfigLike) -> dict[str, str]:
+    """Return non-generated Matrix usernames for runtime identity tests."""
+    return {entity_name: f"actual_{entity_name}" for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]}
+
+
+def persist_actual_entity_accounts(
+    config: ConfigLike,
+    runtime_paths: RuntimePaths,
+    *,
+    password: str = _DEFAULT_TEST_PASSWORD,
+) -> None:
+    """Persist non-generated managed Matrix accounts for runtime identity tests."""
+    persist_entity_accounts(config, runtime_paths, usernames=actual_entity_usernames(config), password=password)
 
 
 def entity_ids(

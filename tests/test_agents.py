@@ -28,7 +28,6 @@ from mindroom.agents import (
     _PRIVATE_CULTURE_MANAGER_CACHE,
     build_agent_toolkit,
     create_agent,
-    get_agent_ids_for_room,
     get_agent_toolkit_names,
 )
 from mindroom.config.agent import (
@@ -43,6 +42,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
@@ -135,7 +135,7 @@ def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
     persist_entity_accounts(
         bound_config,
         runtime_paths,
-        usernames={alias: f"mindroom_{alias}" for alias in ["router", *bound_config.agents, *bound_config.teams]},
+        usernames={alias: f"actual_{alias}" for alias in ["router", *bound_config.agents, *bound_config.teams]},
     )
     return bound_config
 
@@ -154,7 +154,7 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     )
 
 
-def test_get_agent_ids_for_room_includes_configured_teams(tmp_path: Path) -> None:
+def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_path: Path) -> None:
     """Room creation power users should include team bots configured for that room."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(
@@ -172,9 +172,9 @@ def test_get_agent_ids_for_room_includes_configured_teams(tmp_path: Path) -> Non
         runtime_paths,
     )
 
-    assert get_agent_ids_for_room("ops", config, runtime_paths) == [
-        "@mindroom_router:localhost",
-        "@mindroom_ops:localhost",
+    assert managed_entity_power_user_ids_for_room("ops", config, runtime_paths) == [
+        "@actual_router:localhost",
+        "@actual_ops:localhost",
     ]
 
 

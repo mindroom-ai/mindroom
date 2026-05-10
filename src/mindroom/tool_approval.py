@@ -26,7 +26,7 @@ from mindroom.approval_manager import (
     TransportSenderProvider,
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -192,7 +192,7 @@ def resolve_tool_approval_approver(
         return None
     if requester_id in config.bot_accounts:
         return None
-    if requester_id == config.get_mindroom_user_id(runtime_paths):
+    if requester_id == mindroom_user_id(config, runtime_paths):
         return None
     return requester_id
 

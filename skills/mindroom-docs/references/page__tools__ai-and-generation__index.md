@@ -560,5 +560,5 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)
+- [Tools Overview](index.md)
+- [OpenAI-Compatible API](../openai-api.md)

@@ -37,10 +37,10 @@ class TestRoutingIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.turn_controller.suggest_agent_for_message")
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_real_scenario_research_channel(
         self,
-        mock_suggest_agent: AsyncMock,
+        mock_suggest_responder: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         tmp_path: Path,
     ) -> None:
@@ -152,7 +152,7 @@ class TestRoutingIntegration:
         assert news_bot.client.room_send.call_count == 0
 
         # Router should NOT have been called at all
-        assert mock_suggest_agent.call_count == 0
+        assert mock_suggest_responder.call_count == 0
 
         # Verify the response was sent
         last_call = research_bot.client.room_send.call_args_list[-1]

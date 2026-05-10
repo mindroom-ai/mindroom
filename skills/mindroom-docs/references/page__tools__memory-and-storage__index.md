@@ -18,14 +18,14 @@ Use these tools when you need explicit memory CRUD operations, direct provider-s
 `memory` is MindRoom-native and has no tool-specific configuration fields.
 It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the effective `mem0`, `file`, or `none` backend for that agent.
 If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent.
-Use [Memory System](https://docs.mindroom.chat/memory/) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
+Use [Memory System](../memory.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
 `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
 `mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
 `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
 If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 This page does not document conversation-scoped file attachments even though they are storage-like.
-Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) and [Attachments](https://docs.mindroom.chat/attachments/) for attachment IDs, retention, and Matrix media flow.
+Use [Matrix & Attachments](matrix-and-attachments.md) and [Attachments](../attachments.md) for attachment IDs, retention, and Matrix media flow.
 
 ## [`memory`]
 
@@ -67,7 +67,7 @@ delete_memory("abc123")
 
 ### Notes
 
-- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](https://docs.mindroom.chat/memory/), not through tool-local options.
+- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](../memory.md), not through tool-local options.
 - This is the right tool when you want explicit control over MindRoom's built-in durable memory rather than a separate provider account.
 - The tool returns user-facing error strings on failures instead of raising raw exceptions into the conversation.
 
@@ -122,7 +122,7 @@ delete_all_memories()
 
 - `api_key` is optional because the toolkit can use local/default upstream Mem0 initialization instead of the hosted Mem0 platform.
 - This toolkit is separate from MindRoom's `memory.backend: mem0` setting, so enabling `mem0` here does not configure or replace MindRoom's built-in memory backend.
-- If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](https://docs.mindroom.chat/memory/) instead of relying on this toolkit alone.
+- If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](../memory.md) instead of relying on this toolkit alone.
 - Store API keys outside authored YAML even when the current metadata marks them as optional.
 
 ## [`zep`]
@@ -181,7 +181,7 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Memory System](https://docs.mindroom.chat/memory/)
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
-- [Attachments](https://docs.mindroom.chat/attachments/)
+- [Tools Overview](index.md)
+- [Memory System](../memory.md)
+- [Matrix & Attachments](matrix-and-attachments.md)
+- [Attachments](../attachments.md)

@@ -4,20 +4,20 @@ icon: lucide/paperclip
 
 # Attachments
 
-MindRoom can process files, images, audio, and videos sent to Matrix rooms, passing them to agents for analysis or action.
+MindRoom can process files, images, audio, and videos sent to Matrix rooms, passing them to agents and teams for analysis or action.
 Supported attachment kinds: `audio`, `file`, `image`, `video`.
 
 ## Overview
 
 When a user sends a file, image, audio message, or video in a Matrix room:
 
-1. The agent determines whether it should respond (via mention, thread participation, or DM)
+1. The responder determines whether it should answer (via mention, thread participation, or DM)
 2. The media is downloaded and decrypted (if E2E encrypted)
 3. The file is saved locally and registered as a context-scoped attachment
-4. The agent receives the media as an Agno `File`, `Video`, `Audio`, or `Image` object plus an attachment ID it can reference in tool calls
-5. The agent responds with its analysis or takes action on the file
+4. The responder receives the media as an Agno `File`, `Video`, `Audio`, or `Image` object plus an attachment ID it can reference in tool calls
+5. The responder replies with its analysis or takes action on the file
 
-Attachment support works automatically for all agents -- no configuration is needed.
+Attachment support works automatically for agents and teams -- no configuration is needed.
 
 ## How It Works
 
@@ -29,14 +29,14 @@ Attachment support works automatically for all agents -- no configuration is nee
                                                                   │
                                                                   v
                                                             ┌─────────────┐
-                                                            │ Agent       │
-                                                            │ Responds    │
+                                                            │ Responder   │
+                                                            │ Replies     │
                                                             └─────────────┘
 ```
 
 ## Usage
 
-Send a file, image, audio message, or video in a Matrix room and mention the agent in the caption:
+Send a file, image, audio message, or video in a Matrix room and mention the agent or team in the caption:
 
 - **With caption**: `@assistant Summarize this document` -- the caption is used as the prompt
 - **Without caption**: The agent receives `[Attached file]`, `[Attached image]`, `[Attached audio]`, or `[Attached video]` as the prompt

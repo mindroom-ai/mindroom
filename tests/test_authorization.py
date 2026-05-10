@@ -15,6 +15,7 @@ from mindroom import constants
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixRoom, MatrixState
 from tests.conftest import TEST_PASSWORD
@@ -219,7 +220,7 @@ def test_no_restrictions_only_allows_internal_user(
 
     # Internal system user should always be allowed
     assert is_authorized_sender(
-        mock_config_no_restrictions.get_mindroom_user_id(_runtime_paths_for(mock_config_no_restrictions)),
+        mindroom_user_id(mock_config_no_restrictions, _runtime_paths_for(mock_config_no_restrictions)),
         mock_config_no_restrictions,
         "!test:server",
     )
@@ -532,7 +533,7 @@ def test_internal_system_user_always_allowed(
 ) -> None:
     """Test that configured internal user on the current domain is always allowed."""
     runtime_paths = _runtime_paths_for(mock_config_with_restrictions)
-    internal_user_id = mock_config_with_restrictions.get_mindroom_user_id(runtime_paths)
+    internal_user_id = mindroom_user_id(mock_config_with_restrictions, runtime_paths)
     assert internal_user_id is not None
 
     # Internal system user should always be allowed, even with restrictions
@@ -569,7 +570,7 @@ def test_custom_internal_system_user_always_allowed() -> None:
         },
     )
     runtime_paths = _runtime_paths_for(config)
-    internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    internal_user_id = mindroom_user_id(config, runtime_paths)
     assert internal_user_id is not None
     assert is_authorized_sender(internal_user_id, config, "!test:server")
     assert not is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
@@ -1373,8 +1374,8 @@ def test_effective_sender_trusts_persisted_current_internal_accounts_with_nondef
     )
 
 
-def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
-    """Room agent discovery should keep current managed agents visible after username drift."""
+def test_available_responders_in_room_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
+    """Room responder discovery should keep current managed entities visible after username drift."""
     config = _isolated_config(
         tmp_path,
         agents={
@@ -1394,8 +1395,8 @@ def test_available_agents_in_room_trusts_persisted_current_internal_accounts(tmp
     room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
     room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
 
-    available_agents = mindroom.authorization.get_available_agents_in_room(room, config, runtime_paths)
-    assert [agent.full_id for agent in available_agents] == ["@mindroom_assistant_oldns:example.com"]
+    available_responders = mindroom.authorization.get_available_responders_in_room(room, config, runtime_paths)
+    assert [responder.full_id for responder in available_responders] == ["@mindroom_assistant_oldns:example.com"]
 
 
 def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:

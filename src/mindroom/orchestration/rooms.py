@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -46,7 +47,7 @@ def get_root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePath
         set(config.authorization.global_users),
         warning_message="Skipping non-concrete global user IDs for root space invites",
     )
-    internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    internal_user_id = mindroom_user_id(config, runtime_paths)
     if internal_user_id is not None:
         user_ids.add(internal_user_id)
     return user_ids

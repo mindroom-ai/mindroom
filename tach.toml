@@ -612,6 +612,7 @@ depends_on = [
 path = "mindroom.custom_tools.subagents"
 depends_on = [
     "mindroom.agent_descriptions",
+    "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
@@ -812,8 +813,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.rooms"
 depends_on = [
-    "mindroom.agents",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.state",
@@ -1801,6 +1802,7 @@ depends_on = [
 path = "mindroom.hooks.context"
 depends_on = [
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks.matrix_admin",
     "mindroom.hooks.state",
     "mindroom.hooks.types",
@@ -2217,7 +2219,6 @@ expose = [
     "build_agent_toolkit",
     "get_agent_toolkit_names",
     "remove_run_by_event_id",
-    "get_agent_ids_for_room",
 ]
 from = ["mindroom.agents"]
 
@@ -2233,9 +2234,8 @@ from = ["mindroom.agent_storage"]
 
 [[interfaces]]
 expose = [
-    "RoutingSuggestion",
-    "suggest_agent",
-    "suggest_agent_for_message",
+    "suggest_responder",
+    "suggest_responder_for_message",
 ]
 from = ["mindroom.routing"]
 
