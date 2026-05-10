@@ -48,6 +48,7 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    matrix_state_file,
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
@@ -89,6 +90,29 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
 
 
 logger = get_logger(__name__)
+
+
+def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
+    state_file = matrix_state_file(runtime_paths=runtime_paths)
+    if not state_file.exists():
+        return {}
+    data = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return {}
+    accounts = data.get("accounts")
+    if not isinstance(accounts, dict):
+        return {}
+    usernames: dict[str, str] = {}
+    for account_key, account in accounts.items():
+        if not isinstance(account_key, str) or not account_key.startswith("agent_"):
+            continue
+        if not isinstance(account, dict):
+            continue
+        username = account.get("username")
+        if isinstance(username, str) and username:
+            usernames[account_key] = username
+    return usernames
+
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
@@ -838,6 +862,7 @@ class Config(BaseModel):
         if runtime_paths is None:
             return self
         reserved_localparts: dict[str, str] = {}
+        persisted_usernames = _persisted_entity_account_usernames(runtime_paths)
         entity_names = [ROUTER_AGENT_NAME, *self.agents, *self.teams]
         for entity_name in entity_names:
             if entity_name == ROUTER_AGENT_NAME:
@@ -846,7 +871,10 @@ class Config(BaseModel):
                 label = f"agent '{entity_name}'"
             else:
                 label = f"team '{entity_name}'"
-            reserved_localparts[agent_username_localpart(entity_name, runtime_paths=runtime_paths)] = label
+            account_key = f"agent_{entity_name}"
+            reserved_localparts[
+                persisted_usernames.get(account_key, agent_username_localpart(entity_name, runtime_paths=runtime_paths))
+            ] = label
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"

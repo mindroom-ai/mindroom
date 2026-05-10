@@ -374,6 +374,54 @@ def test_mindroom_user_username_rejects_agent_collision(tmp_path: Path) -> None:
         )
 
 
+def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_path: Path) -> None:
+    """Internal user localpart must not collide with prepared agent account localparts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
+    with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
+        Config.model_validate(
+            {
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "Test assistant",
+                        "rooms": ["test_room"],
+                    },
+                },
+                "mindroom_user": {"username": "actual_assistant", "display_name": "Alice"},
+            },
+            context={"runtime_paths": runtime_paths},
+        )
+
+
+def test_mindroom_user_username_allows_prepared_agent_proposal_name(tmp_path: Path) -> None:
+    """Prepared agent accounts reserve their actual localpart, not the original proposal."""
+    runtime_paths = _runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
+    state.save(runtime_paths=runtime_paths)
+
+    config = Config.model_validate(
+        {
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+            },
+            "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
+        },
+        context={"runtime_paths": runtime_paths},
+    )
+
+    assert config.mindroom_user is not None
+    assert config.mindroom_user.username == "mindroom_assistant"
+
+
 def test_mindroom_user_none_validates_and_returns_none_id() -> None:
     """Config with mindroom_user omitted should validate and return None user ID."""
     config = Config()

@@ -17,7 +17,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart
-from tests.conftest import load_config_yaml
+from tests.conftest import TEST_PASSWORD, load_config_yaml
 
 _RUNTIME_GLOBAL_NAMES = {
     "MATRIX_HOMESERVER",
@@ -725,6 +725,36 @@ class TestResolveConfigRelativePath:
 
         with pytest.raises(ValidationError, match="conflicts with router"):
             load_config_yaml(config_path)
+
+    def test_config_from_yaml_allows_obsolete_entity_proposal_after_account_prep(self, tmp_path: Path) -> None:
+        """Runtime-sensitive validation should reserve prepared entity usernames, not stale proposals."""
+        config_path = tmp_path / "config.yaml"
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path.resolve())
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_account("agent_general", "actual_general", TEST_PASSWORD, domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+        config_path.write_text(
+            (
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: gpt-5.4\n"
+                "agents:\n"
+                "  general:\n"
+                "    display_name: General\n"
+                "router:\n"
+                "  model: default\n"
+                "mindroom_user:\n"
+                "  username: mindroom_general\n"
+                "  display_name: MindRoomUser\n"
+            ),
+            encoding="utf-8",
+        )
+
+        config = load_config_yaml(config_path)
+
+        assert config.mindroom_user is not None
+        assert config.mindroom_user.username == "mindroom_general"
 
     def test_config_from_yaml_rejects_root_space_alias_collision(
         self,
