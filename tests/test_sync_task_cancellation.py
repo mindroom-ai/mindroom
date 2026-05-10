@@ -807,8 +807,8 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 
-        # Initialize bots
-        await orchestrator.initialize()
+        with patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()):
+            await orchestrator.initialize()
 
         # Manually simulate what start() does for sync tasks
         # (We can't actually run start() because it would block on gather())

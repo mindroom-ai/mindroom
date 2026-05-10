@@ -5,9 +5,8 @@
 from __future__ import annotations
 
 import json
-import multiprocessing
-import os
-from pathlib import Path
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -19,45 +18,76 @@ from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
+
+
+_ISSUE_STATE_CHILD_SCRIPT = """
+import os
+import sys
+from pathlib import Path
+
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.oauth.state import issue_opaque_oauth_state
+
+runtime_paths = resolve_primary_runtime_paths(
+    config_path=Path(sys.argv[1]),
+    storage_path=Path(sys.argv[2]),
+    process_env={},
+)
+token = issue_opaque_oauth_state(
+    runtime_paths,
+    kind="test_state",
+    ttl_seconds=60,
+    data={"pid": os.getpid()},
+)
+Path(sys.argv[3]).write_text(token, encoding="utf-8")
+"""
 
 
 def _state_file(storage_root: Path) -> Path:
     return storage_root / "oauth_state" / "oauth_state.json"
 
 
-def _issue_state_child(config_path: str, storage_root: str, queue: multiprocessing.Queue) -> None:
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path(config_path),
-        storage_path=Path(storage_root),
-        process_env={},
+def _start_issue_state_child(config_path: Path, storage_root: Path, token_path: Path) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _ISSUE_STATE_CHILD_SCRIPT,
+            str(config_path),
+            str(storage_root),
+            str(token_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    token = issue_opaque_oauth_state(
-        runtime_paths,
-        kind="test_state",
-        ttl_seconds=60,
-        data={"pid": os.getpid()},
-    )
-    queue.put(token)
 
 
 def test_issue_opaque_oauth_state_keeps_concurrent_process_writes(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     storage_root = tmp_path / "storage"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
-    ctx = multiprocessing.get_context("spawn")
-    queue = ctx.Queue()
+    token_paths = [tmp_path / "token-1.txt", tmp_path / "token-2.txt"]
     processes = [
-        ctx.Process(target=_issue_state_child, args=(str(config_path), str(storage_root), queue)),
-        ctx.Process(target=_issue_state_child, args=(str(config_path), str(storage_root), queue)),
+        _start_issue_state_child(config_path, storage_root, token_paths[0]),
+        _start_issue_state_child(config_path, storage_root, token_paths[1]),
     ]
 
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=10)
+    try:
+        results: list[tuple[int | None, str, str]] = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=10)
+            results.append((process.returncode, stdout, stderr))
 
-    assert {process.exitcode for process in processes} == {0}
-    tokens = {queue.get(timeout=1) for _process in processes}
+        assert {returncode for returncode, _stdout, _stderr in results} == {0}, results
+        tokens = {token_path.read_text(encoding="utf-8") for token_path in token_paths}
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=storage_root,

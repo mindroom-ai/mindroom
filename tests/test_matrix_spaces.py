@@ -640,6 +640,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
             new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
         ) as mock_rooms,
         patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
+        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
         updated = await orchestrator.update_config()
