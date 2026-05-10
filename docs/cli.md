@@ -411,6 +411,9 @@ Runs a series of checks in one pass:
 
  Check your environment for common issues.
 
+ Runs connectivity, configuration, and credential checks in a single pass
+ so you can fix everything before running `mindroom run`.
+
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
