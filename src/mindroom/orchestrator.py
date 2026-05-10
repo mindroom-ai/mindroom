@@ -762,14 +762,26 @@ class _MultiAgentOrchestrator:
         users: dict[str, AgentMatrixUser] = {}
         entity_names = tuple(entity_names)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
-        for entity_name in entity_names:
-            users[entity_name] = await create_agent_user(
-                homeserver,
-                entity_name,
-                self._entity_display_name(config, entity_name),
-                runtime_paths=self.runtime_paths,
-            )
-        self._validate_entity_accounts(config)
+
+        async def _prepare_accounts() -> None:
+            nonlocal users
+            prepared_users: dict[str, AgentMatrixUser] = {}
+            for entity_name in entity_names:
+                prepared_users[entity_name] = await create_agent_user(
+                    homeserver,
+                    entity_name,
+                    self._entity_display_name(config, entity_name),
+                    runtime_paths=self.runtime_paths,
+                )
+            self._validate_entity_accounts(config)
+            users = prepared_users
+
+        await run_with_retry(
+            "Preparing managed Matrix accounts",
+            _prepare_accounts,
+            permanent_error_check=is_permanent_startup_error,
+            update_runtime_state=not self.running,
+        )
         return users
 
     def _validate_entity_accounts(self, config: Config) -> None:
