@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING, Any, cast
@@ -12,7 +13,10 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.authorization import (
+    responder_candidate_entities_for_room,
+    responder_candidate_entities_from_cached_room,
+)
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import send_message_result
@@ -262,14 +266,46 @@ def _context_room(context: ToolRuntimeContext) -> nio.MatrixRoom:
     return nio.MatrixRoom(room_id=context.room_id, own_user_id="")
 
 
-async def _available_subagent_names(context: ToolRuntimeContext) -> list[str]:
-    candidates = await responder_candidate_entities_for_room(
-        context.client,
-        _context_room(context),
-        context.requester_id,
-        context.config,
-        context.runtime_paths,
-    )
+def _cached_target_room(context: ToolRuntimeContext, room_id: str) -> nio.MatrixRoom | None:
+    if room_id == context.room_id and context.room is not None:
+        return context.room
+
+    rooms = context.client.rooms
+    if not isinstance(rooms, Mapping):
+        return None
+
+    room = rooms.get(room_id)
+    if isinstance(room, nio.MatrixRoom):
+        return room
+    return None
+
+
+async def _available_subagent_names(context: ToolRuntimeContext, *, room_id: str | None = None) -> list[str]:
+    target_room_id = room_id or context.room_id
+    target_room = _cached_target_room(context, target_room_id)
+    if target_room is not None:
+        candidates = await responder_candidate_entities_for_room(
+            context.client,
+            target_room,
+            context.requester_id,
+            context.config,
+            context.runtime_paths,
+        )
+    elif target_room_id == context.room_id:
+        candidates = await responder_candidate_entities_for_room(
+            context.client,
+            _context_room(context),
+            context.requester_id,
+            context.config,
+            context.runtime_paths,
+        )
+    else:
+        candidates = responder_candidate_entities_from_cached_room(
+            nio.MatrixRoom(room_id=target_room_id, own_user_id=""),
+            context.requester_id,
+            context.config,
+            context.runtime_paths,
+        )
     materializable_agent_names = materializable_agent_names_for_orchestrator(
         context.orchestrator,
         context.config,
@@ -664,7 +700,14 @@ class SubAgentsTools(Toolkit):
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
 
-        available_agents = await _available_subagent_names(context)
+        target_session = session_key or MessageTarget.from_runtime_context(context).session_id
+        if label and not session_key:
+            resolved = await asyncio.to_thread(_resolve_by_label, context, label)
+            if resolved:
+                target_session = resolved[0]
+
+        target_room_id, target_thread_id = _session_key_to_room_thread(target_session)
+        available_agents = await _available_subagent_names(context, room_id=target_room_id)
         agent_id_error = _agent_id_error(
             context,
             tool_name="sessions_send",
@@ -674,13 +717,6 @@ class SubAgentsTools(Toolkit):
         if agent_id_error is not None:
             return agent_id_error
 
-        target_session = session_key or MessageTarget.from_runtime_context(context).session_id
-        if label and not session_key:
-            resolved = await asyncio.to_thread(_resolve_by_label, context, label)
-            if resolved:
-                target_session = resolved[0]
-
-        target_room_id, target_thread_id = _session_key_to_room_thread(target_session)
         target_agent = agent_id or await asyncio.to_thread(_lookup_target_agent, context, target_session)
         target_agent = target_agent or context.agent_name
         target_agent_error = _agent_id_error(

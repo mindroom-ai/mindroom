@@ -678,15 +678,13 @@ class TestRoutingRegression:
                 "router": SimpleNamespace(running=True),
             },
         )
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = test_room_id
-        room.users = {
-            ids["alpha"].full_id: MagicMock(),
-            ids["beta"].full_id: MagicMock(),
-            ids["writer"].full_id: MagicMock(),
-            ids["ops"].full_id: MagicMock(),
-            "@user:localhost": MagicMock(),
-        }
+        room = nio.MatrixRoom(test_room_id, ids["alpha"].full_id)
+        room.add_member(ids["alpha"].full_id, "AlphaAgent", None)
+        room.add_member(ids["beta"].full_id, "BetaAgent", None)
+        room.add_member(ids["writer"].full_id, "WriterAgent", None)
+        room.add_member(ids["ops"].full_id, "Ops Team", None)
+        room.add_member("@user:localhost", "User", None)
+        room.members_synced = True
         context = MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -766,12 +764,10 @@ class TestRoutingRegression:
                 "router": SimpleNamespace(running=True),
             },
         )
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = test_room_id
-        room.users = {
-            ids["ops"].full_id: MagicMock(),
-            "@user:localhost": MagicMock(),
-        }
+        room = nio.MatrixRoom(test_room_id, ids["ops"].full_id)
+        room.add_member(ids["ops"].full_id, "Ops Team", None)
+        room.add_member("@user:localhost", "User", None)
+        room.members_synced = True
         context = MessageContext(
             am_i_mentioned=True,
             is_thread=False,

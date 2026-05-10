@@ -537,6 +537,91 @@ async def test_sessions_send_rejects_agent_outside_room_responder_boundary(
 
 
 @pytest.mark.asyncio
+async def test_sessions_send_rejects_agent_available_only_in_caller_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should validate explicit agents against the target configured room."""
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    caller_room_id = "!caller:localhost"
+    target_room_id = "!target:localhost"
+    config = _make_config(
+        agents={
+            "openclaw": _make_agent_config(role="Coordinate work", rooms=[caller_room_id]),
+            "code": _make_agent_config(role="Write code", rooms=[caller_room_id]),
+            "research": _make_agent_config(role="Research topics", rooms=[target_room_id]),
+        },
+    )
+    ctx = _make_context(
+        tmp_path,
+        config=config,
+        room_id=caller_room_id,
+        room_agent_names=["openclaw", "code"],
+    )
+    target_session = create_session_id(target_room_id, "$target-thread:localhost")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_send(
+                message="do it",
+                session_key=target_session,
+                agent_id="code",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_send"
+    assert payload["message"] == "Agent 'code' is not available in this room. Available agents: research."
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sessions_send_allows_agent_configured_for_target_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should allow target-room agents even when absent from the caller room."""
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    caller_room_id = "!caller:localhost"
+    target_room_id = "!target:localhost"
+    config = _make_config(
+        agents={
+            "openclaw": _make_agent_config(role="Coordinate work", rooms=[caller_room_id]),
+            "code": _make_agent_config(role="Write code", rooms=[caller_room_id]),
+            "research": _make_agent_config(role="Research topics", rooms=[target_room_id]),
+        },
+    )
+    ctx = _make_context(
+        tmp_path,
+        config=config,
+        room_id=caller_room_id,
+        room_agent_names=["openclaw", "code"],
+    )
+    target_session = create_session_id(target_room_id, "$target-thread:localhost")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_send(
+                message="do it",
+                session_key=target_session,
+                agent_id="research",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == target_room_id
+    send_mock.assert_awaited_once_with(
+        ctx,
+        room_id=target_room_id,
+        text="@actual_research:localhost do it",
+        thread_id="$target-thread:localhost",
+        original_sender=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sessions_send_defaults_to_resolved_thread_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -628,12 +713,19 @@ async def test_sessions_send_checks_target_room_thread_mode(
     """sessions_send should evaluate thread mode using the target room context."""
     send_mock = AsyncMock(return_value="$evt")
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
-    config = _make_config()
+    target_room_id = "!target:localhost"
+    config = _make_config(
+        agents={
+            "openclaw": _make_agent_config(role="Coordinate work", rooms=[target_room_id]),
+            "code": _make_agent_config(role="Write code"),
+            "research": _make_agent_config(role="Research topics"),
+        },
+    )
     config.get_entity_thread_mode.side_effect = lambda _agent_name, _runtime_paths, room_id=None: (
-        "room" if room_id == "!target:localhost" else "thread"
+        "room" if room_id == target_room_id else "thread"
     )
     ctx = _make_context(tmp_path, config=config)
-    target_session = create_session_id("!target:localhost", "$worker-thread:localhost")
+    target_session = create_session_id(target_room_id, "$worker-thread:localhost")
 
     with tool_runtime_context(ctx):
         payload = json.loads(
@@ -651,7 +743,7 @@ async def test_sessions_send_checks_target_room_thread_mode(
     config.get_entity_thread_mode.assert_called_with(
         "openclaw",
         ctx.runtime_paths,
-        room_id="!target:localhost",
+        room_id=target_room_id,
     )
 
 

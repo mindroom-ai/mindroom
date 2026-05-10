@@ -158,15 +158,27 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_get_info_agents_defaults_to_current_room_members(self, tmp_path: Path) -> None:
-        """Agent listing should only show agents present in the current Matrix room."""
+    def test_get_info_agents_defaults_to_sender_visible_configured_room_candidates(self, tmp_path: Path) -> None:
+        """Current-room agent listing should use configured-room responder candidates."""
+        room_id = "!room:localhost"
         config = Config(
             agents={
-                "present": AgentConfig(display_name="Present Agent", role="Here", model="default"),
-                "also_present": AgentConfig(display_name="Also Present", role="Also here", model="default"),
+                "present": AgentConfig(display_name="Present Agent", role="Here", model="default", rooms=[room_id]),
+                "blocked": AgentConfig(display_name="Blocked Agent", role="Blocked", model="default", rooms=[room_id]),
+                "unconfigured_present": AgentConfig(
+                    display_name="Unconfigured Present",
+                    role="Present but not configured",
+                    model="default",
+                ),
                 "elsewhere": AgentConfig(display_name="Elsewhere Agent", role="Not here", model="default"),
             },
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {
+                    "blocked": ["@other:localhost"],
+                },
+            },
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -177,17 +189,18 @@ class TestConsolidatedConfigManager:
             usernames={
                 "router": "mindroom_router_oldns",
                 "present": "mindroom_present_oldns",
-                "also_present": "mindroom_also_present_oldns",
+                "blocked": "mindroom_blocked_oldns",
+                "unconfigured_present": "mindroom_unconfigured_present_oldns",
                 "elsewhere": "mindroom_elsewhere_oldns",
             },
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        room.users = {
-            "@mindroom_present_oldns:localhost": None,
-            "@mindroom_also_present_oldns:localhost": None,
-        }
+        room = nio.MatrixRoom(room_id, "@mindroom_present_oldns:localhost")
+        room.add_member("@mindroom_present_oldns:localhost", "Present Agent", None)
+        room.add_member("@mindroom_blocked_oldns:localhost", "Blocked Agent", None)
+        room.add_member("@mindroom_unconfigured_present_oldns:localhost", "Unconfigured Present", None)
+        room.add_member("@user:localhost", "User", None)
+        room.members_synced = True
         runtime_context = ToolRuntimeContext(
             agent_name="present",
             room_id=room.room_id,
@@ -207,8 +220,11 @@ class TestConsolidatedConfigManager:
             all_agents_result = cm.get_info(info_type="agents", agent_scope="all")
 
         assert "Present Agent" in current_room_result
-        assert "Also Present" in current_room_result
+        assert "Blocked Agent" not in current_room_result
+        assert "Unconfigured Present" not in current_room_result
         assert "Elsewhere Agent" not in current_room_result
+        assert "Blocked Agent" in all_agents_result
+        assert "Unconfigured Present" in all_agents_result
         assert "Elsewhere Agent" in all_agents_result
 
     def test_get_info_agents_tolerates_invalid_plugin_manifest(self, tmp_path: Path) -> None:
