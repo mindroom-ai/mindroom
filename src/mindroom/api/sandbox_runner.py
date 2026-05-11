@@ -65,6 +65,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     build_worker_target_from_runtime_env,
+    resolved_worker_key_scope,
     tool_execution_identity,
 )
 from mindroom.workers.backends.local import get_local_worker_manager
@@ -989,6 +990,14 @@ def _workspace_env_hook_workspace_for_request(
     sidecar calls without an agent routing context still use an explicit
     absolute `base_dir` when provided.
     """
+    prepared_base_dir = _prepared_request_base_dir(prepared)
+    if (
+        request.routing_agent_name is not None
+        and prepared_base_dir is not None
+        and _request_targets_user_agent_worker(request)
+    ):
+        return prepared_base_dir
+
     if request.routing_agent_name is not None:
         execution_identity = _request_execution_identity(request)
         agent_runtime = resolve_agent_runtime(
@@ -1000,19 +1009,33 @@ def _workspace_env_hook_workspace_for_request(
         )
         return agent_runtime.tool_base_dir
 
-    if prepared is not None:
-        base_dir = prepared.runtime_overrides.get("base_dir")
-        if isinstance(base_dir, Path):
-            return base_dir
-        if isinstance(base_dir, str):
-            return Path(base_dir)
-        return None
+    if prepared_base_dir is not None:
+        return prepared_base_dir
 
     if isinstance(raw_base_dir := request.tool_init_overrides.get("base_dir"), str):
         candidate = Path(raw_base_dir).expanduser()
         if candidate.is_absolute():
             return candidate
     return None
+
+
+def _prepared_request_base_dir(prepared: sandbox_worker_prep.PreparedWorkerRequest | None) -> Path | None:
+    if prepared is None:
+        return None
+    base_dir = prepared.runtime_overrides.get("base_dir")
+    if isinstance(base_dir, Path):
+        return base_dir
+    if isinstance(base_dir, str):
+        return Path(base_dir)
+    return None
+
+
+def _request_targets_user_agent_worker(request: SandboxRunnerExecuteRequest) -> bool:
+    if request.worker_scope == "user_agent":
+        return True
+    if request.worker_key is None:
+        return False
+    return resolved_worker_key_scope(request.worker_key) == "user_agent"
 
 
 def _workspace_env_overlay_base_env(
@@ -1326,12 +1349,22 @@ async def _execute_request_inprocess(
             apply_workspace_env_hook=apply_workspace_env_hook,
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+        return _request_preparation_failure_response(exc)
     return await _execute_prepared_request_inprocess(
         prepared_request.request,
         prepared_request.runtime_paths,
         config,
         credentials_manager=_runner_credentials_manager(runtime_paths),
+    )
+
+
+def _request_preparation_failure_response(
+    exc: sandbox_worker_prep.WorkerRequestPreparationError,
+) -> SandboxRunnerExecuteResponse:
+    return SandboxRunnerExecuteResponse(
+        ok=False,
+        error=str(exc),
+        failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
     )
 
 
@@ -1387,11 +1420,7 @@ def _execute_request_subprocess_sync(
             apply_workspace_env_hook=apply_workspace_env_hook,
         )
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        return SandboxRunnerExecuteResponse(
-            ok=False,
-            error=str(exc),
-            failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
-        )
+        return _request_preparation_failure_response(exc)
 
     subprocess_context = _prepare_subprocess_context(prepared_request)
     envelope = sandbox_protocol.serialize_subprocess_envelope(

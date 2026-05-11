@@ -5274,6 +5274,68 @@ def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_pat
     assert overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
 
 
+def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base_dir(tmp_path: Path) -> None:
+    """User-agent worker requests should not require the private agent in worker-local config."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "agents": {},
+            "router": {"model": "default"},
+        },
+        runtime_paths,
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="alpha")
+    assert worker_key is not None
+    private_workspace = tmp_path / "storage" / "private_instances" / worker_dir_name(worker_key) / "alpha" / "mind_data"
+    prepared = cast(
+        "sandbox_worker_prep_module.PreparedWorkerRequest",
+        SimpleNamespace(runtime_overrides={"base_dir": private_workspace}),
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_key=worker_key,
+        worker_scope="user_agent",
+        routing_agent_name="alpha",
+        execution_identity=asdict(identity),
+    )
+
+    workspace = sandbox_runner_module._workspace_env_hook_workspace_for_request(
+        request,
+        prepared,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
+
+    assert workspace == private_workspace
+
+
+def test_request_preparation_failure_response_marks_request_errors_as_tool_failures() -> None:
+    """Preparation failures caused by tool setup should keep the tool failure contract."""
+    exc = sandbox_worker_prep_module.WorkerRequestPreparationError("bad hook", failure_kind="request")
+
+    response = sandbox_runner_module._request_preparation_failure_response(exc)
+
+    assert response.ok is False
+    assert response.error == "bad hook"
+    assert response.failure_kind == "tool"
+
+
 def test_workspace_home_contract_filters_worker_names_for_routed_static_sidecar(tmp_path: Path) -> None:
     """Routed static sidecar hooks cannot redirect worker-owned runtime env names."""
     config_path = tmp_path / "config.yaml"
