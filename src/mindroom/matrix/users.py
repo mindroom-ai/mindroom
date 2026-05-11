@@ -216,9 +216,21 @@ def _persist_agent_session(
     )
 
 
-def _set_agent_user_id(agent_user: AgentMatrixUser, user_id: str) -> None:
-    agent_user.user_id = user_id
-    agent_user.__dict__.pop("matrix_id", None)
+def _validated_expected_agent_user_id(agent_user: AgentMatrixUser) -> str:
+    return _validated_returned_user_id(agent_user.user_id, source="Managed Matrix account")
+
+
+def _validated_authenticated_agent_matrix_id(
+    client: nio.AsyncClient,
+    *,
+    expected_user_id: str,
+    source: str,
+) -> MatrixID:
+    actual_user_id = _validated_returned_user_id(client.user_id, source=source)
+    if actual_user_id != expected_user_id:
+        msg = f"{source} returned {actual_user_id} for managed Matrix account {expected_user_id}"
+        raise matrix_startup_error(msg, permanent=True)
+    return MatrixID.parse(expected_user_id)
 
 
 def _persist_authenticated_agent_session(
@@ -226,10 +238,8 @@ def _persist_authenticated_agent_session(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
     *,
-    source: str,
+    matrix_id: MatrixID,
 ) -> None:
-    user_id = _validated_returned_user_id(client.user_id, source=source)
-    matrix_id = MatrixID.parse(user_id)
     _persist_agent_session(
         agent_user.agent_name,
         matrix_id.username,
@@ -239,7 +249,6 @@ def _persist_authenticated_agent_session(
         access_token=client.access_token,
         runtime_paths=runtime_paths,
     )
-    _set_agent_user_id(agent_user, user_id)
     agent_user.device_id = client.device_id
     agent_user.access_token = client.access_token
 
@@ -877,11 +886,13 @@ async def login_agent_user(
         ValueError: If login fails
 
     """
+    expected_user_id = _validated_expected_agent_user_id(agent_user)
+
     if agent_user.access_token and agent_user.device_id:
         try:
             restored_client = await restore_login(
                 homeserver,
-                agent_user.user_id,
+                expected_user_id,
                 agent_user.device_id,
                 agent_user.access_token,
                 runtime_paths=runtime_paths,
@@ -894,24 +905,51 @@ async def login_agent_user(
                 device_id=agent_user.device_id,
             )
         else:
-            _persist_authenticated_agent_session(
-                agent_user,
-                restored_client,
-                runtime_paths,
-                source="Matrix session restore",
-            )
-            return restored_client
+            try:
+                matrix_id = _validated_authenticated_agent_matrix_id(
+                    restored_client,
+                    expected_user_id=expected_user_id,
+                    source="Matrix session restore",
+                )
+            except ValueError as exc:
+                await restored_client.close()
+                logger.warning(
+                    "matrix_login_restore_identity_mismatch_falling_back_to_password",
+                    agent=agent_user.agent_name,
+                    expected_user_id=expected_user_id,
+                    returned_user_id=restored_client.user_id,
+                    device_id=agent_user.device_id,
+                    error=str(exc),
+                )
+            else:
+                _persist_authenticated_agent_session(
+                    agent_user,
+                    restored_client,
+                    runtime_paths,
+                    matrix_id=matrix_id,
+                )
+                return restored_client
 
     client = await login(
         homeserver,
-        agent_user.user_id,
+        expected_user_id,
         agent_user.password,
         runtime_paths=runtime_paths,
     )
+    try:
+        matrix_id = _validated_authenticated_agent_matrix_id(
+            client,
+            expected_user_id=expected_user_id,
+            source="Matrix password login",
+        )
+    except ValueError:
+        await client.close()
+        raise
+
     _persist_authenticated_agent_session(
         agent_user,
         client,
         runtime_paths,
-        source="Matrix password login",
+        matrix_id=matrix_id,
     )
     return client
