@@ -744,6 +744,7 @@ async def _prepare_agent_and_prompt(
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
+        include_openai_compat_guidance=include_openai_compat_guidance,
         timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
     )
