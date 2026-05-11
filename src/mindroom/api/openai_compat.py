@@ -14,7 +14,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
 
 from agno.run.agent import (
@@ -53,14 +53,12 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
 from mindroom.teams import (
     TeamMode,
-    TeamOutcome,
     build_materialized_team_instance,
     format_team_response,
     is_cancelled_run_output,
     is_errored_run_output,
     materialize_exact_team_members,
     prepare_materialized_team_execution,
-    resolve_configured_team,
 )
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
@@ -1113,11 +1111,6 @@ def _allocate_next_tool_id(tool_state: _ToolStreamState) -> str:
     return tool_id
 
 
-def _raise_unmaterializable_team(team_name: str, reason: str | None) -> NoReturn:
-    msg = reason or f"Team '{team_name}' cannot be materialized"
-    raise ValueError(msg)
-
-
 def _resolve_started_tool_id(tool: ToolExecution, tool_state: _ToolStreamState) -> str:
     tool_call_id = _extract_tool_call_id(tool)
 
@@ -1360,13 +1353,12 @@ def _build_team(
 ) -> tuple[list[Agent], Team, TeamMode]:
     """Create member agents and build one agno.Team for a configured team.
 
-    Raises ValueError when the configured team cannot be materialized.
+    Raises when the configured team cannot be materialized.
     """
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
-    config_ids = config.get_ids(runtime_paths)
-    requested_members = [config_ids[member_name] for member_name in team_config.agents]
     model_name = team_config.model or "default"
+    config.assert_team_agents_supported(team_config.agents, team_name=team_name)
 
     team_members = materialize_exact_team_members(
         team_config.agents,
@@ -1380,17 +1372,6 @@ def _build_team(
         reason_prefix=f"Team '{team_name}'",
     )
     try:
-        final_resolution = resolve_configured_team(
-            team_name,
-            requested_members,
-            mode,
-            config,
-            runtime_paths,
-            materializable_agent_names=team_members.materialized_agent_names,
-        )
-        if final_resolution.outcome is not TeamOutcome.TEAM:
-            _raise_unmaterializable_team(team_name, final_resolution.reason)
-
         team = build_materialized_team_instance(
             requested_agent_names=team_members.requested_agent_names,
             agents=team_members.agents,
@@ -1500,8 +1481,9 @@ async def _non_stream_team_completion(
                     unavailable_bases,
                     refresh_scheduler,
                 )
-            except ValueError as e:
-                return _error_response(500, str(e), error_type="server_error")
+            except Exception:
+                logger.exception("Team build failed", team=team_name)
+                return _error_response(500, "Team execution failed", error_type="server_error")
 
             logger.info(
                 "Team completion request",
@@ -1638,9 +1620,10 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                     unavailable_bases,
                     refresh_scheduler,
                 )
-        except ValueError as e:
+        except Exception:
+            logger.exception("Team build failed", team=team_name)
             await _cleanup()
-            return _error_response(500, str(e), error_type="server_error")
+            return _error_response(500, "Team execution failed", error_type="server_error")
 
         logger.info(
             "Team streaming request",

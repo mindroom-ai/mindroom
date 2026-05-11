@@ -25,7 +25,7 @@ from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import TeamRunOutput
 from agno.team import Team as AgnoTeam
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.background import BackgroundTask
@@ -54,6 +54,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.memory import MemoryPromptParts
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -994,6 +995,50 @@ class TestChatCompletions:
         assert observed_agent_names == ["general"]
         assert len(observed_session_ids) == 1
         assert observed_session_ids[0] is not None
+
+    def test_agent_completion_does_not_require_persisted_matrix_accounts(self, tmp_path: Path) -> None:
+        """OpenAI-compatible agent completions should not prepare or require Matrix accounts."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General-purpose assistant",
+                    rooms=[],
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+        )
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            patch(
+                "mindroom.ai._run_cached_agent_attempt",
+                new=AsyncMock(return_value=RunOutput(content="Agent reply")),
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == "Agent reply"
+        assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""
@@ -3837,12 +3882,16 @@ class TestTeamCompletion:
         assert full.index("Team started. ") < full.index("Team execution failed.")
         assert lines[-1] == "data: [DONE]"
 
-    def test_team_build_failure_returns_500(self, team_app_client: TestClient) -> None:
-        """Team build failures should surface a server error response."""
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            side_effect=ValueError("Team 'super_team' cannot be materialized"),
-        ):
+    @pytest.mark.parametrize(
+        "build_error",
+        [
+            ValueError("Team 'super_team' cannot be materialized"),
+            RuntimeError("team build failed"),
+        ],
+    )
+    def test_team_build_failure_returns_500(self, team_app_client: TestClient, build_error: Exception) -> None:
+        """Team build failures should not expose internal exception details."""
+        with patch("mindroom.api.openai_compat._build_team", side_effect=build_error):
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -3852,10 +3901,25 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 500
-        assert response.json()["error"]["message"] == "Team 'super_team' cannot be materialized"
+        assert response.json()["error"]["message"] == "Team execution failed"
 
-    def test_team_member_materialization_failure_returns_friendly_500(self, team_app_client: TestClient) -> None:
-        """Configured team failures should surface the user-facing materialization error."""
+    def test_team_streaming_build_failure_returns_500(self, team_app_client: TestClient) -> None:
+        """Streaming team build failures should surface a server error response before SSE starts."""
+        with patch("mindroom.api.openai_compat._build_team", side_effect=RuntimeError("team build failed")):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["message"] == "Team execution failed"
+
+    def test_team_member_materialization_failure_returns_generic_500(self, team_app_client: TestClient) -> None:
+        """Configured team build failures should not expose internal exception details."""
         with (
             patch("mindroom.model_loading.get_model_instance", return_value=MagicMock()),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -3874,9 +3938,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == (
-            "Team 'super_team' includes agent 'code' that could not be materialized for this request."
-        )
+        assert response.json()["error"]["message"] == "Team execution failed"
 
     def test_team_execution_failure_500(self, team_app_client: TestClient) -> None:
         """Team execution exception returns 500."""
@@ -4508,8 +4570,52 @@ class TestTeamCompletion:
         assert team.num_history_runs is None
         assert team.num_history_messages is None
 
-    def test_build_team_closes_materialized_agents_when_resolution_rejects_team(self) -> None:
-        """Configured-team validation failures should close partially built member resources."""
+    def test_build_team_openai_compat_does_not_require_persisted_matrix_accounts(
+        self,
+        team_config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """OpenAI-compatible team construction should not require Matrix account preparation."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+        )
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="team/super_team",
+            session_id="openai-team-session",
+            runtime_paths=runtime_paths,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+
+        agents: list[AgnoAgent] | None = None
+        team: AgnoTeam | None = None
+        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+            agents, team, mode = openai_compat._build_team(
+                "super_team",
+                team_config,
+                runtime_paths,
+                execution_identity=execution_identity,
+                session_id="openai-team-session",
+            )
+
+        try:
+            assert mode is TeamMode.COORDINATE
+            assert [agent.id for agent in agents] == ["general", "code"]
+            assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
+        finally:
+            if agents is not None and team is not None:
+                openai_compat.close_team_runtime_state_dbs(
+                    agents=agents,
+                    team_db=team.db,
+                    shared_scope_storage=None,
+                )
+
+    def test_build_team_closes_materialized_agents_when_team_build_fails(self) -> None:
+        """Configured-team build failures should close partially built member resources."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -4537,18 +4643,13 @@ class TestTeamCompletion:
                 ),
             ),
             patch(
-                "mindroom.api.openai_compat.resolve_configured_team",
-                return_value=SimpleNamespace(
-                    outcome=openai_compat.TeamOutcome.NONE,
-                    reason="Team 'coord_team' cannot be materialized",
-                ),
+                "mindroom.api.openai_compat.build_materialized_team_instance",
+                side_effect=RuntimeError("team build failed"),
             ),
             patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
+            pytest.raises(RuntimeError, match="team build failed"),
         ):
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
-            with pytest.raises(ValueError, match="cannot be materialized"):
-                _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
+            openai_compat._build_team("coord_team", config, _runtime_paths(), execution_identity=None)
 
         mock_close.assert_called_once_with(
             agents=[built_agent],

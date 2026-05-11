@@ -13206,7 +13206,8 @@ An OpenAI-compatible run can expose fewer tool functions than the same agent in 
 
 ### Auto-routing
 
-Select the `auto` model to let MindRoom's router pick the best agent for each message, the same routing logic used in Matrix rooms.
+Select the `auto` model to let MindRoom's router pick the best OpenAI-compatible agent for each message.
+Auto-routing on `/v1` considers agents only; use explicit `team/<team_name>` models to run teams.
 Once routing resolves a specific agent, session continuity and streamed identity bind to that resolved agent name, not the literal `auto` label.
 
 ### Teams

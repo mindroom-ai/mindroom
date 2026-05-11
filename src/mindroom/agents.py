@@ -946,6 +946,56 @@ def _resolve_agent_dynamic_tool_selection(
     )
 
 
+def _render_agent_identity_context(
+    agent_name: str,
+    display_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    model_provider: str,
+    model_id: str,
+    include_openai_compat_guidance: bool,
+) -> str:
+    openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
+    if include_openai_compat_guidance:
+        openai_context = render_prompt_template(
+            config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            agent_name=agent_name,
+            display_name=display_name,
+            model_provider=model_provider,
+            model_id=model_id,
+            openai_compat_history_guidance=openai_compat_history_guidance,
+        )
+        has_custom_matrix_identity = "AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts
+        has_custom_openai_identity = "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts
+        if not has_custom_matrix_identity or has_custom_openai_identity:
+            return openai_context
+        overridden_identity_context = render_prompt_template(
+            config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            display_name=display_name,
+            matrix_id="not available in OpenAI-compatible API",
+            model_provider=model_provider,
+            model_id=model_id,
+            openai_compat_history_guidance=openai_compat_history_guidance,
+        )
+        return overridden_identity_context + openai_context
+
+    matrix_id = MatrixID.from_agent(
+        agent_name,
+        config.get_domain(runtime_paths),
+        runtime_paths,
+    ).full_id
+    return build_agent_identity_context(
+        display_name=display_name,
+        matrix_id=matrix_id,
+        model_provider=model_provider,
+        model_id=model_id,
+        include_openai_compat_guidance=False,
+        identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+        openai_compat_history_guidance=openai_compat_history_guidance,
+    )
+
+
 @timed("system_prompt_assembly.agent_create.skills_load")
 def _load_agent_skills(
     agent_name: str,
@@ -1133,20 +1183,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_provider = "AI"
         model_id = model_name
 
-    # Add identity context to all agents using the unified template
-    matrix_id = MatrixID.from_agent(
+    identity_context = _render_agent_identity_context(
         agent_name,
-        config.get_domain(runtime_paths),
+        agent_config.display_name,
+        config,
         runtime_paths,
-    ).full_id
-    identity_context = build_agent_identity_context(
-        display_name=agent_config.display_name,
-        matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
         include_openai_compat_guidance=include_openai_compat_guidance,
-        identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-        openai_compat_history_guidance=config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE"),
     )
 
     # Add current date context with the user's configured timezone

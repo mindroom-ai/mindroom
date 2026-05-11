@@ -198,10 +198,18 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     }
 
     agent = _create_agent_for_test("general", config)
+    openai_compat_agent = _create_agent_for_test(
+        "general",
+        config,
+        include_openai_compat_guidance=True,
+    )
 
     assert "## Custom Identity" in agent.role
     assert "Name=GeneralAgent;" in agent.role
     assert "## Your Identity" not in agent.role
+    assert "## Custom Identity" in openai_compat_agent.role
+    assert "Matrix=not available in OpenAI-compatible API" in openai_compat_agent.role
+    assert "OpenAI-compatible API" in openai_compat_agent.role
 
 
 def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> None:
@@ -217,6 +225,9 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
 
     assert OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
     assert OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
+    assert "OpenAI-compatible API" in openai_compat_agent.role
+    assert "Matrix ID:" not in openai_compat_agent.role
+    assert "## Matrix Reply Targeting" not in openai_compat_agent.role
 
 
 def test_create_agent_includes_matrix_reply_targeting_policy() -> None:

@@ -31,6 +31,7 @@ __all__ = [
     "MEMORY_EXISTING_SNIPPETS_TEMPLATE",
     "MEMORY_NO_EXISTING_SNIPPETS",
     "MIXED_PARTIAL_REPLY_HEADER",
+    "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "OPENAI_COMPAT_HISTORY_GUIDANCE",
     "OUTPUT_REDIRECT_PROMPT",
     "PERSONALITY_CONTEXT_SECTION_HEADING",
@@ -69,6 +70,13 @@ OPENAI_COMPAT_HISTORY_GUIDANCE = (
     "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. "
     "Always use the sender or role labels exactly as provided in the prompt.\n"
 )
+
+OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
+You are {display_name}, the MindRoom agent exposed through the OpenAI-compatible API as model `{agent_name}`.
+You are powered by the {model_provider} model: {model_id}.
+{openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
+
+"""
 
 
 INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
@@ -429,6 +437,15 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             {
                 "display_name",
                 "matrix_id",
+                "model_provider",
+                "model_id",
+                "openai_compat_history_guidance",
+            },
+        ),
+        "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {
+                "agent_name",
+                "display_name",
                 "model_provider",
                 "model_id",
                 "openai_compat_history_guidance",
