@@ -124,7 +124,8 @@ def _build_context_payload(
     if (
         cache_write_tokens is not None
         and cache_write_tokens > 0
-        and (uncached_input_tokens is None or cache_write_tokens <= uncached_input_tokens)
+        and uncached_input_tokens is not None
+        and cache_write_tokens <= uncached_input_tokens
     ):
         payload["cache_write_input_tokens"] = cache_write_tokens
     return payload
