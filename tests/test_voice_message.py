@@ -317,7 +317,7 @@ async def test_build_voice_message_payload_skips_real_opus_ogg(tmp_path: Path) -
         pytest.skip("ffmpeg and ffprobe are required for real opus/ogg skip integration")
 
     audio = tmp_path / "voice.ogg"
-    proc = await voice_message.asyncio.create_subprocess_exec(
+    proc = await asyncio.create_subprocess_exec(
         ffmpeg,
         "-y",
         "-hide_banner",
