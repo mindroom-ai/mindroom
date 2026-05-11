@@ -564,6 +564,7 @@ def build_thread_history_chain(
         messages=tuple(messages),
         rendered_text=rendered_text,
         source="matrix_thread_fallback",
+        seen_event_ids=tuple(msg.event_id for msg in thread_history),
         estimated_tokens=estimated_tokens,
     )
 
@@ -781,10 +782,7 @@ def validate_tool_result_adjacency(messages: Sequence[Message]) -> None:
     expected_tool_call_ids: list[str] = []
     for message in messages:
         if expected_tool_call_ids:
-            if message.role != "tool" or message.tool_call_id not in expected_tool_call_ids:
-                msg = "tool result adjacency would be broken by prepared-chain transform"
-                raise ValueError(msg)
-            expected_tool_call_ids.remove(message.tool_call_id)
+            _consume_expected_tool_result(message, expected_tool_call_ids)
             continue
         if message.role == "assistant":
             expected_tool_call_ids = _tool_call_ids(message)
@@ -795,6 +793,13 @@ def validate_tool_result_adjacency(messages: Sequence[Message]) -> None:
     if expected_tool_call_ids:
         msg = "tool result adjacency would be broken by prepared-chain transform"
         raise ValueError(msg)
+
+
+def _consume_expected_tool_result(message: Message, expected_tool_call_ids: list[str]) -> None:
+    if message.role != "tool" or message.tool_call_id not in expected_tool_call_ids:
+        msg = "tool result adjacency would be broken by prepared-chain transform"
+        raise ValueError(msg)
+    expected_tool_call_ids.remove(message.tool_call_id)
 
 
 def compaction_replay_messages(

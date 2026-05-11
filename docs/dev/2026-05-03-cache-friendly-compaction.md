@@ -20,6 +20,16 @@ An explicit `compaction.model` remains supported as a configurable summary-model
 
 This is not about reusing a cached prefix after compaction.
 
+## Prefix Equivalence Contract
+
+For warm-cache compaction, prefix equivalence means the provider-visible messages before the final compaction instruction must be the same ordered message sequence that a normal reply request would send for the selected persisted runs.
+
+The contract covers system context, session summary context, persisted history messages, message roles, message content shapes, and provider tool schemas.
+
+The contract does not require the final user message to match a normal reply because compaction intentionally replaces the live user turn with the durable-summary update instruction.
+
+Any transform that drops, reorders, rewrites, or inserts messages in that prefix must either preserve provider semantics exactly or opt out of warm-cache compaction for that chunk.
+
 ## Implemented Shape
 
 The shared chain code lives in `src/mindroom/prepared_conversation_chain.py`.

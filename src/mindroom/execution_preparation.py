@@ -236,6 +236,7 @@ async def _prepare_execution_context_common(
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:
         final_chain = replay_fallback_chain
+        unseen_event_ids = list(final_chain.seen_event_ids)
         fallback_context_tokens = estimate_static_tokens_fn(final_chain.rendered_text)
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens

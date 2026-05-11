@@ -3082,34 +3082,37 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
 async def test_prepare_history_for_run_uses_context_window_guard_without_authored_compaction(
     tmp_path: Path,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path, context_window=600)
+    runs = [
+        _completed_run(
+            "run-1",
+            messages=[
+                Message(role="user", content="u" * 400),
+                Message(role="assistant", content="a" * 400),
+            ],
+        ),
+        _completed_run(
+            "run-2",
+            messages=[
+                Message(role="user", content="u" * 400),
+                Message(role="assistant", content="a" * 400),
+            ],
+        ),
+        _completed_run(
+            "run-3",
+            messages=[
+                Message(role="user", content="u" * 400),
+                Message(role="assistant", content="a" * 400),
+            ],
+        ),
+    ]
+    replay_budget = estimate_history_messages_tokens([message for run in runs[-2:] for message in (run.messages or [])])
+    context_window = ((replay_budget + estimate_text_tokens("Current prompt")) * 5 + 3) // 4
+    config, runtime_paths = _make_config(tmp_path, context_window=context_window)
     config.defaults.compaction = None
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
         "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="user", content="u" * 400),
-                    Message(role="assistant", content="a" * 400),
-                ],
-            ),
-            _completed_run(
-                "run-2",
-                messages=[
-                    Message(role="user", content="u" * 400),
-                    Message(role="assistant", content="a" * 400),
-                ],
-            ),
-            _completed_run(
-                "run-3",
-                messages=[
-                    Message(role="user", content="u" * 400),
-                    Message(role="assistant", content="a" * 400),
-                ],
-            ),
-        ],
+        runs=runs,
     )
     storage.upsert_session(session)
     agent = _agent(db=storage)
@@ -3140,29 +3143,46 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
 async def test_prepare_history_for_run_context_window_guard_preserves_custom_system_message_role(
     tmp_path: Path,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path, context_window=40)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    runs = [
+        _completed_run(
+            "run-1",
+            messages=[
+                Message(role="developer", content="d" * 120),
+                Message(role="user", content="u" * 15),
+                Message(role="assistant", content="a" * 15),
+            ],
+        ),
+        _completed_run(
+            "run-2",
+            messages=[
+                Message(role="developer", content="d" * 120),
+                Message(role="user", content="u" * 15),
+                Message(role="assistant", content="a" * 15),
+            ],
+        ),
+    ]
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+        system_message_role="developer",
+    )
+    one_run_history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="runs", limit=1),
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        system_message_role=history_settings.system_message_role,
+    )
     session = _session(
         "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="developer", content="d" * 120),
-                    Message(role="user", content="u" * 15),
-                    Message(role="assistant", content="a" * 15),
-                ],
-            ),
-            _completed_run(
-                "run-2",
-                messages=[
-                    Message(role="developer", content="d" * 120),
-                    Message(role="user", content="u" * 15),
-                    Message(role="assistant", content="a" * 15),
-                ],
-            ),
-        ],
+        runs=runs,
     )
+    single_run_budget = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=one_run_history_settings,
+    )
+    context_window = single_run_budget + estimate_text_tokens("Current prompt")
+    config, runtime_paths = _make_config(tmp_path, context_window=context_window)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     storage.upsert_session(session)
     agent = _agent(db=storage)
 
@@ -3176,13 +3196,9 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         execution_identity=None,
         storage=storage,
         session=session,
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-            system_message_role="developer",
-        ),
+        history_settings=history_settings,
         static_prompt_tokens=0,
-        available_history_budget=10,
+        available_history_budget=single_run_budget,
     )
 
     assert prepared.replay_plan is not None
@@ -3558,6 +3574,31 @@ def test_warm_cache_compaction_request_rejects_dangling_tool_calls_before_summar
             ),
         ),
         rendered_text="Calling a tool",
+        source="persisted_runs",
+        source_run_ids=("run-tool",),
+        estimated_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="tool result adjacency"):
+        build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+
+
+def test_warm_cache_compaction_request_rejects_interrupted_tool_result_adjacency() -> None:
+    chain = PreparedConversationChain(
+        messages=(
+            Message(
+                role="assistant",
+                content="Calling tools",
+                tool_calls=[
+                    {"id": "call-1", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+                    {"id": "call-2", "type": "function", "function": {"name": "python", "arguments": "{}"}},
+                ],
+            ),
+            Message(role="tool", content="first result", tool_call_id="call-1"),
+            Message(role="assistant", content="new answer before the second result"),
+            Message(role="tool", content="second result", tool_call_id="call-2"),
+        ),
+        rendered_text="Calling tools",
         source="persisted_runs",
         source_run_ids=("run-tool",),
         estimated_tokens=1,
@@ -5810,6 +5851,7 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
         )
 
     assert prepared_run.prepared_history.replays_persisted_history is False
+    assert prepared_run.unseen_event_ids == ["$root", "$agent-reply"]
     assert prepared_run.prompt_text == (
         "@alice:localhost: Original question\n\n"
         "Prior diagnosis\n\n"
