@@ -615,6 +615,7 @@ def _response_request(
     thread_id: str | None = None,
     prompt: str = "Hello",
     model_prompt: str | None = None,
+    media: MediaInputs | None = None,
     user_id: str | None = None,
     correlation_id: str | None = None,
 ) -> ResponseRequest:
@@ -626,6 +627,7 @@ def _response_request(
         thread_history=(),
         prompt=prompt,
         model_prompt=model_prompt,
+        media=media,
         user_id=user_id,
         correlation_id=correlation_id,
     )
@@ -2398,9 +2400,50 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _SessionStorage()
 
+    async def fake_prepare_agent_and_prompt(
+        _agent_name: str,
+        prompt: str,
+        *_args: object,
+        model_prompt: str | None = None,
+        **_kwargs: object,
+    ) -> _PreparedAgentRun:
+        model_facing_prompt = model_prompt if model_prompt is not None else prompt
+        return _PreparedAgentRun(
+            agent=MagicMock(),
+            messages=(
+                Message(role="user", content="Earlier context"),
+                Message(role="assistant", content="Earlier answer"),
+                Message(role="user", content=model_facing_prompt),
+            ),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+        )
+
+    async def fake_cached_agent_run(
+        _agent: object,
+        run_input: tuple[Message, ...],
+        session_id: str,
+        **kwargs: object,
+    ) -> RunOutput:
+        run = RunOutput(
+            run_id=cast("str | None", kwargs.get("run_id")),
+            content="Hello",
+            status=RunStatus.completed,
+            messages=[*run_input, Message(role="assistant", content="Hello")],
+        )
+        storage.session = AgentSession(
+            session_id=session_id,
+            agent_id="general",
+            created_at=1,
+            updated_at=1,
+            runs=[run],
+        )
+        return run
+
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare_agent_and_prompt)),
+        patch("mindroom.ai_runtime.cached_agent_run", new=AsyncMock(side_effect=fake_cached_agent_run)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -2412,33 +2455,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
-            storage.session = AgentSession(
-                session_id="!test:localhost:$thread-root",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-                runs=[
-                    RunOutput(
-                        content="Hello",
-                        messages=[
-                            Message(role="user", content="Earlier context"),
-                            Message(role="assistant", content="Earlier answer"),
-                            Message(
-                                role="user",
-                                content=(
-                                    "Describe this image\n\n"
-                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
-                                ),
-                            ),
-                            Message(role="assistant", content="Hello"),
-                        ],
-                    ),
-                ],
-            )
-            return "$msg"
-
-        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+        coordinator.deps.delivery_gateway.send_text.return_value = "$msg"
 
         await coordinator.generate_response(
             replace(
@@ -2452,9 +2469,8 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
     persisted_run = cast("RunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
-    assert persisted_run.messages[2].content == (
-        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
-    )
+    assert "Describe this image" in cast("str", persisted_run.messages[2].content)
+    assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[2].content)
 
 
 @pytest.mark.asyncio
@@ -2538,15 +2554,48 @@ async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) ->
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _SessionStorage()
+    seen_run_ids: list[str | None] = []
 
-    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        run_id_callback("retry-run")
-        return "Hello"
+    async def fake_prepare_agent_and_prompt(
+        _agent_name: str,
+        prompt: str,
+        *_args: object,
+        model_prompt: str | None = None,
+        **_kwargs: object,
+    ) -> _PreparedAgentRun:
+        model_facing_prompt = model_prompt if model_prompt is not None else prompt
+        return _prepared_prompt_result(MagicMock(), prompt=model_facing_prompt)
+
+    async def fake_cached_agent_run(
+        _agent: object,
+        run_input: tuple[Message, ...],
+        session_id: str,
+        **kwargs: object,
+    ) -> RunOutput:
+        run_id = cast("str | None", kwargs.get("run_id"))
+        seen_run_ids.append(run_id)
+        if len(seen_run_ids) == 1:
+            error_message = "audio input is not supported"
+            raise ValueError(error_message)
+        run = RunOutput(
+            run_id=run_id,
+            content="Hello",
+            status=RunStatus.completed,
+            messages=[*run_input, Message(role="assistant", content="Hello")],
+        )
+        storage.session = AgentSession(
+            session_id=session_id,
+            agent_id="general",
+            created_at=1,
+            updated_at=1,
+            runs=[run],
+        )
+        return run
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare_agent_and_prompt)),
+        patch("mindroom.ai_runtime.cached_agent_run", new=AsyncMock(side_effect=fake_cached_agent_run)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -2558,36 +2607,16 @@ async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) ->
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
-            storage.session = AgentSession(
-                session_id="!test:localhost:$thread-root",
-                agent_id="general",
-                created_at=1,
-                updated_at=1,
-                runs=[
-                    RunOutput(
-                        run_id="retry-run",
-                        content="Hello",
-                        messages=[
-                            Message(
-                                role="user",
-                                content=(
-                                    "Describe this image\n\n"
-                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
-                                ),
-                            ),
-                            Message(role="assistant", content="Hello"),
-                        ],
-                    ),
-                ],
-            )
-            return "$msg"
-
-        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+        coordinator.deps.delivery_gateway.send_text.return_value = "$msg"
 
         await coordinator.generate_response(
             replace(
-                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                _response_request(
+                    prompt="Describe this image",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                    media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                ),
                 model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
             ),
         )
@@ -2595,11 +2624,14 @@ async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) ->
     persisted_session = cast("AgentSession", storage.session)
     assert persisted_session.runs is not None
     persisted_run = cast("RunOutput", persisted_session.runs[0])
-    assert persisted_run.run_id == "retry-run"
+    assert len(seen_run_ids) == 2
+    assert seen_run_ids[0] is not None
+    assert seen_run_ids[1] is not None
+    assert seen_run_ids[1] != seen_run_ids[0]
+    assert persisted_run.run_id == seen_run_ids[1]
     assert persisted_run.messages is not None
-    assert persisted_run.messages[0].content == (
-        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
-    )
+    assert "Describe this image" in cast("str", persisted_run.messages[0].content)
+    assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[0].content)
 
 
 @pytest.mark.asyncio
@@ -2692,7 +2724,9 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     storage = _SessionStorage()
 
-    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        model_message = cast("str", kwargs["message"])
+        run_id = cast("str | None", kwargs.get("run_id"))
         storage.session = TeamSession(
             session_id="!test:localhost:$thread-root",
             team_id="ultimate",
@@ -2700,17 +2734,12 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
             updated_at=1,
             runs=[
                 TeamRunOutput(
+                    run_id=run_id,
                     content="Team answer",
                     messages=[
                         Message(role="user", content="Earlier context"),
                         Message(role="assistant", content="Earlier answer"),
-                        Message(
-                            role="user",
-                            content=(
-                                "Describe this image\n\n"
-                                "Available attachment IDs: att_1. Use tool calls to inspect or process them."
-                            ),
-                        ),
+                        Message(role="user", content=model_message),
                         Message(role="assistant", content="Team answer"),
                     ],
                 ),
@@ -2747,9 +2776,8 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
-    assert persisted_run.messages[2].content == (
-        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
-    )
+    assert "Describe this image" in cast("str", persisted_run.messages[2].content)
+    assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[2].content)
 
 
 @pytest.mark.asyncio
@@ -2759,10 +2787,31 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     storage = _SessionStorage()
+    seen_run_ids: list[str | None] = []
 
     async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        model_message = cast("str", kwargs["message"])
+        run_id = cast("str | None", kwargs.get("run_id"))
+        seen_run_ids.append(run_id)
         run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        run_id_callback("team-retry-run")
+        if run_id is not None:
+            run_id_callback(run_id)
+        storage.session = TeamSession(
+            session_id="!test:localhost:$thread-root",
+            team_id="ultimate",
+            created_at=1,
+            updated_at=1,
+            runs=[
+                TeamRunOutput(
+                    run_id=run_id,
+                    content="Team answer",
+                    messages=[
+                        Message(role="user", content=model_message),
+                        Message(role="assistant", content="Team answer"),
+                    ],
+                ),
+            ],
+        )
         return "Team answer"
 
     with (
@@ -2784,32 +2833,7 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
 
-        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
-            storage.session = TeamSession(
-                session_id="!test:localhost:$thread-root",
-                team_id="ultimate",
-                created_at=1,
-                updated_at=1,
-                runs=[
-                    TeamRunOutput(
-                        run_id="team-retry-run",
-                        content="Team answer",
-                        messages=[
-                            Message(
-                                role="user",
-                                content=(
-                                    "Describe this image\n\n"
-                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
-                                ),
-                            ),
-                            Message(role="assistant", content="Team answer"),
-                        ],
-                    ),
-                ],
-            )
-            return "$msg"
-
-        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+        coordinator.deps.delivery_gateway.send_text.return_value = "$msg"
 
         await coordinator.generate_team_response_helper(
             replace(
@@ -2823,11 +2847,11 @@ async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Pat
     persisted_session = cast("TeamSession", storage.session)
     assert persisted_session.runs is not None
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
-    assert persisted_run.run_id == "team-retry-run"
+    assert seen_run_ids == [persisted_run.run_id]
+    assert persisted_run.run_id is not None
     assert persisted_run.messages is not None
-    assert persisted_run.messages[0].content == (
-        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
-    )
+    assert "Describe this image" in cast("str", persisted_run.messages[0].content)
+    assert "Available attachment IDs: att_1" in cast("str", persisted_run.messages[0].content)
 
 
 def test_append_knowledge_availability_notice_rendering() -> None:

@@ -2297,7 +2297,7 @@ class ResponseRunner:
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             execution_identity=execution_identity,
-            run_succeeded=run_successes[-1] if run_successes else False,
+            run_succeeded=run_successes[-1] if run_successes else final_delivery_outcome.terminal_status == "completed",
             interactive_target=resolved_target,
             thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
             thread_summary_thread_id=resolved_target.resolved_thread_id,

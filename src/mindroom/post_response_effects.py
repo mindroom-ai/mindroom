@@ -241,7 +241,7 @@ async def apply_post_response_effects(
                 response_event_id=response_event_id,
             )
 
-    if deps.queue_memory_persistence is not None:
+    if outcome.run_succeeded and deps.queue_memory_persistence is not None:
         try:
             deps.queue_memory_persistence()
         except Exception:

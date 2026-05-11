@@ -407,6 +407,28 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_skip_memory_persistence_for_failed_run() -> None:
+    """Failed runs should not enqueue memory persistence for incomplete content."""
+    queue_memory_persistence = MagicMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Provider failed",
+        ),
+        ResponseOutcome(run_succeeded=False),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            queue_memory_persistence=queue_memory_persistence,
+        ),
+    )
+
+    queue_memory_persistence.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_post_response_effects_register_interactive_follow_up_for_preserved_stream_failure() -> None:
     """Preserved visible streamed replies should still register interactive follow-up."""
     register_interactive = AsyncMock()
