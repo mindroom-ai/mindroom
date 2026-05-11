@@ -12,6 +12,20 @@ from fastapi.testclient import TestClient
 from mindroom.api import config_lifecycle
 
 
+def trusted_upstream_headers(
+    *,
+    user_id: str = "alice",
+    email: str = "alice@example.com",
+    matrix_user_id: str = "@alice:example.org",
+) -> dict[str, str]:
+    """Return trusted-upstream auth headers for API tests."""
+    return {
+        "X-Trusted-User": user_id,
+        "X-Trusted-Email": email,
+        "X-Trusted-Matrix-User": matrix_user_id,
+    }
+
+
 @pytest.fixture
 def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
     """Create a temporary config file for testing."""

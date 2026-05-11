@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from tests.api.conftest import trusted_upstream_headers
 
 
 def _config_with_worker_scope(
@@ -80,19 +81,6 @@ def _use_trusted_upstream_runtime(api_app: object) -> constants.RuntimePaths:
     )
     initialize_api_app(api_app, trusted_runtime_paths)
     return trusted_runtime_paths
-
-
-def _trusted_upstream_headers(
-    *,
-    user_id: str,
-    email: str,
-    matrix_user_id: str,
-) -> dict[str, str]:
-    return {
-        "X-Trusted-User": user_id,
-        "X-Trusted-Email": email,
-        "X-Trusted-Matrix-User": matrix_user_id,
-    }
 
 
 @pytest.fixture
@@ -1427,7 +1415,7 @@ class TestCredentialsAPI:
             authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
         )
         _publish_committed_runtime_config(client.app, config)
-        bob_headers = _trusted_upstream_headers(
+        bob_headers = trusted_upstream_headers(
             user_id="bob",
             email="bob@example.org",
             matrix_user_id="@bob:example.org",

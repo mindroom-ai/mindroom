@@ -39,6 +39,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     resolve_worker_target,
 )
+from tests.api.conftest import trusted_upstream_headers
 
 
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
@@ -2046,19 +2047,6 @@ def _trusted_upstream_oauth_email_template_env() -> dict[str, str]:
     return env
 
 
-def _trusted_upstream_headers(
-    *,
-    user_id: str = "alice",
-    email: str = "alice@example.com",
-    matrix_user_id: str = "@alice:example.org",
-) -> dict[str, str]:
-    return {
-        "X-Trusted-User": user_id,
-        "X-Trusted-Email": email,
-        "X-Trusted-Matrix-User": matrix_user_id,
-    }
-
-
 def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(
@@ -2088,11 +2076,11 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
         with TestClient(api_app) as client:
             status_response = client.get(
                 f"/api/oauth/{provider.id}/status?agent_name=general",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
             )
             disconnect_response = client.post(
                 f"/api/oauth/{provider.id}/disconnect?agent_name=general",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
             )
 
     assert status_response.status_code == 200
@@ -2123,7 +2111,7 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
             "_source": "oauth",
         },
     )
-    bob_headers = _trusted_upstream_headers(
+    bob_headers = trusted_upstream_headers(
         user_id="bob",
         email="bob@example.com",
         matrix_user_id="@bob:example.org",
@@ -2167,7 +2155,7 @@ def test_global_oauth_status_keeps_existing_access_without_agent_name(tmp_path: 
     )
     _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
-    bob_headers = _trusted_upstream_headers(
+    bob_headers = trusted_upstream_headers(
         user_id="bob",
         email="bob@example.com",
         matrix_user_id="@bob:example.org",
@@ -2213,7 +2201,7 @@ def test_connect_token_cannot_bypass_agent_reply_permission(tmp_path: Path) -> N
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
                 follow_redirects=False,
             )
 
@@ -2243,13 +2231,13 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
                 follow_redirects=False,
             )
 
@@ -2341,13 +2329,13 @@ def test_agent_connect_token_accepts_historical_trusted_upstream_matrix_requeste
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(matrix_user_id=matrix_user_id),
+                headers=trusted_upstream_headers(matrix_user_id=matrix_user_id),
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                headers=_trusted_upstream_headers(matrix_user_id=matrix_user_id),
+                headers=trusted_upstream_headers(matrix_user_id=matrix_user_id),
                 follow_redirects=False,
             )
 
@@ -2384,7 +2372,7 @@ def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_pat
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(
+                headers=trusted_upstream_headers(
                     user_id="bob",
                     email="bob@example.com",
                     matrix_user_id="@bob:example.org",
@@ -2490,7 +2478,7 @@ def test_agent_connect_token_rejects_trusted_upstream_identity_without_matrix_ma
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(matrix_user_id=""),
+                headers=trusted_upstream_headers(matrix_user_id=""),
                 follow_redirects=False,
             )
 
@@ -2521,7 +2509,7 @@ def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
@@ -2558,13 +2546,13 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=_trusted_upstream_headers(),
+                headers=trusted_upstream_headers(),
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
             callback_response = client.get(
                 f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                headers=_trusted_upstream_headers(matrix_user_id="@bob:example.org"),
+                headers=trusted_upstream_headers(matrix_user_id="@bob:example.org"),
                 follow_redirects=False,
             )
 
