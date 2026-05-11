@@ -16,7 +16,8 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 - **Image analysis** - Pass images to vision-capable AI models for analysis
 - **Authorization** - Fine-grained access control for users and rooms
 
-> [!TIP] **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
+> [!TIP]
+> **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
 
 ## Quick Start
 
@@ -77,7 +78,7 @@ defaults:
   markdown: true
 ```
 
-1. Set up your environment in `.env`:
+2. Set up your environment in `.env`:
 
 ```bash
 # Matrix homeserver (must allow open registration)
@@ -87,7 +88,7 @@ MATRIX_HOMESERVER=https://matrix.example.com
 OPENAI_API_KEY=your_api_key
 ```
 
-1. Run MindRoom:
+3. Run MindRoom:
 
 ```bash
 mindroom run
@@ -102,26 +103,26 @@ mindroom run
 
 ## Features
 
-| Feature                      | Description                                                                                                                                                                                                |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Agents**                   | Single-specialty actors with specific tools and instructions                                                                                                                                               |
-| **Teams**                    | Collaborative bundles of agents (coordinate or collaborate modes)                                                                                                                                          |
-| **Router**                   | Built-in traffic director that routes messages to the right agent                                                                                                                                          |
-| **Memory**                   | Mem0-inspired memory system with agent and team scopes                                                                                                                                                     |
-| **Knowledge Bases**          | File-backed RAG indexing with per-agent base assignment                                                                                                                                                    |
-| **Tools**                    | 100+ integrations for external services                                                                                                                                                                    |
-| **Skills**                   | OpenClaw-compatible skills system for extended agent capabilities                                                                                                                                          |
-| **Scheduling**               | Schedule tasks with cron expressions or natural language                                                                                                                                                   |
-| **Voice**                    | Speech-to-text transcription for voice messages                                                                                                                                                            |
-| **Images**                   | Pass user-sent images to vision-capable AI models                                                                                                                                                          |
-| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs                                                                                                                                                 |
-| **Cultures**                 | Shared evolving principles across groups of agents                                                                                                                                                         |
-| **Interactive Q&A**          | Clickable multiple-choice questions via Matrix reactions                                                                                                                                                   |
-| **Authorization**            | Fine-grained user and room access control                                                                                                                                                                  |
-| **OpenAI-Compatible API**    | Use agents from LibreChat, Open WebUI, or any OpenAI client                                                                                                                                                |
-| **Streaming**                | Progressive message edits with presence-based gating and tool-call markers                                                                                                                                 |
-| **Chat Commands**            | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands handled by the router |
-| **Hot Reload**               | Config changes are detected and agents restart automatically                                                                                                                                               |
+| Feature | Description |
+|---------|-------------|
+| **Agents** | Single-specialty actors with specific tools and instructions |
+| **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
+| **Router** | Built-in traffic director that routes messages to the right agent |
+| **Memory** | Mem0-inspired memory system with agent and team scopes |
+| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
+| **Tools** | 100+ integrations for external services |
+| **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
+| **Scheduling** | Schedule tasks with cron expressions or natural language |
+| **Voice** | Speech-to-text transcription for voice messages |
+| **Images** | Pass user-sent images to vision-capable AI models |
+| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
+| **Cultures** | Shared evolving principles across groups of agents |
+| **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
+| **Authorization** | Fine-grained user and room access control |
+| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
+| **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands handled by the router |
+| **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
 
@@ -140,39 +141,39 @@ mindroom run
 
 ## Documentation
 
-- [Getting Started](https://docs.mindroom.chat/getting-started/index.md) - Installation and first steps
-- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) - Run only `uvx mindroom` locally against hosted Matrix
-- [Configuration](https://docs.mindroom.chat/configuration/index.md) - All configuration options
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
-- [Dashboard](https://docs.mindroom.chat/dashboard/index.md) - Web UI for configuration
-- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) - Use agents from any OpenAI-compatible client
-- [Tools](https://docs.mindroom.chat/tools/index.md) - Available tool integrations
-- [OpenClaw Import](https://docs.mindroom.chat/openclaw/index.md) - Reuse OpenClaw workspace files in MindRoom
-- [MCP](https://docs.mindroom.chat/mcp/index.md) - Configure native MCP client servers and expose their tools to agents
-- [Skills](https://docs.mindroom.chat/skills/index.md) - OpenClaw-compatible skills system
-- [Plugins](https://docs.mindroom.chat/plugins/index.md) - Extend with custom tools, OAuth providers, and skills
-- [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure RAG-backed document indexing
-- [Memory System](https://docs.mindroom.chat/memory/index.md) - How agent memory works
-- [Scheduling](https://docs.mindroom.chat/scheduling/index.md) - Schedule tasks with cron or natural language
-- [Voice Messages](https://docs.mindroom.chat/voice/index.md) - Voice message transcription
-- [Image Messages](https://docs.mindroom.chat/images/index.md) - Image analysis with vision models
-- [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md) - Context-scoped file and video handling
-- [Streaming Responses](https://docs.mindroom.chat/streaming/index.md) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/index.md) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
-- [Interactive Q&A](https://docs.mindroom.chat/interactive/index.md) - Clickable multiple-choice questions via Matrix reactions
-- [Authorization](https://docs.mindroom.chat/authorization/index.md) - User and room access control
-- [Matrix Space](https://docs.mindroom.chat/matrix-space/index.md) - Optional root Matrix Space for grouping managed rooms
-- [Architecture](https://docs.mindroom.chat/architecture/index.md) - How it works under the hood
-- [Deployment](https://docs.mindroom.chat/deployment/index.md) - Docker and Kubernetes deployment
-- [Bridges](https://docs.mindroom.chat/deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix
-- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) - Isolate code-execution tools in a sandbox
-- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
-- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - Single-user OAuth setup
-- [CLI Reference](https://docs.mindroom.chat/cli/index.md) - Command-line interface
-- [Support](https://docs.mindroom.chat/support/index.md) - Contact and troubleshooting help
-- [Privacy Policy](https://docs.mindroom.chat/privacy/index.md) - Privacy and data handling information
-- [Terms of Service](https://docs.mindroom.chat/terms/index.md) - Terms for using MindRoom services and clients
+- [Getting Started](https://docs.mindroom.chat/getting-started/) - Installation and first steps
+- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) - Run only `uvx mindroom` locally against hosted Matrix
+- [Configuration](https://docs.mindroom.chat/configuration/) - All configuration options
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
+- [Dashboard](https://docs.mindroom.chat/dashboard/) - Web UI for configuration
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) - Use agents from any OpenAI-compatible client
+- [Tools](https://docs.mindroom.chat/tools/) - Available tool integrations
+- [OpenClaw Import](https://docs.mindroom.chat/openclaw/) - Reuse OpenClaw workspace files in MindRoom
+- [MCP](https://docs.mindroom.chat/mcp/) - Configure native MCP client servers and expose their tools to agents
+- [Skills](https://docs.mindroom.chat/skills/) - OpenClaw-compatible skills system
+- [Plugins](https://docs.mindroom.chat/plugins/) - Extend with custom tools, OAuth providers, and skills
+- [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) - Build scoped OAuth-backed tool integrations
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure RAG-backed document indexing
+- [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
+- [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
+- [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
+- [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
+- [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
+- [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
+- [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
+- [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
+- [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
+- [Architecture](https://docs.mindroom.chat/architecture/) - How it works under the hood
+- [Deployment](https://docs.mindroom.chat/deployment/) - Docker and Kubernetes deployment
+- [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
+- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) - Isolate code-execution tools in a sandbox
+- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Single-user OAuth setup
+- [CLI Reference](https://docs.mindroom.chat/cli/) - Command-line interface
+- [Support](https://docs.mindroom.chat/support/) - Contact and troubleshooting help
+- [Privacy Policy](https://docs.mindroom.chat/privacy/) - Privacy and data handling information
+- [Terms of Service](https://docs.mindroom.chat/terms/) - Terms for using MindRoom services and clients
 
 ## License
 

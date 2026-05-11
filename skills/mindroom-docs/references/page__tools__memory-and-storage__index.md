@@ -9,22 +9,25 @@ Use these tools when you need explicit memory CRUD operations, direct provider-s
 
 ## Tools On This Page
 
-- \[`memory`\] - Explicitly add, search, list, read, update, and delete MindRoom memories visible to the current agent.
-- \[`mem0`\] - Direct Mem0 toolkit for user-scoped persistent memory outside MindRoom's built-in memory API.
-- \[`zep`\] - Direct Zep Cloud toolkit for session memory and user-graph search.
+- [`memory`] - Explicitly add, search, list, read, update, and delete MindRoom memories visible to the current agent.
+- [`mem0`] - Direct Mem0 toolkit for user-scoped persistent memory outside MindRoom's built-in memory API.
+- [`zep`] - Direct Zep Cloud toolkit for session memory and user-graph search.
 
 ## Common Setup Notes
 
 `memory` is MindRoom-native and has no tool-specific configuration fields.
 It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the effective `mem0`, `file`, or `none` backend for that agent.
-If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent. Use [Memory System](https://docs.mindroom.chat/memory/index.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout. `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
+If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent.
+Use [Memory System](https://docs.mindroom.chat/memory/) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
+`mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
 `mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
 `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
 If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-This page does not document conversation-scoped file attachments even though they are storage-like. Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/index.md) and [Attachments](https://docs.mindroom.chat/attachments/index.md) for attachment IDs, retention, and Matrix media flow.
+This page does not document conversation-scoped file attachments even though they are storage-like.
+Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) and [Attachments](https://docs.mindroom.chat/attachments/) for attachment IDs, retention, and Matrix media flow.
 
-## \[`memory`\]
+## [`memory`]
 
 `memory` gives an agent explicit control over the MindRoom memories available in its current scope.
 
@@ -64,11 +67,11 @@ delete_memory("abc123")
 
 ### Notes
 
-- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](https://docs.mindroom.chat/memory/index.md), not through tool-local options.
+- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](https://docs.mindroom.chat/memory/), not through tool-local options.
 - This is the right tool when you want explicit control over MindRoom's built-in durable memory rather than a separate provider account.
 - The tool returns user-facing error strings on failures instead of raising raw exceptions into the conversation.
 
-## \[`mem0`\]
+## [`mem0`]
 
 `mem0` connects an agent directly to the upstream Mem0 toolkit.
 
@@ -83,19 +86,19 @@ Operations need a `user_id`, either from tool config or from the run context, an
 
 ### Configuration
 
-| Option                       | Type       | Required | Default | Notes                                                                                                                    |
-| ---------------------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `config`                     | `text`     | `no`     | `null`  | Advanced upstream Mem0 config passed through to `Memory.from_config()`, typically used for local or self-managed setups. |
-| `api_key`                    | `password` | `no`     | `null`  | Optional Mem0 Platform API key, also read from `MEM0_API_KEY`.                                                           |
-| `user_id`                    | `text`     | `no`     | `null`  | Fixed user scope for all calls when you do not want to rely on runtime user context.                                     |
-| `org_id`                     | `text`     | `no`     | `null`  | Optional Mem0 organization ID for platform usage, also read from `MEM0_ORG_ID`.                                          |
-| `project_id`                 | `text`     | `no`     | `null`  | Optional Mem0 project ID for platform usage, also read from `MEM0_PROJECT_ID`.                                           |
-| `infer`                      | `boolean`  | `no`     | `true`  | Let Mem0 infer facts from added content.                                                                                 |
-| `enable_add_memory`          | `boolean`  | `no`     | `true`  | Enable `add_memory()`.                                                                                                   |
-| `enable_search_memory`       | `boolean`  | `no`     | `true`  | Enable `search_memory()`.                                                                                                |
-| `enable_get_all_memories`    | `boolean`  | `no`     | `true`  | Enable `get_all_memories()`.                                                                                             |
-| `enable_delete_all_memories` | `boolean`  | `no`     | `true`  | Enable `delete_all_memories()`.                                                                                          |
-| `all`                        | `boolean`  | `no`     | `false` | Enable all currently exposed Mem0 methods regardless of the individual flags.                                            |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `config` | `text` | `no` | `null` | Advanced upstream Mem0 config passed through to `Memory.from_config()`, typically used for local or self-managed setups. |
+| `api_key` | `password` | `no` | `null` | Optional Mem0 Platform API key, also read from `MEM0_API_KEY`. |
+| `user_id` | `text` | `no` | `null` | Fixed user scope for all calls when you do not want to rely on runtime user context. |
+| `org_id` | `text` | `no` | `null` | Optional Mem0 organization ID for platform usage, also read from `MEM0_ORG_ID`. |
+| `project_id` | `text` | `no` | `null` | Optional Mem0 project ID for platform usage, also read from `MEM0_PROJECT_ID`. |
+| `infer` | `boolean` | `no` | `true` | Let Mem0 infer facts from added content. |
+| `enable_add_memory` | `boolean` | `no` | `true` | Enable `add_memory()`. |
+| `enable_search_memory` | `boolean` | `no` | `true` | Enable `search_memory()`. |
+| `enable_get_all_memories` | `boolean` | `no` | `true` | Enable `get_all_memories()`. |
+| `enable_delete_all_memories` | `boolean` | `no` | `true` | Enable `delete_all_memories()`. |
+| `all` | `boolean` | `no` | `false` | Enable all currently exposed Mem0 methods regardless of the individual flags. |
 
 ### Example
 
@@ -119,10 +122,10 @@ delete_all_memories()
 
 - `api_key` is optional because the toolkit can use local/default upstream Mem0 initialization instead of the hosted Mem0 platform.
 - This toolkit is separate from MindRoom's `memory.backend: mem0` setting, so enabling `mem0` here does not configure or replace MindRoom's built-in memory backend.
-- If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](https://docs.mindroom.chat/memory/index.md) instead of relying on this toolkit alone.
+- If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](https://docs.mindroom.chat/memory/) instead of relying on this toolkit alone.
 - Store API keys outside authored YAML even when the current metadata marks them as optional.
 
-## \[`zep`\]
+## [`zep`]
 
 `zep` connects an agent directly to Zep Cloud for conversational memory and user-graph search.
 
@@ -139,18 +142,18 @@ If `user_id` is provided but the user does not exist yet, the toolkit attempts t
 
 ### Configuration
 
-| Option                      | Type       | Required | Default | Notes                                                                        |
-| --------------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------------------- |
-| `session_id`                | `text`     | `no`     | `null`  | Optional stable Zep thread ID, otherwise a new UUID is generated.            |
-| `user_id`                   | `text`     | `no`     | `null`  | Optional stable Zep user ID, otherwise a new user is generated and created.  |
-| `api_key`                   | `password` | `yes`    | `null`  | Required in practice unless it is provided through `ZEP_API_KEY`.            |
-| `ignore_assistant_messages` | `boolean`  | `no`     | `false` | Ignore assistant-role messages when adding session messages.                 |
-| `enable_add_zep_message`    | `boolean`  | `no`     | `true`  | Enable `add_zep_message()`.                                                  |
-| `enable_get_zep_memory`     | `boolean`  | `no`     | `true`  | Enable `get_zep_memory()`.                                                   |
-| `enable_search_zep_memory`  | `boolean`  | `no`     | `true`  | Enable `search_zep_memory()`.                                                |
-| `instructions`              | `text`     | `no`     | `null`  | Override the default tool instructions injected for the model.               |
-| `add_instructions`          | `boolean`  | `no`     | `false` | Add the tool instructions to the model prompt.                               |
-| `all`                       | `boolean`  | `no`     | `false` | Enable all currently exposed Zep methods regardless of the individual flags. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `session_id` | `text` | `no` | `null` | Optional stable Zep thread ID, otherwise a new UUID is generated. |
+| `user_id` | `text` | `no` | `null` | Optional stable Zep user ID, otherwise a new user is generated and created. |
+| `api_key` | `password` | `yes` | `null` | Required in practice unless it is provided through `ZEP_API_KEY`. |
+| `ignore_assistant_messages` | `boolean` | `no` | `false` | Ignore assistant-role messages when adding session messages. |
+| `enable_add_zep_message` | `boolean` | `no` | `true` | Enable `add_zep_message()`. |
+| `enable_get_zep_memory` | `boolean` | `no` | `true` | Enable `get_zep_memory()`. |
+| `enable_search_zep_memory` | `boolean` | `no` | `true` | Enable `search_zep_memory()`. |
+| `instructions` | `text` | `no` | `null` | Override the default tool instructions injected for the model. |
+| `add_instructions` | `boolean` | `no` | `false` | Add the tool instructions to the model prompt. |
+| `all` | `boolean` | `no` | `false` | Enable all currently exposed Zep methods regardless of the individual flags. |
 
 ### Example
 
@@ -178,7 +181,7 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [Memory System](https://docs.mindroom.chat/memory/index.md)
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/index.md)
-- [Attachments](https://docs.mindroom.chat/attachments/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Memory System](https://docs.mindroom.chat/memory/)
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
+- [Attachments](https://docs.mindroom.chat/attachments/)

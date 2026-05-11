@@ -41,14 +41,14 @@ Notes:
 
 ## Frontmatter fields
 
-| Field           | Type                    | Description                                                                           |
-| --------------- | ----------------------- | ------------------------------------------------------------------------------------- |
-| `name`          | string                  | Unique skill identifier                                                               |
-| `description`   | string                  | Brief summary shown to users/models; defaults to the skill name when omitted or blank |
-| `metadata`      | mapping or JSON5 string | OpenClaw metadata and custom fields                                                   |
-| `license`       | string                  | Informational only; accepted but not used by the runtime                              |
-| `compatibility` | string                  | Informational only; accepted but not used by the runtime                              |
-| `allowed-tools` | list                    | Reserved; accepted in frontmatter but not enforced by the runtime                     |
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Unique skill identifier |
+| `description` | string | Brief summary shown to users/models; defaults to the skill name when omitted or blank |
+| `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
+| `license` | string | Informational only; accepted but not used by the runtime |
+| `compatibility` | string | Informational only; accepted but not used by the runtime |
+| `allowed-tools` | list | Reserved; accepted in frontmatter but not enforced by the runtime |
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -68,9 +68,9 @@ Skills without `metadata.openclaw` are always eligible.
 MindRoom resolves skills for each agent from these locations, in this order:
 
 1. Bundled skills: `skills/` at the repository root (if present)
-1. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/index.md))
-1. User skills: `~/.mindroom/skills/`
-1. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
+2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
+3. User skills: `~/.mindroom/skills/`
+4. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
 
 If multiple skills share the same name, the last one wins (agent workspace > user > plugin > bundled).
 
@@ -113,13 +113,13 @@ Agents that have shell or file execution permissions can still read and execute 
 
 ## Skill vs tool
 
-| Aspect       | Skills                    | Tools            |
-| ------------ | ------------------------- | ---------------- |
-| Definition   | Markdown + YAML           | Python code      |
-| Location     | File system               | Code/plugins     |
-| Filtering    | Automatic by requirements | Always available |
-| Instructions | Rich markdown             | Docstrings       |
-| Invocation   | Model via skill tools     | Model only       |
+| Aspect | Skills | Tools |
+| --- | --- | --- |
+| Definition | Markdown + YAML | Python code |
+| Location | File system | Code/plugins |
+| Filtering | Automatic by requirements | Always available |
+| Instructions | Rich markdown | Docstrings |
+| Invocation | Model via skill tools | Model only |
 
 ## Hot reloading
 
@@ -129,5 +129,5 @@ For workspace skills created during an agent turn, assume they become available 
 ## Best practices
 
 1. Keep skills focused - one skill per capability
-1. Declare dependencies with `metadata.openclaw.requires`
-1. Use descriptive names like `code-review`
+2. Declare dependencies with `metadata.openclaw.requires`
+3. Use descriptive names like `code-review`

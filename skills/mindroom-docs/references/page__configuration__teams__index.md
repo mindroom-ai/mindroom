@@ -79,19 +79,19 @@ teams:
 
 ## Configuration Fields
 
-| Field                         | Required | Default                                | Description                                                                                                                                                                               |
-| ----------------------------- | -------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`                | Yes      | -                                      | Human-readable name shown in Matrix                                                                                                                                                       |
-| `role`                        | Yes      | -                                      | Description of the team's purpose                                                                                                                                                         |
-| `agents`                      | Yes      | -                                      | List of agent names that compose this team                                                                                                                                                |
-| `mode`                        | No       | `coordinate`                           | Collaboration mode: `coordinate` or `collaborate`                                                                                                                                         |
-| `rooms`                       | No       | `[]`                                   | List of room names the team responds in                                                                                                                                                   |
-| `model`                       | No       | `default`                              | Model used for team coordination and synthesis                                                                                                                                            |
-| `startup_thread_prewarm`      | No       | `true`                                 | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
-| `num_history_runs`            | No       | `defaults.num_history_runs`            | Number of prior team-scoped runs to replay                                                                                                                                                |
-| `num_history_messages`        | No       | `defaults.num_history_messages`        | Max messages from team-scoped history replayed into the next run                                                                                                                          |
-| `max_tool_calls_from_history` | No       | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history                                                                                                                                  |
-| `compaction`                  | No       | `defaults.compaction`                  | Team-scoped required-compaction overrides                                                                                                                                                 |
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `display_name` | Yes | - | Human-readable name shown in Matrix |
+| `role` | Yes | - | Description of the team's purpose |
+| `agents` | Yes | - | List of agent names that compose this team |
+| `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
+| `rooms` | No | `[]` | List of room names the team responds in |
+| `model` | No | `default` | Model used for team coordination and synthesis |
+| `startup_thread_prewarm` | No | `true` | When enabled, this bot may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
+| `num_history_runs` | No | `defaults.num_history_runs` | Number of prior team-scoped runs to replay |
+| `num_history_messages` | No | `defaults.num_history_messages` | Max messages from team-scoped history replayed into the next run |
+| `max_tool_calls_from_history` | No | `defaults.max_tool_calls_from_history` | Max tool call messages replayed from team-scoped history |
+| `compaction` | No | `defaults.compaction` | Team-scoped required-compaction overrides |
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
 
@@ -113,9 +113,9 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 ## When to Use Each Mode
 
-| Mode          | Use Case                                      | Example                                                                                   |
-| ------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `coordinate`  | Agents need to do different subtasks          | "Get weather and news" - coordinator assigns weather to one agent, news to another        |
+| Mode | Use Case | Example |
+|------|----------|---------|
+| `coordinate` | Agents need to do different subtasks | "Get weather and news" - coordinator assigns weather to one agent, news to another |
 | `collaborate` | Want diverse perspectives on the same problem | "What do you think about X?" - all agents analyze the same question and share their views |
 
 ## Dynamic Team Formation
@@ -125,9 +125,9 @@ In threads with multiple human participants, stale thread context does not auto-
 A fresh explicit `@mention` in the current message is required before agents respond.
 
 1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
-1. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
-1. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
-1. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
+2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
+3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
+4. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
 
 ### Mode Selection
 
@@ -137,7 +137,6 @@ For dynamic teams, the collaboration mode is selected by AI based on the task:
 - Tasks asking for opinions or brainstorming use **collaborate** mode
 
 When AI mode selection is unavailable or fails, MindRoom falls back to:
-
 - **coordinate** when multiple agents are explicitly tagged in the message (they likely have different roles to fulfill)
 - **collaborate** for all other cases, such as agents from thread history or DM rooms (likely discussing the same topic)
 

@@ -120,10 +120,10 @@ The dedicated-worker provisioning flow is implemented today.
 
 Both modes store agent data in the same per-agent directory structure.
 
-| Helm value                     | Behavior                                                            | Best for                                                                              |
-| ------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments                                                                   |
-| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand         | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
+| Helm value | Behavior | Best for |
+|------------|----------|----------|
+| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments |
+| `workerBackend: kubernetes` | Creates dedicated worker Deployments and Services on demand | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
 
 ### Shared Sidecar Mode
 
@@ -145,7 +145,11 @@ If `workers.kubernetes.namespace` is set to a separate worker namespace, the run
 The hosted instance chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in a pre-created tenant auth Secret.
 The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
-> [!WARNING] **Filesystem isolation depends on `worker_scope`.** With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available. With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user. Use `user_agent` for per-agent filesystem isolation.
+> [!WARNING]
+> **Filesystem isolation depends on `worker_scope`.**
+> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
+> With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
+> Use `user_agent` for per-agent filesystem isolation.
 
 Typical Helm values look like:
 
@@ -209,7 +213,8 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 ### Operations
 
 The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually.
-Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`. See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
+Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`.
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the execution model, credential leases, and non-Kubernetes deployment modes.
 
 ## Secrets Management
 
@@ -279,14 +284,14 @@ Reads configuration from `saas-platform/.env`.
 
 All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
-| Endpoint                           | Method | Description                        |
-| ---------------------------------- | ------ | ---------------------------------- |
-| `/system/provision`                | POST   | Create or re-provision an instance |
-| `/system/instances/{id}/start`     | POST   | Start a stopped instance           |
-| `/system/instances/{id}/stop`      | POST   | Stop a running instance            |
-| `/system/instances/{id}/restart`   | POST   | Restart an instance                |
-| `/system/instances/{id}/uninstall` | DELETE | Remove an instance                 |
-| `/system/sync-instances`           | POST   | Sync states between DB and K8s     |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/system/provision` | POST | Create or re-provision an instance |
+| `/system/instances/{id}/start` | POST | Start a stopped instance |
+| `/system/instances/{id}/stop` | POST | Stop a running instance |
+| `/system/instances/{id}/restart` | POST | Restart an instance |
+| `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
+| `/system/sync-instances` | POST | Sync states between DB and K8s |
 
 Example provision request:
 

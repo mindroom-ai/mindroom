@@ -30,19 +30,19 @@ cultures:
 
 ## Configuration Fields
 
-| Field         | Required | Default       | Description                                                                                                             |
-| ------------- | -------- | ------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `description` | No       | `""`          | Description of the shared principles and practices the culture captures                                                 |
-| `agents`      | No       | `[]`          | Agent names assigned to this culture (must exist in the `agents` section). Each agent can belong to at most one culture |
-| `mode`        | No       | `"automatic"` | How culture knowledge is updated (see modes below)                                                                      |
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `description` | No | `""` | Description of the shared principles and practices the culture captures |
+| `agents` | No | `[]` | Agent names assigned to this culture (must exist in the `agents` section). Each agent can belong to at most one culture |
+| `mode` | No | `"automatic"` | How culture knowledge is updated (see modes below) |
 
 ## Culture Modes
 
-| Mode        | Behavior                                                                                                  |
-| ----------- | --------------------------------------------------------------------------------------------------------- |
+| Mode | Behavior |
+|------|----------|
 | `automatic` | Culture knowledge is automatically extracted from every agent interaction and added to the shared context |
-| `agentic`   | The agent decides when to update culture knowledge via a tool call                                        |
-| `manual`    | Culture context is read-only; the description is included in agent context but knowledge is never updated |
+| `agentic` | The agent decides when to update culture knowledge via a tool call |
+| `manual` | Culture context is read-only; the description is included in agent context but knowledge is never updated |
 
 All modes include the culture description in the agent's context. The difference is whether and how the culture's knowledge base evolves over time.
 

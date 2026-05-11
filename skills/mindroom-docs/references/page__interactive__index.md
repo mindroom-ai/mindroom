@@ -6,9 +6,9 @@ When an agent's response contains a specially formatted JSON block, MindRoom aut
 ## How It Works
 
 1. An agent includes an `interactive` code block in its response.
-1. MindRoom parses the JSON, formats the options as a numbered list, and adds emoji reactions to the message.
-1. The user clicks a reaction emoji or types the option number.
-1. MindRoom captures the selection and feeds it back to the agent as a follow-up prompt (`"The user selected: <value>"`).
+2. MindRoom parses the JSON, formats the options as a numbered list, and adds emoji reactions to the message.
+3. The user clicks a reaction emoji or types the option number.
+4. MindRoom captures the selection and feeds it back to the agent as a follow-up prompt (`"The user selected: <value>"`).
 
 The entire flow happens within the thread where the original question was asked.
 
@@ -26,13 +26,12 @@ Agents emit interactive questions by wrapping JSON in an `interactive` code bloc
     ]
 }
 ```
-
-```
+````
 
 ### Fields
 
 | Field | Type | Required | Description |
-| --- | --- | --- | --- |
+|-------|------|----------|-------------|
 | `question` | string | No | The question text shown above options. Defaults to `"Please choose an option:"`. |
 | `options` | array | Yes | List of option objects (max 5). |
 | `options[].emoji` | string | No | Emoji shown as a reaction button. Defaults to `"❓"`. |
@@ -44,14 +43,12 @@ Agents emit interactive questions by wrapping JSON in an `interactive` code bloc
 The JSON block is replaced with a formatted message:
 
 ```
-
 What approach would you prefer?
 
 1. 🚀 Fast and automated
-1. 🔍 Careful and manual
+2. 🔍 Careful and manual
 
 React with an emoji or type the number to respond.
-
 ```
 
 The corresponding emoji reactions are added to the message as clickable buttons.
@@ -72,10 +69,16 @@ Any agent can include an `interactive` code block in its response text.
 You can guide agents to use this feature through their `instructions` or `role`:
 
 ```yaml
-
-agents: assistant: display_name: Assistant role: A helpful assistant instructions: - > When the user needs to choose between options, present them using an interactive code block with JSON containing question and options (each with emoji, label, and value fields).
-
-````
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful assistant
+    instructions:
+      - >
+        When the user needs to choose between options, present them using
+        an interactive code block with JSON containing question and options
+        (each with emoji, label, and value fields).
+```
 
 ## Limitations
 
@@ -83,5 +86,4 @@ agents: assistant: display_name: Assistant role: A helpful assistant instruction
 - Only **one active question per message**. If a response contains multiple interactive blocks, only the first is processed.
 - Questions are tracked **in memory** and do not persist across restarts.
 - Only human users can respond; reactions from other agents are ignored.
-- Only the agent that created the question processes reactions to it.```
-````
+- Only the agent that created the question processes reactions to it.

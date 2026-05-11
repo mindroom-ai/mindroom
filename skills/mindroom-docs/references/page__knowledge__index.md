@@ -6,9 +6,9 @@ Drop files into a folder, point a knowledge base at it, and agents can search th
 ## How It Works
 
 1. You configure a knowledge base pointing to a folder of documents
-1. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
-1. Agents assigned to that knowledge base get a search tool that queries the indexed documents
-1. When the agent uses the tool, relevant document chunks are included in its context
+2. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
+3. Agents assigned to that knowledge base get a search tool that queries the indexed documents
+4. When the agent uses the tool, relevant document chunks are included in its context
 
 ```
 Indexing (scheduled refresh):
@@ -69,14 +69,14 @@ knowledge_bases:
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                                                                                                                                                                                                                 |
-| --------------- | ------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `description`   | string | `""`               | Short description of what the knowledge base contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant                                                                                             |
-| `path`          | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute)                                                                                                                                                                                             |
-| `watch`         | bool   | `true`             | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                                                                                                                                           |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                                                                         |
-| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                                                                       |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `description` | string | `""` | Short description of what the knowledge base contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
+| `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
+| `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
+| `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
+| `git` | object | `null` | Optional Git repository sync settings |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 If chunking is too large, indexing retries will fail with embedder 500 errors.
@@ -122,15 +122,15 @@ PrivateAgentKnowledge applies to the normal agent runtime path, not the OpenAI-c
 If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`.
 Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
 
-| Field                             | Type   | Default | Description                                                                                                                                                             |
-| --------------------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `private.knowledge.enabled`       | bool   | `true`  | Whether PrivateAgentKnowledge indexing is active for this agent                                                                                                         |
-| `private.knowledge.description`   | string | `""`    | Short description of what the private knowledge contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant      |
-| `private.knowledge.path`          | string | `null`  | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`; set `enabled: false` to disable private knowledge                           |
-| `private.knowledge.watch`         | bool   | `true`  | When true, PrivateAgentKnowledge schedules background refresh on access. When false, direct external edits require explicit refresh                                     |
-| `private.knowledge.chunk_size`    | int    | `5000`  | Maximum characters per indexed chunk                                                                                                                                    |
-| `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                           |
-| `private.knowledge.git`           | object | `null`  | Optional Git sync configuration for PrivateAgentKnowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `private.knowledge.enabled` | bool | `true` | Whether PrivateAgentKnowledge indexing is active for this agent |
+| `private.knowledge.description` | string | `""` | Short description of what the private knowledge contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
+| `private.knowledge.path` | string | `null` | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true`; set `enabled: false` to disable private knowledge |
+| `private.knowledge.watch` | bool | `true` | When true, PrivateAgentKnowledge schedules background refresh on access. When false, direct external edits require explicit refresh |
+| `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk |
+| `private.knowledge.chunk_overlap` | int | `0` | Overlap characters between adjacent chunks. Must be smaller than `chunk_size` |
+| `private.knowledge.git` | object | `null` | Optional Git sync configuration for PrivateAgentKnowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |
 
 Use `private.knowledge` when the data itself should be private to that requester's private instance.
 Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
@@ -202,17 +202,17 @@ knowledge_bases:
 
 ### Git Configuration Fields
 
-| Field                   | Type   | Default    | Description                                                                                                    |
-| ----------------------- | ------ | ---------- | -------------------------------------------------------------------------------------------------------------- |
-| `repo_url`              | string | *required* | HTTPS repository URL to clone/fetch                                                                            |
-| `branch`                | string | `main`     | Branch to track                                                                                                |
-| `poll_interval_seconds` | int    | `300`      | Interval for scheduling background Git refreshes                                                               |
-| `credentials_service`   | string | `null`     | Service name in CredentialsManager for private repos                                                           |
-| `lfs`                   | bool   | `false`    | Enable Git LFS support and hydrate the checkout after sync. Requires `git-lfs` on the machine running MindRoom |
-| `sync_timeout_seconds`  | int    | `3600`     | Abort one Git command if it exceeds this timeout                                                               |
-| `skip_hidden`           | bool   | `true`     | Skip files/folders starting with `.`                                                                           |
-| `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                         |
-| `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                         |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
+| `branch` | string | `main` | Branch to track |
+| `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
+| `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
+| `lfs` | bool | `false` | Enable Git LFS support and hydrate the checkout after sync. Requires `git-lfs` on the machine running MindRoom |
+| `sync_timeout_seconds` | int | `3600` | Abort one Git command if it exceeds this timeout |
+| `skip_hidden` | bool | `true` | Skip files/folders starting with `.` |
+| `include_patterns` | list | `[]` | Root-anchored glob patterns to include |
+| `exclude_patterns` | list | `[]` | Root-anchored glob patterns to exclude |
 
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
 Bundled container images already include it.
@@ -293,11 +293,11 @@ knowledge_bases:
 
 Accepted credential fields:
 
-| Fields                  | Notes                                           |
-| ----------------------- | ----------------------------------------------- |
-| `username` + `token`    | Standard GitHub/GitLab access token auth        |
-| `username` + `password` | Basic HTTP auth                                 |
-| `api_key`               | Uses `x-access-token` as username automatically |
+| Fields | Notes |
+|--------|-------|
+| `username` + `token` | Standard GitHub/GitLab access token auth |
+| `username` + `password` | Basic HTTP auth |
+| `api_key` | Uses `x-access-token` as username automatically |
 
 ## Embedder Configuration
 
@@ -313,10 +313,10 @@ memory:
       dimensions: null       # Optional: embedding dimension override (e.g., 256)
 ```
 
-| Provider                | Model Example                            | Notes                                                                     |
-| ----------------------- | ---------------------------------------- | ------------------------------------------------------------------------- |
-| `openai`                | `text-embedding-3-small`                 | Requires `OPENAI_API_KEY`                                                 |
-| `ollama`                | `nomic-embed-text`                       | Self-hosted, set `host` or `OLLAMA_HOST`                                  |
+| Provider | Model Example | Notes |
+|----------|---------------|-------|
+| `openai` | `text-embedding-3-small` | Requires `OPENAI_API_KEY` |
+| `ollama` | `nomic-embed-text` | Self-hosted, set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
 
 ## Storage

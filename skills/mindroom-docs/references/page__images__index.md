@@ -7,9 +7,9 @@ MindRoom can process images sent to Matrix rooms, passing them to vision-capable
 When a user sends an image in a Matrix room:
 
 1. The agent determines whether it should respond (via mention, thread participation, or DM)
-1. The image is downloaded and decrypted (if E2E encrypted)
-1. The image is wrapped as an `agno.media.Image` and passed to the AI model
-1. The agent responds with its analysis
+2. The image is downloaded and decrypted (if E2E encrypted)
+3. The image is wrapped as an `agno.media.Image` and passed to the AI model
+4. The agent responds with its analysis
 
 Image support works automatically for all agents -- no configuration is needed. The AI model must support vision (e.g., Claude, GPT-5.4).
 
@@ -59,7 +59,8 @@ This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/
 ## Image Persistence
 
 Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
-In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls. See [Attachments](https://docs.mindroom.chat/attachments/index.md) for details on retention and context scoping.
+In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls.
+See [Attachments](https://docs.mindroom.chat/attachments/) for details on retention and context scoping.
 
 ## Encryption
 

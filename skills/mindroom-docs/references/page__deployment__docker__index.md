@@ -60,19 +60,19 @@ docker compose up -d
 
 Key environment variables (set in `.env` or pass directly):
 
-| Variable                 | Description                                                                                                                                                                               | Default                                         |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `MATRIX_HOMESERVER`      | Matrix server URL                                                                                                                                                                         | `http://localhost:8008`                         |
-| `MATRIX_SSL_VERIFY`      | Verify SSL certificates                                                                                                                                                                   | `true`                                          |
-| `MATRIX_SERVER_NAME`     | Server name for federation (optional)                                                                                                                                                     | -                                               |
-| `MINDROOM_STORAGE_PATH`  | Data storage directory                                                                                                                                                                    | Relative to config file                         |
-| `LOG_LEVEL`              | Logging level                                                                                                                                                                             | `INFO`                                          |
-| `MINDROOM_LOGGER_LEVELS` | Optional per-logger overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`; set `nio.crypto:WARNING` to inspect Matrix crypto decrypt warnings | -                                               |
-| `MINDROOM_CONFIG_PATH`   | Path to config.yaml                                                                                                                                                                       | `./config.yaml`, then `~/.mindroom/config.yaml` |
-| `ANTHROPIC_API_KEY`      | Anthropic API key (if using Claude models)                                                                                                                                                | -                                               |
-| `OPENAI_API_KEY`         | OpenAI API key (if using OpenAI models)                                                                                                                                                   | -                                               |
-| `MINDROOM_PORT`          | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that                         | `8765`                                          |
-| `MINDROOM_API_KEY`       | API key for dashboard auth (standalone)                                                                                                                                                   | - (open access)                                 |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
+| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
+| `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
+| `LOG_LEVEL` | Logging level | `INFO` |
+| `MINDROOM_LOGGER_LEVELS` | Optional per-logger overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`; set `nio.crypto:WARNING` to inspect Matrix crypto decrypt warnings | - |
+| `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml`, then `~/.mindroom/config.yaml` |
+| `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
+| `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
+| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
+| `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
 
 To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
 For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Docker Compose service.
@@ -148,6 +148,7 @@ MindRoom stores data in the `mindroom_data` directory:
 
 When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
 
-See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 
-> [!TIP] For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+> [!TIP]
+> For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.

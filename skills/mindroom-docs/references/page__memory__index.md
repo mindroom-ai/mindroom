@@ -17,24 +17,21 @@ It does not switch the memory backend by itself.
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
 Optional:
-
 - `memory.team_reads_member_memory: true` allows team-context memory reads to include member agent scopes.
 
 ## Memory Scopes
 
-| Scope | User ID Format               | Description                                |
-| ----- | ---------------------------- | ------------------------------------------ |
-| Agent | `agent_<name>`               | Agent preferences and durable user context |
-| Team  | `team_<agent1>+<agent2>+...` | Shared team conversation memory            |
+| Scope | User ID Format | Description |
+|---|---|---|
+| Agent | `agent_<name>` | Agent preferences and durable user context |
+| Team | `team_<agent1>+<agent2>+...` | Shared team conversation memory |
 
 Notes:
-
 - Team IDs are sorted agent names joined by `+`.
 
 ## Backend: `mem0`
 
 `mem0` keeps the existing behavior:
-
 - semantic retrieval before response
 - automatic extraction after turns
 - storage in Chroma-backed Mem0 collections
@@ -226,15 +223,14 @@ memory:
 High-level behavior:
 
 1. Turns mark sessions dirty.
-1. Background worker picks eligible dirty sessions in bounded batches.
-1. Worker runs a model-driven extraction (not keyword heuristics) to produce durable memories.
-1. If extractor returns `NO_REPLY`, nothing is written.
-1. Successful writes append to memory files via normal memory APIs.
+2. Background worker picks eligible dirty sessions in bounded batches.
+3. Worker runs a model-driven extraction (not keyword heuristics) to produce durable memories.
+4. If extractor returns `NO_REPLY`, nothing is written.
+5. Successful writes append to memory files via normal memory APIs.
 
 ## UI Configuration
 
 The Dashboard **Memory** page supports:
-
 - backend selection (`mem0`, `file`, or `none`)
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
@@ -281,9 +277,9 @@ agents:
     learning_mode: agentic  # Agent controls when to learn
 ```
 
-| Field           | Type   | Default  | Description                                                                                      |
-| --------------- | ------ | -------- | ------------------------------------------------------------------------------------------------ |
-| `learning`      | bool   | `true`   | Enable Agno Learning for the agent                                                               |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `learning` | bool | `true` | Enable Agno Learning for the agent |
 | `learning_mode` | string | `always` | `always`: automatic extraction after every turn. `agentic`: agent decides via tool when to learn |
 
 Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly overridden.

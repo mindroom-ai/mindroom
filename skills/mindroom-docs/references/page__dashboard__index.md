@@ -183,41 +183,41 @@ The dashboard communicates with the backend API at `/api/`:
 
 ### Configuration
 
-| Method | Endpoint                     | Description                                                 |
-| ------ | ---------------------------- | ----------------------------------------------------------- |
-| POST   | `/api/config/load`           | Fetch current configuration                                 |
-| PUT    | `/api/config/save`           | Save full configuration                                     |
-| GET    | `/api/config/raw`            | Fetch the raw `config.yaml` source for recovery editing     |
-| PUT    | `/api/config/raw`            | Replace the entire raw `config.yaml` source during recovery |
-| GET    | `/api/config/agents`         | List all agents                                             |
-| POST   | `/api/config/agents`         | Create new agent                                            |
-| PUT    | `/api/config/agents/{id}`    | Update agent                                                |
-| DELETE | `/api/config/agents/{id}`    | Delete agent                                                |
-| GET    | `/api/config/teams`          | List all teams                                              |
-| POST   | `/api/config/teams`          | Create new team                                             |
-| PUT    | `/api/config/teams/{id}`     | Update team                                                 |
-| DELETE | `/api/config/teams/{id}`     | Delete team                                                 |
-| GET    | `/api/config/models`         | List model configurations                                   |
-| PUT    | `/api/config/models/{id}`    | Update model configuration                                  |
-| GET    | `/api/config/room-models`    | Get room model overrides                                    |
-| PUT    | `/api/config/room-models`    | Update room model overrides                                 |
-| POST   | `/api/config/agent-policies` | Get backend-derived agent policies for a draft config       |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/config/load` | Fetch current configuration |
+| PUT | `/api/config/save` | Save full configuration |
+| GET | `/api/config/raw` | Fetch the raw `config.yaml` source for recovery editing |
+| PUT | `/api/config/raw` | Replace the entire raw `config.yaml` source during recovery |
+| GET | `/api/config/agents` | List all agents |
+| POST | `/api/config/agents` | Create new agent |
+| PUT | `/api/config/agents/{id}` | Update agent |
+| DELETE | `/api/config/agents/{id}` | Delete agent |
+| GET | `/api/config/teams` | List all teams |
+| POST | `/api/config/teams` | Create new team |
+| PUT | `/api/config/teams/{id}` | Update team |
+| DELETE | `/api/config/teams/{id}` | Delete team |
+| GET | `/api/config/models` | List model configurations |
+| PUT | `/api/config/models/{id}` | Update model configuration |
+| GET | `/api/config/room-models` | Get room model overrides |
+| PUT | `/api/config/room-models` | Update room model overrides |
+| POST | `/api/config/agent-policies` | Get backend-derived agent policies for a draft config |
 
 When `/api/config/load` returns validation errors, the dashboard fetches `/api/config/raw`, opens the recovery editor, and saves a full replacement through `PUT /api/config/raw` before retrying the structured reload.
 
 ### Credentials
 
-| Method | Endpoint                                                | Description                           |
-| ------ | ------------------------------------------------------- | ------------------------------------- |
-| GET    | `/api/credentials/list`                                 | List services with credentials        |
-| GET    | `/api/credentials/{service}/status`                     | Get credential status                 |
-| GET    | `/api/credentials/{service}`                            | Get credentials for editing           |
-| POST   | `/api/credentials/{service}`                            | Set credentials                       |
-| POST   | `/api/credentials/{service}/api-key`                    | Set API key                           |
-| GET    | `/api/credentials/{service}/api-key`                    | Get masked API key                    |
-| POST   | `/api/credentials/{service}/test`                       | Test credentials validity             |
-| DELETE | `/api/credentials/{service}`                            | Delete credentials                    |
-| POST   | `/api/credentials/{service}/copy-from/{source_service}` | Copy credentials from another service |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/credentials/list` | List services with credentials |
+| GET | `/api/credentials/{service}/status` | Get credential status |
+| GET | `/api/credentials/{service}` | Get credentials for editing |
+| POST | `/api/credentials/{service}` | Set credentials |
+| POST | `/api/credentials/{service}/api-key` | Set API key |
+| GET | `/api/credentials/{service}/api-key` | Get masked API key |
+| POST | `/api/credentials/{service}/test` | Test credentials validity |
+| DELETE | `/api/credentials/{service}` | Delete credentials |
+| POST | `/api/credentials/{service}/copy-from/{source_service}` | Copy credentials from another service |
 
 Credentials support scoping via query parameters:
 
@@ -226,65 +226,65 @@ Credentials support scoping via query parameters:
 
 ### Knowledge
 
-| Method | Endpoint                                      | Description                                                            |
-| ------ | --------------------------------------------- | ---------------------------------------------------------------------- |
-| GET    | `/api/knowledge/bases`                        | List configured knowledge bases                                        |
-| GET    | `/api/knowledge/bases/{base_id}/files`        | List files in a knowledge base                                         |
-| POST   | `/api/knowledge/bases/{base_id}/upload`       | Upload one or more files for a non-Git-backed base                     |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/knowledge/bases` | List configured knowledge bases |
+| GET | `/api/knowledge/bases/{base_id}/files` | List files in a knowledge base |
+| POST | `/api/knowledge/bases/{base_id}/upload` | Upload one or more files for a non-Git-backed base |
 | DELETE | `/api/knowledge/bases/{base_id}/files/{path}` | Delete a file from disk for a non-Git-backed base and schedule refresh |
-| GET    | `/api/knowledge/bases/{base_id}/status`       | Get indexing status                                                    |
-| POST   | `/api/knowledge/bases/{base_id}/reindex`      | Rebuild the index for a base                                           |
+| GET | `/api/knowledge/bases/{base_id}/status` | Get indexing status |
+| POST | `/api/knowledge/bases/{base_id}/reindex` | Rebuild the index for a base |
 
 ### Skills
 
-| Method | Endpoint                   | Description                                     |
-| ------ | -------------------------- | ----------------------------------------------- |
-| GET    | `/api/skills`              | List all installed skills                       |
-| GET    | `/api/skills/{skill_name}` | Get skill detail (content, origin, edit status) |
-| POST   | `/api/skills`              | Create a new user skill                         |
-| PUT    | `/api/skills/{skill_name}` | Update a user skill's content                   |
-| DELETE | `/api/skills/{skill_name}` | Delete a user skill                             |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/skills` | List all installed skills |
+| GET | `/api/skills/{skill_name}` | Get skill detail (content, origin, edit status) |
+| POST | `/api/skills` | Create a new user skill |
+| PUT | `/api/skills/{skill_name}` | Update a user skill's content |
+| DELETE | `/api/skills/{skill_name}` | Delete a user skill |
 
 ### Schedules
 
-| Method | Endpoint                   | Description                               |
-| ------ | -------------------------- | ----------------------------------------- |
-| GET    | `/api/schedules`           | List scheduled tasks (filterable by room) |
-| PUT    | `/api/schedules/{task_id}` | Edit a scheduled task                     |
-| DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task                   |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/schedules` | List scheduled tasks (filterable by room) |
+| PUT | `/api/schedules/{task_id}` | Edit a scheduled task |
+| DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
 ### Workers
 
-| Method | Endpoint               | Description                   |
-| ------ | ---------------------- | ----------------------------- |
-| GET    | `/api/workers`         | List active sandbox workers   |
-| POST   | `/api/workers/cleanup` | Clean up idle sandbox workers |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/workers` | List active sandbox workers |
+| POST | `/api/workers/cleanup` | Clean up idle sandbox workers |
 
 ### Health & Readiness
 
-| Method | Endpoint      | Description                                                                                                                                                                                                                                        |
-| ------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/health` | Returns `{"status": "healthy"}` when the HTTP server is running and Matrix sync is active. Returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` when Matrix sync has been stale for >180s (after watchdog recovery attempts) |
-| GET    | `/api/ready`  | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise                                                                                                    |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Returns `{"status": "healthy"}` when the HTTP server is running and Matrix sync is active. Returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` when Matrix sync has been stale for >180s (after watchdog recovery attempts) |
+| GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
 
 MindRoom tracks runtime phases internally:
 
-| Phase      | Meaning                                               |
-| ---------- | ----------------------------------------------------- |
-| `idle`     | Process not started                                   |
-| `starting` | Startup in progress (detail message available)        |
-| `ready`    | Orchestrator booted, serving requests                 |
-| `failed`   | Startup or runtime failure (detail message available) |
+| Phase | Meaning |
+|-------|---------|
+| `idle` | Process not started |
+| `starting` | Startup in progress (detail message available) |
+| `ready` | Orchestrator booted, serving requests |
+| `failed` | Startup or runtime failure (detail message available) |
 
 Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
 
-| Method | Endpoint                        | Description                      |
-| ------ | ------------------------------- | -------------------------------- |
-| GET    | `/api/tools`                    | List available tools             |
-| GET    | `/api/rooms`                    | List configured rooms            |
-| GET    | `/api/matrix/agents/rooms`      | Get all agents' room memberships |
-| GET    | `/api/matrix/agents/{id}/rooms` | Get specific agent's rooms       |
-| POST   | `/api/matrix/rooms/leave`       | Leave a single room              |
-| POST   | `/api/matrix/rooms/leave-bulk`  | Leave multiple rooms             |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/tools` | List available tools |
+| GET | `/api/rooms` | List configured rooms |
+| GET | `/api/matrix/agents/rooms` | Get all agents' room memberships |
+| GET | `/api/matrix/agents/{id}/rooms` | Get specific agent's rooms |
+| POST | `/api/matrix/rooms/leave` | Leave a single room |
+| POST | `/api/matrix/rooms/leave-bulk` | Leave multiple rooms |

@@ -6,9 +6,9 @@ Instead of waiting for the full response, users see text appear in real time as 
 ## How It Works
 
 1. Agent starts generating a response.
-1. MindRoom sends an initial message with the first chunk of text plus an in-progress marker (`⋯`).
-1. As more text arrives, MindRoom edits the same message with the accumulated content.
-1. When the response is complete, the final edit removes the `⋯` marker.
+2. MindRoom sends an initial message with the first chunk of text plus an in-progress marker (`⋯`).
+3. As more text arrives, MindRoom edits the same message with the accumulated content.
+4. When the response is complete, the final edit removes the `⋯` marker.
 
 ```
 User sends message
@@ -60,10 +60,10 @@ These timing settings are global-only. Agents inherit them from `defaults` and c
 Even when streaming is enabled, MindRoom only streams to users who are currently online.
 This is checked via `should_use_streaming()` which queries the Matrix presence API.
 
-| Presence State | Streaming Used?                        |
-| -------------- | -------------------------------------- |
-| `online`       | Yes                                    |
-| `unavailable`  | Yes                                    |
+| Presence State | Streaming Used? |
+|----------------|-----------------|
+| `online`       | Yes             |
+| `unavailable`  | Yes             |
 | `offline`      | No (single message sent when complete) |
 
 If the presence check fails, MindRoom defaults to non-streaming (safer, fewer API calls).
@@ -71,7 +71,8 @@ When no requester user ID is available, MindRoom defaults to streaming.
 
 ## In-Progress Marker
 
-While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive. This gives users a visual indicator that the agent is still working.
+While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive.
+This gives users a visual indicator that the agent is still working.
 
 ```
 Hello! I can help you with that ⋯
@@ -88,12 +89,16 @@ The marker is removed on the final edit.
 MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
 
 - **Time-based**: `defaults.streaming.update_interval` sets the steady-state interval between edits (default: 5 seconds).
-- **Character-based**: An edit is also triggered when enough new characters have accumulated. The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
+- **Character-based**: An edit is also triggered when enough new characters have accumulated.
+  The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
 - **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
 - **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
-- **Minimum interval**: A hard floor (0.35s) applies to character-triggered and idle-triggered throttled edits. Time-triggered edits still follow the current ramped interval.
-- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 2.0s without a new delta, but only once `min_char_update_interval` has also elapsed. This is event-driven and does not run on a background timer.
-- **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text. Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
+- **Minimum interval**: A hard floor (0.35s) applies to character-triggered and idle-triggered throttled edits.
+  Time-triggered edits still follow the current ramped interval.
+- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 2.0s without a new delta, but only once `min_char_update_interval` has also elapsed.
+  This is event-driven and does not run on a background timer.
+- **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text.
+  Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
 
 ## Tool Calls During Streaming
 
@@ -113,7 +118,8 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 
 ## Cancellation and Errors
 
-Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)). An explicit user stop finalizes the streamed message with:
+Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
+An explicit user stop finalizes the streamed message with:
 
 ```
 <partial text so far>
@@ -145,7 +151,8 @@ If an error occurs during streaming, the message is finalized with:
 
 ## Large Streamed Messages
 
-If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body. See [Matrix Integration — Large Messages](https://docs.mindroom.chat/architecture/matrix/#large-messages) for details.
+If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
+See [Matrix Integration — Large Messages](https://docs.mindroom.chat/architecture/matrix/#large-messages) for details.
 
 ## Visibility Toggles
 
@@ -171,7 +178,8 @@ Streaming itself still works — only the cancellation affordance is removed.
 
 ## Room Mode
 
-When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/agents/#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages. This is used for bridges and mobile clients that don't support Matrix threads.
+When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/agents/#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
+This is used for bridges and mobile clients that don't support Matrix threads.
 
 ## Replacement Streaming
 

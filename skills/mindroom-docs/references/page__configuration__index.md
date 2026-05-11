@@ -7,8 +7,8 @@ MindRoom is configured through a `config.yaml` file. This section covers all con
 MindRoom searches for the configuration file in this order (first match wins):
 
 1. `MINDROOM_CONFIG_PATH` environment variable (if set)
-1. `./config.yaml` (current working directory)
-1. `~/.mindroom/config.yaml` (home directory)
+2. `./config.yaml` (current working directory)
+3. `~/.mindroom/config.yaml` (home directory)
 
 Data storage (`mindroom_data/`) is placed next to the config file by default.
 
@@ -20,7 +20,8 @@ mindroom config validate --path /path/to/config.yaml
 
 ## MCP Servers
 
-MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block. See [MCP](https://docs.mindroom.chat/mcp/index.md) for transport-specific config, tool naming, examples, and agent setup.
+MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block.
+See [MCP](https://docs.mindroom.chat/mcp/) for transport-specific config, tool naming, examples, and agent setup.
 
 ## Tool Approval
 
@@ -55,40 +56,41 @@ tool_approval:
 
 ### Core
 
-| Variable                              | Description                                                                                                                                                                             | Default                                     |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `MINDROOM_CONFIG_PATH`                | Path to `config.yaml`                                                                                                                                                                   | `./config.yaml` → `~/.mindroom/config.yaml` |
-| `MINDROOM_STORAGE_PATH`               | Data storage directory                                                                                                                                                                  | `mindroom_data/` next to config             |
-| `MINDROOM_CONFIG_TEMPLATE`            | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path                         |
-| `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Optional base64-encoded 32-byte key for encrypted-at-rest credential files                                                                                                              | unset                                       |
-| `LOG_LEVEL`                           | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`)                                                                                                                  | `INFO`                                      |
-| `MINDROOM_LOGGER_LEVELS`              | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`                                   | unset                                       |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_CONFIG_PATH` | Path to `config.yaml` | `./config.yaml` → `~/.mindroom/config.yaml` |
+| `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
+| `MINDROOM_CONFIG_TEMPLATE` | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path |
+| `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Optional base64-encoded 32-byte key for encrypted-at-rest credential files | unset |
+| `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
+| `MINDROOM_LOGGER_LEVELS` | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING` | unset |
 
 ### Matrix
 
-| Variable             | Description                | Default                     |
-| -------------------- | -------------------------- | --------------------------- |
-| `MATRIX_HOMESERVER`  | Matrix homeserver URL      | `http://localhost:8008`     |
-| `MATRIX_SERVER_NAME` | Server name for federation | *(derived from homeserver)* |
-| `MATRIX_SSL_VERIFY`  | Verify SSL certificates    | `true`                      |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
+| `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
+| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
 
 ### API Keys
 
 Set the API key for each provider you use in `config.yaml`:
 
-| Variable             | Provider                                                            |
-| -------------------- | ------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`  | Anthropic (Claude)                                                  |
-| `OPENAI_API_KEY`     | OpenAI                                                              |
-| `GOOGLE_API_KEY`     | Google (Gemini)                                                     |
-| `OPENROUTER_API_KEY` | OpenRouter                                                          |
-| `DEEPSEEK_API_KEY`   | DeepSeek                                                            |
-| `CEREBRAS_API_KEY`   | Cerebras                                                            |
-| `GROQ_API_KEY`       | Groq                                                                |
-| `OLLAMA_HOST`        | Ollama (host URL, not a key)                                        |
-| `OPENAI_BASE_URL`    | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
+| Variable | Provider |
+|----------|----------|
+| `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `OPENAI_API_KEY` | OpenAI |
+| `GOOGLE_API_KEY` | Google (Gemini) |
+| `OPENROUTER_API_KEY` | OpenRouter |
+| `DEEPSEEK_API_KEY` | DeepSeek |
+| `CEREBRAS_API_KEY` | Cerebras |
+| `GROQ_API_KEY` | Groq |
+| `OLLAMA_HOST` | Ollama (host URL, not a key) |
+| `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
-All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`). See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
+All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
+See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
 
 ### Codex CLI Subscription Auth
 
@@ -98,72 +100,72 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 
 ### Operational
 
-| Variable                                             | Description                                                                                                                                                                                                                                      | Default                          |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
-| `MINDROOM_NAMESPACE`                                 | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars)                                                                                                                                                         | *(none)*                         |
-| `MINDROOM_PORT`                                      | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that                                                                                | `8765`                           |
-| `MINDROOM_API_KEY`                                   | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access)                                                                                                                               | *(none)*                         |
-| `MINDROOM_NO_AUTO_INSTALL_TOOLS`                     | Set to `1`/`true`/`yes` to disable automatic tool dependency installation                                                                                                                                                                        | *(unset — auto-install enabled)* |
-| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | *(wait indefinitely)*            |
-| `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS`      | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence                                                                                                                     | `1.0`                            |
-| `MINDROOM_WORKER_BACKEND`                            | Worker backend for tool execution (`static_runner` or `kubernetes`)                                                                                                                                                                              | `static_runner`                  |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
+| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
+| `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
+| `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
+| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
 
 ### OpenAI-Compatible API
 
-| Variable                              | Description                                                            | Default                                          |
-| ------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
-| `OPENAI_COMPAT_API_KEYS`              | Comma-separated API keys for authenticating `/v1/*` requests           | *(none — locked without this or the flag below)* |
-| `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | *(unset — locked)*                               |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for authenticating `/v1/*` requests | _(none — locked without this or the flag below)_ |
+| `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | _(unset — locked)_ |
 
-See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/index.md) for the full auth matrix.
+See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) for the full auth matrix.
 
 ### Provisioning / Pairing
 
 These are set automatically by `mindroom connect` and stored in `.env`:
 
-| Variable                       | Description                                              |
-| ------------------------------ | -------------------------------------------------------- |
-| `MINDROOM_PROVISIONING_URL`    | Provisioning service URL (e.g., `https://mindroom.chat`) |
-| `MINDROOM_LOCAL_CLIENT_ID`     | Client ID from hosted pairing                            |
-| `MINDROOM_LOCAL_CLIENT_SECRET` | Client secret from hosted pairing                        |
+| Variable | Description |
+|----------|-------------|
+| `MINDROOM_PROVISIONING_URL` | Provisioning service URL (e.g., `https://mindroom.chat`) |
+| `MINDROOM_LOCAL_CLIENT_ID` | Client ID from hosted pairing |
+| `MINDROOM_LOCAL_CLIENT_SECRET` | Client secret from hosted pairing |
 
 ### Frontend / Development
 
-| Variable                       | Description                                                 | Default            |
-| ------------------------------ | ----------------------------------------------------------- | ------------------ |
-| `MINDROOM_FRONTEND_DIST`       | Override path to pre-built frontend assets                  | *(auto-detected)*  |
-| `MINDROOM_AUTO_BUILD_FRONTEND` | Set to `0` to skip automatic frontend build                 | *(enabled)*        |
-| `DOCKER_CONTAINER`             | Set to `true` when running inside the packaged Docker image | *(unset)*          |
-| `BROWSER_EXECUTABLE_PATH`      | Path to browser executable for the browser tool             | *(system default)* |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_FRONTEND_DIST` | Override path to pre-built frontend assets | _(auto-detected)_ |
+| `MINDROOM_AUTO_BUILD_FRONTEND` | Set to `0` to skip automatic frontend build | _(enabled)_ |
+| `DOCKER_CONTAINER` | Set to `true` when running inside the packaged Docker image | _(unset)_ |
+| `BROWSER_EXECUTABLE_PATH` | Path to browser executable for the browser tool | _(system default)_ |
 
 ### Vertex AI
 
-| Variable                         | Description                                  |
-| -------------------------------- | -------------------------------------------- |
-| `ANTHROPIC_VERTEX_PROJECT_ID`    | Google Cloud project ID for Vertex AI Claude |
-| `ANTHROPIC_VERTEX_BASE_URL`      | Custom Vertex AI base URL                    |
-| `CLOUD_ML_REGION`                | Google Cloud region for Vertex AI            |
-| `GOOGLE_CLOUD_PROJECT`           | Google Cloud project ID                      |
-| `GOOGLE_CLOUD_LOCATION`          | Google Cloud region                          |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google service account JSON          |
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_VERTEX_PROJECT_ID` | Google Cloud project ID for Vertex AI Claude |
+| `ANTHROPIC_VERTEX_BASE_URL` | Custom Vertex AI base URL |
+| `CLOUD_ML_REGION` | Google Cloud region for Vertex AI |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID |
+| `GOOGLE_CLOUD_LOCATION` | Google Cloud region |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Google service account JSON |
 
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS`.
 
 ### Worker / Sandbox
 
-| Variable                       | Description                                | Default  |
-| ------------------------------ | ------------------------------------------ | -------- |
-| `MINDROOM_SANDBOX_PROXY_URL`   | Sandbox proxy endpoint URL (static runner) | *(none)* |
-| `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy           | *(none)* |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
+| `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
 
-See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
+See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
 
 ### SaaS-Only
 
-| Variable      | Description                                                     | Default  |
-| ------------- | --------------------------------------------------------------- | -------- |
-| `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only)  | *(none)* |
-| `ACCOUNT_ID`  | Account identity for worker key derivation (SaaS platform only) | *(none)* |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CUSTOMER_ID` | Tenant identity for worker key derivation (SaaS platform only) | _(none)_ |
+| `ACCOUNT_ID` | Account identity for worker key derivation (SaaS platform only) | _(none)_ |
 
 ## Basic Structure
 
@@ -571,19 +573,19 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 
 ## Sections
 
-- [Agents](https://docs.mindroom.chat/configuration/agents/index.md) - Configure individual AI agents
-- [Models](https://docs.mindroom.chat/configuration/models/index.md) - Configure AI model providers
-- [Teams](https://docs.mindroom.chat/configuration/teams/index.md) - Configure multi-agent collaboration
-- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/index.md) - Configure dynamic tool bundles that agents load on demand
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/index.md) - Configure shared agent cultures
-- [Router](https://docs.mindroom.chat/configuration/router/index.md) - Configure message routing
-- [Memory](https://docs.mindroom.chat/memory/index.md) - Configure memory providers and behavior
-- [Knowledge Bases](https://docs.mindroom.chat/knowledge/index.md) - Configure file-backed knowledge bases
-- [Voice](https://docs.mindroom.chat/voice/index.md) - Configure speech-to-text voice processing
-- [Authorization](https://docs.mindroom.chat/authorization/index.md) - Configure user and room access control
-- [Matrix Space](https://docs.mindroom.chat/matrix-space/index.md) - Configure the root Matrix Space for managed rooms
-- [Skills](https://docs.mindroom.chat/skills/index.md) - Skill format, gating, and allowlists
-- [Plugins](https://docs.mindroom.chat/plugins/index.md) - Plugin manifest and tool/skill loading
+- [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
+- [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
+- [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
+- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/) - Configure dynamic tool bundles that agents load on demand
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
+- [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
+- [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
+- [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
+- [Authorization](https://docs.mindroom.chat/authorization/) - Configure user and room access control
+- [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Configure the root Matrix Space for managed rooms
+- [Skills](https://docs.mindroom.chat/skills/) - Skill format, gating, and allowlists
+- [Plugins](https://docs.mindroom.chat/plugins/) - Plugin manifest and tool/skill loading
 
 ## Notes
 
@@ -593,14 +595,14 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
 - Approval-gated tools require the router to be joined to the Matrix room.
 - In ad-hoc invited rooms accepted through `accept_invites`, approval only works if the router is already joined to that room.
-- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
+- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
+- `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
-- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/index.md))
+- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config

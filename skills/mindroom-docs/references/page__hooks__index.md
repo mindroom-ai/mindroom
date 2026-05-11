@@ -1,7 +1,8 @@
 # Hooks
 
 Hooks let plugins observe, enrich, and transform messages as they flow through MindRoom.
-A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot. Hooks integrate with the existing [plugin system](https://docs.mindroom.chat/plugins/index.md) and are configured through `config.yaml`.
+A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot.
+Hooks integrate with the existing [plugin system](https://docs.mindroom.chat/plugins/) and are configured through `config.yaml`.
 
 ## Quick start
 
@@ -136,27 +137,27 @@ async def block_secret_reads(ctx):
 
 ## Built-in events
 
-| Event                              | Mode        | Context type                    | When it fires                                                                                                                                                                                                                                       | Key mutable fields                      |
-| ---------------------------------- | ----------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| `message:received`                 | Observer    | `MessageReceivedContext`        | After authorization, dedup, and voice normalization; before command parsing, routing, and image/file/video attachment registration                                                                                                                  | `suppress`                              |
-| `message:enrich`                   | Collector   | `MessageEnrichContext`          | After routing resolves target agent/team; before AI generation                                                                                                                                                                                      | `add_metadata()`                        |
-| `system:enrich`                    | Collector   | `SystemEnrichContext`           | After message enrichment; before AI generation                                                                                                                                                                                                      | `add_instruction()`                     |
-| `message:before_response`          | Transformer | `BeforeResponseContext`         | After AI generation; before the first visible Matrix send or edit                                                                                                                                                                                   | `draft.response_text`, `draft.suppress` |
-| `message:final_response_transform` | Transformer | `FinalResponseTransformContext` | On clean streamed success after real visible assistant text has already landed, before one best-effort final edit                                                                                                                                   | `draft.response_text`                   |
-| `message:after_response`           | Observer    | `AfterResponseContext`          | After final Matrix send or edit                                                                                                                                                                                                                     | None (frozen)                           |
-| `message:cancelled`                | Observer    | `CancelledResponseContext`      | After any terminal outcome other than clean success, including explicit cancellation, interruption, suppression, and delivery-failure recovery                                                                                                      | None (frozen)                           |
-| `agent:started`                    | Observer    | `AgentLifecycleContext`         | After bot starts (Matrix login, presence, callbacks registered)                                                                                                                                                                                     | None (frozen)                           |
-| `agent:stopped`                    | Observer    | `AgentLifecycleContext`         | During orderly shutdown                                                                                                                                                                                                                             | None (frozen)                           |
-| `bot:ready`                        | Observer    | `AgentLifecycleContext`         | After bot completes room joins and initial sync                                                                                                                                                                                                     | None (frozen)                           |
-| `session:started`                  | Observer    | `SessionHookContext`            | Once per persisted session, after the response path confirms a new backing session was created for that history scope, during response finalization and before later cleanup such as persisted response-event IDs or transient-enrichment stripping | None (frozen)                           |
-| `compaction:before`                | Observer    | `CompactionHookContext`         | After the compacted message set is prepared and before the compacted session is persisted                                                                                                                                                           | None (frozen)                           |
-| `compaction:after`                 | Observer    | `CompactionHookContext`         | After compaction is persisted, with before/after token counts and the generated summary                                                                                                                                                             | None (frozen)                           |
-| `schedule:fired`                   | Observer    | `ScheduleFiredContext`          | Before scheduled task posts its synthetic message                                                                                                                                                                                                   | `message_text`, `suppress`              |
-| `reaction:received`                | Observer    | `ReactionReceivedContext`       | After built-in reaction handlers (stop, config, interactive)                                                                                                                                                                                        | None (frozen)                           |
-| `room:member_joined`               | Observer    | `RoomMemberJoinedContext`       | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts`                                                                                      | None (frozen)                           |
-| `config:reloaded`                  | Observer    | `ConfigReloadedContext`         | After orchestrator applies new config and restarts affected entities                                                                                                                                                                                | None (frozen)                           |
-| `tool:before_call`                 | Gate        | `ToolBeforeCallContext`         | Immediately before each tool call runs                                                                                                                                                                                                              | `decline()`                             |
-| `tool:after_call`                  | Observer    | `ToolAfterCallContext`          | After each tool call returns, raises, or is declined                                                                                                                                                                                                | None (observer result snapshot)         |
+| Event | Mode | Context type | When it fires | Key mutable fields |
+| --- | --- | --- | --- | --- |
+| `message:received` | Observer | `MessageReceivedContext` | After authorization, dedup, and voice normalization; before command parsing, routing, and image/file/video attachment registration | `suppress` |
+| `message:enrich` | Collector | `MessageEnrichContext` | After routing resolves target agent/team; before AI generation | `add_metadata()` |
+| `system:enrich` | Collector | `SystemEnrichContext` | After message enrichment; before AI generation | `add_instruction()` |
+| `message:before_response` | Transformer | `BeforeResponseContext` | After AI generation; before the first visible Matrix send or edit | `draft.response_text`, `draft.suppress` |
+| `message:final_response_transform` | Transformer | `FinalResponseTransformContext` | On clean streamed success after real visible assistant text has already landed, before one best-effort final edit | `draft.response_text` |
+| `message:after_response` | Observer | `AfterResponseContext` | After final Matrix send or edit | None (frozen) |
+| `message:cancelled` | Observer | `CancelledResponseContext` | After any terminal outcome other than clean success, including explicit cancellation, interruption, suppression, and delivery-failure recovery | None (frozen) |
+| `agent:started` | Observer | `AgentLifecycleContext` | After bot starts (Matrix login, presence, callbacks registered) | None (frozen) |
+| `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None (frozen) |
+| `bot:ready` | Observer | `AgentLifecycleContext` | After bot completes room joins and initial sync | None (frozen) |
+| `session:started` | Observer | `SessionHookContext` | Once per persisted session, after the response path confirms a new backing session was created for that history scope, during response finalization and before later cleanup such as persisted response-event IDs or transient-enrichment stripping | None (frozen) |
+| `compaction:before` | Observer | `CompactionHookContext` | After the compacted message set is prepared and before the compacted session is persisted | None (frozen) |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
+| `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
+| `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
+| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
+| `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
+| `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
+| `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
 
 `message:before_response` only runs for AI-generated replies before the first real visible assistant text is sent.
 For streaming replies, once real visible assistant text has landed, `message:before_response` does not receive a post-visible finalize pass.
@@ -171,28 +172,28 @@ This makes it suitable for lobby-based onboarding hooks that should create or in
 
 ### Default timeouts
 
-| Event                              | Default timeout (ms) |
-| ---------------------------------- | -------------------- |
-| `message:received`                 | 15000                |
-| `message:enrich`                   | 2000                 |
-| `system:enrich`                    | 2000                 |
-| `message:before_response`          | 200                  |
-| `message:final_response_transform` | 200                  |
-| `message:after_response`           | 3000                 |
-| `message:cancelled`                | 3000                 |
-| `reaction:received`                | 500                  |
-| `room:member_joined`               | 3000                 |
-| `schedule:fired`                   | 1000                 |
-| `agent:started`                    | 5000                 |
-| `agent:stopped`                    | 5000                 |
-| `bot:ready`                        | 5000                 |
-| `session:started`                  | 5000                 |
-| `compaction:before`                | 15000                |
-| `compaction:after`                 | 5000                 |
-| `config:reloaded`                  | 5000                 |
-| `tool:before_call`                 | 200                  |
-| `tool:after_call`                  | 300                  |
-| Custom events                      | 1000                 |
+| Event | Default timeout (ms) |
+| --- | --- |
+| `message:received` | 15000 |
+| `message:enrich` | 2000 |
+| `system:enrich` | 2000 |
+| `message:before_response` | 200 |
+| `message:final_response_transform` | 200 |
+| `message:after_response` | 3000 |
+| `message:cancelled` | 3000 |
+| `reaction:received` | 500 |
+| `room:member_joined` | 3000 |
+| `schedule:fired` | 1000 |
+| `agent:started` | 5000 |
+| `agent:stopped` | 5000 |
+| `bot:ready` | 5000 |
+| `session:started` | 5000 |
+| `compaction:before` | 15000 |
+| `compaction:after` | 5000 |
+| `config:reloaded` | 5000 |
+| `tool:before_call` | 200 |
+| `tool:after_call` | 300 |
+| Custom events | 1000 |
 
 For `session:started`, `compaction:before`, and `compaction:after`, `ctx.scope.key` identifies the persisted history scope rather than one unique session row.
 Use `ctx.session_id` as the unique persisted session identifier within that scope.
@@ -215,14 +216,14 @@ async def enrich_weather(ctx):
     ...
 ```
 
-| Parameter    | Type                    | Default           | Description                              |
-| ------------ | ----------------------- | ----------------- | ---------------------------------------- |
-| `event`      | `str`                   | *required*        | Event name to listen for                 |
-| `name`       | `str`                   | function name     | Hook identifier (unique within a plugin) |
-| `priority`   | `int`                   | `100`             | Execution order; lower values run first  |
-| `timeout_ms` | `int \| None`           | per-event default | Override the event's default timeout     |
-| `agents`     | `Iterable[str] \| None` | `None` (all)      | Only fire for these agent names          |
-| `rooms`      | `Iterable[str] \| None` | `None` (all)      | Only fire for these room IDs             |
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `event` | `str` | *required* | Event name to listen for |
+| `name` | `str` | function name | Hook identifier (unique within a plugin) |
+| `priority` | `int` | `100` | Execution order; lower values run first |
+| `timeout_ms` | `int \| None` | per-event default | Override the event's default timeout |
+| `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent names |
+| `rooms` | `Iterable[str] \| None` | `None` (all) | Only fire for these room IDs |
 
 The decorator is annotation-only.
 It stores metadata on the function and has no side effects on import.
@@ -274,17 +275,17 @@ Environment variable substitution works through MindRoom's existing config loadi
 
 ### Hook override fields
 
-| Field        | Type          | Default                      | Description                          |
-| ------------ | ------------- | ---------------------------- | ------------------------------------ |
-| `enabled`    | `bool`        | `true`                       | Disable a hook without removing code |
-| `priority`   | `int \| null` | `null` (use decorator value) | Override the decorator priority      |
-| `timeout_ms` | `int \| null` | `null` (use decorator value) | Override the decorator timeout       |
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | Disable a hook without removing code |
+| `priority` | `int \| null` | `null` (use decorator value) | Override the decorator priority |
+| `timeout_ms` | `int \| null` | `null` (use decorator value) | Override the decorator timeout |
 
 ### Override precedence
 
 1. Decorator defaults in code
-1. Plugin-level `settings` (available to all hooks as `ctx.settings`)
-1. Per-hook overrides: `enabled`, `priority`, `timeout_ms`
+2. Plugin-level `settings` (available to all hooks as `ctx.settings`)
+3. Per-hook overrides: `enabled`, `priority`, `timeout_ms`
 
 If a hook name appears in `hooks:` but the plugin has no hook with that name, MindRoom logs a startup warning and ignores the override.
 
@@ -295,14 +296,17 @@ The `message:enrich` event powers a full enrichment pipeline that injects live c
 ### How it works
 
 1. **Collect**: After routing decides the target agent, MindRoom runs `emit_collect("message:enrich")` which executes all matching enrichment hooks concurrently.
+2. **Render**: Collected `EnrichmentItem` entries are rendered into an XML block appended to the user turn:
 
-1. **Render**: Collected `EnrichmentItem` entries are rendered into an XML block appended to the user turn:
+    ```xml
+    <mindroom_message_context>
+    <item key="location" cache_policy="stable">User is at Home (San Francisco)</item>
+    <item key="weather" cache_policy="volatile">Current weather: 18C, partly cloudy</item>
+    </mindroom_message_context>
+    ```
 
-   `xml <mindroom_message_context> <item key="location" cache_policy="stable">User is at Home (San Francisco)</item> <item key="weather" cache_policy="volatile">Current weather: 18C, partly cloudy</item> </mindroom_message_context>`
-
-1. **AI sees it**: The model receives the enrichment block as part of the current user message, so it has live context for its response.
-
-1. **Replay sees it too**: MindRoom keeps that same enriched user turn in persisted session history, so later replays and prompt-cache shaping can reuse the exact prompt the model saw.
+3. **AI sees it**: The model receives the enrichment block as part of the current user message, so it has live context for its response.
+4. **Replay sees it too**: MindRoom keeps that same enriched user turn in persisted session history, so later replays and prompt-cache shaping can reuse the exact prompt the model saw.
 
 ### Enrichment policy
 
@@ -318,7 +322,7 @@ Use stable keys and deterministic hook output when you want later replays and ca
 
 Use `ctx.add_metadata()` in any `message:enrich` hook:
 
-```xml
+```python
 @hook("message:enrich")
 async def enrich_with_profile(ctx):
     profile = load_profile(ctx.envelope.requester_id)
@@ -355,14 +359,17 @@ Use it when room-scoped or turn-scoped instructions should live in `agent.additi
 ### How it works
 
 1. **Collect**: After `message:enrich` finishes, MindRoom runs `emit_collect("system:enrich")` with a `SystemEnrichContext`, which executes all matching system-enrichment hooks concurrently.
+2. **Render**: Collected `EnrichmentItem` entries are rendered into an XML block for the system prompt:
 
-1. **Render**: Collected `EnrichmentItem` entries are rendered into an XML block for the system prompt:
+    ```xml
+    <mindroom_system_context>
+    <item key="room_tags" cache_policy="stable">Existing thread tags in this room: backend, urgent</item>
+    <item key="active_focus" cache_policy="volatile">Current focus: triage the incident thread before suggesting new work.</item>
+    </mindroom_system_context>
+    ```
 
-   `xml <mindroom_system_context> <item key="room_tags" cache_policy="stable">Existing thread tags in this room: backend, urgent</item> <item key="active_focus" cache_policy="volatile">Current focus: triage the incident thread before suggesting new work.</item> </mindroom_system_context>`
-
-1. **Apply**: For agent runs, MindRoom renders the block into `agent.additional_context` before AI generation.
-
-1. **Apply to teams**: For team runs, MindRoom assigns the same rendered block to both `team.additional_context` and each member agent's `additional_context`.
+3. **Apply**: For agent runs, MindRoom renders the block into `agent.additional_context` before AI generation.
+4. **Apply to teams**: For team runs, MindRoom assigns the same rendered block to both `team.additional_context` and each member agent's `additional_context`.
 
 ### Adding system enrichment items
 
@@ -408,7 +415,7 @@ Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `compaction:*`
 
 ### Defining a custom event hook
 
-```xml
+```python
 from mindroom.hooks import hook
 
 
@@ -490,21 +497,22 @@ Scoped sub-paths (per-room, per-user) are the plugin author's responsibility.
 
 Every hook context includes these fields:
 
-| Field                | Type             | Description                                                                                                                                 |
-| -------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `event_name`         | `str`            | The event that triggered this hook                                                                                                          |
-| `plugin_name`        | `str`            | Name of the plugin owning this hook                                                                                                         |
-| `settings`           | `dict[str, Any]` | Plugin settings from `config.yaml`                                                                                                          |
-| `config`             | `Config`         | Current MindRoom config (read-only)                                                                                                         |
-| `runtime_paths`      | `RuntimePaths`   | Storage paths and environment values                                                                                                        |
-| `logger`             | `BoundLogger`    | Plugin-scoped structured logger                                                                                                             |
-| `correlation_id`     | `str`            | Unique ID per inbound event                                                                                                                 |
-| `runtime_started_at` | `float \| None`  | Unix timestamp for the current runtime freshness boundary, useful when plugin state must ignore cache rows from before the latest bot start |
-| `state_root`         | `Path`           | Plugin state directory (property)                                                                                                           |
+| Field | Type | Description |
+| --- | --- | --- |
+| `event_name` | `str` | The event that triggered this hook |
+| `plugin_name` | `str` | Name of the plugin owning this hook |
+| `settings` | `dict[str, Any]` | Plugin settings from `config.yaml` |
+| `config` | `Config` | Current MindRoom config (read-only) |
+| `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
+| `logger` | `BoundLogger` | Plugin-scoped structured logger |
+| `correlation_id` | `str` | Unique ID per inbound event |
+| `runtime_started_at` | `float \| None` | Unix timestamp for the current runtime freshness boundary, useful when plugin state must ignore cache rows from before the latest bot start |
+| `state_root` | `Path` | Plugin state directory (property) |
 
 Every hook context also exposes the following helpers:
 
-**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
+Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
 For message-derived contexts, MindRoom automatically preserves the original requester in `com.mindroom.original_sender` so downstream routing, permissions, and memory attribution continue to use the human sender instead of the router relay.
 For `ScheduleFiredContext`, omitting `thread_id` inherits `ctx.thread_id`, while passing `thread_id=None` explicitly posts at room level.
 Plain `hook` sends can still dispatch when they satisfy the usual routing rules, for example if the message explicitly mentions an agent or otherwise qualifies as a normal addressed message.
@@ -516,24 +524,28 @@ For `hook_dispatch`, that first synthetic hop also bypasses the usual "ignore ot
 If that first synthetic hop originated from `message:received`, MindRoom skips the origin plugin on the `message:received` re-entry.
 Deeper synthetic hook hops still arrive as messages, but they do not re-enter `message:received` and they stop before further command handling or agent/model dispatch to avoid feedback loops.
 
-**`await ctx.query_room_state(room_id, event_type, state_key=None)`** Queries Matrix room state events.
+**`await ctx.query_room_state(room_id, event_type, state_key=None)`**
+Queries Matrix room state events.
 When `state_key` is provided, returns the content `dict` for that single state event, or `None` on Matrix error response/not-found.
 When `state_key` is `None`, returns a `{state_key: content}` dict of all state events matching `event_type`, or `None` on Matrix error response.
 Returns `None` when no room state querier is available (e.g. no Matrix client bound).
 When both the current bot and the router can query room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
 Transport exceptions from the underlying Matrix client propagate to the hook.
 
-**`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`** Returns the latest visible cached `m.room.message` from `sender` in the given room or thread scope.
+**`await ctx.get_latest_agent_message_snapshot(room_id, sender, *, thread_id=None)`**
+Returns the latest visible cached `m.room.message` from `sender` in the given room or thread scope.
 The helper automatically applies `ctx.runtime_started_at` so room-level reads ignore visible cache rows from before the current bot runtime.
 It returns `None` when no reader is bound, when the advisory cache is disabled or missing usable rows, or when the sender has no cached message in that scope.
 It raises `AgentMessageSnapshotUnavailable` when a thread snapshot exists but fails the cache freshness contract, such as a stale or invalidated thread cache row.
 
-**`await ctx.put_room_state(room_id, event_type, state_key, content)`** Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
+**`await ctx.put_room_state(room_id, event_type, state_key, content)`**
+Writes a single Matrix room state event and returns `True` on success, `False` on Matrix error response.
 Returns `False` when no room state putter is available.
 When both the current bot and the router can write room state, MindRoom tries the current bot first and falls back to the router on Matrix error responses.
 Transport exceptions from the underlying Matrix client propagate to the hook.
 
-**`ctx.matrix_admin`** Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
+**`ctx.matrix_admin`**
+Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
 The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `get_room_members(room_id)`, and `add_room_to_space(space_room_id, room_id)`.
@@ -739,8 +751,8 @@ A manifest with only `name`, `tools_module`, and `skills` behaves exactly as bef
 To adopt hooks:
 
 1. Add `@hook(...)` decorators to the existing `tools_module`. MindRoom auto-scans and discovers them.
-1. Switch the plugin config entry from string to object form only when you need `settings` or per-hook overrides.
-1. Add `hooks_module` to the manifest later if you want to separate hook code from tool code.
+2. Switch the plugin config entry from string to object form only when you need `settings` or per-hook overrides.
+3. Add `hooks_module` to the manifest later if you want to separate hook code from tool code.
 
 ### What stays the same
 

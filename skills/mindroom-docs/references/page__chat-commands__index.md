@@ -5,16 +5,16 @@ Commands start with `!` and are handled by the router agent.
 
 ## Quick Reference
 
-| Command                      | Description                                      |
-| ---------------------------- | ------------------------------------------------ |
-| `!help [topic]`              | Get help on commands or a specific topic         |
-| `!hi`                        | Show the welcome message again                   |
-| `!schedule <task>`           | Schedule a task or reminder                      |
-| `!list_schedules`            | List pending scheduled tasks                     |
-| `!cancel_schedule <id>`      | Cancel a scheduled task                          |
-| `!edit_schedule <id> <task>` | Edit an existing scheduled task                  |
-| `!config <operation>`        | View and modify configuration                    |
-| `!reload-plugins`            | Force-reload all configured plugins (admin only) |
+| Command | Description |
+|---------|-------------|
+| `!help [topic]` | Get help on commands or a specific topic |
+| `!hi` | Show the welcome message again |
+| `!schedule <task>` | Schedule a task or reminder |
+| `!list_schedules` | List pending scheduled tasks |
+| `!cancel_schedule <id>` | Cancel a scheduled task |
+| `!edit_schedule <id> <task>` | Edit an existing scheduled task |
+| `!config <operation>` | View and modify configuration |
+| `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
 
@@ -27,7 +27,8 @@ Voice messages that contain commands (e.g., spoken `!schedule`) are recognized a
 ## Permission Behavior
 
 Commands are subject to the same authorization rules as normal messages.
-The sender must be authorized to interact with agents in the room (via `global_users`, `room_permissions`, or `default_room_access`). See [Authorization](https://docs.mindroom.chat/authorization/index.md) for details.
+The sender must be authorized to interact with agents in the room (via `global_users`, `room_permissions`, or `default_room_access`).
+See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
@@ -93,7 +94,8 @@ These are periodic checks, not real event subscriptions.
 Include `@agent_name` in your schedule to target specific agents.
 The scheduler validates that mentioned agents are available in the room before creating the task.
 
-Schedules use the timezone from `config.yaml` (defaults to UTC). See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
+Schedules use the timezone from `config.yaml` (defaults to UTC).
+See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
 
 ### `!list_schedules`
 
@@ -165,9 +167,9 @@ Changes are validated against the Pydantic config schema before applying.
 When you use `!config set`, MindRoom:
 
 1. Validates the proposed change against the config schema
-1. Shows a preview with the current and new values
-1. Adds reaction buttons to the preview message
-1. Waits for the requester to react with ✅ (confirm) or ❌ (cancel)
+2. Shows a preview with the current and new values
+3. Adds reaction buttons to the preview message
+4. Waits for the requester to react with ✅ (confirm) or ❌ (cancel)
 
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
@@ -183,7 +185,8 @@ Force-reload every configured plugin from disk. Admin-only.
 !reload-plugins
 ```
 
-Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details. This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
+Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details.
+This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
 
 **Reply format:**
 

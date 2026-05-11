@@ -3,7 +3,7 @@
 Dynamic toolkits are groups of tools that agents can load and unload at runtime.
 Define toolkit bundles in the top-level `toolkits` section and grant agents access via `allowed_toolkits` and `initial_toolkits`.
 
-See [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/index.md) for the user-facing guide covering how agents interact with toolkits at runtime.
+See [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/) for the user-facing guide covering how agents interact with toolkits at runtime.
 
 ## Top-Level `toolkits` Section
 
@@ -33,10 +33,10 @@ toolkits:
 
 Each toolkit has:
 
-| Field         | Type   | Default | Description                                                                                                       |
-| ------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------------- |
-| `description` | string | `""`    | Short description shown to agents when they call `list_toolkits()`                                                |
-| `tools`       | list   | `[]`    | Tool entries in the same format as agent `tools` (plain strings or single-key dicts with inline config overrides) |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `description` | string | `""` | Short description shown to agents when they call `list_toolkits()` |
+| `tools` | list | `[]` | Tool entries in the same format as agent `tools` (plain strings or single-key dicts with inline config overrides) |
 
 ## Per-Agent Settings
 
@@ -54,10 +54,10 @@ agents:
     rooms: [lobby]
 ```
 
-| Field              | Type | Default | Description                                                                                                                                      |
-| ------------------ | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `allowed_toolkits` | list | `[]`    | Toolkit names this agent may load at runtime. Each name must match a key in the top-level `toolkits` section                                     |
-| `initial_toolkits` | list | `[]`    | Toolkits loaded automatically when a new session starts. Must be a subset of `allowed_toolkits`. These are sticky — the agent cannot unload them |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allowed_toolkits` | list | `[]` | Toolkit names this agent may load at runtime. Each name must match a key in the top-level `toolkits` section |
+| `initial_toolkits` | list | `[]` | Toolkits loaded automatically when a new session starts. Must be a subset of `allowed_toolkits`. These are sticky — the agent cannot unload them |
 
 When `allowed_toolkits` is non-empty, MindRoom automatically adds the `dynamic_tools` meta-toolkit to the agent.
 You do not need to add `dynamic_tools` to the agent's `tools` list.
@@ -93,7 +93,8 @@ Duplicate entries within one toolkit are rejected.
 
 ### Scope Compatibility
 
-Some integrations are restricted to shared or unscoped execution (see [Worker Routing](https://docs.mindroom.chat/configuration/agents/#worker-routing)). If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit containing a shared-only integration, MindRoom rejects the config at startup.
+Some integrations are restricted to shared or unscoped execution (see [Worker Routing](https://docs.mindroom.chat/configuration/agents/#worker-routing)).
+If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit containing a shared-only integration, MindRoom rejects the config at startup.
 
 The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
 
@@ -162,5 +163,7 @@ defaults:
 
 In this example:
 
-- `assistant` starts with `file`, `shell`, `scheduler` (from defaults), and the `research` toolkit tools. It can load `devops` or `data` on demand, and cannot unload `research` because it is in `initial_toolkits`.
-- `researcher` starts with `duckduckgo`, `arxiv`, and `scheduler`. It can load `data` on demand for analysis work.
+- `assistant` starts with `file`, `shell`, `scheduler` (from defaults), and the `research` toolkit tools.
+  It can load `devops` or `data` on demand, and cannot unload `research` because it is in `initial_toolkits`.
+- `researcher` starts with `duckduckgo`, `arxiv`, and `scheduler`.
+  It can load `data` on demand for analysis work.

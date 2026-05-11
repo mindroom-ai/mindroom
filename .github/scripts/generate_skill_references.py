@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
 import tomllib
 from dataclasses import dataclass
-from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ ZENSICAL_CONFIG = REPO_ROOT / "zensical.toml"
 SKILL_DIR = REPO_ROOT / "skills" / "mindroom-docs"
 REFERENCES_DIR = SKILL_DIR / "references"
 CACHE_PATH = REPO_ROOT / ".cache" / "mindroom-docs-skill-references.sha256"
+_MARKDOWN_LINK_TARGET_PATTERN = re.compile(r"(!?\[[^\]\n]+\]\()([^)]+)(\))")
+_FENCE_PATTERN = re.compile(r"^\s*([`~]{3,})")
 
 
 @dataclass(frozen=True)
@@ -105,7 +108,6 @@ def _mkdocs_config(project: dict[str, Any], nav_pages: list[NavPage], site_dir: 
             "search",
             {
                 "llmstxt": {
-                    "full_output": "llms-full.txt",
                     "sections": {
                         "MindRoom Docs": [page.source_path for page in nav_pages],
                     },
@@ -147,11 +149,17 @@ def _clear_reference_dir() -> None:
             shutil.rmtree(path)
 
 
-def _copy_main_outputs(site_dir: Path) -> None:
-    for filename in ("llms.txt", "llms-full.txt"):
-        source = site_dir / filename
-        assert source.exists(), f"Expected generated file: {source}"
-        shutil.copyfile(source, REFERENCES_DIR / filename)
+def _copy_main_outputs(site_dir: Path, project: dict[str, Any], nav_pages: list[NavPage]) -> None:
+    llms_index = site_dir / "llms.txt"
+    assert llms_index.exists(), f"Expected generated file: {llms_index}"
+    site_url = str(project.get("site_url", "https://docs.mindroom.chat/"))
+    normalized_llms_index = _normalize_published_doc_urls(
+        llms_index.read_text(encoding="utf-8"),
+        site_url=site_url,
+    )
+    (REFERENCES_DIR / "llms.txt").write_text(normalized_llms_index, encoding="utf-8")
+
+    (REFERENCES_DIR / "llms-full.txt").write_text(_source_full_reference(project, nav_pages), encoding="utf-8")
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -162,103 +170,100 @@ def _strip_frontmatter(text: str) -> str:
     return rest if separator else text
 
 
-def _source_paragraph_lines(source_text: str) -> list[list[str]]:
-    paragraphs: list[list[str]] = []
-    current: list[str] = []
-    in_code = False
+def _site_url() -> str:
+    project, _nav_pages = _load_project_and_nav()
+    return str(project.get("site_url", "https://docs.mindroom.chat/"))
 
-    for line in _strip_frontmatter(source_text).splitlines():
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            in_code = not in_code
 
-        starts_block = (
-            in_code
-            or not stripped
-            or line.startswith((" ", "\t"))
-            or stripped.startswith(("#", "-", "*", "|", ">", "```", "===", "!!!"))
-            or stripped[0].isdigit()
-        )
-        if starts_block:
-            if current:
-                paragraphs.append(current)
-                current = []
+def _normalize_published_doc_urls(text: str, *, site_url: str) -> str:
+    published_base_url = re.escape(site_url.rstrip("/") + "/")
+    return re.sub(
+        rf"({published_base_url})([^)\s#]*?)index\.md",
+        lambda match: f"{match.group(1)}{match.group(2)}",
+        text,
+    )
+
+
+def _resolve_source_link(source_path: str, target: str, site_url: str) -> str | None:
+    if (
+        "://" in target
+        or target.startswith(("#", "mailto:", "tel:", "matrix:", "urn:"))
+        or not target.split("#", 1)[0].endswith(".md")
+    ):
+        return None
+
+    target_path, separator, fragment = target.partition("#")
+    source_parent = Path(source_path).parent.as_posix()
+    resolved_source_path = posixpath.normpath(posixpath.join(source_parent, target_path))
+    if resolved_source_path.startswith("../") or resolved_source_path == "..":
+        return None
+    if not (DOCS_DIR / resolved_source_path).exists():
+        return None
+
+    public_path = _source_to_public_path(resolved_source_path)
+    resolved_url = f"{site_url.rstrip('/')}/{public_path}"
+    return f"{resolved_url}{separator}{fragment}" if separator else resolved_url
+
+
+def _source_to_public_path(source_path: str) -> str:
+    source = Path(source_path)
+    if source.name in {"index.md", "README.md"}:
+        parent = source.parent.as_posix()
+        return "" if parent == "." else f"{parent}/"
+    return f"{source.with_suffix('').as_posix()}/"
+
+
+def _rewrite_source_links(text: str, source_path: str, site_url: str) -> str:
+    lines: list[str] = []
+    active_fence: str | None = None
+
+    def replace_match(match: re.Match[str]) -> str:
+        resolved_target = _resolve_source_link(source_path, match.group(2), site_url)
+        if resolved_target is None:
+            return match.group(0)
+        return f"{match.group(1)}{resolved_target}{match.group(3)}"
+
+    for line in text.splitlines(keepends=True):
+        if fence_match := _FENCE_PATTERN.match(line):
+            fence = fence_match.group(1)
+            if active_fence is None:
+                active_fence = fence
+            elif fence[0] == active_fence[0] and len(fence) >= len(active_fence):
+                active_fence = None
+            lines.append(line)
             continue
-
-        current.append(stripped)
-
-    if current:
-        paragraphs.append(current)
-
-    return paragraphs
-
-
-def _source_fence_openings(source_text: str) -> list[str]:
-    openings: list[str] = []
-    in_code = False
-    for line in _strip_frontmatter(source_text).splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("```"):
+        if active_fence is not None:
+            lines.append(line)
             continue
-        if not in_code:
-            openings.append(stripped)
-        in_code = not in_code
-    return openings
+        lines.append(_MARKDOWN_LINK_TARGET_PATTERN.sub(replace_match, line))
+
+    return "".join(lines)
 
 
-def _restore_source_fence_languages(rendered_text: str, source_text: str) -> str:
-    source_openings = _source_fence_openings(source_text)
-    if not source_openings:
-        return rendered_text
-
-    restored_lines: list[str] = []
-    in_code = False
-    opening_index = 0
-    for line in rendered_text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("```"):
-            restored_lines.append(line)
-            continue
-
-        if in_code:
-            restored_lines.append(line)
-            in_code = False
-            continue
-
-        source_opening = source_openings[opening_index] if opening_index < len(source_openings) else stripped
-        opening_index += 1
-        in_code = True
-        if source_opening == stripped:
-            restored_lines.append(line)
-            continue
-
-        prefix = line[: len(line) - len(line.lstrip())]
-        restored_lines.append(f"{prefix}{source_opening}")
-
-    suffix = "\n" if rendered_text.endswith("\n") else ""
-    return "\n".join(restored_lines) + suffix
+def _source_page_reference(page: NavPage, *, site_url: str | None = None) -> str:
+    source_path = DOCS_DIR / page.source_path
+    assert source_path.exists(), f"Expected docs source page: {source_path}"
+    source_text = _strip_frontmatter(source_path.read_text(encoding="utf-8")).strip() + "\n"
+    return _rewrite_source_links(source_text, page.source_path, site_url or _site_url())
 
 
-def _restore_source_line_breaks(rendered_text: str, source_text: str) -> str:
-    for paragraph in _source_paragraph_lines(source_text):
-        for left, right in pairwise(paragraph):
-            rendered_text = rendered_text.replace(f"{left} {right}", f"{left}\n{right}")
+def _source_full_reference(project: dict[str, Any], nav_pages: list[NavPage]) -> str:
+    site_name = str(project.get("site_name", "MindRoom"))
+    site_description = str(project.get("site_description", "MindRoom documentation"))
+    site_url = str(project.get("site_url", "https://docs.mindroom.chat/"))
+    sections = [f"# {site_name}", "", f"> {site_description}", "", "# MindRoom Docs"]
+    sections.extend(_source_page_reference(page, site_url=site_url).strip() for page in nav_pages)
+    return "\n\n".join(section for section in sections if section) + "\n"
 
-    return _restore_source_fence_languages(rendered_text, source_text)
 
-
-def _flatten_page_references(site_dir: Path, nav_pages: list[NavPage]) -> dict[str, str]:
+def _flatten_page_references(site_dir: Path, nav_pages: list[NavPage], project: dict[str, Any]) -> dict[str, str]:
+    site_url = str(project.get("site_url", "https://docs.mindroom.chat/"))
     built_to_reference: dict[str, str] = {}
     for page in nav_pages:
         generated = site_dir / page.built_path
         assert generated.exists(), f"Expected generated page: {generated}"
-        source_path = DOCS_DIR / page.source_path
-        assert source_path.exists(), f"Expected docs source page: {source_path}"
         reference_name = f"page__{page.built_path.replace('/', '__')}"
-        rendered_text = generated.read_text(encoding="utf-8")
-        source_text = source_path.read_text(encoding="utf-8")
-        restored_text = _restore_source_line_breaks(rendered_text, source_text)
-        (REFERENCES_DIR / reference_name).write_text(restored_text, encoding="utf-8")
+        (REFERENCES_DIR / reference_name).write_text(_source_page_reference(page, site_url=site_url), encoding="utf-8")
         built_to_reference[page.built_path] = reference_name
     return built_to_reference
 
@@ -305,8 +310,8 @@ def main() -> None:
         generated_site_dir = _run_mkdocs_build(config, tmp_dir)
 
         _clear_reference_dir()
-        _copy_main_outputs(generated_site_dir)
-        built_to_reference = _flatten_page_references(generated_site_dir, nav_pages)
+        _copy_main_outputs(generated_site_dir, project, nav_pages)
+        built_to_reference = _flatten_page_references(generated_site_dir, nav_pages, project)
         _write_reference_index(nav_pages, built_to_reference)
 
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

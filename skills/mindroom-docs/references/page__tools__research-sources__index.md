@@ -9,19 +9,20 @@ Use these tools when you want paper-only search, encyclopedia summaries, biomedi
 
 ## Tools On This Page
 
-- \[`arxiv`\] - Search ArXiv and optionally download papers to extract page text.
-- \[`wikipedia`\] - Fetch Wikipedia summaries, or update an injected knowledge base from Wikipedia.
-- \[`pubmed`\] - Search PubMed for medical and life-science literature with concise or expanded result formatting.
-- \[`hackernews`\] - Fetch top Hacker News stories and basic user details from the public API.
+- [`arxiv`] - Search ArXiv and optionally download papers to extract page text.
+- [`wikipedia`] - Fetch Wikipedia summaries, or update an injected knowledge base from Wikipedia.
+- [`pubmed`] - Search PubMed for medical and life-science literature with concise or expanded result formatting.
+- [`hackernews`] - Fetch top Hacker News stories and basic user details from the public API.
 
 ## Common Setup Notes
 
 All four tools are `setup_type: none`, so they work out of the box and do not require API keys or OAuth.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so these tools have no dedicated dashboard auth flow.
 Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-MindRoom does not add Matrix runtime-context behavior or worker-routing overrides for these tools. Use [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) instead when you need broader web discovery, news search, or provider-backed search APIs.
+MindRoom does not add Matrix runtime-context behavior or worker-routing overrides for these tools.
+Use [Web Search](https://docs.mindroom.chat/tools/web-search/) instead when you need broader web discovery, news search, or provider-backed search APIs.
 
-## \[`arxiv`\]
+## [`arxiv`]
 
 `arxiv` searches ArXiv by query and can download selected PDFs to extract text from their pages.
 
@@ -33,12 +34,12 @@ Reading papers downloads each PDF locally, parses it with `pypdf`, and returns t
 
 ### Configuration
 
-| Option                     | Type      | Required | Default | Notes                                                                    |
-| -------------------------- | --------- | -------- | ------- | ------------------------------------------------------------------------ |
-| `enable_search_arxiv`      | `boolean` | `no`     | `true`  | Enable `search_arxiv_and_return_articles()`.                             |
-| `enable_read_arxiv_papers` | `boolean` | `no`     | `true`  | Enable `read_arxiv_papers()`.                                            |
-| `all`                      | `boolean` | `no`     | `false` | Enable the full upstream toolkit surface.                                |
-| `download_dir`             | `text`    | `no`     | `null`  | Local directory where downloaded PDFs are stored before text extraction. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_search_arxiv` | `boolean` | `no` | `true` | Enable `search_arxiv_and_return_articles()`. |
+| `enable_read_arxiv_papers` | `boolean` | `no` | `true` | Enable `read_arxiv_papers()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `download_dir` | `text` | `no` | `null` | Local directory where downloaded PDFs are stored before text extraction. |
 
 ### Example
 
@@ -59,9 +60,9 @@ read_arxiv_papers(["2103.03404v1"], pages_to_read=3)
 
 - `read_arxiv_papers()` expects ArXiv IDs such as `2103.03404v1`, not a free-text search query.
 - If `download_dir` is not set, the upstream toolkit writes PDFs to its default local `arxiv_pdfs` directory before parsing them.
-- Use `duckduckgo`, `googlesearch`, or `exa` from [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) when you need broader search beyond ArXiv papers.
+- Use `duckduckgo`, `googlesearch`, or `exa` from [Web Search](https://docs.mindroom.chat/tools/web-search/) when you need broader search beyond ArXiv papers.
 
-## \[`wikipedia`\]
+## [`wikipedia`]
 
 `wikipedia` is the lightweight encyclopedia lookup tool for summary-style retrieval from Wikipedia.
 
@@ -73,10 +74,10 @@ This makes `wikipedia` a simple direct lookup tool by default, with an advanced 
 
 ### Configuration
 
-| Option      | Type      | Required | Default | Notes                                                                                                                                         |
-| ----------- | --------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `knowledge` | `text`    | `no`     | `null`  | Advanced upstream hook for injecting a `Knowledge` object. In typical MindRoom YAML usage you leave this unset and use direct summary search. |
-| `all`       | `boolean` | `no`     | `false` | Exposed in metadata, but the current upstream implementation does not change behavior for this toolkit.                                       |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `knowledge` | `text` | `no` | `null` | Advanced upstream hook for injecting a `Knowledge` object. In typical MindRoom YAML usage you leave this unset and use direct summary search. |
+| `all` | `boolean` | `no` | `false` | Exposed in metadata, but the current upstream implementation does not change behavior for this toolkit. |
 
 ### Example
 
@@ -95,9 +96,9 @@ search_wikipedia("Matrix protocol")
 
 - `knowledge` is not a normal string option at runtime, so the usual MindRoom configuration is just `- wikipedia`.
 - Search uses the upstream `wikipedia.summary()` call, so ambiguous topics work best with a specific query.
-- Use [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) when you need multiple result links or broader web coverage instead of one encyclopedia summary.
+- Use [Web Search](https://docs.mindroom.chat/tools/web-search/) when you need multiple result links or broader web coverage instead of one encyclopedia summary.
 
-## \[`pubmed`\]
+## [`pubmed`]
 
 `pubmed` searches PubMed through NCBI E-utilities and formats article metadata for medical and life-science research.
 
@@ -110,13 +111,13 @@ When `results_expanded` is enabled, each result also includes first author, jour
 
 ### Configuration
 
-| Option                 | Type      | Required | Default                  | Notes                                                                                                   |
-| ---------------------- | --------- | -------- | ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `email`                | `text`    | `no`     | `your_email@example.com` | Contact email sent to NCBI E-utilities. A real email is recommended even though no API key is required. |
-| `max_results`          | `number`  | `no`     | `null`                   | Default result cap used when the call does not pass `max_results`.                                      |
-| `results_expanded`     | `boolean` | `no`     | `false`                  | Return richer metadata instead of the concise title and summary format.                                 |
-| `enable_search_pubmed` | `boolean` | `no`     | `true`                   | Enable `search_pubmed()`.                                                                               |
-| `all`                  | `boolean` | `no`     | `false`                  | Enable the full upstream toolkit surface.                                                               |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `email` | `text` | `no` | `your_email@example.com` | Contact email sent to NCBI E-utilities. A real email is recommended even though no API key is required. |
+| `max_results` | `number` | `no` | `null` | Default result cap used when the call does not pass `max_results`. |
+| `results_expanded` | `boolean` | `no` | `false` | Return richer metadata instead of the concise title and summary format. |
+| `enable_search_pubmed` | `boolean` | `no` | `true` | Enable `search_pubmed()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -140,7 +141,7 @@ search_pubmed("CRISPR therapy", max_results=5)
 - Concise mode truncates long abstracts to about 200 characters, so use `results_expanded: true` when you need more context in each result.
 - The tool returns a JSON list of formatted text blocks rather than a deeply nested article schema.
 
-## \[`hackernews`\]
+## [`hackernews`]
 
 `hackernews` reads the public Hacker News Firebase API for top-story and user-profile data.
 
@@ -152,11 +153,11 @@ User lookups return a smaller JSON object with karma, about text, and total subm
 
 ### Configuration
 
-| Option                    | Type      | Required | Default | Notes                                     |
-| ------------------------- | --------- | -------- | ------- | ----------------------------------------- |
-| `enable_get_top_stories`  | `boolean` | `no`     | `true`  | Enable `get_top_hackernews_stories()`.    |
-| `enable_get_user_details` | `boolean` | `no`     | `true`  | Enable `get_user_details()`.              |
-| `all`                     | `boolean` | `no`     | `false` | Enable the full upstream toolkit surface. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_get_top_stories` | `boolean` | `no` | `true` | Enable `get_top_hackernews_stories()`. |
+| `enable_get_user_details` | `boolean` | `no` | `true` | Enable `get_user_details()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -176,10 +177,10 @@ get_user_details("pg")
 
 - This tool uses public Hacker News endpoints and does not need credentials.
 - `get_top_hackernews_stories()` is best for front-page monitoring and lightweight discussion sourcing, not full web search.
-- Pair it with [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) or [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/index.md) when you want to follow story links and inspect the linked pages themselves.
+- Pair it with [Web Search](https://docs.mindroom.chat/tools/web-search/) or [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) when you want to follow story links and inspect the linked pages themselves.
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [Web Search](https://docs.mindroom.chat/tools/web-search/index.md)
-- [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Web Search](https://docs.mindroom.chat/tools/web-search/)
+- [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/)

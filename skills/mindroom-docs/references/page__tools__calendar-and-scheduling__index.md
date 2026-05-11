@@ -9,20 +9,22 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 ## Tools On This Page
 
-- \[`google_calendar`\] - Read Google Calendar data and, when enabled, create, update, or delete events through Google OAuth.
-- \[`cal_com`\] - Query Cal.com availability and manage bookings through the Cal.com API.
-- \[`scheduler`\] - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
+- [`google_calendar`] - Read Google Calendar data and, when enabled, create, update, or delete events through Google OAuth.
+- [`cal_com`] - Query Cal.com availability and manage bookings through the Cal.com API.
+- [`scheduler`] - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
 
 ## Common Setup Notes
 
 `google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
-It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
+It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
+Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
+`cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
 Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
 MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
-## \[`google_calendar`\]
+## [`google_calendar`]
 
 `google_calendar` wraps Agno's Google Calendar toolkit with MindRoom-scoped Google OAuth credentials.
 
@@ -37,10 +39,10 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 
 ### Configuration
 
-| Option         | Type      | Required | Default   | Notes                                         |
-| -------------- | --------- | -------- | --------- | --------------------------------------------- |
-| `calendar_id`  | `text`    | `no`     | `primary` | Google Calendar ID to query or update.        |
-| `allow_update` | `boolean` | `no`     | `false`   | Expose create, update, and delete operations. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
+| `allow_update` | `boolean` | `no` | `false` | Expose create, update, and delete operations. |
 
 ### Example
 
@@ -72,7 +74,7 @@ create_event(
 - If the Google Calendar connection is missing the required calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
 
-## \[`cal_com`\]
+## [`cal_com`]
 
 `cal_com` talks to the Cal.com v2 booking API for availability lookup and booking management.
 
@@ -85,17 +87,17 @@ The per-method enable flags let you narrow the exposed call surface when an agen
 
 ### Configuration
 
-| Option                         | Type       | Required | Default | Notes                                                                                              |
-| ------------------------------ | ---------- | -------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `api_key`                      | `password` | `no`     | `null`  | Cal.com API key. Configure this through the dashboard or credential store rather than inline YAML. |
-| `event_type_id`                | `number`   | `no`     | `null`  | Default Cal.com event type ID used for slot lookup and new bookings.                               |
-| `user_timezone`                | `text`     | `no`     | `null`  | IANA timezone used when formatting returned booking times.                                         |
-| `enable_get_available_slots`   | `boolean`  | `no`     | `true`  | Enable `get_available_slots()`.                                                                    |
-| `enable_create_booking`        | `boolean`  | `no`     | `true`  | Enable `create_booking()`.                                                                         |
-| `enable_get_upcoming_bookings` | `boolean`  | `no`     | `true`  | Enable `get_upcoming_bookings()`.                                                                  |
-| `enable_reschedule_booking`    | `boolean`  | `no`     | `true`  | Enable `reschedule_booking()`.                                                                     |
-| `enable_cancel_booking`        | `boolean`  | `no`     | `true`  | Enable `cancel_booking()`.                                                                         |
-| `all`                          | `boolean`  | `no`     | `false` | Enable every Cal.com operation at once.                                                            |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Cal.com API key. Configure this through the dashboard or credential store rather than inline YAML. |
+| `event_type_id` | `number` | `no` | `null` | Default Cal.com event type ID used for slot lookup and new bookings. |
+| `user_timezone` | `text` | `no` | `null` | IANA timezone used when formatting returned booking times. |
+| `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
+| `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
+| `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
+| `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `reschedule_booking()`. |
+| `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
+| `all` | `boolean` | `no` | `false` | Enable every Cal.com operation at once. |
 
 ### Example
 
@@ -126,7 +128,7 @@ get_upcoming_bookings(email="alex@example.com")
 - `api_key` is a password field, so MindRoom blocks inline YAML overrides for it in normal authored config.
 - All current requests go to `https://api.cal.com/v2`.
 
-## \[`scheduler`\]
+## [`scheduler`]
 
 `scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent work.
 
@@ -165,12 +167,12 @@ cancel_schedule("a1b2c3d4")
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
-- Use [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
+- Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [Scheduling](https://docs.mindroom.chat/scheduling/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Scheduling](https://docs.mindroom.chat/scheduling/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md)
-- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md)
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
