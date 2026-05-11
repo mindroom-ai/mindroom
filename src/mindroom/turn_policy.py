@@ -452,7 +452,7 @@ class TurnPolicy:
         message: str,
         is_dm: bool,
         *,
-        available_agents_in_room: list[MatrixID] | None = None,
+        available_responders_in_room: list[MatrixID] | None = None,
         materializable_agent_names: set[str] | None = None,
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
@@ -475,8 +475,8 @@ class TurnPolicy:
         )
         if materializable_agent_names is None:
             materializable_agent_names = self.materializable_agent_names()
-        if available_agents_in_room is None:
-            available_agents_in_room = await self.responder_candidates_for_room(
+        if available_responders_in_room is None:
+            available_responders_in_room = await self.responder_candidates_for_room(
                 room,
                 requester_user_id,
                 materializable_agent_names=materializable_agent_names,
@@ -492,7 +492,7 @@ class TurnPolicy:
             runtime_paths=self.deps.runtime_paths,
             is_dm_room=is_dm,
             is_thread=context.is_thread,
-            available_agents_in_room=available_agents_in_room,
+            available_responders_in_room=available_responders_in_room,
             materializable_agent_names=materializable_agent_names,
         )
 
@@ -533,7 +533,7 @@ class TurnPolicy:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         else:
-            available_agents = await self.responder_candidates_for_room(
+            available_responders = await self.responder_candidates_for_room(
                 room,
                 requester_user_id,
             )
@@ -542,11 +542,11 @@ class TurnPolicy:
                 sender_id=requester_user_id,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
-                available_agents_in_room=available_agents,
+                available_responders_in_room=available_responders,
             ):
                 self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
                 plan = _DispatchPlan(kind="ignore", ignore_reason="router")
-            elif len(available_agents) == 1:
+            elif len(available_responders) == 1:
                 self.deps.logger.info("Skipping routing: only one responder candidate")
                 plan = _DispatchPlan(kind="ignore", ignore_reason="router")
             else:
@@ -622,24 +622,26 @@ class TurnPolicy:
             if materializable_agent_names is not None
             else None
         )
-        sender_visible_agents_in_room = await responder_candidate_entities_for_room(
+        sender_visible_responders_in_room = await responder_candidate_entities_for_room(
             self.deps.runtime.client,
             room,
             requester_user_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        available_agents_in_room = self.filter_materializable_responders(
-            sender_visible_agents_in_room,
+        available_responders_in_room = self.filter_materializable_responders(
+            sender_visible_responders_in_room,
             materializable_agent_names=materializable_agent_names,
             live_entity_names=live_entity_names,
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_matrix_id = registry.current_id(self.deps.agent_name)
-        agent_is_responder_candidate = agent_matrix_id.full_id in {agent.full_id for agent in available_agents_in_room}
+        agent_is_responder_candidate = agent_matrix_id.full_id in {
+            agent.full_id for agent in available_responders_in_room
+        }
         team_action = self.explicit_configured_team_rejection_action(
             context,
-            sender_visible_agents_in_room,
+            sender_visible_responders_in_room,
             materializable_agent_names=materializable_agent_names,
             live_entity_names=live_entity_names,
         )
@@ -660,8 +662,8 @@ class TurnPolicy:
             )
             single_visible_self = (
                 not is_thread_history_degraded(context.thread_history)
-                and len(available_agents_in_room) == 1
-                and available_agents_in_room[0] == agent_matrix_id
+                and len(available_responders_in_room) == 1
+                and available_responders_in_room[0] == agent_matrix_id
             )
             if should_continue_active_thread or single_visible_self:
                 return ResponseAction(kind="individual")
@@ -679,10 +681,10 @@ class TurnPolicy:
                 requester_user_id,
                 message,
                 is_dm,
-                available_agents_in_room=sender_visible_agents_in_room,
+                available_responders_in_room=sender_visible_responders_in_room,
                 materializable_agent_names=materializable_agent_names,
             )
-            team_action = self.team_response_action(form_team, available_agents_in_room)
+            team_action = self.team_response_action(form_team, available_responders_in_room)
         if team_action is not None:
             return team_action
 
@@ -697,7 +699,7 @@ class TurnPolicy:
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
-            available_agents_in_room=available_agents_in_room,
+            available_responders_in_room=available_responders_in_room,
         ):
             if agent_is_responder_candidate and self._should_queue_follow_up_in_active_response_thread(
                 context=context,

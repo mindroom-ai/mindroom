@@ -657,7 +657,7 @@ class TurnController:
             return False
         if thread_history is None:
             return False
-        available_agents = await self.deps.turn_policy.responder_candidates_for_room(
+        available_responders = await self.deps.turn_policy.responder_candidates_for_room(
             room,
             requester_user_id,
         )
@@ -666,7 +666,7 @@ class TurnController:
             sender_id=requester_user_id,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            available_agents_in_room=available_agents,
+            available_responders_in_room=available_responders,
         )
 
     async def _coalescing_key_for_event(

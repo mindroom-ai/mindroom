@@ -187,7 +187,7 @@ class TestParseWorkflowSchedule:
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("research"), _mid("email_assistant")],
+            available_responders=[_mid("research"), _mid("email_assistant")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -220,7 +220,7 @@ class TestParseWorkflowSchedule:
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("general")],
+            available_responders=[_mid("general")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -246,7 +246,7 @@ class TestParseWorkflowSchedule:
             "Daily at 9am, give me a market analysis",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("finance")],
+            available_responders=[_mid("finance")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -271,7 +271,7 @@ class TestParseWorkflowSchedule:
             "Schedule something",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("general")],
+            available_responders=[_mid("general")],
         )
 
         assert isinstance(result, _WorkflowParseError)
@@ -302,7 +302,7 @@ class TestParseWorkflowSchedule:
             "remind me later",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[
+            available_responders=[
                 _mid("general"),
                 _mid("research"),
                 _mid("finance"),
@@ -392,7 +392,7 @@ class TestParseWorkflowSchedule:
             "If someone mentions urgent then notify the team immediately",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("general")],
+            available_responders=[_mid("general")],
         )
 
         assert isinstance(result, _WorkflowParseError)

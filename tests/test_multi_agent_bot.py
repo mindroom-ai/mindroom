@@ -8365,7 +8365,7 @@ class TestAgentBot:
             )
 
         assert mock_decide.await_count == 1
-        assert mock_decide.call_args.kwargs["available_agents_in_room"] == [
+        assert mock_decide.call_args.kwargs["available_responders_in_room"] == [
             entity_ids(config, runtime_paths_for(config))["calculator"],
         ]
         assert mock_decide.call_args.kwargs["materializable_agent_names"] == {"calculator"}

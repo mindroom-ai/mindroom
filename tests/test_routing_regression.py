@@ -712,7 +712,7 @@ class TestRoutingRegression:
         assert action.kind == "individual"
         candidate_names = [
             entity_name_for_id(candidate, test_config, runtime_paths)
-            for candidate in mock_should_agent_respond.call_args.kwargs["available_agents_in_room"]
+            for candidate in mock_should_agent_respond.call_args.kwargs["available_responders_in_room"]
         ]
         assert candidate_names == ["alpha"]
 

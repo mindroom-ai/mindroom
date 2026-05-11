@@ -766,18 +766,18 @@ async def _parse_workflow_schedule(
     request: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    available_agents: typing.Sequence[MatrixID],
+    available_responders: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
 ) -> ScheduledWorkflow | _WorkflowParseError:
     """Parse natural language into structured workflow using AI."""
     if current_time is None:
         current_time = datetime.now(UTC)
 
-    assert available_agents, "No agents or teams available for scheduling"
+    assert available_responders, "No agents or teams available for scheduling"
     registry = entity_identity_registry(config, runtime_paths)
     agent_list = ", ".join(
         f"@{entity_name}"
-        for agent_id in available_agents
+        for agent_id in available_responders
         if (entity_name := registry.current_entity_name_for_user_id(agent_id.full_id, include_router=False)) is not None
     )
 
@@ -1348,7 +1348,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    sender_visible_room_agents = await responder_candidate_entities_for_room(
+    sender_visible_room_responders = await responder_candidate_entities_for_room(
         client,
         room,
         scheduled_by,
@@ -1356,9 +1356,9 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         runtime_paths,
     )
 
-    available_agents: list[MatrixID] = []
+    available_responders: list[MatrixID] = []
     if new_thread:
-        available_agents = list(sender_visible_room_agents)
+        available_responders = list(sender_visible_room_responders)
     else:
         if thread_id:
             thread_history = list(
@@ -1369,21 +1369,21 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 ),
             )
             thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
-            available_agents = [agent for agent in thread_agents if agent in sender_visible_room_agents]
+            available_responders = [agent for agent in thread_agents if agent in sender_visible_room_responders]
 
         if mentioned_agents:
             for mid in mentioned_agents:
-                if mid not in available_agents and mid in sender_visible_room_agents:
-                    available_agents.append(mid)
+                if mid not in available_responders and mid in sender_visible_room_responders:
+                    available_responders.append(mid)
 
-        if not available_agents:
-            available_agents = list(sender_visible_room_agents)
+        if not available_responders:
+            available_responders = list(sender_visible_room_responders)
 
-    if not available_agents:
+    if not available_responders:
         return (None, "❌ No agents or teams in this room are allowed to reply to you.")
 
-    # Parse the workflow request with available agents
-    workflow_result = await _parse_workflow_schedule(full_text, config, runtime_paths, available_agents)
+    # Parse the workflow request with available responders.
+    workflow_result = await _parse_workflow_schedule(full_text, config, runtime_paths, available_responders)
 
     if isinstance(workflow_result, _WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"
@@ -1401,7 +1401,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(
         workflow_result.message,
-        available_agents,
+        available_responders,
         config,
         runtime_paths,
     )
