@@ -399,8 +399,8 @@ class _SyncIteration:
             task = getattr(self, attr)
             if task is None:
                 continue
-            setattr(self, attr, None)
             if attr != "sync_task":
+                setattr(self, attr, None)
                 task.cancel()
             try:
                 if attr == "sync_task":
@@ -409,9 +409,13 @@ class _SyncIteration:
                         task,
                         timeout_log_message="Matrix sync iteration cleanup cancellation timed out",
                     )
+                    setattr(self, attr, None)
                     continue
                 await task
-            except (asyncio.CancelledError, _MatrixSyncCancellationTimeoutError, _MatrixSyncStalledError):
+            except _MatrixSyncCancellationTimeoutError:
+                setattr(self, attr, task)
+                raise
+            except (asyncio.CancelledError, _MatrixSyncStalledError):
                 pass
             except Exception:
                 logger.warning("Suppressed error during sync iteration cleanup", exc_info=True)
@@ -616,12 +620,46 @@ async def stop_entities(
         agent_bots.pop(entity_name, None)
 
 
+async def _handle_sync_iteration_cleanup_timeout(
+    bot: AgentBot | TeamBot,
+    iteration: _SyncIteration,
+) -> None:
+    """Hold the supervisor open when iteration cleanup leaves a sync task running."""
+    logger.exception("sync_loop_cleanup_cancellation_timed_out", agent=bot.agent_name)
+    if iteration.sync_task is None:
+        return
+    await _hold_supervisor_until_sync_task_finishes(bot, iteration.sync_task)
+
+
+def _sync_restart_should_stop(bot: AgentBot | TeamBot, retry_count: int, max_retries: int) -> bool:
+    """Return whether the sync restart loop should stop before another attempt."""
+    return not bot.running or (max_retries >= 0 and retry_count >= max_retries)
+
+
+async def _cleanup_sync_iteration_after_attempt(
+    bot: AgentBot | TeamBot,
+    iteration: _SyncIteration,
+    *,
+    prepared_for_sync_shutdown: bool,
+) -> bool:
+    """Clean up one sync attempt and return whether the supervisor must stop."""
+    if not prepared_for_sync_shutdown:
+        await bot.prepare_for_sync_shutdown()
+    try:
+        await iteration.cancel()
+    except _MatrixSyncCancellationTimeoutError:
+        await _handle_sync_iteration_cleanup_timeout(bot, iteration)
+        return True
+    return False
+
+
 async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
     """Run sync_forever with automatic restart on failure."""
     retry_count = 0
     while bot.running and (max_retries < 0 or retry_count < max_retries):
         iteration: _SyncIteration | None = None
         prepared_for_sync_shutdown = False
+        should_stop_after_cleanup = False
         try:
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
@@ -649,11 +687,13 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
         finally:
             if iteration is not None:
-                if not prepared_for_sync_shutdown:
-                    await bot.prepare_for_sync_shutdown()
-                await iteration.cancel()
+                should_stop_after_cleanup = await _cleanup_sync_iteration_after_attempt(
+                    bot,
+                    iteration,
+                    prepared_for_sync_shutdown=prepared_for_sync_shutdown,
+                )
 
-        if not bot.running or (max_retries >= 0 and retry_count >= max_retries):
+        if should_stop_after_cleanup or _sync_restart_should_stop(bot, retry_count, max_retries):
             break
 
         wait_time = retry_delay_seconds(
