@@ -1178,20 +1178,20 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        available_agents = await self.deps.turn_policy.responder_candidates_for_room(
+        responder_candidates = await self.deps.turn_policy.responder_candidates_for_room(
             room,
             permission_sender_id,
         )
-        if not available_agents:
+        if not responder_candidates:
             self.deps.logger.debug(
-                "No agents to route to in this room for sender",
+                "No responders to route to in this room for sender",
                 sender=permission_sender_id,
             )
             return
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-            if len(available_agents) == 1:
-                suggested_entity = self._managed_entity_name_for_sender(available_agents[0].full_id)
+            if len(responder_candidates) == 1:
+                suggested_entity = self._managed_entity_name_for_sender(responder_candidates[0].full_id)
                 self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
             else:
                 self.deps.logger.info("Handling AI routing", event_id=event.event_id)
@@ -1199,7 +1199,7 @@ class TurnController:
                 routing_text = message or event.body
                 suggested_entity = await suggest_responder_for_message(
                     routing_text,
-                    available_agents,
+                    responder_candidates,
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
                     thread_history,

@@ -95,6 +95,15 @@ def _validate_spawn_metadata(summary: object, tag: object) -> tuple[str, str]:
     return normalized_summary, normalized_tag
 
 
+def _validate_spawn_request(task: str, summary: object, tag: object) -> tuple[str, str, str]:
+    normalized_task = task.strip()
+    if not normalized_task:
+        msg = "Task cannot be empty."
+        raise ValueError(msg)
+    normalized_summary, normalized_tag = _validate_spawn_metadata(summary, tag)
+    return normalized_task, normalized_summary, normalized_tag
+
+
 def _registry_path(context: ToolRuntimeContext) -> Path:
     assert context.storage_path is not None
     return context.storage_path / "subagents" / "session_registry.json"
@@ -765,21 +774,10 @@ class SubAgentsTools(Toolkit):
         if context is None:
             return _context_error("sessions_spawn")
 
-        normalized_task = task.strip()
-        validation_error: str | None = None
-        if not normalized_task:
-            validation_error = _payload("sessions_spawn", "error", message="Task cannot be empty.")
-            normalized_summary = ""
-            normalized_tag = ""
-        else:
-            try:
-                normalized_summary, normalized_tag = _validate_spawn_metadata(summary, tag)
-            except (ThreadTagsError, ValueError) as exc:
-                validation_error = _payload("sessions_spawn", "error", message=str(exc))
-                normalized_summary = ""
-                normalized_tag = ""
-        if validation_error is not None:
-            return validation_error
+        try:
+            normalized_task, normalized_summary, normalized_tag = _validate_spawn_request(task, summary, tag)
+        except (ThreadTagsError, ValueError) as exc:
+            return _payload("sessions_spawn", "error", message=str(exc))
 
         available_agents = await _available_subagent_names(context)
         agent_id_error = _agent_id_error(

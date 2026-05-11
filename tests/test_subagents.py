@@ -73,6 +73,7 @@ def _make_config(
         "research": _make_agent_config(role="Research topics"),
     }
     config.teams = {}
+    config.mindroom_user = None
     config.get_domain = MagicMock(return_value="localhost")
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)

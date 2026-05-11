@@ -16,11 +16,18 @@ if TYPE_CHECKING:
 _DEFAULT_TEST_PASSWORD = "mock_test_password"  # noqa: S105
 
 
+class MindRoomUserLike(Protocol):
+    """Minimal internal-user config surface needed by identity fixtures."""
+
+    username: str
+
+
 class ConfigLike(Protocol):
     """Minimal config surface needed for persisted identity fixtures."""
 
     agents: Mapping[str, object]
     teams: Mapping[str, object]
+    mindroom_user: MindRoomUserLike | None
 
     def get_domain(self, runtime_paths: RuntimePaths) -> str:
         """Return the Matrix domain for the runtime paths."""
@@ -46,7 +53,7 @@ def persist_entity_accounts(
         username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
         state.add_account(account_key, username, password, domain=domain)
         changed = True
-    mindroom_user = vars(config).get("mindroom_user")
+    mindroom_user = config.mindroom_user
     if mindroom_user is not None and managed_account_key("user") not in state.accounts:
         state.add_account(
             managed_account_key("user"),

@@ -13439,7 +13439,7 @@ Streaming behavior is configured in `config.yaml` with `defaults.enable_streamin
 
 ## Agent Users
 
-Each agent, team, and the router gets its own Matrix user.
+Each agent, team, and router has its own Matrix user.
 
 The configured alias is the user-facing runtime handle, such as `@assistant` in chat.
 

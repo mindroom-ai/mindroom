@@ -215,7 +215,7 @@ You: @research @analyst What are the latest AI breakthroughs?
 [Agents collaborate to research and analyze]
 ```
 
-## How Agents And Teams Work
+## How Agents and Teams Work
 
 ### Responder Rules
 Agents and teams respond using Matrix thread relations to keep conversations organized.
