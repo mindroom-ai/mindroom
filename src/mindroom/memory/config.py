@@ -138,7 +138,6 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     else:
         # Fallback if no LLM configured
         logger.warning("No memory LLM configured, using default ollama/llama3.2")
-        ollama_host = get_ollama_host(runtime_paths) or "http://localhost:11434"
 
         llm_config = {
             "provider": "ollama",

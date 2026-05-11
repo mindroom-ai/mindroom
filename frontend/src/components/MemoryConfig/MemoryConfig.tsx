@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
-import { defaultConnectionIdForPurpose, type Config as MindRoomConfig } from '@/types/config';
-import { EditorPanel } from '@/components/shared/EditorPanel';
-import { FieldGroup } from '@/components/shared/FieldGroup';
-import { Input } from '@/components/ui/input';
+import {
+  defaultConnectionIdForPurpose,
+  type Config as MindRoomConfig,
+  type MemoryBackend,
+} from "@/types/config";
+import { EditorPanel } from "@/components/shared/EditorPanel";
+import { FieldGroup } from "@/components/shared/FieldGroup";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -52,9 +56,9 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   embedder: {
     provider: "openai",
     config: {
-      model: 'text-embedding-3-small',
-      connection: '',
-      host: '',
+      model: "text-embedding-3-small",
+      connection: "",
+      host: "",
     },
   },
   file: {
@@ -165,9 +169,9 @@ function defaultEmbedderConfig(
   provider: string,
 ): MemorySettings["embedder"]["config"] {
   return {
-    model: DEFAULT_MODELS[provider] || '',
-    connection: '',
-    host: DEFAULT_HOSTS[provider] || '',
+    model: DEFAULT_MODELS[provider] || "",
+    connection: "",
+    host: DEFAULT_HOSTS[provider] || "",
   };
 }
 
@@ -179,8 +183,8 @@ export function MemoryConfig() {
   );
   const defaultEmbedderConnection = defaultConnectionIdForPurpose(
     localConfig.embedder.provider,
-    'embedder',
-    config?.connections
+    "embedder",
+    config?.connections,
   );
 
   useEffect(() => {
@@ -328,7 +332,9 @@ export function MemoryConfig() {
         ...localConfig.embedder,
         config: {
           ...localConfig.embedder.config,
-          connection: normalizeOptionalConnection(localConfig.embedder.config.connection || ''),
+          connection: normalizeOptionalConnection(
+            localConfig.embedder.config.connection || "",
+          ),
         },
       },
     });
@@ -461,16 +467,18 @@ export function MemoryConfig() {
             helperText={
               defaultEmbedderConnection
                 ? `Leave empty to use ${defaultEmbedderConnection}.`
-                : 'No default connection is configured. Set an explicit connection id if this provider needs credentials.'
+                : "No default connection is configured. Set an explicit connection id if this provider needs credentials."
             }
             htmlFor="memory-embedder-connection"
           >
             <Input
               id="memory-embedder-connection"
               type="text"
-              value={localConfig.embedder.config.connection || ''}
-              onChange={e => handleConnectionChange(e.target.value)}
-              placeholder={defaultEmbedderConnection ?? 'explicit connection id'}
+              value={localConfig.embedder.config.connection || ""}
+              onChange={(e) => handleConnectionChange(e.target.value)}
+              placeholder={
+                defaultEmbedderConnection ?? "explicit connection id"
+              }
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
@@ -895,16 +903,16 @@ export function MemoryConfig() {
           )}
         </div>
 
-        {localConfig.backend !== 'file' &&
-          localConfig.embedder.provider === 'openai' &&
+        {localConfig.backend !== "file" &&
+          localConfig.embedder.provider === "openai" &&
           !localConfig.embedder.config.connection &&
           defaultEmbedderConnection && (
             <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
               <p className="text-sm text-yellow-800 dark:text-yellow-300">
-                <strong>Note:</strong> This embedder will use the default{' '}
+                <strong>Note:</strong> This embedder will use the default{" "}
                 <code className="rounded bg-yellow-100 px-1 py-0.5 text-[10px] dark:bg-yellow-900/40">
                   {defaultEmbedderConnection}
-                </code>{' '}
+                </code>{" "}
                 connection unless you set an explicit connection name here.
               </p>
             </div>
@@ -942,10 +950,10 @@ export function MemoryConfig() {
               <span className="font-mono text-foreground">
                 {localConfig.embedder.config.connection ||
                   defaultEmbedderConnection ||
-                  'not configured'}
+                  "not configured"}
               </span>
             </div>
-            {localConfig.backend === 'file' && (
+            {localConfig.backend === "file" && (
               <>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Auto Flush:</span>

@@ -88,11 +88,13 @@ memory:
       model: llama3.2
 ```
 
-When you use a credentialed memory LLM or embedder, set `connection` on that consuming config. OpenAI embedders default to `openai/embeddings`. Memory LLMs default to `provider/default`.
+When you use a credentialed memory LLM or embedder, set `connection` on that consuming config.
+OpenAI embedders default to `openai/embeddings`.
+Memory LLMs default to `provider/default`.
 
 Example with an explicit OpenAI memory LLM connection:
 
-```
+```yaml
 memory:
   llm:
     provider: openai

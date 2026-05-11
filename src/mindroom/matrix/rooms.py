@@ -43,8 +43,22 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+__all__ = [
+    "ensure_all_rooms_exist",
+    "ensure_root_space",
+    "ensure_user_in_rooms",
+    "filter_non_dm_rooms",
+    "get_room_alias_from_id",
+    "is_dm_room",
+    "leave_non_dm_rooms",
+]
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _ROOT_SPACE_AVATAR_KEY = "root_space"
+
+
+def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the persisted room alias for one Matrix room ID."""
+    return matrix_state.get_room_alias_from_id(room_id, runtime_paths)
 
 
 async def _set_room_avatar_if_available(

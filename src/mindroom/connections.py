@@ -74,7 +74,7 @@ def canonical_connection_provider(provider: str) -> str:
     return "google" if normalized == "gemini" else normalized
 
 
-def default_connection_ids(
+def _default_connection_ids(
     *,
     provider: str,
     purpose: ConnectionPurpose,
@@ -102,7 +102,7 @@ def default_connection_id(
     purpose: ConnectionPurpose,
 ) -> str | None:
     """Return the primary stable default connection id for one provider/purpose pair."""
-    connection_ids = default_connection_ids(provider=provider, purpose=purpose)
+    connection_ids = _default_connection_ids(provider=provider, purpose=purpose)
     return connection_ids[0] if connection_ids else None
 
 
@@ -212,11 +212,12 @@ def resolve_connection(
     purpose: ConnectionPurpose,
     connection_name: str | None = None,
     runtime_paths: RuntimePaths,
+    validate_credentials: bool = True,
 ) -> ResolvedConnection:
     """Resolve one named connection and load its shared credentials when needed."""
     canonical_provider = canonical_connection_provider(provider)
     expected_auth_kind = required_connection_auth_kind(provider=provider, purpose=purpose)
-    conventional_default_ids = default_connection_ids(provider=provider, purpose=purpose)
+    conventional_default_ids = _default_connection_ids(provider=provider, purpose=purpose)
     resolved_connection_id = connection_name
     if resolved_connection_id is None:
         resolved_connection_id = _configured_default_connection_id(config, conventional_default_ids)
@@ -273,5 +274,6 @@ def resolve_connection(
         service=connection_config.service,
         credentials=credentials,
     )
-    _validate_connection_credentials(resolved_connection)
+    if validate_credentials:
+        _validate_connection_credentials(resolved_connection)
     return resolved_connection

@@ -1,4 +1,10 @@
-import { type Dispatch, type ReactNode, type SetStateAction, useMemo, useState } from 'react';
+import {
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+  useMemo,
+  useState,
+} from "react";
 import {
   type Column,
   type ColumnDef,
@@ -16,16 +22,26 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { EditorPanel } from '@/components/shared/EditorPanel';
-import { showSaveFailureToastIfNeeded } from '@/components/shared';
-import { ArrowUpDown, Pencil, Plus, Save, Settings, Trash2 } from 'lucide-react';
-import { toast } from '@/components/ui/toaster';
-import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
-import { ProviderLogo } from './ProviderLogos';
-import { getProviderInfo, getProviderList } from '@/lib/providers';
-import { defaultConnectionIdForPurpose, type ProviderType } from '@/types/config';
+} from "@/components/ui/select";
+import { EditorPanel } from "@/components/shared/EditorPanel";
+import { showSaveFailureToastIfNeeded } from "@/components/shared";
+import {
+  ArrowUpDown,
+  Pencil,
+  Plus,
+  Save,
+  Settings,
+  Trash2,
+} from "lucide-react";
+import { toast } from "@/components/ui/toaster";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
+import { ProviderLogo } from "./ProviderLogos";
+import { getProviderInfo, getProviderList } from "@/lib/providers";
+import {
+  defaultConnectionIdForPurpose,
+  type ProviderType,
+} from "@/types/config";
 
 interface RowDraft {
   modelName: string;
@@ -48,17 +64,19 @@ interface ModelRowData {
 }
 
 const EMPTY_DRAFT: RowDraft = {
-  modelName: '',
-  provider: 'openrouter',
-  modelId: '',
-  baseUrl: '',
-  contextWindow: '',
-  connection: '',
+  modelName: "",
+  provider: "openrouter",
+  modelId: "",
+  baseUrl: "",
+  contextWindow: "",
+  connection: "",
 };
 
-const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
-function getOpenAIBaseUrl(modelConfig: { extra_kwargs?: Record<string, unknown> }): string | null {
+function getOpenAIBaseUrl(modelConfig: {
+  extra_kwargs?: Record<string, unknown>;
+}): string | null {
   const extraKwargs = modelConfig.extra_kwargs;
   if (!extraKwargs) {
     return null;
@@ -129,60 +147,74 @@ function renderTableValue<TContext>(
   return renderer;
 }
 
-function renderOpenAIEndpointEditor(draft: RowDraft, setDraft: Dispatch<SetStateAction<RowDraft>>) {
-  if (draft.provider !== 'openai') {
+function renderOpenAIEndpointEditor(
+  draft: RowDraft,
+  setDraft: Dispatch<SetStateAction<RowDraft>>,
+) {
+  if (draft.provider !== "openai") {
     return null;
   }
 
   return (
-    <div className="space-y-2" onClick={event => event.stopPropagation()}>
+    <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
       <Input
         value={draft.baseUrl}
-        onChange={event => {
+        onChange={(event) => {
           const baseUrl = event.target.value;
-          setDraft(current => ({ ...current, baseUrl }));
+          setDraft((current) => ({ ...current, baseUrl }));
         }}
-        onClick={event => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
         placeholder={DEFAULT_OPENAI_BASE_URL}
         className="h-8 text-xs"
       />
       <p className="text-xs text-muted-foreground">
-        Leave empty to use{' '}
-        <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{DEFAULT_OPENAI_BASE_URL}</code>.
+        Leave empty to use{" "}
+        <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+          {DEFAULT_OPENAI_BASE_URL}
+        </code>
+        .
       </p>
     </div>
   );
 }
 
-function renderContextWindowEditor(draft: RowDraft, setDraft: Dispatch<SetStateAction<RowDraft>>) {
+function renderContextWindowEditor(
+  draft: RowDraft,
+  setDraft: Dispatch<SetStateAction<RowDraft>>,
+) {
   return (
-    <div className="space-y-2" onClick={event => event.stopPropagation()}>
+    <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
       <Input
         value={draft.contextWindow}
-        onChange={event => {
+        onChange={(event) => {
           const contextWindow = event.target.value;
-          setDraft(current => ({ ...current, contextWindow }));
+          setDraft((current) => ({ ...current, contextWindow }));
         }}
-        onClick={event => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
         placeholder="optional context window"
         inputMode="numeric"
         className="h-8 text-xs"
       />
       <p className="text-xs text-muted-foreground">
-        Required for compaction-aware budgeting when the provider does not report it elsewhere.
+        Required for compaction-aware budgeting when the provider does not
+        report it elsewhere.
       </p>
     </div>
   );
 }
 
-function renderConnectionSummary(row: Pick<ModelRowData, 'connection' | 'effectiveConnection'>) {
+function renderConnectionSummary(
+  row: Pick<ModelRowData, "connection" | "effectiveConnection">,
+) {
   if (row.connection) {
     return (
       <div className="space-y-1">
         <Badge variant="outline" className="text-xs">
           Explicit connection
         </Badge>
-        <p className="font-mono text-xs text-muted-foreground">{row.connection}</p>
+        <p className="font-mono text-xs text-muted-foreground">
+          {row.connection}
+        </p>
       </div>
     );
   }
@@ -193,7 +225,9 @@ function renderConnectionSummary(row: Pick<ModelRowData, 'connection' | 'effecti
         <Badge variant="outline" className="text-xs">
           Configured default
         </Badge>
-        <p className="font-mono text-xs text-muted-foreground">{row.effectiveConnection}</p>
+        <p className="font-mono text-xs text-muted-foreground">
+          {row.effectiveConnection}
+        </p>
       </div>
     );
   }
@@ -203,7 +237,9 @@ function renderConnectionSummary(row: Pick<ModelRowData, 'connection' | 'effecti
       <Badge variant="outline" className="text-xs">
         No default connection
       </Badge>
-      <p className="font-mono text-xs text-muted-foreground">Set an explicit connection id.</p>
+      <p className="font-mono text-xs text-muted-foreground">
+        Set an explicit connection id.
+      </p>
     </div>
   );
 }
@@ -211,28 +247,32 @@ function renderConnectionSummary(row: Pick<ModelRowData, 'connection' | 'effecti
 function renderConnectionEditor(
   draft: RowDraft,
   setDraft: Dispatch<SetStateAction<RowDraft>>,
-  defaultConnection: string | null
+  defaultConnection: string | null,
 ) {
   return (
-    <div className="space-y-2" onClick={event => event.stopPropagation()}>
+    <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
       <Input
         value={draft.connection}
-        onChange={event => {
+        onChange={(event) => {
           const connection = event.target.value;
-          setDraft(current => ({ ...current, connection }));
+          setDraft((current) => ({ ...current, connection }));
         }}
-        onClick={event => event.stopPropagation()}
-        placeholder={defaultConnection ?? 'explicit connection id'}
+        onClick={(event) => event.stopPropagation()}
+        placeholder={defaultConnection ?? "explicit connection id"}
         className="h-8 text-xs"
       />
       {defaultConnection ? (
         <p className="text-xs text-muted-foreground">
-          Leave empty to use{' '}
-          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{defaultConnection}</code>.
+          Leave empty to use{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            {defaultConnection}
+          </code>
+          .
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">
-          No default connection is configured for this provider. Set an explicit connection id.
+          No default connection is configured for this provider. Set an explicit
+          connection id.
         </p>
       )}
     </div>
@@ -262,9 +302,9 @@ export function ModelConfig() {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
-      baseUrl: row.openAIBaseUrl || '',
-      contextWindow: row.contextWindow != null ? String(row.contextWindow) : '',
-      connection: row.connection || '',
+      baseUrl: row.openAIBaseUrl || "",
+      contextWindow: row.contextWindow != null ? String(row.contextWindow) : "",
+      connection: row.connection || "",
     });
   };
 
@@ -422,7 +462,7 @@ export function ModelConfig() {
       delete nextModelConfig.connection;
     }
 
-    if (rowDraft.provider !== 'ollama') {
+    if (rowDraft.provider !== "ollama") {
       delete nextModelConfig.host;
     }
 
@@ -495,7 +535,7 @@ export function ModelConfig() {
     if (normalizedConnection) {
       nextModelConfig.connection = normalizedConnection;
     }
-    if (newRowDraft.provider === 'openai' && normalizedBaseUrl) {
+    if (newRowDraft.provider === "openai" && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
     }
     if (normalizedContextWindow != null) {
@@ -540,11 +580,13 @@ export function ModelConfig() {
   const rows = useMemo<ModelRowData[]>(() => {
     return Object.entries(models).map(([modelName, modelConfig]) => {
       const openAIBaseUrl =
-        modelConfig.provider === 'openai' ? getOpenAIBaseUrl(modelConfig) : null;
+        modelConfig.provider === "openai"
+          ? getOpenAIBaseUrl(modelConfig)
+          : null;
       const configuredDefaultConnection = defaultConnectionIdForPurpose(
         modelConfig.provider,
-        'chat_model',
-        config?.connections
+        "chat_model",
+        config?.connections,
       );
 
       return {
@@ -554,9 +596,10 @@ export function ModelConfig() {
         modelId: modelConfig.id,
         openAIBaseUrl,
         contextWindow: modelConfig.context_window ?? null,
-        connection: normalizeConnection(modelConfig.connection ?? ''),
+        connection: normalizeConnection(modelConfig.connection ?? ""),
         effectiveConnection:
-          normalizeConnection(modelConfig.connection ?? '') ?? configuredDefaultConnection,
+          normalizeConnection(modelConfig.connection ?? "") ??
+          configuredDefaultConnection,
       };
     });
   }, [config?.connections, models]);
@@ -617,8 +660,8 @@ export function ModelConfig() {
                     ? {
                         ...current,
                         provider,
-                        baseUrl: provider === 'openai' ? current.baseUrl : '',
-                        connection: '',
+                        baseUrl: provider === "openai" ? current.baseUrl : "",
+                        connection: "",
                       }
                     : current,
                 );
@@ -705,9 +748,11 @@ export function ModelConfig() {
       },
     },
     {
-      id: 'connection',
-      accessorFn: row => row.effectiveConnection,
-      header: ({ column }) => <SortableHeader label="Connection" column={column} />,
+      id: "connection",
+      accessorFn: (row) => row.effectiveConnection,
+      header: ({ column }) => (
+        <SortableHeader label="Connection" column={column} />
+      ),
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
@@ -717,7 +762,11 @@ export function ModelConfig() {
         return renderConnectionEditor(
           rowDraft,
           setRowDraft as Dispatch<SetStateAction<RowDraft>>,
-          defaultConnectionIdForPurpose(rowDraft.provider, 'chat_model', config?.connections)
+          defaultConnectionIdForPurpose(
+            rowDraft.provider,
+            "chat_model",
+            config?.connections,
+          ),
         );
       },
     },
@@ -824,7 +873,10 @@ export function ModelConfig() {
         </div>
 
         <div className="rounded-lg border">
-          <div className="overflow-x-auto" data-testid="models-table-scroll-container">
+          <div
+            className="overflow-x-auto"
+            data-testid="models-table-scroll-container"
+          >
             <table className="w-full min-w-[880px] text-sm">
               <thead>
                 {table.getHeaderGroups().map((headerGroup) => (
@@ -875,8 +927,9 @@ export function ModelConfig() {
                           setNewRowDraft((current) => ({
                             ...current,
                             provider,
-                            baseUrl: provider === 'openai' ? current.baseUrl : '',
-                            connection: '',
+                            baseUrl:
+                              provider === "openai" ? current.baseUrl : "",
+                            connection: "",
                           }));
                         }}
                       >
@@ -925,9 +978,9 @@ export function ModelConfig() {
                         setNewRowDraft,
                         defaultConnectionIdForPurpose(
                           newRowDraft.provider,
-                          'chat_model',
-                          config?.connections
-                        )
+                          "chat_model",
+                          config?.connections,
+                        ),
                       )}
                     </td>
                     <td className="px-4 py-2.5 align-middle text-right">

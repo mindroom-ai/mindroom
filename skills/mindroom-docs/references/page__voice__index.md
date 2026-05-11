@@ -79,7 +79,7 @@ Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server
 
 For self-hosted solutions that should use a non-default credential:
 
-```
+```yaml
 connections:
   openai/stt_lab:
     provider: openai
@@ -205,8 +205,8 @@ Reply-permission checks still use the original human sender, not a later router 
 
 ## Environment Variables
 
-| Variable         | Description                               |
-| ---------------- | ----------------------------------------- |
+| Variable | Description |
+|----------|-------------|
 | `OPENAI_API_KEY` | Seeds the default `openai/stt` connection |
 
 ## Text-to-Speech Tools

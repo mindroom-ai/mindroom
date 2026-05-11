@@ -722,7 +722,7 @@ def test_config_rejects_configured_default_connection_provider_mismatch() -> Non
 
 def test_config_rejects_inline_model_api_key_bypasses() -> None:
     """Model config should reject inline API key escape hatches."""
-    with pytest.raises(ValidationError, match="extra_kwargs.api_key"):
+    with pytest.raises(ValidationError, match=r"extra_kwargs\.api_key"):
         Config(
             models={
                 "default": {
@@ -736,7 +736,7 @@ def test_config_rejects_inline_model_api_key_bypasses() -> None:
 
 def test_config_rejects_inline_model_client_credentials_bypass() -> None:
     """Model config should reject inline Vertex client credential escape hatches."""
-    with pytest.raises(ValidationError, match="extra_kwargs.client_params.credentials"):
+    with pytest.raises(ValidationError, match=r"extra_kwargs\.client_params\.credentials"):
         Config(
             models={
                 "default": {
@@ -767,7 +767,7 @@ def test_config_rejects_inline_memory_api_key_bypasses() -> None:
             },
         )
 
-    with pytest.raises(ValidationError, match="memory.llm.config.api_key"):
+    with pytest.raises(ValidationError, match=r"memory\.llm\.config\.api_key"):
         Config(
             memory={
                 "llm": {

@@ -311,6 +311,12 @@ class CredentialsManager:
         credentials_path = self._credentials_file(normalized_service)
         self._save_credentials_file(normalized_service, credentials_path, credentials)
 
+    def set_api_key(self, service: str, api_key: str, key_name: str = "api_key") -> None:
+        """Save one API key credential field for a service."""
+        credentials = self.load_credentials(service) or {}
+        credentials[key_name] = api_key
+        self.save_credentials(service, credentials)
+
     def _save_credentials_file(
         self,
         normalized_service: str,

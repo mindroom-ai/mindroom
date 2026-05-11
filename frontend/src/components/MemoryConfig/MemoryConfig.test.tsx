@@ -246,28 +246,28 @@ describe("MemoryConfig", () => {
       expect(nextConfig?.embedder).toEqual({
         provider: "sentence_transformers",
         config: {
-          model: 'sentence-transformers/all-MiniLM-L6-v2',
-          connection: '',
-          host: '',
+          model: "sentence-transformers/all-MiniLM-L6-v2",
+          connection: "",
+          host: "",
         },
       });
     });
   });
 
-  it('shows default connection note for OpenAI without an explicit connection', () => {
+  it("shows default connection note for OpenAI without an explicit connection", () => {
     render(<MemoryConfig />);
 
     expect(screen.getAllByText(/openai\/embeddings/).length).toBeGreaterThan(0);
   });
 
-  it('hides the default connection note when an explicit connection is set', () => {
+  it("hides the default connection note when an explicit connection is set", () => {
     const configWithConnection: Partial<Config> = {
       memory: {
         embedder: {
           provider: "openai",
           config: {
-            model: 'text-embedding-3-small',
-            connection: 'openai/local-embeddings',
+            model: "text-embedding-3-small",
+            connection: "openai/local-embeddings",
           },
         },
       },
@@ -282,9 +282,11 @@ describe("MemoryConfig", () => {
 
     render(<MemoryConfig />);
 
-    expect(screen.queryByText(/This embedder will use the default/)).not.toBeInTheDocument();
     expect(
-      screen.getByText('openai/local-embeddings', { selector: '.font-mono' })
+      screen.queryByText(/This embedder will use the default/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("openai/local-embeddings", { selector: ".font-mono" }),
     ).toBeInTheDocument();
   });
 
@@ -334,31 +336,33 @@ describe("MemoryConfig", () => {
     });
   });
 
-  it('updates connection when input changes', async () => {
+  it("updates connection when input changes", async () => {
     render(<MemoryConfig />);
 
     const connectionInput = document.getElementById(
-      'memory-embedder-connection'
+      "memory-embedder-connection",
     ) as HTMLInputElement;
-    fireEvent.change(connectionInput, { target: { value: 'openai/local-embeddings' } });
+    fireEvent.change(connectionInput, {
+      target: { value: "openai/local-embeddings" },
+    });
 
     await waitFor(() => {
       expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
         expect.objectContaining({
           embedder: expect.objectContaining({
-            provider: 'openai',
+            provider: "openai",
             config: expect.objectContaining({
-              model: 'text-embedding-3-small',
-              host: '',
-              connection: 'openai/local-embeddings',
+              model: "text-embedding-3-small",
+              host: "",
+              connection: "openai/local-embeddings",
             }),
           }),
-        })
+        }),
       );
     });
   });
 
-  it('calls saveConfig when save button is clicked', async () => {
+  it("calls saveConfig when save button is clicked", async () => {
     // Re-mock with isDirty: true so the button is enabled
     (useConfigStore as any).mockReturnValue({
       config: mockConfig,

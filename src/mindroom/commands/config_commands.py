@@ -142,16 +142,6 @@ def _parse_value(value_str: str) -> Any:  # noqa: ANN401
     return value_str
 
 
-def _validate_config_dict(config_dict: dict[str, Any], runtime_paths: RuntimePaths) -> Config:
-    """Validate one config payload against the active runtime context."""
-    return Config.validate_with_runtime(
-        config_dict,
-        runtime_paths,
-        tolerate_plugin_load_errors=True,
-        strict_connection_validation=True,
-    )
-
-
 def _format_value(value: Any) -> str:  # noqa: ANN401
     """Format a value for display as YAML.
 
@@ -250,7 +240,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            Config.validate_with_runtime(test_config_dict, runtime_paths)
+            Config.validate_with_runtime(test_config_dict, runtime_paths, tolerate_plugin_load_errors=True)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except (ValidationError, ConfigRuntimeValidationError) as e:
@@ -334,7 +324,11 @@ async def apply_config_change(
         _set_nested_value(config_dict, config_path_str, new_value)
 
         try:
-            config_lifecycle.validate_and_persist_config_payload(config_dict, runtime_paths)
+            config_lifecycle.validate_and_persist_config_payload(
+                config_dict,
+                runtime_paths,
+                tolerate_plugin_load_errors=True,
+            )
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 

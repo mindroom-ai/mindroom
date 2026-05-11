@@ -205,7 +205,11 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            validate_and_persist_config_payload(
+                config.authored_model_dump(),
+                self.runtime_paths,
+                tolerate_plugin_load_errors=True,
+            )
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:

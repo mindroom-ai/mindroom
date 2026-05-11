@@ -23,10 +23,17 @@ from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import resolve_runtime_paths
-from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.knowledge.manager import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.registry import (
+    load_published_index_state,
+    published_index_metadata_path,
+    resolve_published_index_key,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 def _knowledge_config(
@@ -37,32 +44,26 @@ def _knowledge_config(
     git: bool = False,
     description: str = "",
 ) -> Config:
-    git_config = (
-        KnowledgeGitConfig(
-            repo_url="https://github.com/example/private-repo.git",
-            branch="main",
-            poll_interval_seconds=300,
-        )
-        if with_git
-        else None
-    )
-    return Config(
-        agents={},
-        models={},
-        connections={
-            "openai/embeddings": {
-                "provider": "openai",
-                "service": "openai",
-                "auth_kind": "api_key",
-            },
-        },
-        knowledge_bases={
-            base_id: KnowledgeBaseConfig(
-                path=str(path),
-                watch=False,
-                git=git_config,
-            ),
-        },
+    knowledge_bases = {
+        "research": KnowledgeBaseConfig(
+            description=description,
+            path=str(path),
+            watch=False,
+            git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git") if git else None,
+        ),
+    }
+    if extra_base:
+        knowledge_bases["unused"] = KnowledgeBaseConfig(path=str(path.parent / "unused"), watch=False)
+    if duplicate_source_base:
+        knowledge_bases["summary"] = KnowledgeBaseConfig(path=str(path), watch=False, chunk_size=1024)
+    return Config(agents={}, models={}, knowledge_bases=knowledge_bases)
+
+
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
     )
 
 
@@ -73,15 +74,46 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
-@pytest.fixture
-def test_client(tmp_path: Path) -> TestClient:
-    """Create an API client bound to explicit runtime paths for this test file."""
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
+def _write_index_metadata(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    base_id: str = "research",
+    collection: str = "published_collection",
+    revision: str | None = None,
+    published_at: str | None = None,
+    last_error: str | None = None,
+    indexed_count: int | None = None,
+) -> None:
+    key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "settings": list(key.indexing_settings),
+        "status": "complete",
+        "collection": collection,
+        "indexed_count": 0 if indexed_count is None else indexed_count,
+        "source_signature": "test-source-signature",
+    }
+    if revision is not None:
+        payload["published_revision"] = revision
+    if published_at is not None:
+        payload["last_published_at"] = published_at
+    metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    if last_error is None:
+        knowledge_registry.mark_published_index_refresh_succeeded(key)
+    else:
+        knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error=last_error)
+
+
+def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    if tracked_paths:
+        subprocess.run(["git", "add", *tracked_paths], cwd=path, check=True, capture_output=True)
+
+
+def _test_client(tmp_path: Path) -> TestClient:
+    runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     return TestClient(main.app)
@@ -1629,44 +1661,22 @@ def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) 
             super().__init__()
             self.manual_calls: list[tuple[str, Config, RuntimePaths, bool]] = []
 
-def test_knowledge_routes_ignore_unpublished_plugin_drift(test_client: TestClient, tmp_path: Path) -> None:
-    """Knowledge routes should keep serving the published snapshot when plugin files drift on disk."""
-    runtime_paths = main._app_runtime_paths(test_client.app)
-    plugin_root = runtime_paths.config_path.parent / "plugins" / "demo_plugin"
-    plugin_root.mkdir(parents=True)
-    manifest_path = plugin_root / "mindroom.plugin.json"
-    manifest_path.write_text('{"name": "demo_plugin", "skills": []}', encoding="utf-8")
-    config = _knowledge_config(tmp_path / "published")
-    config.plugins = [PluginEntryConfig(path="./plugins/demo_plugin")]
-    _publish_committed_runtime_config(test_client.app, config)
-    manifest_path.write_text('{"name": "BadName", "skills": []}', encoding="utf-8")
-
-    response = test_client.get("/api/knowledge/bases")
-
-    assert response.status_code == 200
-    assert response.json()["bases"][0]["name"] == "research"
-
-
-def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path) -> None:
-    """The API helper should not reuse a cached manager for an old base path."""
-    storage_path = tmp_path / "storage"
-    old_path = tmp_path / "old"
-    new_path = tmp_path / "new"
-    old_path.mkdir(parents=True, exist_ok=True)
-    new_path.mkdir(parents=True, exist_ok=True)
-
-    config_old = _knowledge_config(old_path)
-    config_new = _knowledge_config(new_path)
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage_path)
-    get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-openai-key")
-
-    async def _run() -> None:
-        try:
-            await initialize_shared_knowledge_managers(
-                config_old,
-                runtime_paths,
-                start_watchers=False,
-                reindex_on_create=False,
+        async def refresh_now(
+            self,
+            base_id: str,
+            *,
+            config: Config,
+            runtime_paths: RuntimePaths,
+            execution_identity: object | None = None,
+            force_reindex: bool = False,
+        ) -> object:
+            _ = execution_identity
+            self.manual_calls.append((base_id, config, runtime_paths, force_reindex))
+            return SimpleNamespace(
+                indexed_count=11,
+                index_published=True,
+                availability=KnowledgeAvailability.READY,
+                last_error=None,
             )
 
     scheduler = _ManualRefreshScheduler()

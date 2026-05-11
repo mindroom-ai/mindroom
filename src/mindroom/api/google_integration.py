@@ -19,6 +19,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle
+from mindroom.api.auth import verify_user
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -71,7 +72,7 @@ _GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE = (
 )
 
 
-class GoogleOAuthNotConfiguredError(ValueError):
+class _GoogleOAuthNotConfiguredError(ValueError):
     """Raised when the dashboard cannot find a google/oauth client connection."""
 
 
@@ -241,11 +242,11 @@ def _google_oauth_client_service(config: Config) -> str:
     """Return the backing credential service for the configured google/oauth connection."""
     connection_id = default_connection_id(provider="google", purpose="google_oauth_client")
     if connection_id is None:
-        raise GoogleOAuthNotConfiguredError(_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
+        raise _GoogleOAuthNotConfiguredError(_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
 
     connection_config = config.connections.get(connection_id)
     if connection_config is None:
-        raise GoogleOAuthNotConfiguredError(_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
+        raise _GoogleOAuthNotConfiguredError(_GOOGLE_OAUTH_NOT_CONFIGURED_MESSAGE)
     if canonical_connection_provider(connection_config.provider) != "google":
         msg = f"Google OAuth connection '{connection_id}' must use provider 'google'"
         raise ValueError(msg)
@@ -260,9 +261,7 @@ def _google_oauth_client_service(config: Config) -> str:
 
 def _require_request_snapshot(request: Request) -> ApiSnapshot:
     """Return the auth-bound API snapshot for one protected dashboard request."""
-    from mindroom.api.main import request_api_snapshot  # noqa: PLC0415
-
-    snapshot = request_api_snapshot(request)
+    snapshot = config_lifecycle.request_snapshot(request)
     if snapshot is None:
         msg = "Authenticated request is missing its bound API snapshot"
         raise RuntimeError(msg)
@@ -422,8 +421,6 @@ async def callback(request: Request) -> RedirectResponse:
     if not state:
         raise HTTPException(status_code=400, detail="No OAuth state received")
 
-    from mindroom.api.main import verify_user  # noqa: PLC0415
-
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
     pending = consume_pending_oauth_request(request, "google", state)
     agent_name = pending.agent_name
@@ -486,8 +483,6 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
 @router.post("/configure")
 async def configure(request: Request, credentials: dict[str, str]) -> dict[str, Any]:
     """Configure Google OAuth credentials manually."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     client_id = credentials.get("client_id")
     client_secret = credentials.get("client_secret")
 
@@ -498,13 +493,11 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
         )
 
     try:
-        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
-
         config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
         snapshot = _require_request_snapshot(request)
-        _reload_api_runtime_config(
+        config_lifecycle.reload_api_runtime_config(
             request.app,
-            api_runtime_paths(request),
+            config_lifecycle.api_runtime_paths(request),
             expected_snapshot=snapshot,
             mutate_runtime=lambda runtime_paths: _save_oauth_client_credentials(
                 client_id,
@@ -513,7 +506,7 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
                 config=config,
             ),
         )
-    except GoogleOAuthNotConfiguredError as e:
+    except _GoogleOAuthNotConfiguredError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except HTTPException:
         raise
@@ -525,18 +518,14 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
 @router.post("/reset")
 async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
     oauth_client_services: set[str] = set()
     try:
-        from mindroom.api.main import _reload_api_runtime_config  # noqa: PLC0415
-
         config, _runtime_paths = config_lifecycle.read_committed_runtime_config(request)
         snapshot = _require_request_snapshot(request)
         oauth_client_services = _google_oauth_client_services(config)
-        _reload_api_runtime_config(
+        config_lifecycle.reload_api_runtime_config(
             request.app,
-            api_runtime_paths(request),
+            config_lifecycle.api_runtime_paths(request),
             expected_snapshot=snapshot,
             mutate_runtime=lambda runtime_paths: _reset_google_credentials(
                 runtime_paths,

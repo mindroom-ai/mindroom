@@ -46,6 +46,11 @@ from mindroom.credentials import (
     get_runtime_shared_credentials_manager,
     load_scoped_credentials,
 )
+from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
+from mindroom.knowledge import resolve_agent_knowledge_access
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.matrix.state import MatrixState
+from mindroom.prompts import HIDDEN_TOOL_CALLS_PROMPT, OPENAI_COMPAT_HISTORY_GUIDANCE
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -65,6 +70,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template
+from tests.conftest import bind_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:

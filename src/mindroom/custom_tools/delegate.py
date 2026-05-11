@@ -7,6 +7,7 @@ response as the tool result.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -176,6 +177,15 @@ class DelegateTools(Toolkit):
             room_id=room_id,
             runtime_paths=self._runtime_paths,
         )
+        if room_id is not None:
+            matrix_rooms = importlib.import_module("mindroom.matrix.rooms")
+            room_alias = matrix_rooms.get_room_alias_from_id(room_id, self._runtime_paths)
+            if room_alias in self._config.room_models:
+                runtime_model = self._config.resolve_runtime_model(
+                    entity_name=agent_name,
+                    active_model_name=self._config.room_models[room_alias],
+                    runtime_paths=self._runtime_paths,
+                )
         return replace(
             runtime_context,
             agent_name=agent_name,

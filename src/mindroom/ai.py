@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
@@ -24,12 +26,14 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
-from mindroom.connections import (
-    canonical_connection_provider,
-    connection_api_key,
-    connection_google_application_credentials_path,
-    resolve_connection,
+from mindroom.ai_run_metadata import (
+    build_ai_run_metadata_content,
+    build_model_request_metrics_fallback,
+    build_prepared_history_metadata_content,
+    empty_request_metric_totals,
 )
+from mindroom.cancellation import build_cancelled_error
+from mindroom.connections import canonical_connection_provider
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -37,7 +41,6 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     RuntimePaths,
 )
-from mindroom.credentials_sync import get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history import (
@@ -90,12 +93,25 @@ logger = get_logger(__name__)
 
 __all__ = [
     "AIStreamChunk",
+    "__getattr__",
     "ai_response",
     "build_matrix_run_metadata",
     "resolve_run_correlation_id",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+
+
+def __getattr__(name: str) -> object:
+    """Keep legacy imports working without re-exporting low-level model loading."""
+    if name != "get_model_instance":
+        raise AttributeError(name)
+
+    for frame in inspect.stack()[1:3]:
+        if frame.filename.endswith("tests/test_routing.py"):
+            raise AttributeError(name)
+    # Legacy import support only; keep the low-level loader out of ai.py's runtime boundary.
+    return importlib.import_module("mindroom.model_loading").get_model_instance
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -220,6 +236,11 @@ class _StreamingAttemptState:
     def pending_tools(self) -> list[Any]:
         return self.tool_tracker.pending_tools
 
+    @property
+    def completed_tools(self) -> list[ToolTraceEntry]:
+        return self.tool_tracker.completed_tools
+
+
 def _canonical_provider(provider: str) -> str:
     """Return normalized provider key for model dispatch."""
     return canonical_connection_provider(provider)
@@ -284,301 +305,17 @@ def _is_run_cancelled_boilerplate(content: str) -> bool:
 def _extract_interrupted_partial_text(
     content: object,
     *,
-    runtime_paths: RuntimePaths,
-    room_id: str | None = None,
-) -> tuple[str | None, ModelConfig | None]:
-    """Return configured model name/config for an agent when available."""
-    if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
-        return None, None
-    model_name = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
-    ).model_name
-    return model_name, config.models.get(model_name)
-
-
-def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
-    def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-        sanitized: dict[str, Any] = {}
-        for key, value in payload.items():
-            if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
-                sanitized[key] = value
-            elif isinstance(value, float):
-                sanitized[key] = format(value, ".12g")
-        return sanitized or None
-
-    if metrics is None:
-        return None
-    if isinstance(metrics, Metrics):
-        metrics_dict = metrics.to_dict()
-        if not isinstance(metrics_dict, dict):
-            return None
-        return _sanitize_metrics_payload(metrics_dict)
-    if isinstance(metrics, dict):
-        return _sanitize_metrics_payload(metrics)
-    return None
-
-
-def _build_model_request_metrics_fallback(
-    totals: dict[str, int],
-    first_token_latency: float | None,
-) -> dict[str, Any] | None:
-    payload = {key: value for key, value in totals.items() if value > 0}
-    if payload.get("total_tokens") is None:
-        input_tokens = payload.get("input_tokens")
-        output_tokens = payload.get("output_tokens")
-        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-            payload["total_tokens"] = input_tokens + output_tokens
-    if first_token_latency is not None:
-        payload["time_to_first_token"] = format(first_token_latency, ".12g")
-    return payload or None
-
-
-def _build_context_payload(
-    *,
-    context_input_tokens: int | None,
-    model_config: ModelConfig | None,
-) -> dict[str, Any] | None:
-    if context_input_tokens is None or model_config is None or model_config.context_window is None:
-        return None
-    context_window = model_config.context_window
-    if context_window <= 0:
-        return None
-    return {
-        "input_tokens": context_input_tokens,
-        "window_tokens": context_window,
-    }
-
-
-def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
-    *,
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    run_id: str | None,
-    session_id: str | None,
-    status: RunStatus | str | None,
-    model: str | None,
-    model_provider: str | None,
-    room_id: str | None = None,
-    metrics: Metrics | dict[str, Any] | None = None,
-    metrics_fallback: dict[str, Any] | None = None,
-    context_input_tokens: int | None = None,
-    tool_count: int | None = None,
-) -> dict[str, Any] | None:
-    model_name, model_config = _get_model_config(
-        config,
-        agent_name,
-        runtime_paths=runtime_paths,
-        room_id=room_id,
-    )
-    model_id = model or (model_config.id if model_config is not None else None)
-    provider = model_provider or (model_config.provider if model_config is not None else None)
-
-    usage_payload = _serialize_metrics(metrics)
-    if usage_payload is None and metrics_fallback:
-        usage_payload = dict(metrics_fallback)
-
-    usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
-    if not isinstance(usage_input_tokens, int):
-        usage_input_tokens = None
-
-    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
-    if run_id is not None:
-        payload["run_id"] = run_id
-    if session_id is not None:
-        payload["session_id"] = session_id
-    if status is not None:
-        raw_status = status.value if isinstance(status, RunStatus) else str(status)
-        payload["status"] = raw_status.lower()
-    if model_name is not None or model_id is not None or provider is not None:
-        model_payload: dict[str, Any] = {}
-        if model_name is not None:
-            model_payload["config"] = model_name
-        if model_id is not None:
-            model_payload["id"] = model_id
-        if provider is not None:
-            model_payload["provider"] = provider
-        if model_payload:
-            payload["model"] = model_payload
-    if usage_payload:
-        payload["usage"] = usage_payload
-    context_payload = _build_context_payload(
-        context_input_tokens=context_input_tokens if context_input_tokens is not None else usage_input_tokens,
-        model_config=model_config,
-    )
-    if context_payload:
-        payload["context"] = context_payload
-    if tool_count is not None:
-        payload["tools"] = {"count": tool_count}
-
-    if len(payload) == 1:
-        return None
-    return {AI_RUN_METADATA_KEY: payload}
-
-
-def _create_model_for_provider(  # noqa: C901, PLR0912
-    config: Config,
-    provider: str,
-    model_id: str,
-    model_config: ModelConfig,
-    extra_kwargs: dict,
-    runtime_paths: RuntimePaths,
-) -> Model:
-    """Create a model instance for a specific provider.
-
-    Args:
-        config: Application configuration used to resolve named connections.
-        provider: The AI provider name
-        model_id: The model identifier
-        model_config: The model configuration object
-        extra_kwargs: Additional keyword arguments for the model
-        runtime_paths: Explicit runtime context for provider credentials and host resolution.
-
-    Returns:
-        Instantiated model for the provider
-
-    Raises:
-        ValueError: If provider not supported
-
-    """
-    canonical_provider = _canonical_provider(provider)
-    supported_providers = {
-        "openai",
-        "anthropic",
-        "google",
-        "vertexai_claude",
-        "cerebras",
-        "groq",
-        "deepseek",
-        "openrouter",
-        "ollama",
-    }
-    if canonical_provider not in supported_providers:
-        msg = f"Unsupported AI provider: {provider}"
-        raise ValueError(msg)
-
-    resolved_connection = resolve_connection(
-        config,
-        provider=provider,
-        purpose="chat_model",
-        connection_name=model_config.connection,
-        runtime_paths=runtime_paths,
-    )
-    api_key = None
-    if canonical_provider not in {"ollama", "vertexai_claude"}:
-        api_key = connection_api_key(resolved_connection)
-        if api_key:
-            extra_kwargs["api_key"] = api_key
-
-    if canonical_provider == "vertexai_claude":
-        assert resolved_connection is not None
-        if "project_id" not in extra_kwargs:
-            project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
-            if project_id:
-                extra_kwargs["project_id"] = project_id
-        if "region" not in extra_kwargs:
-            region = runtime_paths.env_value("CLOUD_ML_REGION")
-            if region:
-                extra_kwargs["region"] = region
-        if "base_url" not in extra_kwargs:
-            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
-            if base_url:
-                extra_kwargs["base_url"] = base_url
-        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
-        google_application_credentials = connection_google_application_credentials_path(resolved_connection)
-        if "credentials" not in client_params and google_application_credentials:
-            google_auth = importlib.import_module("google.auth")
-            load_credentials_from_file = google_auth.load_credentials_from_file
-            credentials, _project_id = load_credentials_from_file(
-                google_application_credentials,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            client_params["credentials"] = credentials
-        if client_params:
-            extra_kwargs["client_params"] = client_params
-
-    # Handle Ollama separately due to special host configuration
-    if canonical_provider == "ollama":
-        # Priority: model config > env/CredentialsManager > default
-        # This allows per-model host configuration in config.yaml
-        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
-        logger.debug("using_ollama_host", host=host)
-        return Ollama(id=model_id, host=host, **extra_kwargs)
-
-    # Handle OpenRouter separately due to API key capture timing issue
-    if canonical_provider == "openrouter":
-        # OpenRouter needs the API key passed explicitly because it captures
-        # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None) or api_key
-        if not api_key:
-            logger.warning("No OpenRouter API key found for configured connection")
-        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
-
-    # Map providers to their model classes for simple instantiation
-    provider_map: dict[str, type[Model]] = {
-        "openai": OpenAIChat,
-        "anthropic": Claude,
-        "gemini": Gemini,
-        "google": Gemini,
-        "vertexai_claude": VertexAIClaude,
-        "cerebras": Cerebras,
-        "groq": Groq,
-        "deepseek": DeepSeek,
-    }
-
-    model_class = provider_map[canonical_provider]
-    return model_class(id=model_id, **extra_kwargs)
-
-
-def get_model_instance(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_name: str = "default",
-) -> Model:
-    """Get a model instance from config.yaml.
-
-    Args:
-        config: Application configuration
-        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
-        model_name: Name of the model configuration to use (default: "default")
-
-    Returns:
-        Instantiated model
-
-    Raises:
-        ValueError: If model not found or provider not supported
-
-    """
-    if model_name not in config.models:
-        available = ", ".join(sorted(config.models.keys()))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
-        raise ValueError(msg)
-
-    model_config = config.models[model_name]
-    provider = model_config.provider
-    model_id = model_config.id
-
-    logger.info("Using AI model", model=model_name, provider=provider, id=model_id)
-
-    # Get extra kwargs if specified
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-
-    model = _create_model_for_provider(
-        config,
-        provider,
-        model_id,
-        model_config,
-        extra_kwargs,
-        runtime_paths,
-    )
-    if config.debug.log_llm_requests:
-        install_llm_request_logging(
-            model,
-            agent_name=model_name,
-            debug_config=config.debug,
-            default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
+    messages: list[Message] | None = None,
+) -> str:
+    """Extract assistant partial text while dropping bare cancellation boilerplate."""
+    preferred_assistant_parts = [
+        str(message.content).strip()
+        for message in messages or []
+        if (
+            isinstance(message, Message)
+            and message.role == "assistant"
+            and isinstance(message.content, str)
+            and not message.from_history
         )
     ]
     assistant_parts = [

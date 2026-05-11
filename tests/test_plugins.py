@@ -571,7 +571,7 @@ def test_load_config_tolerates_malformed_manifest_on_startup(
         },
     )
     mock_logger = MagicMock()
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
@@ -589,8 +589,8 @@ def test_load_config_tolerates_malformed_manifest_on_startup(
             for call in mock_logger.warning.call_args_list
         )
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()

@@ -15,14 +15,17 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select';
-import { Button } from '@/components/ui/button';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
-import { useToast } from '@/components/ui/use-toast';
-import { showSaveFailureToastIfNeeded } from '@/components/shared';
-import { useConfigStore } from '@/store/configStore';
-import { defaultConnectionIdForPurpose, VoiceConfig as VoiceConfigType } from '@/types/config';
+} from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/use-toast";
+import { showSaveFailureToastIfNeeded } from "@/components/shared";
+import { useConfigStore } from "@/store/configStore";
+import {
+  defaultConnectionIdForPurpose,
+  VoiceConfig as VoiceConfigType,
+} from "@/types/config";
 
 const OPENAI_TRANSCRIPTION_ENDPOINT =
   "https://api.openai.com/v1/audio/transcriptions";
@@ -31,10 +34,10 @@ const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   enabled: false,
   visible_router_echo: true,
   stt: {
-    provider: 'openai',
-    model: 'whisper-1',
-    connection: '',
-    host: '',
+    provider: "openai",
+    model: "whisper-1",
+    connection: "",
+    host: "",
   },
   intelligence: {
     model: "default",
@@ -61,8 +64,10 @@ function normalizeHost(host?: string): string {
   return host.trim().replace(/\/+$/, "");
 }
 
-function normalizeOptionalConnection(connection?: string | null): string | undefined {
-  const trimmed = connection?.trim() ?? '';
+function normalizeOptionalConnection(
+  connection?: string | null,
+): string | undefined {
+  const trimmed = connection?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
@@ -87,8 +92,11 @@ export function VoiceConfig() {
     updateVoiceConfig(newConfig);
   };
 
-  const handleSTTChange = (updates: Partial<VoiceConfigType['stt']>) => {
-    const nextConnection = Object.prototype.hasOwnProperty.call(updates, 'connection')
+  const handleSTTChange = (updates: Partial<VoiceConfigType["stt"]>) => {
+    const nextConnection = Object.prototype.hasOwnProperty.call(
+      updates,
+      "connection",
+    )
       ? normalizeOptionalConnection(updates.connection)
       : voiceConfig.stt.connection;
     handleVoiceConfigChange({
@@ -114,15 +122,16 @@ export function VoiceConfig() {
   const effectiveEndpoint = normalizedHost
     ? `${normalizedHost}/v1/audio/transcriptions`
     : OPENAI_TRANSCRIPTION_ENDPOINT;
-  const effectiveMode = normalizedHost ? 'OpenAI-compatible API' : 'OpenAI API';
-  const providerLabel = voiceConfig.stt.provider || DEFAULT_VOICE_CONFIG.stt.provider;
+  const effectiveMode = normalizedHost ? "OpenAI-compatible API" : "OpenAI API";
+  const providerLabel =
+    voiceConfig.stt.provider || DEFAULT_VOICE_CONFIG.stt.provider;
   const defaultSttConnection = defaultConnectionIdForPurpose(
     voiceConfig.stt.provider,
-    'voice_stt',
-    config?.connections
+    "voice_stt",
+    config?.connections,
   );
   const effectiveConnection =
-    voiceConfig.stt.connection || defaultSttConnection || 'not configured';
+    voiceConfig.stt.connection || defaultSttConnection || "not configured";
 
   const handleSave = async () => {
     updateVoiceConfig({
@@ -220,7 +229,9 @@ export function VoiceConfig() {
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Connection:</span>
-                <span className="font-mono text-right text-foreground">{effectiveConnection}</span>
+                <span className="font-mono text-right text-foreground">
+                  {effectiveConnection}
+                </span>
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Command Model:</span>
@@ -291,13 +302,15 @@ export function VoiceConfig() {
                 <Label htmlFor="stt-connection">Connection (Optional)</Label>
                 <Input
                   id="stt-connection"
-                  value={voiceConfig.stt.connection || ''}
-                  onChange={e => handleSTTChange({ connection: e.target.value })}
-                  placeholder={defaultSttConnection ?? 'explicit connection id'}
+                  value={voiceConfig.stt.connection || ""}
+                  onChange={(e) =>
+                    handleSTTChange({ connection: e.target.value })
+                  }
+                  placeholder={defaultSttConnection ?? "explicit connection id"}
                 />
                 {defaultSttConnection ? (
                   <p className="text-xs text-muted-foreground">
-                    Leave empty to use{' '}
+                    Leave empty to use{" "}
                     <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
                       {defaultSttConnection}
                     </code>
@@ -305,7 +318,8 @@ export function VoiceConfig() {
                   </p>
                 ) : (
                   <p className="text-xs text-muted-foreground">
-                    No default connection is configured. Set an explicit connection id if needed.
+                    No default connection is configured. Set an explicit
+                    connection id if needed.
                   </p>
                 )}
               </div>

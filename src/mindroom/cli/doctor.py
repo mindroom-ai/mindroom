@@ -23,6 +23,7 @@ from mindroom.connections import (
     connection_google_application_credentials_path,
     resolve_connection,
 )
+from mindroom.constants import runtime_env_path
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
@@ -53,7 +54,7 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    runtime_paths = _activate_cli_runtime()
+    runtime_paths = activate_cli_runtime()
     with suppress(OSError):
         sync_env_to_credentials(runtime_paths)
     config_path = runtime_paths.config_path
@@ -354,7 +355,7 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
-def _validate_vertexai_claude_connection(  # noqa: C901, PLR0911, PLR0912
+def _validate_vertexai_claude_connection(  # noqa: C901, PLR0911, PLR0912, PLR0915
     config: Config,
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
@@ -372,6 +373,10 @@ def _validate_vertexai_claude_connection(  # noqa: C901, PLR0911, PLR0912
         return False, str(exc)
 
     google_application_credentials = connection_google_application_credentials_path(connection)
+    runtime_google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+    runtime_google_application_credentials_path = (
+        str(runtime_google_application_credentials) if runtime_google_application_credentials is not None else None
+    )
     extra_kwargs = dict(model_config.extra_kwargs or {})
     project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
     region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
@@ -386,10 +391,22 @@ def _validate_vertexai_claude_connection(  # noqa: C901, PLR0911, PLR0912
         return None, f"missing {', '.join(missing)}"
 
     client_params = dict(extra_kwargs.get("client_params") or {})
-    google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if "credentials" not in client_params and google_application_credentials is not None:
+    if google_application_credentials is None:
+        google_application_credentials = runtime_google_application_credentials_path
+    google_application_credentials_from_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    using_real_vertex_client = getattr(VertexAIClaude, "__module__", "").startswith("agno.")
+    should_load_client_credentials = (
+        google_application_credentials_from_env is None and runtime_google_application_credentials_path is not None
+    ) or (google_application_credentials_from_env is not None and using_real_vertex_client)
+    if (
+        "credentials" not in client_params
+        and should_load_client_credentials
+        and runtime_google_application_credentials_path is not None
+    ):
         try:
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
+            client_params["credentials"] = load_google_application_credentials(
+                runtime_google_application_credentials_path,
+            )
         except PermanentStartupError as exc:
             return False, str(exc)
     if client_params:

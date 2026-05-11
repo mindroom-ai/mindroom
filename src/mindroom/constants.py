@@ -818,7 +818,7 @@ OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 # Canonical mapping from provider name to the environment variable it requires.
 # Other modules derive their own views from this single source of truth.
-PROVIDER_ENV_KEYS: dict[str, str] = {
+_PROVIDER_ENV_KEYS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
@@ -841,8 +841,8 @@ def env_key_for_provider(provider: str) -> str | None:
     Handles the gemini→google alias so callers don't need to.
     """
     if provider == "gemini":
-        return PROVIDER_ENV_KEYS.get("google")
-    return PROVIDER_ENV_KEYS.get(provider)
+        return _PROVIDER_ENV_KEYS.get("google")
+    return _PROVIDER_ENV_KEYS.get(provider)
 
 
 def patch_chromadb_for_python314() -> None:

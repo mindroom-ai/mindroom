@@ -430,6 +430,10 @@ class KubernetesWorkerBackend:
                         allowed_services=self.worker_grantable_credentials,
                         credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
                     )
+                    self._resources.mirror_google_application_credentials(
+                        worker_key=worker_key,
+                        state_subpath=state_subpath,
+                    )
                     self._resources.apply_service(worker_id)
                     deployment = self._resources.wait_for_ready(
                         worker_id,

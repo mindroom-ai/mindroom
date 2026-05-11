@@ -8,8 +8,8 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import TracebackType
-from typing import Any, ClassVar, NoReturn, cast
+from types import SimpleNamespace, TracebackType
+from typing import Annotated, Any, ClassVar, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -22,18 +22,18 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from mindroom import constants, frontend_assets
-from mindroom.api import auth, config_lifecycle, frontend, main
-from mindroom.api import sandbox_runner as sandbox_runner_api
+from mindroom.api import auth, config_lifecycle, frontend, google_integration, main
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
     reset_matrix_sync_health,
 )
+from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
@@ -2480,8 +2480,8 @@ def test_persist_runtime_validated_config_deletes_removed_google_oauth_service_c
         },
     )
 
-    config_lifecycle.persist_runtime_validated_config(
-        Config.validate_with_runtime(_authored_config_payload("general"), runtime_paths),
+    config_lifecycle.validate_and_persist_config_payload(
+        _authored_config_payload("general"),
         runtime_paths,
     )
 
@@ -4462,7 +4462,7 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
             },
         },
     )
-    original_read = main.read_api_committed_config
+    original_read = config_lifecycle.read_committed_config
 
     def _swap_then_read(request: Request, reader: Callable[[dict[str, Any]], object]) -> object:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)

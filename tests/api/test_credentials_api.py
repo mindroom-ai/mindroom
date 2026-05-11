@@ -14,7 +14,8 @@ from mindroom.api import credentials as credentials_api
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.oauth.providers import OAuthProvider
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 
 
 def _openai_test_connections() -> dict[str, dict[str, str]]:
@@ -25,7 +26,11 @@ def _openai_test_connections() -> dict[str, dict[str, str]]:
     }
 
 
-def _config_with_worker_scope(worker_scope: str | None) -> Config:
+def _config_with_worker_scope(
+    worker_scope: str | None,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> Config:
     config = Config.model_validate(
         {
             "connections": _openai_test_connections(),

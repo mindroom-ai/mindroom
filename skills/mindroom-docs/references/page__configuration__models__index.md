@@ -19,14 +19,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field            | Required | Default            | Description                                                                                                                                                                                               |
-| ---------------- | -------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`       | Yes      | -                  | The AI provider (see supported providers above)                                                                                                                                                           |
-| `id`             | Yes      | -                  | Model ID specific to the provider                                                                                                                                                                         |
-| `connection`     | No       | `provider/default` | Named connection used for credentials (`gemini` canonicalizes to `google/default`)                                                                                                                        |
-| `host`           | No       | `null`             | Host URL for self-hosted models (e.g., Ollama)                                                                                                                                                            |
-| `extra_kwargs`   | No       | `null`             | Additional provider-specific parameters                                                                                                                                                                   |
-| `context_window` | No       | `null`             | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `provider` | Yes | - | The AI provider (see supported providers above) |
+| `id` | Yes | - | Model ID specific to the provider |
+| `connection` | No | `provider/default` | Named connection used for credentials (`gemini` canonicalizes to `google/default`) |
+| `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
+| `extra_kwargs` | No | `null` | Additional provider-specific parameters |
+| `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
 ## Configuration Examples
 

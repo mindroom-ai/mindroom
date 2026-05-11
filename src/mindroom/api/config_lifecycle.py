@@ -131,12 +131,49 @@ def _config_error_detail(
     ]
 
 
+def _validate_api_managed_user_localpart(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+    """Reject internal-user localparts reserved by API-managed Matrix accounts."""
+    if config.mindroom_user is None:
+        return
+
+    reserved_localparts: dict[str, str] = {"mindroom_router": "router 'router'"}
+    namespace = constants.runtime_mindroom_namespace(runtime_paths)
+    if namespace:
+        for entity_name in ("router", *config.agents, *config.teams):
+            if entity_name == "router":
+                label = "router 'router'"
+            elif entity_name in config.agents:
+                label = f"agent '{entity_name}'"
+            else:
+                label = f"team '{entity_name}'"
+            reserved_localparts[f"mindroom_{entity_name}_{namespace}"] = label
+
+    conflict = reserved_localparts.get(config.mindroom_user.username)
+    if conflict:
+        msg = f"mindroom_user.username '{config.mindroom_user.username}' conflicts with {conflict} Matrix localpart"
+        raise ConfigRuntimeValidationError(msg)
+
+
+def _load_api_runtime_config_model(
+    runtime_paths: constants.RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool,
+) -> Config:
+    """Load config for API use, including API-managed account guardrails."""
+    runtime_config = load_runtime_config_model(
+        runtime_paths,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+    _validate_api_managed_user_localpart(runtime_config, runtime_paths)
+    return runtime_config
+
+
 def _load_config_result(
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None]:
     """Load and validate one config file without mutating shared app state."""
     try:
-        runtime_config = load_runtime_config_model(
+        runtime_config = _load_api_runtime_config_model(
             runtime_paths,
             tolerate_plugin_load_errors=True,
         )
@@ -251,13 +288,32 @@ def _validated_config_payload(
         tolerate_plugin_load_errors=True,
         strict_connection_validation=True,
     )
+    _validate_api_managed_user_localpart(validated_config, runtime_paths)
     return validated_config, validated_config.authored_model_dump()
+
+
+def validate_and_persist_config_payload(
+    raw_config: dict[str, Any],
+    runtime_paths: constants.RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> Config:
+    """Validate and persist one authored config payload against the active runtime."""
+    validated_config = Config.validate_with_runtime(
+        raw_config,
+        runtime_paths,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        strict_connection_validation=True,
+    )
+    _validate_api_managed_user_localpart(validated_config, runtime_paths)
+    _persist_runtime_validated_config(validated_config, runtime_paths)
+    return validated_config
 
 
 def _load_existing_runtime_config_if_available(runtime_paths: constants.RuntimePaths) -> Config | None:
     """Return the current on-disk config when it can be loaded before an overwrite."""
     try:
-        return load_runtime_config_model(
+        return _load_api_runtime_config_model(
             runtime_paths,
             tolerate_plugin_load_errors=True,
         )
@@ -297,18 +353,6 @@ def _cleanup_removed_google_oauth_client_services(
     shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
     for service in sorted(removed_services):
         shared_manager.delete_credentials(service)
-
-
-def _app_config_state(api_app: FastAPI) -> ApiState:
-    """Return the app-bound API config state."""
-    try:
-        state = api_app.state.api_state
-    except AttributeError:
-        state = None
-    if not isinstance(state, ApiState):
-        msg = "API context is not initialized"
-        raise TypeError(msg)
-    return state
 
 
 def register_api_app(api_app: FastAPI) -> None:
@@ -368,6 +412,7 @@ def _published_snapshot(
     config_data: dict[str, Any] | None = None,
     runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
+    auth_state: object = _UNSET,
     backend_managed_services: frozenset[str] | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
@@ -386,6 +431,7 @@ def _published_snapshot(
         if backend_managed_services is _UNSET
         else cast("frozenset[str]", backend_managed_services)
     )
+    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
     return replace(
         snapshot,
         generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
@@ -393,6 +439,7 @@ def _published_snapshot(
         config_data=updated_config_data,
         runtime_config=updated_runtime_config,
         config_load_result=updated_load_result,
+        auth_state=updated_auth_state,
         backend_managed_services=updated_backend_managed_services,
     )
 
@@ -408,6 +455,63 @@ def _stale_snapshot_error() -> HTTPException:
 def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     """Return the API request's committed runtime paths."""
     return _request_or_current_snapshot(request).runtime_paths
+
+
+def reload_api_runtime_config(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    expected_snapshot: ApiSnapshot | None = None,
+    mutate_runtime: Callable[[constants.RuntimePaths], constants.RuntimePaths] | None = None,
+) -> None:
+    """Rebind the API app to one runtime and surface structured config reload failures."""
+    app_state = require_api_state(api_app)
+    with app_state.config_lock:
+        current_snapshot = app_state.snapshot
+        if expected_snapshot is not None and (
+            current_snapshot.generation != expected_snapshot.generation
+            or current_snapshot.runtime_paths != expected_snapshot.runtime_paths
+        ):
+            raise _stale_snapshot_error()
+        target_runtime_paths = runtime_paths if mutate_runtime is None else mutate_runtime(runtime_paths)
+        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == target_runtime_paths else None
+        config_data = current_snapshot.config_data if current_snapshot.runtime_paths == target_runtime_paths else {}
+        runtime_config = (
+            current_snapshot.runtime_config if current_snapshot.runtime_paths == target_runtime_paths else None
+        )
+        config_load_result = (
+            current_snapshot.config_load_result if current_snapshot.runtime_paths == target_runtime_paths else None
+        )
+        backend_managed_services = (
+            current_snapshot.backend_managed_services
+            if current_snapshot.runtime_paths == target_runtime_paths
+            else frozenset()
+        )
+        refreshed_snapshot = _published_snapshot(
+            current_snapshot,
+            runtime_paths=target_runtime_paths,
+            config_data=config_data,
+            runtime_config=runtime_config,
+            auth_state=auth_state,
+            config_load_result=config_load_result,
+            backend_managed_services=backend_managed_services,
+        )
+        app_state.snapshot = refreshed_snapshot
+        result, validated_payload, loaded_runtime_config = _load_config_result(target_runtime_paths)
+        app_state.snapshot = _published_snapshot(
+            refreshed_snapshot,
+            config_data=validated_payload if validated_payload is not None else refreshed_snapshot.config_data,
+            runtime_config=loaded_runtime_config
+            if loaded_runtime_config is not None
+            else refreshed_snapshot.runtime_config,
+            config_load_result=result,
+            backend_managed_services=(
+                _backend_managed_services_for_config(loaded_runtime_config)
+                if loaded_runtime_config is not None
+                else refreshed_snapshot.backend_managed_services
+            ),
+        )
+    _raise_for_config_load_result(result)
 
 
 def committed_generation(request: Request) -> int:
@@ -492,7 +596,7 @@ def _validate_raw_config_source(
         validation_path = Path(tmp.name)
     validation_runtime_paths = replace(runtime_paths, config_path=validation_path)
     try:
-        runtime_config = load_runtime_config_model(
+        runtime_config = _load_api_runtime_config_model(
             validation_runtime_paths,
             tolerate_plugin_load_errors=True,
         )

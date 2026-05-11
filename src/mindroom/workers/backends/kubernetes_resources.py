@@ -8,19 +8,32 @@ import hmac
 import importlib
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
+from mindroom import constants
+from mindroom.constants import RuntimePaths
+from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import (
-    SHARED_CREDENTIALS_PATH_ENV,
     get_runtime_credentials_manager,
     get_runtime_shared_credentials_manager,
+    load_worker_grantable_shared_credentials,
 )
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
+from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    SHARED_CREDENTIALS_PATH_ENV,
+    VENDOR_TELEMETRY_ENV_VALUES,
+    credentials_encryption_key_value,
+    worker_extra_env,
+)
+from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
@@ -320,6 +333,19 @@ class KubernetesResourceManager:
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
         self.worker_grantable_credentials = worker_grantable_credentials
+        unsupported_services = sorted(
+            {
+                service
+                for service in worker_grantable_credentials
+                if not credential_service_policy(service, None).worker_grantable_supported
+            },
+        )
+        if unsupported_services:
+            msg = (
+                "Dedicated workers do not support "
+                f"{', '.join(unsupported_services)}. Keep these credentials in the primary runtime."
+            )
+            raise WorkerBackendError(msg)
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -432,6 +458,14 @@ class KubernetesResourceManager:
             manifest=manifest,
         )
         return DeploymentApplyResult(recreated=False)
+
+    def mirror_google_application_credentials(self, *, worker_key: str, state_subpath: str) -> None:
+        """Rewrite allowed Google ADC credential payloads to worker-visible mirrored files."""
+        self._worker_google_application_credentials_path(
+            worker_key,
+            Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
+            local_dedicated_root=(self.storage_root / state_subpath).resolve(),
+        )
 
     def patch_deployment(
         self,
@@ -911,11 +945,36 @@ class KubernetesResourceManager:
 
     def _write_startup_manifest(
         self,
-        worker_key: str,
-        dedicated_root: Path,
         *,
         worker_key: str,
         dedicated_root: Path,
+        local_dedicated_root: Path,
+    ) -> tuple[str, str]:
+        startup_runtime_paths = self._worker_runtime_paths(
+            worker_key=worker_key,
+            dedicated_root=dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+        )
+        constants.write_startup_manifest(
+            local_dedicated_root,
+            startup_runtime_paths,
+            tool_validation_snapshot=self.tool_validation_snapshot,
+            public_runtime=True,
+        )
+        return (
+            str(constants.sandbox_startup_manifest_path(dedicated_root)),
+            constants.startup_manifest_sha256(
+                startup_runtime_paths,
+                tool_validation_snapshot=self.tool_validation_snapshot,
+                public_runtime=True,
+            ),
+        )
+
+    def _worker_google_application_credentials_path(
+        self,
+        worker_key: str,
+        dedicated_root: Path,
+        *,
         local_dedicated_root: Path,
     ) -> str | None:
         """Return a worker-visible ADC file path and rewrite the mirrored credential payload."""
@@ -925,7 +984,11 @@ class KubernetesResourceManager:
         shared_manager = get_runtime_shared_credentials_manager(self.runtime_paths)
         mirrored_paths: dict[str, str] = {}
         for service in self._configured_google_adc_services():
-            credentials = shared_manager.load_credentials(service)
+            credentials = load_worker_grantable_shared_credentials(
+                service,
+                shared_manager=shared_manager,
+                allowed_services=self.worker_grantable_credentials,
+            )
             raw_path = credentials.get("application_credentials_path") if isinstance(credentials, dict) else None
             if (
                 not isinstance(credentials, dict)
@@ -977,6 +1040,7 @@ class KubernetesResourceManager:
         *,
         worker_key: str,
         dedicated_root: Path,
+        local_dedicated_root: Path,
     ) -> RuntimePaths:
         config_path = (
             Path(self.config.config_path)

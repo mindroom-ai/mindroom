@@ -22,8 +22,8 @@ from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
-from mindroom.cli import config as cli_config_module
-from mindroom.cli.config import _activate_cli_runtime
+from mindroom.cli import config as config_cli
+from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
@@ -73,7 +73,7 @@ def _clear_runtime_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setenv("LINES", "50")
-    monkeypatch.setattr(cli_config_module.console, "_width", 200)
+    monkeypatch.setattr(config_cli.console, "_width", 200)
 
 
 def _runtime_path_env(config_path: Path, *, storage_path: Path | None = None) -> dict[str, str]:
@@ -2081,7 +2081,7 @@ class TestDoctor:
 
         assert result.exit_code == 1
         output = normalize_console_output(result.output)
-        assert "vertexai_claude connection failed for claude-sonnet-4-6" in output
+        assert "vertexai_claude connection failed for model 'default' (claude-sonnet-4-6)" in output
         assert "GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist" in output
 
     def test_vertexai_claude_invalid_adc_file_is_failure(
@@ -2105,7 +2105,7 @@ class TestDoctor:
 
         assert result.exit_code == 1
         output = normalize_console_output(result.output)
-        assert "vertexai_claude connection failed for claude-sonnet-4-6" in output
+        assert "vertexai_claude connection failed for model 'default' (claude-sonnet-4-6)" in output
         assert "Failed to load GOOGLE_APPLICATION_CREDENTIALS" in output
 
     def test_vertexai_claude_api_rejection_is_failure(

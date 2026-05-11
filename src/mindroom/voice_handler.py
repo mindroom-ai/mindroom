@@ -15,14 +15,10 @@ from agno.media import Audio
 
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
-from mindroom.authorization import get_available_agents_for_sender
+from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.connections import connection_api_key, resolve_connection
-from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
-    VOICE_PREFIX,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
-)
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type

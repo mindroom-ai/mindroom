@@ -346,6 +346,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.google_integration"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials",
+    "mindroom.connections",
+    "mindroom.credentials",
+    "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
 path = "mindroom.api.integrations"
 depends_on = [
     "mindroom.api.auth",
@@ -417,6 +429,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.frontend",
+    "mindroom.api.google_integration",
     "mindroom.api.homeassistant_integration",
     "mindroom.api.integrations",
     "mindroom.api.knowledge",

@@ -14,8 +14,12 @@ from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
 
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
+from mindroom.connections import (
+    connection_api_key,
+    connection_google_application_credentials_path,
+    resolve_connection,
+)
 from mindroom.constants import RuntimePaths, runtime_env_path
-from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
@@ -41,7 +45,8 @@ def _canonical_provider(provider: str) -> str:
     return provider.strip().lower().replace("-", "_")
 
 
-def _create_model_for_provider(  # noqa: C901, PLR0912
+def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
+    config: Config,
     provider: str,
     model_id: str,
     model_config: ModelConfig,
@@ -51,14 +56,41 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 ) -> Model:
     """Create a model instance for one provider."""
     canonical_provider = _canonical_provider(provider)
+    supported_providers = {
+        "openai",
+        "anthropic",
+        "gemini",
+        "google",
+        "vertexai_claude",
+        "cerebras",
+        "groq",
+        "deepseek",
+        "ollama",
+        "openrouter",
+        "codex",
+        "openai_codex",
+    }
+    if canonical_provider not in supported_providers:
+        msg = f"Unsupported AI provider: {provider}"
+        raise ValueError(msg)
 
-    if (
-        canonical_provider not in {"ollama", "vertexai_claude", "codex", "openai_codex"}
-        and "api_key" not in extra_kwargs
-    ):
-        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-        if api_key:
-            extra_kwargs["api_key"] = api_key
+    resolved_connection = None
+    if canonical_provider not in {"codex", "openai_codex"}:
+        resolved_connection = resolve_connection(
+            config,
+            provider=provider,
+            purpose="chat_model",
+            connection_name=model_config.connection,
+            runtime_paths=runtime_paths,
+            validate_credentials=False,
+        )
+        if canonical_provider not in {"ollama", "vertexai_claude"}:
+            api_key = connection_api_key(resolved_connection) or get_api_key_for_provider(
+                canonical_provider,
+                runtime_paths=runtime_paths,
+            )
+            if api_key:
+                extra_kwargs["api_key"] = api_key
 
     if canonical_provider == "vertexai_claude":
         if "project_id" not in extra_kwargs:
@@ -74,10 +106,17 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             if base_url:
                 extra_kwargs["base_url"] = base_url
         client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
-        if "credentials" not in client_params and (
-            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        ):
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
+        google_application_credentials = (
+            connection_google_application_credentials_path(resolved_connection)
+            if resolved_connection is not None
+            else None
+        )
+        if google_application_credentials is None:
+            adc_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+            if adc_path is not None:
+                google_application_credentials = str(adc_path)
+        if "credentials" not in client_params and google_application_credentials:
+            client_params["credentials"] = load_google_application_credentials(google_application_credentials)
         if client_params:
             extra_kwargs["client_params"] = client_params
 
@@ -145,17 +184,11 @@ def get_model_instance(
 
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    model_creds = creds_manager.load_credentials(f"model:{model_name}")
-    model_api_key = model_creds.get("api_key") if model_creds else None
-
-    if model_api_key:
-        extra_kwargs["api_key"] = model_api_key
-
     if _canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
 
     model = _create_model_for_provider(
+        config,
         provider,
         model_id,
         model_config,

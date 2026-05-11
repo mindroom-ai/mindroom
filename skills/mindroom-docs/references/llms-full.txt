@@ -1999,14 +1999,14 @@ Models define the AI providers and model IDs used by agents.
 
 Each model configuration supports the following fields:
 
-| Field            | Required | Default            | Description                                                                                                                                                                                               |
-| ---------------- | -------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`       | Yes      | -                  | The AI provider (see supported providers above)                                                                                                                                                           |
-| `id`             | Yes      | -                  | Model ID specific to the provider                                                                                                                                                                         |
-| `connection`     | No       | `provider/default` | Named connection used for credentials (`gemini` canonicalizes to `google/default`)                                                                                                                        |
-| `host`           | No       | `null`             | Host URL for self-hosted models (e.g., Ollama)                                                                                                                                                            |
-| `extra_kwargs`   | No       | `null`             | Additional provider-specific parameters                                                                                                                                                                   |
-| `context_window` | No       | `null`             | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `provider` | Yes | - | The AI provider (see supported providers above) |
+| `id` | Yes | - | Model ID specific to the provider |
+| `connection` | No | `provider/default` | Named connection used for credentials (`gemini` canonicalizes to `google/default`) |
+| `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
+| `extra_kwargs` | No | `null` | Additional provider-specific parameters |
+| `context_window` | No | `null` | Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit `compaction.model` also needs its own `context_window` for destructive compaction |
 
 ## Configuration Examples
 
@@ -11682,11 +11682,13 @@ memory:
       model: llama3.2
 ```
 
-When you use a credentialed memory LLM or embedder, set `connection` on that consuming config. OpenAI embedders default to `openai/embeddings`. Memory LLMs default to `provider/default`.
+When you use a credentialed memory LLM or embedder, set `connection` on that consuming config.
+OpenAI embedders default to `openai/embeddings`.
+Memory LLMs default to `provider/default`.
 
 Example with an explicit OpenAI memory LLM connection:
 
-```
+```yaml
 memory:
   llm:
     provider: openai
@@ -11975,7 +11977,7 @@ Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server
 
 For self-hosted solutions that should use a non-default credential:
 
-```
+```yaml
 connections:
   openai/stt_lab:
     provider: openai
@@ -12101,8 +12103,8 @@ Reply-permission checks still use the original human sender, not a later router 
 
 ## Environment Variables
 
-| Variable         | Description                               |
-| ---------------- | ----------------------------------------- |
+| Variable | Description |
+|----------|-------------|
 | `OPENAI_API_KEY` | Seeds the default `openai/stt` connection |
 
 ## Text-to-Speech Tools

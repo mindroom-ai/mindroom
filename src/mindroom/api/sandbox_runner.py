@@ -194,6 +194,10 @@ def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str,
 def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return the runtime config visible inside one sandbox runner."""
     if runtime_paths.config_path.exists():
+        if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
+            return _dedicated_worker_runtime_config_or_empty(runtime_paths)
+        if constants.sandbox_startup_manifest_path(runtime_paths.storage_root).exists():
+            return load_config(runtime_paths)
         return load_config(runtime_paths, tolerate_plugin_load_errors=True)
     return Config.validate_with_runtime(
         {},
@@ -261,6 +265,8 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
 def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
+    if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
+        return runtime_paths, _dedicated_worker_runtime_config_or_empty(runtime_paths)
     return runtime_paths, _runtime_config_or_empty(runtime_paths)
 
 
@@ -483,6 +489,10 @@ def app_runtime_paths(app: FastAPI) -> RuntimePaths:
 def app_runtime_config(app: FastAPI) -> Config:
     """Return sandbox runner config stored on the FastAPI app."""
     return _app_context(app).config
+
+
+_app_runtime_paths = app_runtime_paths
+_app_runtime_config = app_runtime_config
 
 
 def _app_tool_metadata(app: FastAPI) -> dict[str, Any]:

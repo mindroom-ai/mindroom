@@ -68,6 +68,7 @@ from mindroom.constants import (
     RuntimePaths,
     matrix_state_file,
     resolve_config_relative_path,
+    resolve_runtime_paths,
     runtime_matrix_homeserver,
 )
 from mindroom.git_urls import credential_free_repo_url
@@ -244,7 +245,17 @@ def _normalize_optional_config_sections(data: dict[str, object]) -> None:
         data["plugins"] = []
 
 
-def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> AuthoredOptionalModel:
+def normalized_config_data(data: object) -> object:
+    """Return config input with legacy optional sections normalized."""
+    if not isinstance(data, dict):
+        return data
+
+    normalized_data = cast("dict[str, object]", data.copy())
+    _normalize_optional_config_sections(normalized_data)
+    return normalized_data
+
+
+def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> _AuthoredOptionalModel:
     """Return the authored tri-state semantics for one optional model field."""
     if not field_is_set:
         return _AuthoredOptionalModel(kind="unset")
@@ -1067,6 +1078,9 @@ class Config(BaseModel):
                 "strict_connection_validation": strict_connection_validation,
             },
         )
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
+
         try:
             if tolerate_plugin_load_errors:
                 config._validate_authored_tool_entries(
@@ -1089,6 +1103,12 @@ class Config(BaseModel):
             if not authored_connections:
                 dump.pop("connections", None)
         return dump
+
+    def save_to_yaml(self, config_path: Path) -> None:
+        """Persist authored config YAML to an explicit path."""
+        path = Path(config_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(self.authored_model_dump(), sort_keys=False), encoding="utf-8")
 
     @classmethod
     def from_yaml(

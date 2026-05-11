@@ -1,5 +1,6 @@
 """Test extra_kwargs functionality in model configuration."""
 
+import importlib
 import tempfile
 from pathlib import Path
 
@@ -8,12 +9,20 @@ import yaml
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
+from agno.utils.models.claude import format_messages
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.model_loading import get_model_instance
+from mindroom.startup_errors import PermanentStartupError
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
+from mindroom.vertex_claude_prompt_cache import (
+    _copy_messages_with_vertex_prompt_cache_breakpoint,
+    install_vertex_claude_prompt_cache_hook,
+)
 
 
 def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, RuntimePaths]:
@@ -358,13 +367,11 @@ def test_vertexai_claude_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     )
 
-    def fake_load_credentials_from_file(_path: str, *, scopes: list[str]) -> tuple[object, str]:
-        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
-        return object(), "ignored-project"
+    fake_credentials = object()
 
     monkeypatch.setattr(
-        "google.auth.load_credentials_from_file",
-        fake_load_credentials_from_file,
+        "mindroom.model_loading.load_google_application_credentials",
+        lambda _path: fake_credentials,
     )
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
@@ -374,6 +381,8 @@ def test_vertexai_claude_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+    assert model.client_params is not None
+    assert model.client_params["credentials"] is fake_credentials
 
 
 def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
@@ -833,7 +842,7 @@ def test_get_model_instance_uses_explicit_named_connection_override(monkeypatch:
             captured.update(kwargs)
             self.id = str(kwargs["id"])
 
-    monkeypatch.setattr("mindroom.ai.OpenAIChat", _FakeOpenAIChat)
+    monkeypatch.setattr("mindroom.model_loading.OpenAIChat", _FakeOpenAIChat)
 
     config_data = {
         "connections": {
@@ -864,7 +873,7 @@ def test_get_model_instance_uses_explicit_named_connection_override(monkeypatch:
 
 def test_model_config_rejects_inline_vertex_client_credentials() -> None:
     """Vertex model configs must not bypass connection routing with inline credentials."""
-    with pytest.raises(ValidationError, match="extra_kwargs.client_params.credentials"):
+    with pytest.raises(ValidationError, match=r"extra_kwargs\.client_params\.credentials"):
         ModelConfig(
             provider="vertexai_claude",
             id="claude-sonnet-4-6",
