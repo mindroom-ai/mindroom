@@ -435,7 +435,29 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     client_config_resolution = provider.client_config_resolution(runtime_paths)
     has_client_config = client_config_resolution is not None
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
-    connected = has_service_account_config or oauth_credentials_usable(provider, runtime_paths, credentials)
+    refresh_failed = False
+    if credentials and has_client_config and not has_service_account_config:
+        try:
+            refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
+        except OAuthProviderError as exc:
+            refresh_failed = True
+            logger.warning(
+                "oauth_token_refresh_failed",
+                provider_id=provider.id,
+                error_type=type(exc).__name__,
+            )
+        else:
+            if refreshed_credentials is not None:
+                save_scoped_credentials(
+                    provider.credential_service,
+                    refreshed_credentials,
+                    credentials_manager=target.base_manager,
+                    worker_target=worker_target,
+                )
+                credentials = refreshed_credentials
+    connected = has_service_account_config or (
+        not refresh_failed and oauth_credentials_usable(provider, runtime_paths, credentials)
+    )
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service
     elif provider.all_client_config_services:

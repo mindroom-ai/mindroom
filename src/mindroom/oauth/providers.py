@@ -532,9 +532,28 @@ class OAuthProvider:
             raise OAuthProviderError(msg)
 
         refresh_response = dict(token_response)
-        for key in ("refresh_token", "_oauth_claims", "_oauth_claims_verified"):
-            if key not in refresh_response and key in token_data:
-                refresh_response[key] = token_data[key]
+        response_refresh_token = refresh_response.get("refresh_token")
+        existing_refresh_token = token_data.get("refresh_token")
+        if (
+            (not isinstance(response_refresh_token, str) or not response_refresh_token)
+            and isinstance(existing_refresh_token, str)
+            and existing_refresh_token
+        ):
+            refresh_response["refresh_token"] = existing_refresh_token
+
+        response_claims = refresh_response.get("_oauth_claims")
+        existing_claims = token_data.get("_oauth_claims")
+        if (
+            (not isinstance(response_claims, Mapping) or not response_claims)
+            and isinstance(existing_claims, Mapping)
+            and existing_claims
+        ):
+            refresh_response["_oauth_claims"] = existing_claims
+        if (
+            refresh_response.get("_oauth_claims_verified") is not True
+            and token_data.get("_oauth_claims_verified") is True
+        ):
+            refresh_response["_oauth_claims_verified"] = True
         parser = self.token_parser or _default_token_parser
         result = parser(self, refresh_response, client_config, runtime_paths)
         self.validate_claims(result, runtime_paths)
