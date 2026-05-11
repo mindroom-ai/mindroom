@@ -1962,6 +1962,54 @@ def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
     assert not queued_signal.is_set()
 
 
+@pytest.mark.asyncio
+async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(tmp_path: Path) -> None:
+    """A reservation handed to the lifecycle should not leak if lock acquisition is cancelled."""
+    bot = _bot(tmp_path)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$event",
+        target=target,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+    assert reservation is not None
+    assert queued_signal.pending_human_messages == 1
+
+    lock = lifecycle._response_lifecycle_lock(target)
+    await lock.acquire()
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        msg = "lock wait should be cancelled before the operation runs"
+        raise AssertionError(msg)
+
+    try:
+        task = asyncio.create_task(
+            lifecycle.run_locked_response(
+                target=target,
+                response_envelope=envelope,
+                queued_notice_reservation=reservation,
+                pipeline_timing=None,
+                locked_operation=locked_operation,
+            ),
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        lock.release()
+        queued_signal.finish_response_turn()
+
+    assert queued_signal.pending_human_messages == 0
+    assert not queued_signal.is_set()
+    assert not queued_signal.has_active_response_turn()
+
+
 def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> None:
     """A reserved active follow-up mixed into a multi-event batch should fail and clear."""
     bot = _bot(tmp_path)

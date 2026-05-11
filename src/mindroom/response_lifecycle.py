@@ -228,6 +228,7 @@ class ResponseLifecycleCoordinator:
             queued_notice_reservation=queued_notice_reservation,
         )
         lock_acquired = False
+        reservation_consumed = False
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
@@ -238,6 +239,7 @@ class ResponseLifecycleCoordinator:
             try:
                 if queued_notice_reservation is not None:
                     queued_notice_reservation.consume()
+                    reservation_consumed = True
                 notice = self._consume_queued_human_notice(
                     notice=notice,
                     queued_signal=queued_signal,
@@ -248,6 +250,8 @@ class ResponseLifecycleCoordinator:
                 if lock_acquired:
                     lifecycle_lock.release()
         finally:
+            if queued_notice_reservation is not None and not reservation_consumed:
+                queued_notice_reservation.cancel()
             self._consume_queued_human_notice(
                 notice=notice,
                 queued_signal=queued_signal,
