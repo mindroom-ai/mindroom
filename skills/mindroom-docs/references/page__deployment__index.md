@@ -4,30 +4,31 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                                | Best For                                                           |
-| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md)        | Simplest setup: run only `uvx mindroom run` locally                |
-| Full Stack (Docker Compose)                                                                           | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)                    | Single MindRoom runtime or when you already have Matrix            |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                               | Multi-tenant SaaS, production                                      |
-| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) | Hosted private agents behind an authenticated access layer         |
-| Direct                                                                                                | Development, simple setups                                         |
+| Method | Best For |
+|--------|----------|
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Simplest setup: run only `uvx mindroom run` locally |
+| Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
+| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted private agents behind an authenticated access layer |
+| Direct | Development, simple setups |
 
 ## Bridges
 
 Connect external messaging platforms to Matrix:
 
-- [Bridges overview](https://docs.mindroom.chat/deployment/bridges/index.md) - available bridges and how they work
-- [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/index.md) - bridge Telegram chats via mautrix-telegram
+- [Bridges overview](https://docs.mindroom.chat/deployment/bridges/) - available bridges and how they work
+- [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/) - bridge Telegram chats via mautrix-telegram
 
 ## Google Services (Gmail/Calendar/Drive/Sheets)
 
 Use these guides if you want users to connect Google accounts in the MindRoom frontend:
 
-- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - one-time setup for shared/team deployments
-- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) - one-time setup for shared/team deployments
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - single-user bring-your-own OAuth app setup
 
-For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) and the Google Drive section in the individual setup guide. For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) so agent-issued OAuth links authenticate as the requester that triggered them.
+For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) and the Google Drive section in the individual setup guide.
+For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) so agent-issued OAuth links authenticate as the requester that triggered them.
 
 ## Quick Start
 
@@ -44,7 +45,7 @@ uvx mindroom run
 Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
-See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough.
+See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 
 ### Full Stack (recommended)
 
@@ -88,11 +89,11 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
-See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for the full single-container setup.
+See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/) for the full single-container setup.
 
 ### Kubernetes
 
-See the [Kubernetes deployment guide](https://docs.mindroom.chat/deployment/kubernetes/index.md) for Helm chart configuration.
+See the [Kubernetes deployment guide](https://docs.mindroom.chat/deployment/kubernetes/) for Helm chart configuration.
 
 ## Required Configuration
 
@@ -107,8 +108,8 @@ OPENAI_API_KEY=sk-...
 Direct and single-container deployments:
 
 1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` (must allow open registration for agent accounts)
-1. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
-1. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
+2. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
+3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
 

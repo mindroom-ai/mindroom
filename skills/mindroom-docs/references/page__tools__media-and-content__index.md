@@ -9,12 +9,12 @@ Use these tools when you need local video processing, media lookup, brand asset 
 
 ## Tools On This Page
 
-- \[`moviepy_video_tools`\] - Local video helpers for audio extraction, SRT creation, and caption burn-in.
-- \[`giphy`\] - GIF search that returns Giphy-hosted animated images.
-- \[`youtube`\] - YouTube URL inspection for video metadata, captions, and timestamped transcript lines.
-- \[`unsplash`\] - Stock photo search and photo metadata lookup from Unsplash.
-- \[`brandfetch`\] - Brand asset and identity lookup by domain, brand ID, ISIN, stock ticker, or brand name.
-- \[`spotify`\] - Spotify search, playlist, profile, recommendation, and playback actions.
+- [`moviepy_video_tools`] - Local video helpers for audio extraction, SRT creation, and caption burn-in.
+- [`giphy`] - GIF search that returns Giphy-hosted animated images.
+- [`youtube`] - YouTube URL inspection for video metadata, captions, and timestamped transcript lines.
+- [`unsplash`] - Stock photo search and photo metadata lookup from Unsplash.
+- [`brandfetch`] - Brand asset and identity lookup by domain, brand ID, ISIN, stock ticker, or brand name.
+- [`spotify`] - Spotify search, playlist, profile, recommendation, and playback actions.
 
 ## Common Setup Notes
 
@@ -28,7 +28,7 @@ That matters most on this page for `moviepy_video_tools`, `giphy`, `brandfetch`,
 `spotify` is the only tool on this page with dedicated integration routes in `src/mindroom/api/integrations.py`.
 MindRoom treats `spotify` as a shared-only integration, so dashboard credential management and tool support require `worker_scope` unset or `shared`, not `user` or `user_agent`.
 
-## \[`moviepy_video_tools`\]
+## [`moviepy_video_tools`]
 
 `moviepy_video_tools` is the local video-processing toolkit for extracting audio, saving SRT text, and burning captions into a rendered video file.
 
@@ -42,12 +42,12 @@ This tool works entirely on local files, so it is only useful when the agent run
 
 ### Configuration
 
-| Option                     | Type      | Required | Default | Notes                                     |
-| -------------------------- | --------- | -------- | ------- | ----------------------------------------- |
-| `enable_process_video`     | `boolean` | `no`     | `true`  | Enable `extract_audio()`.                 |
-| `enable_generate_captions` | `boolean` | `no`     | `true`  | Enable `create_srt()`.                    |
-| `enable_embed_captions`    | `boolean` | `no`     | `true`  | Enable `embed_captions()`.                |
-| `all`                      | `boolean` | `no`     | `false` | Enable the full upstream toolkit surface. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_process_video` | `boolean` | `no` | `true` | Enable `extract_audio()`. |
+| `enable_generate_captions` | `boolean` | `no` | `true` | Enable `create_srt()`. |
+| `enable_embed_captions` | `boolean` | `no` | `true` | Enable `embed_captions()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -71,7 +71,7 @@ embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_capti
 - `embed_captions()` defaults the output filename to `<video>_captioned.mp4` when `output_path` is omitted.
 - Use this tool for simple local media transforms, not remote video discovery or hosting.
 
-## \[`giphy`\]
+## [`giphy`]
 
 `giphy` searches Giphy for animated GIFs and returns image artifacts that agents can reuse in a response.
 
@@ -84,12 +84,12 @@ Successful calls return a `ToolResult` with both plain-text URLs and attached im
 
 ### Configuration
 
-| Option               | Type       | Required | Default | Notes                                                            |
-| -------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------- |
-| `api_key`            | `password` | `yes`    | `null`  | Giphy API key. The upstream toolkit also checks `GIPHY_API_KEY`. |
-| `limit`              | `number`   | `no`     | `1`     | Number of GIFs returned per search.                              |
-| `enable_search_gifs` | `boolean`  | `no`     | `true`  | Enable `search_gifs()`.                                          |
-| `all`                | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                        |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | Giphy API key. The upstream toolkit also checks `GIPHY_API_KEY`. |
+| `limit` | `number` | `no` | `1` | Number of GIFs returned per search. |
+| `enable_search_gifs` | `boolean` | `no` | `true` | Enable `search_gifs()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -111,7 +111,7 @@ search_gifs("matrix code review celebration")
 - `search_gifs()` returns hosted GIF URLs, not downloaded local files.
 - Use this when you want animated reaction media rather than stock photography or brand assets.
 
-## \[`youtube`\]
+## [`youtube`]
 
 `youtube` works from a YouTube video URL and extracts metadata, captions, or timestamped transcript lines.
 
@@ -125,14 +125,14 @@ It expects a specific YouTube URL and then fetches metadata or transcript-derive
 
 ### Configuration
 
-| Option                        | Type       | Required | Default | Notes                                                         |
-| ----------------------------- | ---------- | -------- | ------- | ------------------------------------------------------------- |
-| `enable_get_video_captions`   | `boolean`  | `no`     | `true`  | Enable `get_youtube_video_captions()`.                        |
-| `enable_get_video_data`       | `boolean`  | `no`     | `true`  | Enable `get_youtube_video_data()`.                            |
-| `enable_get_video_timestamps` | `boolean`  | `no`     | `true`  | Enable `get_video_timestamps()`.                              |
-| `all`                         | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                     |
-| `languages`                   | `string[]` | `no`     | `null`  | Preferred transcript languages, for example `["en", "es"]`.   |
-| `proxies`                     | `text`     | `no`     | `null`  | Optional proxy mapping forwarded to `youtube_transcript_api`. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_get_video_captions` | `boolean` | `no` | `true` | Enable `get_youtube_video_captions()`. |
+| `enable_get_video_data` | `boolean` | `no` | `true` | Enable `get_youtube_video_data()`. |
+| `enable_get_video_timestamps` | `boolean` | `no` | `true` | Enable `get_video_timestamps()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `languages` | `string[]` | `no` | `null` | Preferred transcript languages, for example `["en", "es"]`. |
+| `proxies` | `text` | `no` | `null` | Optional proxy mapping forwarded to `youtube_transcript_api`. |
 
 ### Example
 
@@ -156,7 +156,7 @@ get_video_timestamps("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 - `languages` only affects transcript retrieval methods, not `get_youtube_video_data()`.
 - Invalid or unsupported URLs return plain-text error strings from the upstream toolkit.
 
-## \[`unsplash`\]
+## [`unsplash`]
 
 `unsplash` searches Unsplash for stock photography, fetches one photo's metadata, or requests random photo selections.
 
@@ -171,14 +171,14 @@ It triggers Unsplash's required download-tracking endpoint and returns the downl
 
 ### Configuration
 
-| Option                    | Type       | Required | Default | Notes                                                                        |
-| ------------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------------------- |
-| `access_key`              | `password` | `yes`    | `null`  | Unsplash access key. The upstream toolkit also checks `UNSPLASH_ACCESS_KEY`. |
-| `enable_search_photos`    | `boolean`  | `no`     | `true`  | Enable `search_photos()`.                                                    |
-| `enable_get_photo`        | `boolean`  | `no`     | `true`  | Enable `get_photo()`.                                                        |
-| `enable_get_random_photo` | `boolean`  | `no`     | `true`  | Enable `get_random_photo()`.                                                 |
-| `enable_download_photo`   | `boolean`  | `no`     | `false` | Enable `download_photo()`.                                                   |
-| `all`                     | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                                    |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `access_key` | `password` | `yes` | `null` | Unsplash access key. The upstream toolkit also checks `UNSPLASH_ACCESS_KEY`. |
+| `enable_search_photos` | `boolean` | `no` | `true` | Enable `search_photos()`. |
+| `enable_get_photo` | `boolean` | `no` | `true` | Enable `get_photo()`. |
+| `enable_get_random_photo` | `boolean` | `no` | `true` | Enable `get_random_photo()`. |
+| `enable_download_photo` | `boolean` | `no` | `false` | Enable `download_photo()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -202,7 +202,7 @@ get_photo("abcd1234")
 - The tool returns URLs and metadata, not local downloaded image files.
 - Use `unsplash` for stock photography, not logos or brand identity assets.
 
-## \[`brandfetch`\]
+## [`brandfetch`]
 
 `brandfetch` retrieves brand identity data such as logos, colors, fonts, and related brand metadata.
 
@@ -216,16 +216,16 @@ The two methods use different credentials.
 
 ### Configuration
 
-| Option                        | Type       | Required | Default                        | Notes                                                                                                   |
-| ----------------------------- | ---------- | -------- | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `api_key`                     | `password` | `no`     | `null`                         | Brandfetch API key for `search_by_identifier()`. The upstream toolkit also checks `BRANDFETCH_API_KEY`. |
-| `client_id`                   | `text`     | `no`     | `null`                         | Brandfetch Client ID for `search_by_brand()`. The upstream toolkit also checks `BRANDFETCH_CLIENT_ID`.  |
-| `enable_search_by_identifier` | `boolean`  | `no`     | `true`                         | Enable `search_by_identifier()`.                                                                        |
-| `enable_search_by_brand`      | `boolean`  | `no`     | `false`                        | Enable `search_by_brand()`.                                                                             |
-| `base_url`                    | `url`      | `no`     | `https://api.brandfetch.io/v2` | Base Brandfetch API URL.                                                                                |
-| `timeout`                     | `number`   | `no`     | `20.0`                         | Request timeout in seconds.                                                                             |
-| `all`                         | `boolean`  | `no`     | `false`                        | Enable the full upstream toolkit surface.                                                               |
-| `async_tools`                 | `boolean`  | `no`     | `false`                        | Deprecated upstream flag that is no longer needed for normal use.                                       |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Brandfetch API key for `search_by_identifier()`. The upstream toolkit also checks `BRANDFETCH_API_KEY`. |
+| `client_id` | `text` | `no` | `null` | Brandfetch Client ID for `search_by_brand()`. The upstream toolkit also checks `BRANDFETCH_CLIENT_ID`. |
+| `enable_search_by_identifier` | `boolean` | `no` | `true` | Enable `search_by_identifier()`. |
+| `enable_search_by_brand` | `boolean` | `no` | `false` | Enable `search_by_brand()`. |
+| `base_url` | `url` | `no` | `https://api.brandfetch.io/v2` | Base Brandfetch API URL. |
+| `timeout` | `number` | `no` | `20.0` | Request timeout in seconds. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `async_tools` | `boolean` | `no` | `false` | Deprecated upstream flag that is no longer needed for normal use. |
 
 ### Example
 
@@ -249,7 +249,7 @@ search_by_brand("OpenAI")
 - `search_by_identifier()` is the better default when you already know the brand domain or ticker.
 - `async_tools` is kept only for upstream compatibility and should be left at its default.
 
-## \[`spotify`\]
+## [`spotify`]
 
 `spotify` is the richest content tool on this page, covering music search, recommendations, playlists, profile lookups, and limited playback control.
 
@@ -263,11 +263,11 @@ The upstream playlist and playback methods need additional Spotify scopes beyond
 
 ### Configuration
 
-| Option           | Type       | Required | Default | Notes                                                    |
-| ---------------- | ---------- | -------- | ------- | -------------------------------------------------------- |
-| `access_token`   | `password` | `yes`    | `null`  | Spotify OAuth access token used by the toolkit.          |
-| `default_market` | `text`     | `no`     | `US`    | Default market code for search and album lookup methods. |
-| `timeout`        | `number`   | `no`     | `30`    | Request timeout in seconds.                              |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `access_token` | `password` | `yes` | `null` | Spotify OAuth access token used by the toolkit. |
+| `default_market` | `text` | `no` | `US` | Default market code for search and album lookup methods. |
+| `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 
 ### Example
 
@@ -296,6 +296,6 @@ get_currently_playing()
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)

@@ -63,9 +63,9 @@ Set at least one key:
 ### 3. Pair your local install from chat UI
 
 1. Open `https://chat.mindroom.chat` and sign in.
-1. Go to `Settings -> Local MindRoom`.
-1. Click `Generate Pair Code`.
-1. Run locally:
+2. Go to `Settings -> Local MindRoom`.
+3. Click `Generate Pair Code`.
+4. Run locally:
 
 ```bash
 uvx mindroom connect --pair-code ABCD-EFGH
@@ -87,11 +87,13 @@ uvx mindroom run
 
 **In chat:** Send a message mentioning your agent in a room where it is configured.
 
-**Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools. Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
+**Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
+Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
 
 **Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 
-For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
+For a detailed architecture and credential model, see:
+[Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
 
 ## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
@@ -143,35 +145,24 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
 
 === "uv (recommended)"
 
-```bash
-```bash
-uv tool install mindroom
-```bash
-
-```
+    ```bash
+    uv tool install mindroom
+    ```
 
 === "pip"
 
-```bash
-
-```bash
-pip install mindroom
-```yaml
-
-```
+    ```bash
+    pip install mindroom
+    ```
 
 === "From source"
 
-```bash
-
-```bash
-git clone https://github.com/mindroom-ai/mindroom
-cd mindroom
-uv sync
-source .venv/bin/activate
-```bash
-
-```
+    ```bash
+    git clone https://github.com/mindroom-ai/mindroom
+    cd mindroom
+    uv sync
+    source .venv/bin/activate
+    ```
 
 ### Configuration
 
@@ -179,16 +170,27 @@ source .venv/bin/activate
 
 Create a `config.yaml` in your working directory:
 
-```bash
+```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful AI assistant that can answer questions
+    model: default
+    include_default_tools: true
+    rooms: [lobby]
+    # Optional: file-based context (OpenClaw-style)
+    # context_files: [SOUL.md, USER.md]
 
-agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [SOUL.md, USER.md]
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
 
-models: default: provider: openai id: gpt-5.4
-
-defaults: tools: [scheduler] markdown: true
+defaults:
+  tools: [scheduler]
+  markdown: true
 
 timezone: America/Los_Angeles
-
 ```
 
 #### 2. Set up environment variables
@@ -196,49 +198,36 @@ timezone: America/Los_Angeles
 Create a `.env` file with your credentials:
 
 ```bash
-
 # Matrix homeserver (must allow open registration for agent accounts)
-
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # Optional: For self-signed certificates (development)
-
 # MATRIX_SSL_VERIFY=false
 
 # Optional: For federation setups where server_name differs from homeserver hostname
-
 # MATRIX_SERVER_NAME=example.com
 
 # AI provider API keys
-
 OPENAI_API_KEY=your_openai_key
-
 # OPENROUTER_API_KEY=your_openrouter_key
-
 # ANTHROPIC_API_KEY=your_anthropic_key
 
 # Optional: protect the dashboard API (recommended for non-localhost)
-
 # MINDROOM_API_KEY=your-secret-key
-
 ```
 
 #### Optional: Bootstrap local Synapse + Cinny with Docker (Linux/macOS)
 
 If you want a local Matrix + client setup without running the full `mindroom-stack` app, use the helper command:
 
-```
-
+```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
-
 ```
 
 If you're running from source in this repo, use:
 
-```
-
+```bash
 uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
-
 ```
 
 This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Cinny container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
@@ -248,11 +237,9 @@ This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom C
 
 #### 3. Run MindRoom
 
-```
-
+```bash
 mindroom run
-
-````
+```
 
 MindRoom will:
 
@@ -263,8 +250,7 @@ MindRoom will:
 
 ## Next Steps
 
-- Learn about [agent configuration](https://docs.mindroom.chat/configuration/agents/index.md)
-- Learn about [OpenClaw workspace import](https://docs.mindroom.chat/openclaw/index.md) if you want file-based memory/context patterns
-- Explore [available tools](https://docs.mindroom.chat/tools/index.md)
-- Set up [teams for multi-agent collaboration](https://docs.mindroom.chat/configuration/teams/index.md)```
-````
+- Learn about [agent configuration](https://docs.mindroom.chat/configuration/agents/)
+- Learn about [OpenClaw workspace import](https://docs.mindroom.chat/openclaw/) if you want file-based memory/context patterns
+- Explore [available tools](https://docs.mindroom.chat/tools/)
+- Set up [teams for multi-agent collaboration](https://docs.mindroom.chat/configuration/teams/)

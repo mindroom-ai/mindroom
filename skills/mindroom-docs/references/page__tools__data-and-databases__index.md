@@ -9,19 +9,19 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 
 ## Tools On This Page
 
-- \[`sql`\] - Generic SQLAlchemy-backed SQL access for databases that can be reached by URL or engine.
-- \[`postgres`\] - PostgreSQL-specific table inspection, query analysis, querying, and export.
-- \[`redshift`\] - Amazon Redshift warehouse access with password or IAM-based authentication.
-- \[`neo4j`\] - Neo4j graph inspection and Cypher queries.
-- \[`duckdb`\] - Local analytical SQL with file loading, exports, and full-text helpers.
-- \[`csv`\] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
-- \[`pandas`\] - In-memory dataframe creation and dataframe method execution.
-- \[`google_bigquery`\] - BigQuery dataset inspection and SQL queries.
-- \[`google_drive`\] - Google Drive file listing, metadata search, and file reading through the per-service Google Drive OAuth provider.
-- \[`google_sheets`\] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
-- \[`openbb`\] - Stock prices, company search, news, profiles, and price targets through OpenBB.
-- \[`yfinance`\] - Yahoo Finance market data, fundamentals, news, and history.
-- \[`financial_datasets_api`\] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
+- [`sql`] - Generic SQLAlchemy-backed SQL access for databases that can be reached by URL or engine.
+- [`postgres`] - PostgreSQL-specific table inspection, query analysis, querying, and export.
+- [`redshift`] - Amazon Redshift warehouse access with password or IAM-based authentication.
+- [`neo4j`] - Neo4j graph inspection and Cypher queries.
+- [`duckdb`] - Local analytical SQL with file loading, exports, and full-text helpers.
+- [`csv`] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
+- [`pandas`] - In-memory dataframe creation and dataframe method execution.
+- [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
+- [`google_drive`] - Google Drive file listing, metadata search, and file reading through the per-service Google Drive OAuth provider.
+- [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
+- [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
+- [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
+- [`financial_datasets_api`] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
 
 ## Common Setup Notes
 
@@ -35,7 +35,7 @@ Token-like fields such as `openbb_pat` are better kept in stored credentials eve
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
-## \[`sql`\]
+## [`sql`]
 
 `sql` is the generic SQL toolkit for database engines that SQLAlchemy can open directly.
 
@@ -49,21 +49,21 @@ For dialects where database name and schema are distinct concepts, `db_url` is t
 
 ### Configuration
 
-| Option                  | Type       | Required | Default | Notes                                                                      |
-| ----------------------- | ---------- | -------- | ------- | -------------------------------------------------------------------------- |
-| `db_url`                | `url`      | `no`     | `null`  | Preferred authored connection string.                                      |
-| `db_engine`             | `text`     | `no`     | `null`  | Advanced programmatic SQLAlchemy `Engine` input, not the normal YAML path. |
-| `user`                  | `text`     | `no`     | `null`  | Username for URL assembly when not using `db_url`.                         |
-| `password`              | `password` | `no`     | `null`  | Database password stored through the dashboard or credential store.        |
-| `host`                  | `url`      | `no`     | `null`  | Database host for URL assembly.                                            |
-| `port`                  | `number`   | `no`     | `null`  | Database port for URL assembly.                                            |
-| `schema`                | `text`     | `no`     | `null`  | Schema name, and also the path segment in the assembled generic URL.       |
-| `dialect`               | `text`     | `no`     | `null`  | SQLAlchemy dialect prefix such as `postgresql`, `mysql`, or `sqlite`.      |
-| `tables`                | `text`     | `no`     | `null`  | Advanced predeclared table metadata mapping.                               |
-| `enable_list_tables`    | `boolean`  | `no`     | `true`  | Enable `list_tables()`.                                                    |
-| `enable_describe_table` | `boolean`  | `no`     | `true`  | Enable `describe_table()`.                                                 |
-| `enable_run_sql_query`  | `boolean`  | `no`     | `true`  | Enable `run_sql_query()`.                                                  |
-| `all`                   | `boolean`  | `no`     | `false` | Enable the full upstream SQL tool surface.                                 |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `db_url` | `url` | `no` | `null` | Preferred authored connection string. |
+| `db_engine` | `text` | `no` | `null` | Advanced programmatic SQLAlchemy `Engine` input, not the normal YAML path. |
+| `user` | `text` | `no` | `null` | Username for URL assembly when not using `db_url`. |
+| `password` | `password` | `no` | `null` | Database password stored through the dashboard or credential store. |
+| `host` | `url` | `no` | `null` | Database host for URL assembly. |
+| `port` | `number` | `no` | `null` | Database port for URL assembly. |
+| `schema` | `text` | `no` | `null` | Schema name, and also the path segment in the assembled generic URL. |
+| `dialect` | `text` | `no` | `null` | SQLAlchemy dialect prefix such as `postgresql`, `mysql`, or `sqlite`. |
+| `tables` | `text` | `no` | `null` | Advanced predeclared table metadata mapping. |
+| `enable_list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
+| `enable_describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
+| `enable_run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream SQL tool surface. |
 
 ### Example
 
@@ -88,7 +88,7 @@ run_sql_query("SELECT * FROM events ORDER BY created_at DESC", limit=20)
 - If you need passwords, store them through the dashboard or credential store instead of inline YAML.
 - This generic toolkit is useful for simple SQL inspection, but `postgres` and `redshift` expose richer warehouse-style helpers such as query inspection and exports.
 
-## \[`postgres`\]
+## [`postgres`]
 
 `postgres` is the PostgreSQL-specific toolkit for read-only schema inspection, query review, querying, and CSV export.
 
@@ -101,15 +101,15 @@ The toolkit opens a Psycopg connection, sets `search_path` to `table_schema`, an
 
 ### Configuration
 
-| Option         | Type       | Required | Default  | Notes                                                                                             |
-| -------------- | ---------- | -------- | -------- | ------------------------------------------------------------------------------------------------- |
-| `connection`   | `text`     | `no`     | `null`   | Programmatic existing Psycopg connection object, not usable from the UI or normal YAML authoring. |
-| `host`         | `url`      | `yes`    | `null`   | PostgreSQL server hostname.                                                                       |
-| `port`         | `number`   | `no`     | `5432`   | PostgreSQL server port.                                                                           |
-| `db_name`      | `text`     | `yes`    | `null`   | Database name.                                                                                    |
-| `user`         | `text`     | `yes`    | `null`   | PostgreSQL username.                                                                              |
-| `password`     | `password` | `yes`    | `null`   | PostgreSQL password stored through the dashboard or credential store.                             |
-| `table_schema` | `text`     | `no`     | `public` | Schema used for table operations and connection `search_path`.                                    |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `connection` | `text` | `no` | `null` | Programmatic existing Psycopg connection object, not usable from the UI or normal YAML authoring. |
+| `host` | `url` | `yes` | `null` | PostgreSQL server hostname. |
+| `port` | `number` | `no` | `5432` | PostgreSQL server port. |
+| `db_name` | `text` | `yes` | `null` | Database name. |
+| `user` | `text` | `yes` | `null` | PostgreSQL username. |
+| `password` | `password` | `yes` | `null` | PostgreSQL password stored through the dashboard or credential store. |
+| `table_schema` | `text` | `no` | `public` | Schema used for table operations and connection `search_path`. |
 
 ### Example
 
@@ -139,7 +139,7 @@ export_table_to_path("daily_revenue", "/tmp/daily_revenue.csv")
 - Use `connection` only for programmatic instantiation where you already have a Psycopg connection object.
 - Secrets such as `password` must be stored outside authored YAML.
 
-## \[`redshift`\]
+## [`redshift`]
 
 `redshift` is the warehouse-oriented toolkit for Amazon Redshift clusters with either password or IAM authentication.
 
@@ -152,23 +152,23 @@ When IAM auth is enabled, the toolkit can fall back to environment variables suc
 
 ### Configuration
 
-| Option               | Type       | Required | Default  | Notes                                                                   |
-| -------------------- | ---------- | -------- | -------- | ----------------------------------------------------------------------- |
-| `host`               | `url`      | `yes`    | `null`   | Redshift cluster endpoint.                                              |
-| `port`               | `number`   | `no`     | `5439`   | Redshift port.                                                          |
-| `database`           | `text`     | `yes`    | `null`   | Database name.                                                          |
-| `user`               | `text`     | `yes`    | `null`   | Username for password auth.                                             |
-| `password`           | `password` | `yes`    | `null`   | Password for standard authentication.                                   |
-| `iam`                | `boolean`  | `no`     | `false`  | Use IAM-based auth instead of password auth.                            |
-| `cluster_identifier` | `text`     | `no`     | `null`   | Cluster identifier, required for IAM auth against provisioned clusters. |
-| `region`             | `text`     | `no`     | `null`   | AWS region for IAM auth.                                                |
-| `db_user`            | `text`     | `no`     | `null`   | Database user for IAM auth.                                             |
-| `access_key_id`      | `password` | `no`     | `null`   | Optional AWS access key for IAM auth.                                   |
-| `secret_access_key`  | `password` | `no`     | `null`   | Optional AWS secret key for IAM auth.                                   |
-| `session_token`      | `password` | `no`     | `null`   | Optional AWS session token for temporary credentials.                   |
-| `profile`            | `text`     | `no`     | `null`   | AWS profile name for IAM auth.                                          |
-| `ssl`                | `boolean`  | `no`     | `true`   | Enable SSL.                                                             |
-| `table_schema`       | `text`     | `no`     | `public` | Schema used for table operations.                                       |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `host` | `url` | `yes` | `null` | Redshift cluster endpoint. |
+| `port` | `number` | `no` | `5439` | Redshift port. |
+| `database` | `text` | `yes` | `null` | Database name. |
+| `user` | `text` | `yes` | `null` | Username for password auth. |
+| `password` | `password` | `yes` | `null` | Password for standard authentication. |
+| `iam` | `boolean` | `no` | `false` | Use IAM-based auth instead of password auth. |
+| `cluster_identifier` | `text` | `no` | `null` | Cluster identifier, required for IAM auth against provisioned clusters. |
+| `region` | `text` | `no` | `null` | AWS region for IAM auth. |
+| `db_user` | `text` | `no` | `null` | Database user for IAM auth. |
+| `access_key_id` | `password` | `no` | `null` | Optional AWS access key for IAM auth. |
+| `secret_access_key` | `password` | `no` | `null` | Optional AWS secret key for IAM auth. |
+| `session_token` | `password` | `no` | `null` | Optional AWS session token for temporary credentials. |
+| `profile` | `text` | `no` | `null` | AWS profile name for IAM auth. |
+| `ssl` | `boolean` | `no` | `true` | Enable SSL. |
+| `table_schema` | `text` | `no` | `public` | Schema used for table operations. |
 
 ### Example
 
@@ -199,7 +199,7 @@ export_table_to_path("fact_orders", "/tmp/fact_orders.csv")
 - If you use password auth, store `password` through the dashboard or credential store rather than inline YAML.
 - `redshift` is the better fit than generic `sql` when you want Redshift-aware connection options and warehouse export helpers.
 
-## \[`neo4j`\]
+## [`neo4j`]
 
 `neo4j` is the graph database toolkit for labels, relationship types, schema discovery, and Cypher queries.
 
@@ -211,17 +211,17 @@ The individual enable flags let you expose schema discovery without allowing arb
 
 ### Configuration
 
-| Option                      | Type       | Required | Default | Notes                                                            |
-| --------------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------- |
-| `uri`                       | `url`      | `no`     | `null`  | Neo4j connection URI such as `bolt://localhost:7687`.            |
-| `user`                      | `text`     | `yes`    | `null`  | Neo4j username.                                                  |
-| `password`                  | `password` | `yes`    | `null`  | Neo4j password stored through the dashboard or credential store. |
-| `database`                  | `text`     | `no`     | `null`  | Optional target database name.                                   |
-| `enable_list_labels`        | `boolean`  | `no`     | `true`  | Enable `list_labels()`.                                          |
-| `enable_list_relationships` | `boolean`  | `no`     | `true`  | Enable `list_relationship_types()`.                              |
-| `enable_get_schema`         | `boolean`  | `no`     | `true`  | Enable `get_schema()`.                                           |
-| `enable_run_cypher`         | `boolean`  | `no`     | `true`  | Enable `run_cypher_query()`.                                     |
-| `all`                       | `boolean`  | `no`     | `false` | Enable the full Neo4j toolkit.                                   |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `uri` | `url` | `no` | `null` | Neo4j connection URI such as `bolt://localhost:7687`. |
+| `user` | `text` | `yes` | `null` | Neo4j username. |
+| `password` | `password` | `yes` | `null` | Neo4j password stored through the dashboard or credential store. |
+| `database` | `text` | `no` | `null` | Optional target database name. |
+| `enable_list_labels` | `boolean` | `no` | `true` | Enable `list_labels()`. |
+| `enable_list_relationships` | `boolean` | `no` | `true` | Enable `list_relationship_types()`. |
+| `enable_get_schema` | `boolean` | `no` | `true` | Enable `get_schema()`. |
+| `enable_run_cypher` | `boolean` | `no` | `true` | Enable `run_cypher_query()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full Neo4j toolkit. |
 
 ### Example
 
@@ -249,7 +249,7 @@ run_cypher_query("MATCH (u:User)-[:PLACED]->(o:Order) RETURN u.id, count(o) AS o
 - Store the Neo4j password through the dashboard or credential store instead of inline YAML.
 - Disable `enable_run_cypher` when you want schema visibility without free-form graph queries.
 
-## \[`duckdb`\]
+## [`duckdb`]
 
 `duckdb` is the local analytical SQL engine for file-backed analytics, table creation, exports, and full-text indexing.
 
@@ -262,13 +262,13 @@ If `db_path` is unset, DuckDB runs in memory.
 
 ### Configuration
 
-| Option          | Type      | Required | Default | Notes                                                              |
-| --------------- | --------- | -------- | ------- | ------------------------------------------------------------------ |
-| `db_path`       | `text`    | `no`     | `null`  | Path to a persistent DuckDB database file.                         |
-| `connection`    | `text`    | `no`     | `null`  | Advanced existing DuckDB connection object, not normal YAML input. |
-| `init_commands` | `text`    | `no`     | `null`  | Advanced startup commands passed through to the toolkit.           |
-| `read_only`     | `boolean` | `no`     | `false` | Open the database in read-only mode.                               |
-| `config`        | `text`    | `no`     | `null`  | Advanced raw DuckDB config mapping.                                |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `db_path` | `text` | `no` | `null` | Path to a persistent DuckDB database file. |
+| `connection` | `text` | `no` | `null` | Advanced existing DuckDB connection object, not normal YAML input. |
+| `init_commands` | `text` | `no` | `null` | Advanced startup commands passed through to the toolkit. |
+| `read_only` | `boolean` | `no` | `false` | Open the database in read-only mode. |
+| `config` | `text` | `no` | `null` | Advanced raw DuckDB config mapping. |
 
 ### Example
 
@@ -295,7 +295,7 @@ export_table_to_path("orders", format="CSV", path="/tmp")
 - If you only need quick reads and SQL over a few predeclared CSVs, `csv` is lighter.
 - The upstream `show_tables()` signature currently expects `show_tables=True`.
 
-## \[`csv`\]
+## [`csv`]
 
 `csv` is the lightweight CSV analysis toolkit for pre-registered files with optional DuckDB-backed SQL queries.
 
@@ -308,17 +308,17 @@ The toolkit works with a preconfigured list of CSV paths and exposes each one by
 
 ### Configuration
 
-| Option                  | Type      | Required | Default | Notes                                                                |
-| ----------------------- | --------- | -------- | ------- | -------------------------------------------------------------------- |
-| `csvs`                  | `text`    | `no`     | `null`  | Advanced pre-registered CSV path list passed through to the toolkit. |
-| `row_limit`             | `number`  | `no`     | `null`  | Default row cap for `read_csv_file()`.                               |
-| `duckdb_connection`     | `text`    | `no`     | `null`  | Advanced existing DuckDB connection object.                          |
-| `duckdb_kwargs`         | `text`    | `no`     | `null`  | Advanced DuckDB connection kwargs mapping.                           |
-| `enable_read_csv_file`  | `boolean` | `no`     | `true`  | Enable `read_csv_file()`.                                            |
-| `enable_list_csv_files` | `boolean` | `no`     | `true`  | Enable `list_csv_files()`.                                           |
-| `enable_get_columns`    | `boolean` | `no`     | `true`  | Enable `get_columns()`.                                              |
-| `enable_query_csv_file` | `boolean` | `no`     | `true`  | Enable `query_csv_file()`.                                           |
-| `all`                   | `boolean` | `no`     | `false` | Enable the full CSV toolkit.                                         |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `csvs` | `text` | `no` | `null` | Advanced pre-registered CSV path list passed through to the toolkit. |
+| `row_limit` | `number` | `no` | `null` | Default row cap for `read_csv_file()`. |
+| `duckdb_connection` | `text` | `no` | `null` | Advanced existing DuckDB connection object. |
+| `duckdb_kwargs` | `text` | `no` | `null` | Advanced DuckDB connection kwargs mapping. |
+| `enable_read_csv_file` | `boolean` | `no` | `true` | Enable `read_csv_file()`. |
+| `enable_list_csv_files` | `boolean` | `no` | `true` | Enable `list_csv_files()`. |
+| `enable_get_columns` | `boolean` | `no` | `true` | Enable `get_columns()`. |
+| `enable_query_csv_file` | `boolean` | `no` | `true` | Enable `query_csv_file()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full CSV toolkit. |
 
 ### Example
 
@@ -343,7 +343,7 @@ query_csv_file("sales_2025", 'SELECT "region", COUNT(*) FROM sales_2025 GROUP BY
 - `query_csv_file()` requires DuckDB and only runs the first SQL statement you provide.
 - If you need richer file loading or exports, use `duckdb` instead.
 
-## \[`pandas`\]
+## [`pandas`]
 
 `pandas` is the in-memory dataframe toolkit for creating named dataframes and running dataframe methods on them.
 
@@ -356,11 +356,11 @@ Stored dataframes live in the current process memory only and are not persisted 
 
 ### Configuration
 
-| Option                           | Type      | Required | Default | Notes                               |
-| -------------------------------- | --------- | -------- | ------- | ----------------------------------- |
-| `enable_create_pandas_dataframe` | `boolean` | `no`     | `true`  | Enable `create_pandas_dataframe()`. |
-| `enable_run_dataframe_operation` | `boolean` | `no`     | `true`  | Enable `run_dataframe_operation()`. |
-| `all`                            | `boolean` | `no`     | `false` | Enable the full Pandas toolkit.     |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_create_pandas_dataframe` | `boolean` | `no` | `true` | Enable `create_pandas_dataframe()`. |
+| `enable_run_dataframe_operation` | `boolean` | `no` | `true` | Enable `run_dataframe_operation()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full Pandas toolkit. |
 
 ### Example
 
@@ -387,7 +387,7 @@ run_dataframe_operation("sales", "describe", {})
 - `create_pandas_dataframe()` rejects empty dataframes and duplicate dataframe names.
 - Use `pandas` when you want dataframe-native operations rather than SQL.
 
-## \[`google_bigquery`\]
+## [`google_bigquery`]
 
 `google_bigquery` is the BigQuery toolkit for listing tables, describing schemas, and running SQL inside one dataset.
 
@@ -400,16 +400,16 @@ MindRoom's metadata marks `dataset`, `project`, and `location` as required, even
 
 ### Configuration
 
-| Option                  | Type      | Required | Default | Notes                                                                      |
-| ----------------------- | --------- | -------- | ------- | -------------------------------------------------------------------------- |
-| `dataset`               | `text`    | `yes`    | `null`  | BigQuery dataset name.                                                     |
-| `project`               | `text`    | `yes`    | `null`  | Google Cloud project ID.                                                   |
-| `location`              | `text`    | `yes`    | `null`  | BigQuery location such as `US` or `EU`.                                    |
-| `credentials`           | `text`    | `no`     | `null`  | Advanced Google credentials object passed directly to the BigQuery client. |
-| `enable_list_tables`    | `boolean` | `no`     | `true`  | Enable `list_tables()`.                                                    |
-| `enable_describe_table` | `boolean` | `no`     | `true`  | Enable `describe_table()`.                                                 |
-| `enable_run_sql_query`  | `boolean` | `no`     | `true`  | Enable `run_sql_query()`.                                                  |
-| `all`                   | `boolean` | `no`     | `false` | Enable the full BigQuery toolkit.                                          |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `dataset` | `text` | `yes` | `null` | BigQuery dataset name. |
+| `project` | `text` | `yes` | `null` | Google Cloud project ID. |
+| `location` | `text` | `yes` | `null` | BigQuery location such as `US` or `EU`. |
+| `credentials` | `text` | `no` | `null` | Advanced Google credentials object passed directly to the BigQuery client. |
+| `enable_list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
+| `enable_describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
+| `enable_run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full BigQuery toolkit. |
 
 ### Example
 
@@ -435,7 +435,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 - `google_bigquery` does not use a MindRoom Google OAuth provider.
 - If `credentials` is unset, the BigQuery SDK falls back to the process's default Google Cloud authentication behavior.
 
-## \[`google_drive`\]
+## [`google_drive`]
 
 `google_drive` is the Google Drive toolkit for listing, searching, and reading files from the connected user's Drive account.
 
@@ -449,12 +449,12 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 
 ### Configuration
 
-| Option          | Type      | Required | Default    | Notes                                                    |
-| --------------- | --------- | -------- | ---------- | -------------------------------------------------------- |
-| `list_files`    | `boolean` | `no`     | `true`     | Enable recent file listing.                              |
-| `search_files`  | `boolean` | `no`     | `true`     | Enable Drive metadata search.                            |
-| `read_file`     | `boolean` | `no`     | `true`     | Enable file content reads.                               |
-| `max_read_size` | `number`  | `no`     | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `list_files` | `boolean` | `no` | `true` | Enable recent file listing. |
+| `search_files` | `boolean` | `no` | `true` | Enable Drive metadata search. |
+| `read_file` | `boolean` | `no` | `true` | Enable file content reads. |
+| `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
 
 ### Example
 
@@ -476,9 +476,9 @@ google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 
 - `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
 - The provider requests Drive read-only access plus OpenID email/profile scopes.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 
-## \[`google_sheets`\]
+## [`google_sheets`]
 
 `google_sheets` is the Google Sheets toolkit for spreadsheet access through the Google Sheets OAuth provider.
 
@@ -493,13 +493,13 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 
 ### Configuration
 
-| Option              | Type      | Required | Default | Notes                                                                                           |
-| ------------------- | --------- | -------- | ------- | ----------------------------------------------------------------------------------------------- |
-| `spreadsheet_id`    | `text`    | `no`     | `null`  | Default spreadsheet ID. Leave unset to work with multiple spreadsheets by passing IDs per call. |
-| `spreadsheet_range` | `text`    | `no`     | `null`  | Default range such as `Sheet1!A1:Z100`.                                                         |
-| `read`              | `boolean` | `no`     | `true`  | Enable read operations.                                                                         |
-| `create`            | `boolean` | `no`     | `false` | Enable spreadsheet creation.                                                                    |
-| `update`            | `boolean` | `no`     | `false` | Enable sheet updates.                                                                           |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `spreadsheet_id` | `text` | `no` | `null` | Default spreadsheet ID. Leave unset to work with multiple spreadsheets by passing IDs per call. |
+| `spreadsheet_range` | `text` | `no` | `null` | Default range such as `Sheet1!A1:Z100`. |
+| `read` | `boolean` | `no` | `true` | Enable read operations. |
+| `create` | `boolean` | `no` | `false` | Enable spreadsheet creation. |
+| `update` | `boolean` | `no` | `false` | Enable sheet updates. |
 
 ### Example
 
@@ -524,10 +524,10 @@ read_sheet(
 ### Notes
 
 - `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 - The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
-## \[`openbb`\]
+## [`openbb`]
 
 `openbb` is the finance toolkit for stock quotes, symbol lookup, company news, company profiles, and price targets through OpenBB providers.
 
@@ -540,17 +540,17 @@ You can selectively enable additional research functions without exposing the fu
 
 ### Configuration
 
-| Option                         | Type      | Required | Default    | Notes                                                                                            |
-| ------------------------------ | --------- | -------- | ---------- | ------------------------------------------------------------------------------------------------ |
-| `obb`                          | `text`    | `no`     | `null`     | Advanced preconfigured OpenBB instance object.                                                   |
-| `openbb_pat`                   | `text`    | `no`     | `null`     | Optional OpenBB PAT for premium providers. Usually stored in credentials instead of inline YAML. |
-| `provider`                     | `text`    | `no`     | `yfinance` | Data provider such as `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`.  |
-| `enable_get_stock_price`       | `boolean` | `no`     | `true`     | Enable `get_stock_price()`.                                                                      |
-| `enable_search_company_symbol` | `boolean` | `no`     | `false`    | Enable `search_company_symbol()`.                                                                |
-| `enable_get_company_news`      | `boolean` | `no`     | `false`    | Enable `get_company_news()`.                                                                     |
-| `enable_get_company_profile`   | `boolean` | `no`     | `false`    | Enable `get_company_profile()`.                                                                  |
-| `enable_get_price_targets`     | `boolean` | `no`     | `false`    | Enable `get_price_targets()`.                                                                    |
-| `all`                          | `boolean` | `no`     | `false`    | Enable the full OpenBB toolkit.                                                                  |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `obb` | `text` | `no` | `null` | Advanced preconfigured OpenBB instance object. |
+| `openbb_pat` | `text` | `no` | `null` | Optional OpenBB PAT for premium providers. Usually stored in credentials instead of inline YAML. |
+| `provider` | `text` | `no` | `yfinance` | Data provider such as `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
+| `enable_get_stock_price` | `boolean` | `no` | `true` | Enable `get_stock_price()`. |
+| `enable_search_company_symbol` | `boolean` | `no` | `false` | Enable `search_company_symbol()`. |
+| `enable_get_company_news` | `boolean` | `no` | `false` | Enable `get_company_news()`. |
+| `enable_get_company_profile` | `boolean` | `no` | `false` | Enable `get_company_profile()`. |
+| `enable_get_price_targets` | `boolean` | `no` | `false` | Enable `get_price_targets()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full OpenBB toolkit. |
 
 ### Example
 
@@ -578,7 +578,7 @@ get_price_targets("NVDA")
 - Use `obb` only when you are constructing the toolkit programmatically with a live OpenBB object.
 - This tool overlaps with `yfinance`, but `openbb` is the better fit when you want provider switching or OpenBB-specific data sources.
 
-## \[`yfinance`\]
+## [`yfinance`]
 
 `yfinance` is the direct Yahoo Finance toolkit for quotes, company info, fundamentals, statements, recommendations, news, and price history.
 
@@ -590,9 +590,9 @@ The optional `session` field is an advanced programmatic HTTP session hook for c
 
 ### Configuration
 
-| Option    | Type   | Required | Default | Notes                                      |
-| --------- | ------ | -------- | ------- | ------------------------------------------ |
-| `session` | `text` | `no`     | `null`  | Advanced programmatic HTTP session object. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `session` | `text` | `no` | `null` | Advanced programmatic HTTP session object. |
 
 ### Example
 
@@ -616,7 +616,7 @@ get_company_news("TSLA", num_stories=5)
 - `session` is only useful for programmatic customization and is not a common `config.yaml` setting.
 - Choose `yfinance` when you want the widest Yahoo Finance surface with the fewest setup requirements.
 
-## \[`financial_datasets_api`\]
+## [`financial_datasets_api`]
 
 `financial_datasets_api` is the structured market-data toolkit for company info, statements, ownership, filings, news, search, and crypto prices.
 
@@ -628,9 +628,9 @@ If `api_key` is unset, it falls back to `FINANCIAL_DATASETS_API_KEY`, and otherw
 
 ### Configuration
 
-| Option    | Type       | Required | Default | Notes                                                                                      |
-| --------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------------------ |
-| `api_key` | `password` | `no`     | `null`  | Financial Datasets API key stored through the dashboard, credential store, or environment. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Financial Datasets API key stored through the dashboard, credential store, or environment. |
 
 ### Example
 
@@ -656,7 +656,7 @@ get_news("TSLA", limit=10)
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md)
-- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md)
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)

@@ -11,10 +11,10 @@ matrix_space:
   name: MindRoom   # Default: "MindRoom"
 ```
 
-| Field     | Type   | Default      | Description                                                                   |
-| --------- | ------ | ------------ | ----------------------------------------------------------------------------- |
-| `enabled` | bool   | `true`       | Whether to create and maintain a root Matrix Space for managed MindRoom rooms |
-| `name`    | string | `"MindRoom"` | Display name for the root Matrix Space when enabled                           |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Whether to create and maintain a root Matrix Space for managed MindRoom rooms |
+| `name` | string | `"MindRoom"` | Display name for the root Matrix Space when enabled |
 
 ## Behavior
 

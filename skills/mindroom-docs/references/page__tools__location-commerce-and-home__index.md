@@ -9,10 +9,10 @@ Use these tools when you need physical-world lookup data, store analytics, or sm
 
 ## Tools On This Page
 
-- \[`google_maps`\] - Google Maps place search, directions, geocoding, address validation, elevation, and timezone lookups.
-- \[`openweather`\] - Current weather, multi-day forecast, air pollution, and location geocoding from OpenWeather.
-- \[`shopify`\] - Shopify Admin API analytics for shop info, products, orders, customers, inventory, and sales trends.
-- \[`homeassistant`\] - Home Assistant entity state queries, device control, scene activation, and generic service calls.
+- [`google_maps`] - Google Maps place search, directions, geocoding, address validation, elevation, and timezone lookups.
+- [`openweather`] - Current weather, multi-day forecast, air pollution, and location geocoding from OpenWeather.
+- [`shopify`] - Shopify Admin API analytics for shop info, products, orders, customers, inventory, and sales trends.
+- [`homeassistant`] - Home Assistant entity state queries, device control, scene activation, and generic service calls.
 
 ## Common Setup Notes
 
@@ -25,7 +25,7 @@ Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_
 Like the Google OAuth tools and unlike `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
-## \[`google_maps`\]
+## [`google_maps`]
 
 `google_maps` is the Google Maps toolkit for place search, routing, geocoding, address validation, and location metadata.
 
@@ -39,9 +39,9 @@ MindRoom does not add extra runtime behavior on top of the upstream toolkit beyo
 
 ### Configuration
 
-| Option | Type       | Required | Default | Notes                                                                 |
-| ------ | ---------- | -------- | ------- | --------------------------------------------------------------------- |
-| `key`  | `password` | `no`     | `null`  | Google Maps API key stored through the dashboard or credential store. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `key` | `password` | `no` | `null` | Google Maps API key stored through the dashboard or credential store. |
 
 ### Example
 
@@ -66,7 +66,7 @@ validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
 - In practice, the tool still needs a valid Google Maps API key before any call succeeds.
 - If you plan to use `validate_address()`, enable the Address Validation API for the same Google Cloud project as the key.
 
-## \[`openweather`\]
+## [`openweather`]
 
 `openweather` is the OpenWeather toolkit for weather, forecast, air quality, and place geocoding.
 
@@ -80,15 +80,15 @@ MindRoom does not add custom behavior here beyond metadata, dependency managemen
 
 ### Configuration
 
-| Option                   | Type       | Required | Default  | Notes                                                                 |
-| ------------------------ | ---------- | -------- | -------- | --------------------------------------------------------------------- |
-| `api_key`                | `password` | `no`     | `null`   | OpenWeather API key stored through the dashboard or credential store. |
-| `units`                  | `text`     | `no`     | `metric` | Measurement units passed to the OpenWeather API.                      |
-| `enable_current_weather` | `boolean`  | `no`     | `true`   | Enable `get_current_weather()`.                                       |
-| `enable_forecast`        | `boolean`  | `no`     | `true`   | Enable `get_forecast()`.                                              |
-| `enable_air_pollution`   | `boolean`  | `no`     | `true`   | Enable `get_air_pollution()`.                                         |
-| `enable_geocoding`       | `boolean`  | `no`     | `true`   | Enable `geocode_location()`.                                          |
-| `all`                    | `boolean`  | `no`     | `false`  | Enable the full OpenWeather toolkit.                                  |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | OpenWeather API key stored through the dashboard or credential store. |
+| `units` | `text` | `no` | `metric` | Measurement units passed to the OpenWeather API. |
+| `enable_current_weather` | `boolean` | `no` | `true` | Enable `get_current_weather()`. |
+| `enable_forecast` | `boolean` | `no` | `true` | Enable `get_forecast()`. |
+| `enable_air_pollution` | `boolean` | `no` | `true` | Enable `get_air_pollution()`. |
+| `enable_geocoding` | `boolean` | `no` | `true` | Enable `geocode_location()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full OpenWeather toolkit. |
 
 ### Example
 
@@ -114,7 +114,7 @@ geocode_location("Reykjavik", limit=3)
 - In practice, the tool still needs a valid OpenWeather API key before any call succeeds.
 - Because weather lookups reuse the first geocoding match, ambiguous location names can resolve to an unexpected city unless you make the query more specific.
 
-## \[`shopify`\]
+## [`shopify`]
 
 `shopify` is the Shopify Admin GraphQL toolkit for store analytics, catalog inspection, order reporting, customer lookups, and inventory visibility.
 
@@ -128,12 +128,12 @@ MindRoom does not wrap the Shopify API further, so behavior comes directly from 
 
 ### Configuration
 
-| Option         | Type       | Required | Default   | Notes                                                                            |
-| -------------- | ---------- | -------- | --------- | -------------------------------------------------------------------------------- |
-| `shop_name`    | `text`     | `yes`    | `null`    | Store subdomain such as `my-store` from `my-store.myshopify.com`.                |
-| `access_token` | `password` | `yes`    | `null`    | Shopify Admin API access token stored through the dashboard or credential store. |
-| `api_version`  | `text`     | `no`     | `2025-10` | Shopify Admin API version used in GraphQL requests.                              |
-| `timeout`      | `number`   | `no`     | `30`      | Request timeout in seconds.                                                      |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `shop_name` | `text` | `yes` | `null` | Store subdomain such as `my-store` from `my-store.myshopify.com`. |
+| `access_token` | `password` | `yes` | `null` | Shopify Admin API access token stored through the dashboard or credential store. |
+| `api_version` | `text` | `no` | `2025-10` | Shopify Admin API version used in GraphQL requests. |
+| `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 
 ### Example
 
@@ -161,7 +161,7 @@ get_average_order_value(days=30)
 - The upstream toolkit explicitly expects `read_orders`, `read_products`, `read_customers`, and `read_analytics` for its full analytics surface.
 - `shop_name` and `access_token` can also come from `SHOPIFY_SHOP_NAME` and `SHOPIFY_ACCESS_TOKEN`, but MindRoom's documented configuration path is stored tool credentials.
 
-## \[`homeassistant`\]
+## [`homeassistant`]
 
 `homeassistant` is MindRoom's custom Home Assistant toolkit for entity state queries, device control, scenes, automations, and generic service calls.
 
@@ -175,10 +175,10 @@ MindRoom adds important runtime behavior here by loading scoped credentials, enf
 
 ### Configuration
 
-| Option                | Type       | Required | Default | Notes                                                                                                                                |
-| --------------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `HOMEASSISTANT_URL`   | `url`      | `yes`    | `null`  | Dashboard field label for the Home Assistant base URL. The dedicated integration flow stores the normalized value as `instance_url`. |
-| `HOMEASSISTANT_TOKEN` | `password` | `yes`    | `null`  | Dashboard field label for a long-lived access token. OAuth setup stores `access_token` and `refresh_token` instead.                  |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `HOMEASSISTANT_URL` | `url` | `yes` | `null` | Dashboard field label for the Home Assistant base URL. The dedicated integration flow stores the normalized value as `instance_url`. |
+| `HOMEASSISTANT_TOKEN` | `password` | `yes` | `null` | Dashboard field label for a long-lived access token. OAuth setup stores `access_token` and `refresh_token` instead. |
 
 ### Example
 
@@ -209,6 +209,6 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)

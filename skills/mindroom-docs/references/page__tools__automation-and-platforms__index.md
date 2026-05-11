@@ -9,13 +9,13 @@ Use these tools when you need infrastructure automation, generic API access, rem
 
 ## Tools On This Page
 
-- \[`aws_lambda`\] - AWS Lambda function listing and invocation.
-- \[`aws_ses`\] - Amazon SES outbound email sending.
-- \[`airflow`\] - Local Airflow DAG file reads and writes.
-- \[`e2b`\] - Hosted E2B code-execution sandbox with file, command, and server helpers.
-- \[`daytona`\] - Persistent remote sandbox and dev-environment execution.
-- \[`composio`\] - Dynamic Composio-backed integration toolset for connected external apps.
-- \[`custom_api`\] - Generic HTTP requests to arbitrary APIs.
+- [`aws_lambda`] - AWS Lambda function listing and invocation.
+- [`aws_ses`] - Amazon SES outbound email sending.
+- [`airflow`] - Local Airflow DAG file reads and writes.
+- [`e2b`] - Hosted E2B code-execution sandbox with file, command, and server helpers.
+- [`daytona`] - Persistent remote sandbox and dev-environment execution.
+- [`composio`] - Dynamic Composio-backed integration toolset for connected external apps.
+- [`custom_api`] - Generic HTTP requests to arbitrary APIs.
 
 ## Common Setup Notes
 
@@ -31,7 +31,7 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `sandbox_env_vars`, `sandbox_labels`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
-## \[`aws_lambda`\]
+## [`aws_lambda`]
 
 `aws_lambda` lists Lambda functions and invokes them in the configured AWS region.
 
@@ -44,12 +44,12 @@ The toolkit constructs a boto3 Lambda client at init time with `region_name`.
 
 ### Configuration
 
-| Option                   | Type      | Required | Default     | Notes                                                      |
-| ------------------------ | --------- | -------- | ----------- | ---------------------------------------------------------- |
-| `region_name`            | `text`    | `no`     | `us-east-1` | AWS region used when constructing the boto3 Lambda client. |
-| `enable_list_functions`  | `boolean` | `no`     | `true`      | Enable `list_functions()`.                                 |
-| `enable_invoke_function` | `boolean` | `no`     | `true`      | Enable `invoke_function()`.                                |
-| `all`                    | `boolean` | `no`     | `false`     | Enable the full upstream Lambda toolkit surface.           |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `region_name` | `text` | `no` | `us-east-1` | AWS region used when constructing the boto3 Lambda client. |
+| `enable_list_functions` | `boolean` | `no` | `true` | Enable `list_functions()`. |
+| `enable_invoke_function` | `boolean` | `no` | `true` | Enable `invoke_function()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream Lambda toolkit surface. |
 
 ### Example
 
@@ -72,7 +72,7 @@ invoke_function("daily-report", payload='{"date": "2026-03-31"}')
 - The payload is a raw string in the upstream wrapper, so JSON requests should be serialized before invocation.
 - Use this tool for simple invocation workflows, not full Lambda administration.
 
-## \[`aws_ses`\]
+## [`aws_ses`]
 
 `aws_ses` sends plain-text outbound email through Amazon SES with a configured sender identity.
 
@@ -85,13 +85,13 @@ The current wrapper does not add HTML email support, templates, attachments, or 
 
 ### Configuration
 
-| Option              | Type      | Required | Default     | Notes                                                                                                          |
-| ------------------- | --------- | -------- | ----------- | -------------------------------------------------------------------------------------------------------------- |
-| `sender_email`      | `text`    | `no`     | `null`      | Sender email address used in the SES `Source` header. This is effectively required in practice.                |
-| `sender_name`       | `text`    | `no`     | `null`      | Display name used in the SES `Source` header. Set this together with `sender_email` for a clean sender format. |
-| `region_name`       | `text`    | `no`     | `us-east-1` | AWS region used when constructing the boto3 SES client.                                                        |
-| `enable_send_email` | `boolean` | `no`     | `true`      | Enable `send_email()`.                                                                                         |
-| `all`               | `boolean` | `no`     | `false`     | Enable the full upstream SES toolkit surface.                                                                  |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `sender_email` | `text` | `no` | `null` | Sender email address used in the SES `Source` header. This is effectively required in practice. |
+| `sender_name` | `text` | `no` | `null` | Display name used in the SES `Source` header. Set this together with `sender_email` for a clean sender format. |
+| `region_name` | `text` | `no` | `us-east-1` | AWS region used when constructing the boto3 SES client. |
+| `enable_send_email` | `boolean` | `no` | `true` | Enable `send_email()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream SES toolkit surface. |
 
 ### Example
 
@@ -119,7 +119,7 @@ send_email(
 - Verify the sender identity in SES before relying on this tool for real mail delivery.
 - This wrapper only sends plain-text email.
 
-## \[`airflow`\]
+## [`airflow`]
 
 `airflow` is a local DAG-file helper for reading and writing Airflow Python files.
 
@@ -133,12 +133,12 @@ It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state,
 
 ### Configuration
 
-| Option                 | Type      | Required | Default | Notes                                                                                                    |
-| ---------------------- | --------- | -------- | ------- | -------------------------------------------------------------------------------------------------------- |
-| `dags_dir`             | `text`    | `no`     | `null`  | Base directory for DAG files, resolved relative to the current working directory when given as a string. |
-| `enable_save_dag_file` | `boolean` | `no`     | `true`  | Enable `save_dag_file()`.                                                                                |
-| `enable_read_dag_file` | `boolean` | `no`     | `true`  | Enable `read_dag_file()`.                                                                                |
-| `all`                  | `boolean` | `no`     | `false` | Enable the full upstream Airflow toolkit surface.                                                        |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the current working directory when given as a string. |
+| `enable_save_dag_file` | `boolean` | `no` | `true` | Enable `save_dag_file()`. |
+| `enable_read_dag_file` | `boolean` | `no` | `true` | Enable `read_dag_file()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream Airflow toolkit surface. |
 
 ### Example
 
@@ -161,7 +161,7 @@ save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 - `dags_dir` is not a MindRoom-managed workspace root like `base_dir` on some local execution tools.
 - Keep the configured directory aligned with the filesystem path your Airflow deployment actually watches.
 
-## \[`e2b`\]
+## [`e2b`]
 
 `e2b` provides a hosted code-execution sandbox with Python execution, file transfer, command execution, and temporary public URLs.
 
@@ -175,11 +175,11 @@ The media helpers operate on the most recent `run_python_code()` result, which i
 
 ### Configuration
 
-| Option            | Type       | Required | Default | Notes                                                                                                                                                |
-| ----------------- | ---------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api_key`         | `password` | `no`     | `null`  | E2B API key. The tool also falls back to `E2B_API_KEY`.                                                                                              |
-| `timeout`         | `number`   | `no`     | `300`   | Sandbox timeout in seconds passed into `Sandbox.create(...)`.                                                                                        |
-| `sandbox_options` | `text`     | `no`     | `null`  | Advanced raw sandbox-constructor options. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | E2B API key. The tool also falls back to `E2B_API_KEY`. |
+| `timeout` | `number` | `no` | `300` | Sandbox timeout in seconds passed into `Sandbox.create(...)`. |
+| `sandbox_options` | `text` | `no` | `null` | Advanced raw sandbox-constructor options. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
 
 ### Example
 
@@ -203,7 +203,7 @@ run_server("python -m http.server 8000", port=8000)
 - `sandbox_options` is mainly useful for advanced programmatic setup rather than normal handwritten YAML.
 - Use `e2b` when you want a cloud code interpreter with file and server helpers, not just a single command runner.
 
-## \[`daytona`\]
+## [`daytona`]
 
 `daytona` runs code and shell commands in a remote sandbox that can persist across agent sessions.
 
@@ -219,26 +219,26 @@ The bundled default instructions describe a code-write, execute, and show-result
 
 ### Configuration
 
-| Option                | Type       | Required | Default  | Notes                                                                                                                                                                 |
-| --------------------- | ---------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api_key`             | `password` | `no`     | `null`   | Daytona API key. The tool also falls back to `DAYTONA_API_KEY`.                                                                                                       |
-| `api_url`             | `url`      | `no`     | `null`   | Daytona API URL. The tool also falls back to `DAYTONA_API_URL`.                                                                                                       |
-| `sandbox_id`          | `text`     | `no`     | `null`   | Explicit sandbox ID to reuse instead of creating or looking up a session-backed sandbox.                                                                              |
-| `sandbox_language`    | `text`     | `no`     | `PYTHON` | Primary sandbox language, such as `PYTHON`, `JAVASCRIPT`, or `TYPESCRIPT`.                                                                                            |
-| `sandbox_target`      | `text`     | `no`     | `null`   | Daytona target passed into `DaytonaConfig`.                                                                                                                           |
-| `sandbox_os`          | `text`     | `no`     | `null`   | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`.                                   |
-| `auto_stop_interval`  | `number`   | `no`     | `60`     | Auto-stop interval in minutes for created sandboxes.                                                                                                                  |
-| `sandbox_os_user`     | `text`     | `no`     | `null`   | OS user for the sandbox.                                                                                                                                              |
-| `sandbox_env_vars`    | `text`     | `no`     | `null`   | Advanced raw environment-variable mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `sandbox_labels`      | `text`     | `no`     | `{}`     | Advanced raw label mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text.                |
-| `organization_id`     | `text`     | `no`     | `null`   | Daytona organization ID.                                                                                                                                              |
-| `timeout`             | `number`   | `no`     | `300`    | Timeout in seconds for sandbox operations.                                                                                                                            |
-| `auto_create_sandbox` | `boolean`  | `no`     | `true`   | Create a new sandbox automatically when lookup or reuse fails.                                                                                                        |
-| `verify_ssl`          | `boolean`  | `no`     | `false`  | Verify Daytona SSL certificates. The default `false` path monkey-patches the Daytona client to disable SSL verification warnings and checks.                          |
-| `persistent`          | `boolean`  | `no`     | `true`   | Reuse the same sandbox across agent-session calls instead of creating a fresh sandbox each time.                                                                      |
-| `sandbox_public`      | `boolean`  | `no`     | `null`   | Whether created sandboxes should be public.                                                                                                                           |
-| `instructions`        | `text`     | `no`     | `null`   | Custom toolkit instructions that replace the bundled default instructions.                                                                                            |
-| `add_instructions`    | `boolean`  | `no`     | `false`  | Add the toolkit instructions into the agent prompt.                                                                                                                   |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Daytona API key. The tool also falls back to `DAYTONA_API_KEY`. |
+| `api_url` | `url` | `no` | `null` | Daytona API URL. The tool also falls back to `DAYTONA_API_URL`. |
+| `sandbox_id` | `text` | `no` | `null` | Explicit sandbox ID to reuse instead of creating or looking up a session-backed sandbox. |
+| `sandbox_language` | `text` | `no` | `PYTHON` | Primary sandbox language, such as `PYTHON`, `JAVASCRIPT`, or `TYPESCRIPT`. |
+| `sandbox_target` | `text` | `no` | `null` | Daytona target passed into `DaytonaConfig`. |
+| `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
+| `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
+| `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
+| `sandbox_env_vars` | `text` | `no` | `null` | Advanced raw environment-variable mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `sandbox_labels` | `text` | `no` | `{}` | Advanced raw label mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
+| `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
+| `auto_create_sandbox` | `boolean` | `no` | `true` | Create a new sandbox automatically when lookup or reuse fails. |
+| `verify_ssl` | `boolean` | `no` | `false` | Verify Daytona SSL certificates. The default `false` path monkey-patches the Daytona client to disable SSL verification warnings and checks. |
+| `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across agent-session calls instead of creating a fresh sandbox each time. |
+| `sandbox_public` | `boolean` | `no` | `null` | Whether created sandboxes should be public. |
+| `instructions` | `text` | `no` | `null` | Custom toolkit instructions that replace the bundled default instructions. |
+| `add_instructions` | `boolean` | `no` | `false` | Add the toolkit instructions into the agent prompt. |
 
 ### Example
 
@@ -267,7 +267,7 @@ create_file("main.py", "print('ok')")
 - `verify_ssl: false` is not a cosmetic flag here, because the current implementation actively patches the Daytona client to skip certificate verification.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 
-## \[`composio`\]
+## [`composio`]
 
 `composio` is a dynamic bridge into Composio's connected-app ecosystem rather than a fixed list of built-in actions.
 
@@ -281,24 +281,24 @@ MindRoom's current registry metadata on this branch documents the connection and
 
 ### Configuration
 
-| Option                  | Type       | Required | Default   | Notes                                                                                                                                                                  |
-| ----------------------- | ---------- | -------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api_key`               | `password` | `no`     | `null`    | Composio API key. The SDK can also fall back to cached Composio user data or `COMPOSIO_API_KEY`.                                                                       |
-| `base_url`              | `url`      | `no`     | `null`    | Optional Composio API base URL.                                                                                                                                        |
-| `entity_id`             | `text`     | `no`     | `default` | Composio entity identifier used when executing actions.                                                                                                                |
-| `workspace_id`          | `text`     | `no`     | `null`    | Optional Composio workspace identifier.                                                                                                                                |
-| `workspace_config`      | `text`     | `no`     | `null`    | Advanced raw workspace configuration. The upstream constructor expects a workspace-config object, while current MindRoom metadata exposes this as text.                |
-| `connected_account_ids` | `text`     | `no`     | `null`    | Advanced raw mapping of app names to connected account IDs. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `metadata`              | `text`     | `no`     | `null`    | Advanced raw metadata mapping used by Composio actions and processors.                                                                                                 |
-| `processors`            | `text`     | `no`     | `null`    | Advanced raw processor mapping for request, response, or schema hooks.                                                                                                 |
-| `output_dir`            | `text`     | `no`     | `null`    | Optional output directory for file-based results.                                                                                                                      |
-| `lockfile`              | `text`     | `no`     | `null`    | Optional lockfile path for action-version locking and concurrency control.                                                                                             |
-| `max_retries`           | `number`   | `no`     | `3`       | Maximum retries for failed Composio operations.                                                                                                                        |
-| `verbosity_level`       | `number`   | `no`     | `null`    | Optional verbosity level.                                                                                                                                              |
-| `output_in_file`        | `boolean`  | `no`     | `false`   | Write operation output to files instead of only returning it directly.                                                                                                 |
-| `allow_tracing`         | `boolean`  | `no`     | `false`   | Enable tracing support for debugging.                                                                                                                                  |
-| `lock`                  | `boolean`  | `no`     | `true`    | Enable lockfile-based coordination.                                                                                                                                    |
-| `logging_level`         | `text`     | `no`     | `INFO`    | Composio logging level such as `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.                                                                                     |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Composio API key. The SDK can also fall back to cached Composio user data or `COMPOSIO_API_KEY`. |
+| `base_url` | `url` | `no` | `null` | Optional Composio API base URL. |
+| `entity_id` | `text` | `no` | `default` | Composio entity identifier used when executing actions. |
+| `workspace_id` | `text` | `no` | `null` | Optional Composio workspace identifier. |
+| `workspace_config` | `text` | `no` | `null` | Advanced raw workspace configuration. The upstream constructor expects a workspace-config object, while current MindRoom metadata exposes this as text. |
+| `connected_account_ids` | `text` | `no` | `null` | Advanced raw mapping of app names to connected account IDs. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `metadata` | `text` | `no` | `null` | Advanced raw metadata mapping used by Composio actions and processors. |
+| `processors` | `text` | `no` | `null` | Advanced raw processor mapping for request, response, or schema hooks. |
+| `output_dir` | `text` | `no` | `null` | Optional output directory for file-based results. |
+| `lockfile` | `text` | `no` | `null` | Optional lockfile path for action-version locking and concurrency control. |
+| `max_retries` | `number` | `no` | `3` | Maximum retries for failed Composio operations. |
+| `verbosity_level` | `number` | `no` | `null` | Optional verbosity level. |
+| `output_in_file` | `boolean` | `no` | `false` | Write operation output to files instead of only returning it directly. |
+| `allow_tracing` | `boolean` | `no` | `false` | Enable tracing support for debugging. |
+| `lock` | `boolean` | `no` | `true` | Enable lockfile-based coordination. |
+| `logging_level` | `text` | `no` | `INFO` | Composio logging level such as `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
 ### Example
 
@@ -318,7 +318,7 @@ agents:
 - `workspace_config`, `connected_account_ids`, `metadata`, and `processors` are advanced constructor inputs and are not the most ergonomic handwritten YAML fields in the current metadata model.
 - Use `composio` when you want one external platform to broker many app integrations instead of configuring each app-specific tool directly in MindRoom.
 
-## \[`custom_api`\]
+## [`custom_api`]
 
 `custom_api` is the generic escape hatch for making HTTP requests to APIs that do not have a dedicated MindRoom tool.
 
@@ -334,17 +334,17 @@ Non-2xx responses still return a structured result object, with an added `"error
 
 ### Configuration
 
-| Option                | Type       | Required | Default | Notes                                                                                                                                           |
-| --------------------- | ---------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `base_url`            | `url`      | `no`     | `null`  | Base URL joined with the `endpoint` argument when set.                                                                                          |
-| `username`            | `text`     | `no`     | `null`  | Optional HTTP Basic Auth username.                                                                                                              |
-| `password`            | `password` | `no`     | `null`  | Optional HTTP Basic Auth password stored through the dashboard or credential store.                                                             |
-| `api_key`             | `password` | `no`     | `null`  | Optional bearer token stored through the dashboard or credential store.                                                                         |
-| `headers`             | `text`     | `no`     | `null`  | Advanced raw default-header mapping. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `verify_ssl`          | `boolean`  | `no`     | `true`  | Verify SSL certificates for outgoing HTTPS requests.                                                                                            |
-| `timeout`             | `number`   | `no`     | `30`    | Request timeout in seconds.                                                                                                                     |
-| `enable_make_request` | `boolean`  | `no`     | `true`  | Enable `make_request()`.                                                                                                                        |
-| `all`                 | `boolean`  | `no`     | `false` | Enable the full upstream custom-API toolkit surface.                                                                                            |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `base_url` | `url` | `no` | `null` | Base URL joined with the `endpoint` argument when set. |
+| `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
+| `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
+| `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
+| `headers` | `text` | `no` | `null` | Advanced raw default-header mapping. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
+| `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
+| `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream custom-API toolkit surface. |
 
 ### Example
 
@@ -372,7 +372,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/index.md)
-- [Project Management](https://docs.mindroom.chat/tools/project-management/index.md)
-- [MCP](https://docs.mindroom.chat/mcp/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
+- [Project Management](https://docs.mindroom.chat/tools/project-management/)
+- [MCP](https://docs.mindroom.chat/mcp/)

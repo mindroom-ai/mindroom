@@ -9,16 +9,16 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 
 ## Tools On This Page
 
-- \[`file`\] - Generic local file reads, writes, listings, searches, and chunk edits.
-- \[`shell`\] - Shell command execution with background handles, runtime env passthrough, and PATH overrides.
-- \[`python`\] - Python code execution, file helpers, and package installation in the active runtime.
-- \[`coding`\] - Code-oriented reads, precise edits, grep, file discovery, and directory listing.
-- \[`docker`\] - Local Docker container, image, volume, and network management.
-- \[`calculator`\] - Exact arithmetic and small numeric helper functions.
-- \[`reasoning`\] - Internal `think` and `analyze` scratchpad tools for structured reasoning.
-- \[`file_generation`\] - JSON, CSV, PDF, and text file export helpers.
-- \[`visualization`\] - Matplotlib-backed chart generation.
-- \[`sleep`\] - Intentional delays and pauses.
+- [`file`] - Generic local file reads, writes, listings, searches, and chunk edits.
+- [`shell`] - Shell command execution with background handles, runtime env passthrough, and PATH overrides.
+- [`python`] - Python code execution, file helpers, and package installation in the active runtime.
+- [`coding`] - Code-oriented reads, precise edits, grep, file discovery, and directory listing.
+- [`docker`] - Local Docker container, image, volume, and network management.
+- [`calculator`] - Exact arithmetic and small numeric helper functions.
+- [`reasoning`] - Internal `think` and `analyze` scratchpad tools for structured reasoning.
+- [`file_generation`] - JSON, CSV, PDF, and text file export helpers.
+- [`visualization`] - Matplotlib-backed chart generation.
+- [`sleep`] - Intentional delays and pauses.
 
 ## Common Setup Notes
 
@@ -29,7 +29,8 @@ MindRoom's built-in default worker-routed set is `coding`, `file`, `python`, and
 You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
-`worker_scope` controls runtime reuse, not filesystem security. Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the deployment model, storage visibility rules, and scope tradeoffs.
+`worker_scope` controls runtime reuse, not filesystem security.
+Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the deployment model, storage visibility rules, and scope tradeoffs.
 
 When an agent has a canonical workspace root, MindRoom injects that workspace as `base_dir` for tools that expose a `base_dir` constructor field.
 In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-managed instead of something you set inline.
@@ -75,7 +76,7 @@ agents:
           output_dir: charts
 ```
 
-## \[`file`\]
+## [`file`]
 
 `file` is the generic local filesystem toolkit for read, write, list, search, delete, and chunk-based edits.
 
@@ -89,21 +90,21 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 
 ### Configuration
 
-| Option                      | Type      | Required | Default    | Notes                                                                                                                                                      |
-| --------------------------- | --------- | -------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `base_dir`                  | `text`    | `no`     | `null`     | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
-| `enable_save_file`          | `boolean` | `no`     | `true`     | Enable `save_file()`.                                                                                                                                      |
-| `enable_read_file`          | `boolean` | `no`     | `true`     | Enable `read_file()`.                                                                                                                                      |
-| `enable_delete_file`        | `boolean` | `no`     | `false`    | Enable `delete_file()`.                                                                                                                                    |
-| `enable_list_files`         | `boolean` | `no`     | `true`     | Enable `list_files()`.                                                                                                                                     |
-| `enable_search_files`       | `boolean` | `no`     | `true`     | Enable `search_files()`.                                                                                                                                   |
-| `enable_read_file_chunk`    | `boolean` | `no`     | `true`     | Enable `read_file_chunk()`.                                                                                                                                |
-| `enable_replace_file_chunk` | `boolean` | `no`     | `true`     | Enable `replace_file_chunk()`.                                                                                                                             |
-| `expose_base_directory`     | `boolean` | `no`     | `false`    | Include absolute file paths and `base_directory` in `search_files()` output.                                                                               |
-| `max_file_length`           | `number`  | `no`     | `10000000` | Maximum character count for `read_file()`.                                                                                                                 |
-| `max_file_lines`            | `number`  | `no`     | `100000`   | Maximum line count for `read_file()`.                                                                                                                      |
-| `line_separator`            | `text`    | `no`     | `"\n"`     | Separator used by the chunk helpers.                                                                                                                       |
-| `all`                       | `boolean` | `no`     | `false`    | Enable every upstream `file` function at once.                                                                                                             |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
+| `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
+| `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
+| `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
+| `enable_list_files` | `boolean` | `no` | `true` | Enable `list_files()`. |
+| `enable_search_files` | `boolean` | `no` | `true` | Enable `search_files()`. |
+| `enable_read_file_chunk` | `boolean` | `no` | `true` | Enable `read_file_chunk()`. |
+| `enable_replace_file_chunk` | `boolean` | `no` | `true` | Enable `replace_file_chunk()`. |
+| `expose_base_directory` | `boolean` | `no` | `false` | Include absolute file paths and `base_directory` in `search_files()` output. |
+| `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
+| `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
+| `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk helpers. |
+| `all` | `boolean` | `no` | `false` | Enable every upstream `file` function at once. |
 
 ### Example
 
@@ -131,7 +132,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 - `delete_file()` is disabled by default, so destructive access is opt-in.
 - `search_files()` matches filesystem globs, not content inside files.
 
-## \[`shell`\]
+## [`shell`]
 
 `shell` runs argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
 
@@ -149,13 +150,13 @@ MindRoom marks `shell` as worker-routed by default, so it usually executes in th
 
 ### Configuration
 
-| Option                     | Type      | Required | Default | Notes                                                                                                                                                                                                  |
-| -------------------------- | --------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `base_dir`                 | `text`    | `no`     | `null`  | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`.                                                                         |
-| `enable_run_shell_command` | `boolean` | `no`     | `true`  | Enable `run_shell_command()` and the companion handle APIs.                                                                                                                                            |
-| `all`                      | `boolean` | `no`     | `false` | Enable all shell functions.                                                                                                                                                                            |
-| `extra_env_passthrough`    | `text`    | `no`     | `null`  | Extra exported process env var names or glob patterns exposed to sandboxed shell execution beyond the small default system env. This matches exported process env, not config-adjacent `.env` entries. |
-| `shell_path_prepend`       | `text`    | `no`     | `null`  | Extra PATH entries prepended for shell subprocesses only.                                                                                                                                              |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `base_dir` | `text` | `no` | `null` | Runtime-managed working directory when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
+| `enable_run_shell_command` | `boolean` | `no` | `true` | Enable `run_shell_command()` and the companion handle APIs. |
+| `all` | `boolean` | `no` | `false` | Enable all shell functions. |
+| `extra_env_passthrough` | `text` | `no` | `null` | Extra exported process env var names or glob patterns exposed to sandboxed shell execution beyond the small default system env. This matches exported process env, not config-adjacent `.env` entries. |
+| `shell_path_prepend` | `text` | `no` | `null` | Extra PATH entries prepended for shell subprocesses only. |
 
 ### Example
 
@@ -182,7 +183,8 @@ kill_shell_command("shell:abcd1234")
 
 ### Notes
 
-- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries. MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
+- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
+  MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -199,7 +201,7 @@ export PATH="$PWD/.local/bin:$PATH"
 EOF
 ```
 
-## \[`python`\]
+## [`python`]
 
 `python` executes arbitrary Python code, runs Python files, exposes a few file helpers, and can install packages into the active interpreter environment.
 
@@ -213,12 +215,12 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 
 ### Configuration
 
-| Option                 | Type      | Required | Default | Notes                                                                                                                     |
-| ---------------------- | --------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `base_dir`             | `text`    | `no`     | `null`  | Runtime-managed working root when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
-| `safe_globals`         | `text`    | `no`     | `null`  | Advanced raw constructor input that maps to the upstream `safe_globals` dict parameter.                                   |
-| `safe_locals`          | `text`    | `no`     | `null`  | Advanced raw constructor input that maps to the upstream `safe_locals` dict parameter.                                    |
-| `restrict_to_base_dir` | `boolean` | `no`     | `true`  | Constrain the file helper methods to `base_dir`.                                                                          |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
+| `safe_globals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_globals` dict parameter. |
+| `safe_locals` | `text` | `no` | `null` | Advanced raw constructor input that maps to the upstream `safe_locals` dict parameter. |
+| `restrict_to_base_dir` | `boolean` | `no` | `true` | Constrain the file helper methods to `base_dir`. |
 
 ### Example
 
@@ -247,7 +249,7 @@ list_files()
 - Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
 - Workspace identity, worker cache, and virtualenv env names remain controlled by MindRoom, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
 
-## \[`coding`\]
+## [`coding`]
 
 `coding` is MindRoom's code-oriented local toolkit with line-numbered reads, precise text edits, grep, file discovery, and directory listing.
 
@@ -264,9 +266,9 @@ MindRoom marks `coding` as worker-routed by default.
 
 ### Configuration
 
-| Option     | Type   | Required | Default | Notes                                                                                                                                              |
-| ---------- | ------ | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `base_dir` | `text` | `no`     | `null`  | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
 
 ### Example
 
@@ -292,7 +294,7 @@ ls("src/mindroom")
 - Recursive `grep()` and `find_files()` filter hidden and gitignored paths automatically, but explicit file targets are not filtered.
 - `edit_file()` refuses ambiguous edits, so widen the surrounding context in `old_text` when a match is not unique.
 
-## \[`docker`\]
+## [`docker`]
 
 `docker` manages local containers, images, volumes, and networks through the Docker Python client.
 
@@ -330,7 +332,7 @@ list_networks()
 - If you explicitly route `docker` through workers with `worker_tools`, the worker runtime also needs Docker access.
 - `get_container_logs(stream=True)` does not return a live stream payload to the model and instead returns a status message telling you to use non-streaming mode.
 
-## \[`calculator`\]
+## [`calculator`]
 
 `calculator` provides exact small-math helper functions without requiring arbitrary code execution.
 
@@ -366,7 +368,7 @@ square_root(144)
 - Errors such as division by zero, negative factorials, and negative square roots are returned as JSON error payloads instead of raising Python exceptions into the model.
 - Use `calculator` for exact arithmetic when you do not need the broader power and risk of `python`.
 
-## \[`reasoning`\]
+## [`reasoning`]
 
 `reasoning` gives an agent an internal scratchpad for structured `think` and `analyze` steps.
 
@@ -381,15 +383,15 @@ These steps are intended for the agent's internal reasoning flow rather than use
 
 ### Configuration
 
-| Option              | Type      | Required | Default | Notes                                                                          |
-| ------------------- | --------- | -------- | ------- | ------------------------------------------------------------------------------ |
-| `enable_think`      | `boolean` | `no`     | `true`  | Enable `think()`.                                                              |
-| `enable_analyze`    | `boolean` | `no`     | `true`  | Enable `analyze()`.                                                            |
-| `add_instructions`  | `boolean` | `no`     | `false` | Inject the toolkit's reasoning instructions into the model prompt.             |
-| `add_few_shot`      | `boolean` | `no`     | `false` | Append built-in or custom few-shot examples when instructions are being added. |
-| `instructions`      | `text`    | `no`     | `null`  | Replace the default reasoning instructions with your own text.                 |
-| `few_shot_examples` | `text`    | `no`     | `null`  | Provide custom few-shot examples for the reasoning toolkit.                    |
-| `all`               | `boolean` | `no`     | `false` | Enable all reasoning functions.                                                |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_think` | `boolean` | `no` | `true` | Enable `think()`. |
+| `enable_analyze` | `boolean` | `no` | `true` | Enable `analyze()`. |
+| `add_instructions` | `boolean` | `no` | `false` | Inject the toolkit's reasoning instructions into the model prompt. |
+| `add_few_shot` | `boolean` | `no` | `false` | Append built-in or custom few-shot examples when instructions are being added. |
+| `instructions` | `text` | `no` | `null` | Replace the default reasoning instructions with your own text. |
+| `few_shot_examples` | `text` | `no` | `null` | Provide custom few-shot examples for the reasoning toolkit. |
+| `all` | `boolean` | `no` | `false` | Enable all reasoning functions. |
 
 ### Example
 
@@ -422,7 +424,7 @@ analyze(
 - `few_shot_examples` only matters when few-shot examples are actually being included.
 - The stored reasoning steps live in session state for the current run, which lets later steps see the full scratchpad history.
 
-## \[`file_generation`\]
+## [`file_generation`]
 
 `file_generation` creates export artifacts as JSON, CSV, PDF, or plain text and can optionally save them to disk.
 
@@ -437,14 +439,14 @@ PDF generation is automatically disabled when `reportlab` is unavailable, even i
 
 ### Configuration
 
-| Option                   | Type      | Required | Default | Notes                                                         |
-| ------------------------ | --------- | -------- | ------- | ------------------------------------------------------------- |
-| `output_directory`       | `text`    | `no`     | `null`  | Optional directory where generated files are written to disk. |
-| `enable_json_generation` | `boolean` | `no`     | `true`  | Enable `generate_json_file()`.                                |
-| `enable_csv_generation`  | `boolean` | `no`     | `true`  | Enable `generate_csv_file()`.                                 |
-| `enable_pdf_generation`  | `boolean` | `no`     | `true`  | Enable `generate_pdf_file()` when `reportlab` is available.   |
-| `enable_txt_generation`  | `boolean` | `no`     | `true`  | Enable `generate_text_file()`.                                |
-| `all`                    | `boolean` | `no`     | `false` | Enable all file-generation functions.                         |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `output_directory` | `text` | `no` | `null` | Optional directory where generated files are written to disk. |
+| `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
+| `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
+| `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
+| `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
+| `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example
 
@@ -470,7 +472,7 @@ generate_text_file("Plain text export", filename="notes.txt")
 - `generate_json_file()` accepts dicts, lists, or strings, and plain strings are wrapped into JSON when they are not already valid JSON.
 - Use a real `output_directory` if you want the artifact to remain on disk for later shell or file-tool access.
 
-## \[`visualization`\]
+## [`visualization`]
 
 `visualization` creates chart images with matplotlib and writes them to an output directory.
 
@@ -483,15 +485,15 @@ Each chart function accepts dict-like data, list-based data, or JSON strings, no
 
 ### Configuration
 
-| Option                       | Type      | Required | Default    | Notes                                             |
-| ---------------------------- | --------- | -------- | ---------- | ------------------------------------------------- |
-| `output_dir`                 | `text`    | `no`     | `"charts"` | Directory where generated chart images are saved. |
-| `enable_create_bar_chart`    | `boolean` | `no`     | `true`     | Enable `create_bar_chart()`.                      |
-| `enable_create_line_chart`   | `boolean` | `no`     | `true`     | Enable `create_line_chart()`.                     |
-| `enable_create_pie_chart`    | `boolean` | `no`     | `true`     | Enable `create_pie_chart()`.                      |
-| `enable_create_scatter_plot` | `boolean` | `no`     | `true`     | Enable `create_scatter_plot()`.                   |
-| `enable_create_histogram`    | `boolean` | `no`     | `true`     | Enable `create_histogram()`.                      |
-| `all`                        | `boolean` | `no`     | `false`    | Enable all chart functions.                       |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `output_dir` | `text` | `no` | `"charts"` | Directory where generated chart images are saved. |
+| `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `create_bar_chart()`. |
+| `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `create_line_chart()`. |
+| `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `create_pie_chart()`. |
+| `enable_create_scatter_plot` | `boolean` | `no` | `true` | Enable `create_scatter_plot()`. |
+| `enable_create_histogram` | `boolean` | `no` | `true` | Enable `create_histogram()`. |
+| `all` | `boolean` | `no` | `false` | Enable all chart functions. |
 
 ### Example
 
@@ -521,7 +523,7 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 - If you explicitly route `visualization` through workers, the chart files will be created in the worker-visible filesystem instead of the primary process filesystem.
 - `matplotlib` must be importable in the runtime that executes the tool.
 
-## \[`sleep`\]
+## [`sleep`]
 
 `sleep` is a minimal delay utility for workflows that need an intentional pause between steps.
 
@@ -532,10 +534,10 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### Configuration
 
-| Option         | Type      | Required | Default | Notes                       |
-| -------------- | --------- | -------- | ------- | --------------------------- |
-| `enable_sleep` | `boolean` | `no`     | `true`  | Enable `sleep()`.           |
-| `all`          | `boolean` | `no`     | `false` | Enable all sleep functions. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_sleep` | `boolean` | `no` | `true` | Enable `sleep()`. |
+| `all` | `boolean` | `no` | `false` | Enable all sleep functions. |
 
 ### Example
 
@@ -557,6 +559,6 @@ sleep(5)
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)

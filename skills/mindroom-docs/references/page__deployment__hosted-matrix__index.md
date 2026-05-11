@@ -8,11 +8,11 @@ This guide covers the simplest production-like setup:
 
 ## What Runs Where
 
-| Component            | Runs on                          | Purpose                                 |
-| -------------------- | -------------------------------- | --------------------------------------- |
-| `chat.mindroom.chat` | Hosted web app                   | Login UI and pairing UI                 |
-| `mindroom.chat`      | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
-| `uvx mindroom run`   | Your machine/server              | Agent orchestration, tools, model calls |
+| Component | Runs on | Purpose |
+|----------|---------|---------|
+| `chat.mindroom.chat` | Hosted web app | Login UI and pairing UI |
+| `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
+| `uvx mindroom run` | Your machine/server | Agent orchestration, tools, model calls |
 
 ## Prerequisites
 
@@ -45,9 +45,9 @@ MindRoom reads `~/.codex/auth.json` by default.
 ## 3. Pair This Install
 
 1. Open `https://chat.mindroom.chat`.
-1. Go to `Settings -> Local MindRoom`.
-1. Click `Generate Pair Code`.
-1. Run locally:
+2. Go to `Settings -> Local MindRoom`.
+3. Click `Generate Pair Code`.
+4. Run locally:
 
 ```bash
 uvx mindroom connect --pair-code ABCD-EFGH
@@ -69,9 +69,9 @@ uvx mindroom run
 MindRoom then:
 
 1. Connects to `MATRIX_HOMESERVER`
-1. Creates/updates configured agent Matrix users
-1. Joins/creates configured rooms
-1. Starts processing messages
+2. Creates/updates configured agent Matrix users
+3. Joins/creates configured rooms
+4. Starts processing messages
 
 ## Credential Model (Important)
 

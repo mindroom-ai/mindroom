@@ -54,7 +54,8 @@ Later edits may leave `client_secret` blank only when `client_id` is unchanged.
 Changing `client_id` requires submitting the matching new `client_secret`.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
-Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents. Use [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) for those deployments.
+Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.
+Use [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) for those deployments.
 
 ## Connect
 

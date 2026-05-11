@@ -9,11 +9,11 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 
 ## Tools On This Page
 
-- \[`matrix_message`\] - Send, reply, react, read, edit, or inspect Matrix conversation context.
-- \[`thread_tags`\] - Add, remove, and inspect shared tags on a Matrix thread.
-- \[`thread_summary`\] - Set or update a Matrix thread summary from the current room and thread context.
-- \[`matrix_api`\] - Use a low-level Matrix event and state API with explicit room and event IDs.
-- \[`attachments`\] - List, inspect, and register context-scoped attachment IDs for later tool calls.
+- [`matrix_message`] - Send, reply, react, read, edit, or inspect Matrix conversation context.
+- [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
+- [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
+- [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
+- [`attachments`] - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
 ## Common Setup Notes
 
@@ -22,7 +22,7 @@ These tools depend on the active `ToolRuntimeContext`, so they only work when an
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
 Current source in this worktree exposes `matrix_message`, `thread_tags`, `thread_summary`, `matrix_api`, and `attachments` in this area.
 
-## \[`matrix_message`\]
+## [`matrix_message`]
 
 `matrix_message` is the main Matrix-native tool for sending, reading, reacting to, editing, and inspecting conversation context.
 
@@ -75,7 +75,7 @@ matrix_message(action="react", target="$event123", message="✅")
 - Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
 - If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
 
-## \[`thread_tags`\]
+## [`thread_tags`]
 
 `thread_tags` lets agents add, remove, and inspect shared thread tags using Matrix room state.
 
@@ -115,7 +115,7 @@ list_thread_tags(thread_id="$threadRootEvent")
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 
-## \[`thread_summary`\]
+## [`thread_summary`]
 
 `thread_summary` lets agents set or replace the current thread summary explicitly instead of waiting for the automatic summarizer.
 
@@ -156,7 +156,7 @@ set_thread_summary(
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
 
-## \[`matrix_api`\]
+## [`matrix_api`]
 
 `matrix_api` exposes a small low-level Matrix API surface for explicit room, event, and state operations, including room-scoped search.
 
@@ -210,7 +210,7 @@ matrix_api(
 - The tool returns structured JSON payloads for both success and error cases.
 - Because it is intentionally low-level, it requires explicit IDs instead of deriving them from reply or thread context.
 
-## \[`attachments`\]
+## [`attachments`]
 
 `attachments` lets agents inspect and register files that are scoped to the current Matrix conversation.
 
@@ -252,7 +252,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 - `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
 - Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
-- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](https://docs.mindroom.chat/attachments/index.md) guide.
+- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](https://docs.mindroom.chat/attachments/) guide.
 
 ## Related Matrix Runtime Features
 
@@ -263,6 +263,6 @@ The `thread_summary` tool complements that automatic behavior by letting an agen
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [Attachments](https://docs.mindroom.chat/attachments/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Attachments](https://docs.mindroom.chat/attachments/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)

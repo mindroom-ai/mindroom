@@ -9,18 +9,18 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 ## Tools On This Page
 
-- \[`gmail`\] - Gmail mailbox access and message composition through the Google Gmail OAuth provider.
-- \[`slack`\] - Slack channel messaging, threaded replies, channel listing, and history reads.
-- \[`discord`\] - Discord bot messaging, channel inspection, history reads, and message deletion.
-- \[`telegram`\] - Telegram bot delivery to one configured chat.
-- \[`whatsapp`\] - WhatsApp Business API text and template messaging.
-- \[`twilio`\] - Twilio SMS delivery, call lookup, and recent message listing.
-- \[`webex`\] - Webex room messaging and room listing.
-- \[`resend`\] - Transactional email delivery through Resend.
-- \[`email`\] - Simple SMTP email sending through Gmail SMTP.
-- \[`x`\] - X posting, replying, DMs, profile lookup, timeline reads, and recent-post search.
-- \[`reddit`\] - Reddit read access plus optional posting and replies with user auth.
-- \[`zoom`\] - Zoom Server-to-Server OAuth meeting scheduling and management.
+- [`gmail`] - Gmail mailbox access and message composition through the Google Gmail OAuth provider.
+- [`slack`] - Slack channel messaging, threaded replies, channel listing, and history reads.
+- [`discord`] - Discord bot messaging, channel inspection, history reads, and message deletion.
+- [`telegram`] - Telegram bot delivery to one configured chat.
+- [`whatsapp`] - WhatsApp Business API text and template messaging.
+- [`twilio`] - Twilio SMS delivery, call lookup, and recent message listing.
+- [`webex`] - Webex room messaging and room listing.
+- [`resend`] - Transactional email delivery through Resend.
+- [`email`] - Simple SMTP email sending through Gmail SMTP.
+- [`x`] - X posting, replying, DMs, profile lookup, timeline reads, and recent-post search.
+- [`reddit`] - Reddit read access plus optional posting and replies with user auth.
+- [`zoom`] - Zoom Server-to-Server OAuth meeting scheduling and management.
 
 ## Common Setup Notes
 
@@ -34,7 +34,7 @@ Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TO
 The generic-looking `email` tool is not a fully configurable SMTP client on this branch.
 Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
 
-## \[`gmail`\]
+## [`gmail`]
 
 `gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the Google Gmail OAuth provider.
 
@@ -49,16 +49,16 @@ Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
 
-| Option                 | Type      | Required | Default | Notes                                                          |
-| ---------------------- | --------- | -------- | ------- | -------------------------------------------------------------- |
-| `get_latest_emails`    | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `get_emails_from_user` | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `get_unread_emails`    | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `get_starred_emails`   | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `search_emails`        | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `create_draft_email`   | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `send_email`           | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
-| `send_email_reply`     | `boolean` | `no`     | `true`  | Declared in MindRoom's registry metadata as a capability flag. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `get_latest_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `get_emails_from_user` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `get_unread_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `get_starred_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `search_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `create_draft_email` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `send_email` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| `send_email_reply` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
 
 ### Example
 
@@ -87,7 +87,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - Use those selector kwargs to disable specific methods you do not want the agent calling.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
-## \[`slack`\]
+## [`slack`]
 
 `slack` is the Slack bot toolkit for posting to channels, replying in threads, listing channels, and reading recent channel history.
 
@@ -100,15 +100,15 @@ Channel-history responses are normalized into a smaller JSON structure instead o
 
 ### Configuration
 
-| Option                       | Type       | Required | Default | Notes                                                        |
-| ---------------------------- | ---------- | -------- | ------- | ------------------------------------------------------------ |
-| `token`                      | `password` | `no`     | `null`  | Slack bot token, or use `SLACK_TOKEN`. Required in practice. |
-| `markdown`                   | `boolean`  | `no`     | `true`  | Enable Slack markdown rendering on sent messages.            |
-| `enable_send_message`        | `boolean`  | `no`     | `true`  | Enable `send_message()`.                                     |
-| `enable_send_message_thread` | `boolean`  | `no`     | `true`  | Enable `send_message_thread()`.                              |
-| `enable_list_channels`       | `boolean`  | `no`     | `true`  | Enable `list_channels()`.                                    |
-| `enable_get_channel_history` | `boolean`  | `no`     | `true`  | Enable `get_channel_history()`.                              |
-| `all`                        | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                    |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `token` | `password` | `no` | `null` | Slack bot token, or use `SLACK_TOKEN`. Required in practice. |
+| `markdown` | `boolean` | `no` | `true` | Enable Slack markdown rendering on sent messages. |
+| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
+| `enable_send_message_thread` | `boolean` | `no` | `true` | Enable `send_message_thread()`. |
+| `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
+| `enable_get_channel_history` | `boolean` | `no` | `true` | Enable `get_channel_history()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -134,7 +134,7 @@ get_channel_history("C0123456789", limit=25)
 - Use channel IDs for the most reliable calls, especially for threaded replies and history reads.
 - `get_channel_history()` returns a simplified JSON view rather than the raw Slack response.
 
-## \[`discord`\]
+## [`discord`]
 
 `discord` is the Discord bot toolkit for channel messaging, channel metadata, channel history, server channel listing, and message deletion.
 
@@ -147,15 +147,15 @@ Most functions expect Discord IDs such as `channel_id`, `guild_id`, and `message
 
 ### Configuration
 
-| Option                        | Type       | Required | Default | Notes                                                                |
-| ----------------------------- | ---------- | -------- | ------- | -------------------------------------------------------------------- |
-| `bot_token`                   | `password` | `no`     | `null`  | Discord bot token, or use `DISCORD_BOT_TOKEN`. Required in practice. |
-| `enable_send_message`         | `boolean`  | `no`     | `true`  | Enable `send_message()`.                                             |
-| `enable_get_channel_messages` | `boolean`  | `no`     | `true`  | Enable `get_channel_messages()`.                                     |
-| `enable_get_channel_info`     | `boolean`  | `no`     | `true`  | Enable `get_channel_info()`.                                         |
-| `enable_list_channels`        | `boolean`  | `no`     | `true`  | Enable `list_channels()`.                                            |
-| `enable_delete_message`       | `boolean`  | `no`     | `true`  | Enable `delete_message()`.                                           |
-| `all`                         | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                            |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `bot_token` | `password` | `no` | `null` | Discord bot token, or use `DISCORD_BOT_TOKEN`. Required in practice. |
+| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
+| `enable_get_channel_messages` | `boolean` | `no` | `true` | Enable `get_channel_messages()`. |
+| `enable_get_channel_info` | `boolean` | `no` | `true` | Enable `get_channel_info()`. |
+| `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
+| `enable_delete_message` | `boolean` | `no` | `true` | Enable `delete_message()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -180,7 +180,7 @@ send_message("123456789012345678", "Hello from MindRoom.")
 - This tool uses ordinary Discord REST calls and does not manage slash commands, presence, or gateway subscriptions.
 - Deletion is enabled by default, so disable `enable_delete_message` if you only want read and send access.
 
-## \[`telegram`\]
+## [`telegram`]
 
 `telegram` is the simplest chat-delivery tool on this page, with one configured destination and one send function.
 
@@ -193,12 +193,12 @@ Responses are returned as the raw Telegram API response text.
 
 ### Configuration
 
-| Option                | Type       | Required | Default | Notes                                                              |
-| --------------------- | ---------- | -------- | ------- | ------------------------------------------------------------------ |
-| `chat_id`             | `text`     | `yes`    | `null`  | Telegram chat or channel ID that this tool instance will target.   |
-| `token`               | `password` | `no`     | `null`  | Telegram bot token, or use `TELEGRAM_TOKEN`. Required in practice. |
-| `enable_send_message` | `boolean`  | `no`     | `true`  | Enable `send_message()`.                                           |
-| `all`                 | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                          |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `chat_id` | `text` | `yes` | `null` | Telegram chat or channel ID that this tool instance will target. |
+| `token` | `password` | `no` | `null` | Telegram bot token, or use `TELEGRAM_TOKEN`. Required in practice. |
+| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -220,7 +220,7 @@ send_message("Nightly backup completed.")
 - Because the destination chat is fixed in config, this tool is best for one bot-to-room delivery path rather than general multi-room Telegram automation.
 - If you need different Telegram destinations, configure different agents or different tool credentials per scope.
 
-## \[`whatsapp`\]
+## [`whatsapp`]
 
 `whatsapp` is the WhatsApp Business API toolkit for text messages and template messages through Meta's Graph API.
 
@@ -233,13 +233,13 @@ If no default recipient is configured, every send call must provide one.
 
 ### Configuration
 
-| Option            | Type       | Required | Default | Notes                                                                                       |
-| ----------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------------------- |
-| `access_token`    | `password` | `no`     | `null`  | WhatsApp Business API token, or use `WHATSAPP_ACCESS_TOKEN`. Required in practice.          |
-| `phone_number_id` | `text`     | `no`     | `null`  | WhatsApp Business phone number ID, or use `WHATSAPP_PHONE_NUMBER_ID`. Required in practice. |
-| `version`         | `text`     | `no`     | `v22.0` | Graph API version prefix.                                                                   |
-| `recipient_waid`  | `text`     | `no`     | `null`  | Default recipient phone number or WhatsApp ID.                                              |
-| `async_mode`      | `boolean`  | `no`     | `false` | Register async send functions instead of sync send functions.                               |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `access_token` | `password` | `no` | `null` | WhatsApp Business API token, or use `WHATSAPP_ACCESS_TOKEN`. Required in practice. |
+| `phone_number_id` | `text` | `no` | `null` | WhatsApp Business phone number ID, or use `WHATSAPP_PHONE_NUMBER_ID`. Required in practice. |
+| `version` | `text` | `no` | `v22.0` | Graph API version prefix. |
+| `recipient_waid` | `text` | `no` | `null` | Default recipient phone number or WhatsApp ID. |
+| `async_mode` | `boolean` | `no` | `false` | Register async send functions instead of sync send functions. |
 
 ### Example
 
@@ -264,7 +264,7 @@ send_template_message_sync(template_name="deployment_notice", language_code="en_
 - `async_mode: true` changes the registered function names to the async variants, which matters if you are debugging tool traces or reading model-generated tool calls.
 - Template sends expect a preapproved WhatsApp template name and, optionally, template `components`.
 
-## \[`twilio`\]
+## [`twilio`]
 
 `twilio` is the telecom-oriented toolkit for SMS sends, call lookups, and recent message history.
 
@@ -277,19 +277,19 @@ Optional `region` and `edge` are passed into the Twilio client for regional rout
 
 ### Configuration
 
-| Option                    | Type       | Required | Default | Notes                                                                  |
-| ------------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------------- |
-| `account_sid`             | `text`     | `no`     | `null`  | Twilio account SID, or use `TWILIO_ACCOUNT_SID`. Required in practice. |
-| `auth_token`              | `password` | `no`     | `null`  | Twilio auth token for the simpler auth mode.                           |
-| `api_key`                 | `password` | `no`     | `null`  | Twilio API key for key-and-secret auth.                                |
-| `api_secret`              | `password` | `no`     | `null`  | Twilio API secret for key-and-secret auth.                             |
-| `region`                  | `text`     | `no`     | `null`  | Optional Twilio region such as `au1`.                                  |
-| `edge`                    | `text`     | `no`     | `null`  | Optional Twilio edge such as `sydney`.                                 |
-| `debug`                   | `boolean`  | `no`     | `false` | Enable Twilio HTTP client logging.                                     |
-| `enable_send_sms`         | `boolean`  | `no`     | `true`  | Enable `send_sms()`.                                                   |
-| `enable_get_call_details` | `boolean`  | `no`     | `true`  | Enable `get_call_details()`.                                           |
-| `enable_list_messages`    | `boolean`  | `no`     | `true`  | Enable `list_messages()`.                                              |
-| `all`                     | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                              |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `account_sid` | `text` | `no` | `null` | Twilio account SID, or use `TWILIO_ACCOUNT_SID`. Required in practice. |
+| `auth_token` | `password` | `no` | `null` | Twilio auth token for the simpler auth mode. |
+| `api_key` | `password` | `no` | `null` | Twilio API key for key-and-secret auth. |
+| `api_secret` | `password` | `no` | `null` | Twilio API secret for key-and-secret auth. |
+| `region` | `text` | `no` | `null` | Optional Twilio region such as `au1`. |
+| `edge` | `text` | `no` | `null` | Optional Twilio edge such as `sydney`. |
+| `debug` | `boolean` | `no` | `false` | Enable Twilio HTTP client logging. |
+| `enable_send_sms` | `boolean` | `no` | `true` | Enable `send_sms()`. |
+| `enable_get_call_details` | `boolean` | `no` | `true` | Enable `get_call_details()`. |
+| `enable_list_messages` | `boolean` | `no` | `true` | Enable `list_messages()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -315,7 +315,7 @@ list_messages(limit=10)
 - Use either `auth_token` or the `api_key` plus `api_secret` pair, not both as separate independent auth methods.
 - `send_sms()` rejects non-E.164 numbers before it reaches Twilio's API.
 
-## \[`webex`\]
+## [`webex`]
 
 `webex` is the Cisco Webex toolkit for room messaging and room listing.
 
@@ -328,12 +328,12 @@ Responses are returned as JSON strings built from the SDK result objects.
 
 ### Configuration
 
-| Option                | Type       | Required | Default | Notes                                                                  |
-| --------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------------- |
-| `enable_send_message` | `boolean`  | `no`     | `true`  | Enable `send_message()`.                                               |
-| `enable_list_rooms`   | `boolean`  | `no`     | `true`  | Enable `list_rooms()`.                                                 |
-| `all`                 | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                              |
-| `access_token`        | `password` | `no`     | `null`  | Webex access token, or use `WEBEX_ACCESS_TOKEN`. Required in practice. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
+| `enable_list_rooms` | `boolean` | `no` | `true` | Enable `list_rooms()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `access_token` | `password` | `no` | `null` | Webex access token, or use `WEBEX_ACCESS_TOKEN`. Required in practice. |
 
 ### Example
 
@@ -356,7 +356,7 @@ send_message("Y2lzY29zcGFyazovL3VzL1JPT00v...", "Agenda is ready.")
 - The current tool surface is room messaging and room discovery only.
 - Use room IDs, not room titles, when sending messages.
 
-## \[`resend`\]
+## [`resend`]
 
 `resend` is the transactional-email API toolkit for HTML email delivery through Resend.
 
@@ -369,12 +369,12 @@ The current implementation passes the message body as HTML, not plain text.
 
 ### Configuration
 
-| Option              | Type       | Required | Default | Notes                                                                              |
-| ------------------- | ---------- | -------- | ------- | ---------------------------------------------------------------------------------- |
-| `api_key`           | `password` | `no`     | `null`  | Resend API key, or use `RESEND_API_KEY`. Required in practice.                     |
-| `from_email`        | `text`     | `no`     | `null`  | Sender identity used for every call. Usually required by the provider in practice. |
-| `enable_send_email` | `boolean`  | `no`     | `true`  | Enable `send_email()`.                                                             |
-| `all`               | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                                          |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Resend API key, or use `RESEND_API_KEY`. Required in practice. |
+| `from_email` | `text` | `no` | `null` | Sender identity used for every call. Usually required by the provider in practice. |
+| `enable_send_email` | `boolean` | `no` | `true` | Enable `send_email()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -396,7 +396,7 @@ send_email("alice@example.com", "Welcome", "<p>Your account is ready.</p>")
 - The `body` argument is sent as HTML.
 - Use `resend` when you want provider-managed transactional delivery rather than Gmail mailbox access.
 
-## \[`email`\]
+## [`email`]
 
 `email` is the simplest SMTP mailer on this page, but on this branch it is specifically wired for Gmail SMTP rather than generic SMTP.
 
@@ -409,14 +409,14 @@ The current implementation sends plain-text bodies only.
 
 ### Configuration
 
-| Option              | Type       | Required | Default | Notes                                                                |
-| ------------------- | ---------- | -------- | ------- | -------------------------------------------------------------------- |
-| `receiver_email`    | `text`     | `no`     | `null`  | Default recipient for all `email_user()` calls.                      |
-| `sender_name`       | `text`     | `no`     | `null`  | Display name shown in the `From` header.                             |
-| `sender_email`      | `text`     | `no`     | `null`  | Gmail sender address used for SMTP login.                            |
-| `sender_passkey`    | `password` | `no`     | `null`  | Gmail app password or equivalent SMTP passkey. Required in practice. |
-| `enable_email_user` | `boolean`  | `no`     | `true`  | Enable `email_user()`.                                               |
-| `all`               | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                            |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `receiver_email` | `text` | `no` | `null` | Default recipient for all `email_user()` calls. |
+| `sender_name` | `text` | `no` | `null` | Display name shown in the `From` header. |
+| `sender_email` | `text` | `no` | `null` | Gmail sender address used for SMTP login. |
+| `sender_passkey` | `password` | `no` | `null` | Gmail app password or equivalent SMTP passkey. Required in practice. |
+| `enable_email_user` | `boolean` | `no` | `true` | Enable `email_user()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 ### Example
 
@@ -441,7 +441,7 @@ email_user("Nightly report", "The report finished successfully.")
 - If you need mailbox reads, drafts, replies, or labels, use `gmail` instead.
 - If you need provider-managed transactional delivery with HTML bodies, use `resend` instead.
 
-## \[`x`\]
+## [`x`]
 
 `x` is the X or Twitter toolkit for recent-post search, user lookup, timeline access, posting, replying, and DMs.
 
@@ -454,15 +454,15 @@ The implementation clamps `max_results` for search to the Twitter API's supporte
 
 ### Configuration
 
-| Option                 | Type       | Required | Default | Notes                                                           |
-| ---------------------- | ---------- | -------- | ------- | --------------------------------------------------------------- |
-| `bearer_token`         | `password` | `no`     | `null`  | Bearer token, or use `X_BEARER_TOKEN`.                          |
-| `consumer_key`         | `password` | `no`     | `null`  | OAuth consumer key, or use `X_CONSUMER_KEY`.                    |
-| `consumer_secret`      | `password` | `no`     | `null`  | OAuth consumer secret, or use `X_CONSUMER_SECRET`.              |
-| `access_token`         | `password` | `no`     | `null`  | OAuth access token, or use `X_ACCESS_TOKEN`.                    |
-| `access_token_secret`  | `password` | `no`     | `null`  | OAuth access token secret, or use `X_ACCESS_TOKEN_SECRET`.      |
-| `include_post_metrics` | `boolean`  | `no`     | `false` | Include public metrics in `search_posts()` output.              |
-| `wait_on_rate_limit`   | `boolean`  | `no`     | `false` | Let Tweepy wait for rate limits instead of failing immediately. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `bearer_token` | `password` | `no` | `null` | Bearer token, or use `X_BEARER_TOKEN`. |
+| `consumer_key` | `password` | `no` | `null` | OAuth consumer key, or use `X_CONSUMER_KEY`. |
+| `consumer_secret` | `password` | `no` | `null` | OAuth consumer secret, or use `X_CONSUMER_SECRET`. |
+| `access_token` | `password` | `no` | `null` | OAuth access token, or use `X_ACCESS_TOKEN`. |
+| `access_token_secret` | `password` | `no` | `null` | OAuth access token secret, or use `X_ACCESS_TOKEN_SECRET`. |
+| `include_post_metrics` | `boolean` | `no` | `false` | Include public metrics in `search_posts()` output. |
+| `wait_on_rate_limit` | `boolean` | `no` | `false` | Let Tweepy wait for rate limits instead of failing immediately. |
 
 ### Example
 
@@ -488,7 +488,7 @@ reply_to_post("1890123456789012345", "Thanks for the feedback.")
 - The toolkit also defines `get_my_info()`, but MindRoom's current registered tool list on this branch does not advertise a separate config flag for it.
 - `reply_to_post()` builds a `twitter.com` URL in its response, while `create_post()` builds an `x.com` URL, so response formatting is currently inconsistent upstream.
 
-## \[`reddit`\]
+## [`reddit`]
 
 `reddit` is the Reddit toolkit for reading user and subreddit data, listing trending communities, and optionally posting or replying with user credentials.
 
@@ -501,14 +501,14 @@ If `username` and `password` are also configured, the tool enables posting and r
 
 ### Configuration
 
-| Option            | Type       | Required | Default | Notes                                                                          |
-| ----------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------ |
-| `reddit_instance` | `text`     | `no`     | `null`  | Advanced programmatic Reddit client injection, not normal YAML authoring.      |
-| `client_id`       | `text`     | `no`     | `null`  | Reddit app client ID, or use `REDDIT_CLIENT_ID`. Required in practice.         |
-| `client_secret`   | `password` | `no`     | `null`  | Reddit app client secret, or use `REDDIT_CLIENT_SECRET`. Required in practice. |
-| `user_agent`      | `text`     | `no`     | `null`  | Optional custom user agent, with `RedditTools v1.0` as the upstream fallback.  |
-| `username`        | `text`     | `no`     | `null`  | Reddit username for posting and replying.                                      |
-| `password`        | `password` | `no`     | `null`  | Reddit password for posting and replying.                                      |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `reddit_instance` | `text` | `no` | `null` | Advanced programmatic Reddit client injection, not normal YAML authoring. |
+| `client_id` | `text` | `no` | `null` | Reddit app client ID, or use `REDDIT_CLIENT_ID`. Required in practice. |
+| `client_secret` | `password` | `no` | `null` | Reddit app client secret, or use `REDDIT_CLIENT_SECRET`. Required in practice. |
+| `user_agent` | `text` | `no` | `null` | Optional custom user agent, with `RedditTools v1.0` as the upstream fallback. |
+| `username` | `text` | `no` | `null` | Reddit username for posting and replying. |
+| `password` | `password` | `no` | `null` | Reddit password for posting and replying. |
 
 ### Example
 
@@ -533,7 +533,7 @@ get_user_info("spez")
 - `create_post()`, `reply_to_post()`, and `reply_to_comment()` additionally require `username` and `password`.
 - The current MindRoom metadata treats `reddit_instance` as text, but the upstream constructor expects an already constructed `praw.Reddit` object.
 
-## \[`zoom`\]
+## [`zoom`]
 
 `zoom` is the Zoom meeting-management toolkit for scheduling, listing, inspecting, deleting, and reading recordings through Zoom's Server-to-Server OAuth flow.
 
@@ -546,11 +546,11 @@ Meeting creation always targets `users/me/meetings` and applies a fixed set of d
 
 ### Configuration
 
-| Option          | Type       | Required | Default | Notes                                                                                              |
-| --------------- | ---------- | -------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `account_id`    | `text`     | `no`     | `null`  | Zoom account ID from a Server-to-Server OAuth app, or use `ZOOM_ACCOUNT_ID`. Required in practice. |
-| `client_id`     | `text`     | `no`     | `null`  | Zoom client ID, or use `ZOOM_CLIENT_ID`. Required in practice.                                     |
-| `client_secret` | `password` | `no`     | `null`  | Zoom client secret, or use `ZOOM_CLIENT_SECRET`. Required in practice.                             |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `account_id` | `text` | `no` | `null` | Zoom account ID from a Server-to-Server OAuth app, or use `ZOOM_ACCOUNT_ID`. Required in practice. |
+| `client_id` | `text` | `no` | `null` | Zoom client ID, or use `ZOOM_CLIENT_ID`. Required in practice. |
+| `client_secret` | `password` | `no` | `null` | Zoom client secret, or use `ZOOM_CLIENT_SECRET`. Required in practice. |
 
 ### Example
 
@@ -578,5 +578,5 @@ get_meeting("81234567890")
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
-- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/index.md) - For `aws_ses` when you want an alternative outbound-email provider.
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - For `aws_ses` when you want an alternative outbound-email provider.

@@ -93,16 +93,18 @@ The `research` toolkit is sticky because it is in `initial_toolkits` and cannot 
 A typical conversation might look like:
 
 1. **User**: "What papers exist on transformer architectures?"
-1. Agent uses `arxiv` (already loaded via `research` toolkit) to search.
-1. **User**: "Now deploy the demo app to AWS."
-1. Agent calls `list_toolkits()` to check available toolkits.
-1. Agent calls `load_tools("devops")` to load infrastructure tools.
-1. Agent responds: "I've loaded the devops toolkit. I'll have Docker, AWS Lambda, and GitHub tools available on your next message."
-1. **User**: "Go ahead."
-1. Agent now has `docker`, `aws_lambda`, and `github` available and proceeds with the deployment.
+   - Agent uses `arxiv` (already loaded via `research` toolkit) to search.
+
+2. **User**: "Now deploy the demo app to AWS."
+   - Agent calls `list_toolkits()` to check available toolkits.
+   - Agent calls `load_tools("devops")` to load infrastructure tools.
+   - Agent responds: "I've loaded the devops toolkit. I'll have Docker, AWS Lambda, and GitHub tools available on your next message."
+
+3. **User**: "Go ahead."
+   - Agent now has `docker`, `aws_lambda`, and `github` available and proceeds with the deployment.
 
 ## See Also
 
-- [Toolkit Configuration](https://docs.mindroom.chat/configuration/toolkits/index.md) — config reference for the `toolkits` section and per-agent settings
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md) — enabling and configuring tools
-- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/index.md) — complete list of available tools
+- [Toolkit Configuration](https://docs.mindroom.chat/configuration/toolkits/) — config reference for the `toolkits` section and per-agent settings
+- [Tools Overview](https://docs.mindroom.chat/tools/) — enabling and configuring tools
+- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/) — complete list of available tools

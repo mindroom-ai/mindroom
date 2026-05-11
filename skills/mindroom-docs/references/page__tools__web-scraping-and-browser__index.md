@@ -9,21 +9,21 @@ Use these tools when you need lightweight text extraction, structured scraping A
 
 ## Tools On This Page
 
-- \[`crawl4ai`\] - Local Crawl4AI crawling with readable-text extraction and optional query-aware filtering.
-- \[`website`\] - Simple website reader and optional knowledge-base ingester.
-- \[`trafilatura`\] - Local page extraction, metadata extraction, HTML-to-text conversion, batch extraction, and focused crawling.
-- \[`newspaper`\] - News-article reader backed by the `newspaper4k` dependency.
-- \[`jina`\] - Jina Reader URL reading and optional web search with an optional API key.
-- \[`firecrawl`\] - Firecrawl API for scrape, crawl, map, and search jobs.
-- \[`spider`\] - Spider Cloud API for search, scrape, and crawl.
-- \[`scrapegraph`\] - ScrapeGraph AI extraction, markdown conversion, search scraping, and agentic crawling.
-- \[`apify`\] - Apify Actor runner that turns configured actors into tool functions.
-- \[`brightdata`\] - Bright Data scraping, screenshots, SERP queries, and feed endpoints.
-- \[`oxylabs`\] - Oxylabs Google search, Amazon data, and general web scraping.
-- \[`agentql`\] - AgentQL browser-assisted scraping with optional custom extraction queries.
-- \[`browserbase`\] - Browserbase-hosted browser sessions with remote navigation, screenshots, and page reads.
-- \[`browser`\] - MindRoom's local Playwright browser controller.
-- \[`web_browser_tools`\] - Host OS browser opener for launching a real browser tab or window.
+- [`crawl4ai`] - Local Crawl4AI crawling with readable-text extraction and optional query-aware filtering.
+- [`website`] - Simple website reader and optional knowledge-base ingester.
+- [`trafilatura`] - Local page extraction, metadata extraction, HTML-to-text conversion, batch extraction, and focused crawling.
+- [`newspaper`] - News-article reader backed by the `newspaper4k` dependency.
+- [`jina`] - Jina Reader URL reading and optional web search with an optional API key.
+- [`firecrawl`] - Firecrawl API for scrape, crawl, map, and search jobs.
+- [`spider`] - Spider Cloud API for search, scrape, and crawl.
+- [`scrapegraph`] - ScrapeGraph AI extraction, markdown conversion, search scraping, and agentic crawling.
+- [`apify`] - Apify Actor runner that turns configured actors into tool functions.
+- [`brightdata`] - Bright Data scraping, screenshots, SERP queries, and feed endpoints.
+- [`oxylabs`] - Oxylabs Google search, Amazon data, and general web scraping.
+- [`agentql`] - AgentQL browser-assisted scraping with optional custom extraction queries.
+- [`browserbase`] - Browserbase-hosted browser sessions with remote navigation, screenshots, and page reads.
+- [`browser`] - MindRoom's local Playwright browser controller.
+- [`web_browser_tools`] - Host OS browser opener for launching a real browser tab or window.
 
 ## Common Setup Notes
 
@@ -39,7 +39,7 @@ Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_
 
 ## No-Config Scrapers
 
-### \[`crawl4ai`\]
+### [`crawl4ai`]
 
 `crawl4ai` is the best local option on this page when you want one tool that can fetch readable page content from one URL or a short URL list.
 
@@ -54,18 +54,18 @@ This is a local crawler rather than a hosted API, so it does not need an API key
 
 #### Configuration
 
-| Option              | Type      | Required | Default            | Notes                                                                                                                    |
-| ------------------- | --------- | -------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `max_length`        | `number`  | `no`     | `5000`             | Maximum returned character count after extraction.                                                                       |
-| `timeout`           | `number`  | `no`     | `60`               | Crawl timeout in seconds.                                                                                                |
-| `use_pruning`       | `boolean` | `no`     | `false`            | Enable pruning-based cleanup when no `search_query` is provided.                                                         |
-| `pruning_threshold` | `number`  | `no`     | `0.48`             | Threshold passed to Crawl4AI pruning mode.                                                                               |
-| `bm25_threshold`    | `number`  | `no`     | `1.0`              | Threshold passed to BM25 filtering when `search_query` is used.                                                          |
-| `headless`          | `boolean` | `no`     | `true`             | Launch Crawl4AI's browser in headless mode.                                                                              |
-| `wait_until`        | `text`    | `no`     | `domcontentloaded` | Playwright wait condition before extraction.                                                                             |
-| `proxy_config`      | `object`  | `no`     | `null`             | Raw browser proxy config passed into Crawl4AI `BrowserConfig`, while the current MindRoom metadata exposes this as text. |
-| `enable_crawl`      | `boolean` | `no`     | `true`             | Enable `crawl()`.                                                                                                        |
-| `all`               | `boolean` | `no`     | `false`            | Enable the full upstream toolkit surface.                                                                                |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `max_length` | `number` | `no` | `5000` | Maximum returned character count after extraction. |
+| `timeout` | `number` | `no` | `60` | Crawl timeout in seconds. |
+| `use_pruning` | `boolean` | `no` | `false` | Enable pruning-based cleanup when no `search_query` is provided. |
+| `pruning_threshold` | `number` | `no` | `0.48` | Threshold passed to Crawl4AI pruning mode. |
+| `bm25_threshold` | `number` | `no` | `1.0` | Threshold passed to BM25 filtering when `search_query` is used. |
+| `headless` | `boolean` | `no` | `true` | Launch Crawl4AI's browser in headless mode. |
+| `wait_until` | `text` | `no` | `domcontentloaded` | Playwright wait condition before extraction. |
+| `proxy_config` | `object` | `no` | `null` | Raw browser proxy config passed into Crawl4AI `BrowserConfig`, while the current MindRoom metadata exposes this as text. |
+| `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -89,7 +89,7 @@ crawl("https://matrix.org/blog/", search_query="bridges and federation")
 - `proxy_config` maps directly to Crawl4AI browser settings, so treat it as an advanced raw config object.
 - For heavily protected or browser-hostile sites, `browserbase`, `brightdata`, or `browser` can be a better fit.
 
-### \[`website`\]
+### [`website`]
 
 `website` is the lightest built-in page reader on this page.
 
@@ -103,9 +103,9 @@ In normal hand-authored `config.yaml`, you should treat this as a quick page-rea
 
 #### Configuration
 
-| Option      | Type     | Required | Default | Notes                                                                                                                               |
-| ----------- | -------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `knowledge` | `object` | `no`     | `null`  | Advanced programmatic `Knowledge` object injection that changes the tool surface from `read_url()` to `add_website_to_knowledge()`. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `knowledge` | `object` | `no` | `null` | Advanced programmatic `Knowledge` object injection that changes the tool surface from `read_url()` to `add_website_to_knowledge()`. |
 
 #### Example
 
@@ -126,7 +126,7 @@ read_url("https://docs.mindroom.chat")
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 
-### \[`trafilatura`\]
+### [`trafilatura`]
 
 `trafilatura` is the most capable local extractor on this page when you want text extraction, metadata, HTML conversion, and lightweight crawling from one toolkit.
 
@@ -141,28 +141,28 @@ If the spider module is missing, the tool skips crawler registration instead of 
 
 #### Configuration
 
-| Option                         | Type      | Required | Default  | Notes                                                                                 |
-| ------------------------------ | --------- | -------- | -------- | ------------------------------------------------------------------------------------- |
-| `output_format`                | `text`    | `no`     | `txt`    | Default extraction format such as `txt`, `json`, `markdown`, `xml`, `csv`, or `html`. |
-| `include_comments`             | `boolean` | `no`     | `true`   | Include comment content in extracted output.                                          |
-| `include_tables`               | `boolean` | `no`     | `true`   | Keep table content in extracted output.                                               |
-| `include_images`               | `boolean` | `no`     | `false`  | Include image information where Trafilatura supports it.                              |
-| `include_formatting`           | `boolean` | `no`     | `false`  | Preserve formatting markers in extracted output.                                      |
-| `include_links`                | `boolean` | `no`     | `false`  | Preserve links in extracted output.                                                   |
-| `with_metadata`                | `boolean` | `no`     | `false`  | Include metadata in extraction output.                                                |
-| `favor_precision`              | `boolean` | `no`     | `false`  | Bias extraction toward precision.                                                     |
-| `favor_recall`                 | `boolean` | `no`     | `false`  | Bias extraction toward recall.                                                        |
-| `target_language`              | `text`    | `no`     | `null`   | Optional ISO 639-1 language filter such as `en` or `de`.                              |
-| `deduplicate`                  | `boolean` | `no`     | `false`  | Deduplicate repeated content segments.                                                |
-| `max_tree_size`                | `number`  | `no`     | `null`   | Optional parser tree-size limit.                                                      |
-| `max_crawl_urls`               | `number`  | `no`     | `10`     | Maximum URLs to visit when crawling.                                                  |
-| `max_known_urls`               | `number`  | `no`     | `100000` | Maximum discovered URLs to track while crawling.                                      |
-| `enable_extract_text`          | `boolean` | `no`     | `true`   | Enable `extract_text()`.                                                              |
-| `enable_extract_metadata_only` | `boolean` | `no`     | `true`   | Enable `extract_metadata_only()`.                                                     |
-| `enable_html_to_text`          | `boolean` | `no`     | `true`   | Enable `html_to_text()`.                                                              |
-| `enable_extract_batch`         | `boolean` | `no`     | `true`   | Enable `extract_batch()`.                                                             |
-| `enable_crawl_website`         | `boolean` | `no`     | `true`   | Enable `crawl_website()` when Trafilatura spider support is available.                |
-| `all`                          | `boolean` | `no`     | `false`  | Enable the full upstream toolkit surface.                                             |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `output_format` | `text` | `no` | `txt` | Default extraction format such as `txt`, `json`, `markdown`, `xml`, `csv`, or `html`. |
+| `include_comments` | `boolean` | `no` | `true` | Include comment content in extracted output. |
+| `include_tables` | `boolean` | `no` | `true` | Keep table content in extracted output. |
+| `include_images` | `boolean` | `no` | `false` | Include image information where Trafilatura supports it. |
+| `include_formatting` | `boolean` | `no` | `false` | Preserve formatting markers in extracted output. |
+| `include_links` | `boolean` | `no` | `false` | Preserve links in extracted output. |
+| `with_metadata` | `boolean` | `no` | `false` | Include metadata in extraction output. |
+| `favor_precision` | `boolean` | `no` | `false` | Bias extraction toward precision. |
+| `favor_recall` | `boolean` | `no` | `false` | Bias extraction toward recall. |
+| `target_language` | `text` | `no` | `null` | Optional ISO 639-1 language filter such as `en` or `de`. |
+| `deduplicate` | `boolean` | `no` | `false` | Deduplicate repeated content segments. |
+| `max_tree_size` | `number` | `no` | `null` | Optional parser tree-size limit. |
+| `max_crawl_urls` | `number` | `no` | `10` | Maximum URLs to visit when crawling. |
+| `max_known_urls` | `number` | `no` | `100000` | Maximum discovered URLs to track while crawling. |
+| `enable_extract_text` | `boolean` | `no` | `true` | Enable `extract_text()`. |
+| `enable_extract_metadata_only` | `boolean` | `no` | `true` | Enable `extract_metadata_only()`. |
+| `enable_html_to_text` | `boolean` | `no` | `true` | Enable `html_to_text()`. |
+| `enable_extract_batch` | `boolean` | `no` | `true` | Enable `extract_batch()`. |
+| `enable_crawl_website` | `boolean` | `no` | `true` | Enable `crawl_website()` when Trafilatura spider support is available. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -187,7 +187,7 @@ extract_metadata_only("https://matrix.org/blog/")
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
 - For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
 
-### \[`newspaper`\]
+### [`newspaper`]
 
 `newspaper` is the article-focused extractor for news pages and blog posts.
 
@@ -201,12 +201,12 @@ That means old references to `newspaper4k` are stale for current MindRoom config
 
 #### Configuration
 
-| Option                | Type      | Required | Default | Notes                                          |
-| --------------------- | --------- | -------- | ------- | ---------------------------------------------- |
-| `include_summary`     | `boolean` | `no`     | `false` | Include article summary when available.        |
-| `article_length`      | `number`  | `no`     | `null`  | Truncate article text to this many characters. |
-| `enable_read_article` | `boolean` | `no`     | `true`  | Enable `read_article()`.                       |
-| `all`                 | `boolean` | `no`     | `false` | Enable the full upstream toolkit surface.      |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `include_summary` | `boolean` | `no` | `false` | Include article summary when available. |
+| `article_length` | `number` | `no` | `null` | Truncate article text to this many characters. |
+| `enable_read_article` | `boolean` | `no` | `true` | Enable `read_article()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -229,7 +229,7 @@ read_article("https://matrix.org/blog/")
 - This tool is tuned for article-style pages rather than arbitrary websites.
 - For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
 
-### \[`jina`\]
+### [`jina`]
 
 `jina` wraps Jina Reader's read and search endpoints and is the easiest hosted option on this page when you want an optional-key reader rather than a strict credential gate.
 
@@ -244,17 +244,17 @@ The installed implementation only adds the `Authorization` header when an API ke
 
 #### Configuration
 
-| Option                 | Type       | Required | Default              | Notes                                                                            |
-| ---------------------- | ---------- | -------- | -------------------- | -------------------------------------------------------------------------------- |
-| `api_key`              | `password` | `no`     | `null`               | Optional Jina API key, with `JINA_API_KEY` as the SDK fallback.                  |
-| `base_url`             | `url`      | `no`     | `https://r.jina.ai/` | Base URL for `read_url()`.                                                       |
-| `search_url`           | `url`      | `no`     | `https://s.jina.ai/` | Base URL for `search_query()`.                                                   |
-| `max_content_length`   | `number`   | `no`     | `10000`              | Maximum returned character count.                                                |
-| `timeout`              | `number`   | `no`     | `null`               | Optional Jina timeout header in seconds.                                         |
-| `search_query_content` | `boolean`  | `no`     | `true`               | Return full content in search results instead of metadata-only search summaries. |
-| `enable_read_url`      | `boolean`  | `no`     | `true`               | Enable `read_url()`.                                                             |
-| `enable_search_query`  | `boolean`  | `no`     | `false`              | Enable `search_query()`.                                                         |
-| `all`                  | `boolean`  | `no`     | `false`              | Enable the full upstream toolkit surface.                                        |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Optional Jina API key, with `JINA_API_KEY` as the SDK fallback. |
+| `base_url` | `url` | `no` | `https://r.jina.ai/` | Base URL for `read_url()`. |
+| `search_url` | `url` | `no` | `https://s.jina.ai/` | Base URL for `search_query()`. |
+| `max_content_length` | `number` | `no` | `10000` | Maximum returned character count. |
+| `timeout` | `number` | `no` | `null` | Optional Jina timeout header in seconds. |
+| `search_query_content` | `boolean` | `no` | `true` | Return full content in search results instead of metadata-only search summaries. |
+| `enable_read_url` | `boolean` | `no` | `true` | Enable `read_url()`. |
+| `enable_search_query` | `boolean` | `no` | `false` | Enable `search_query()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -280,7 +280,7 @@ search_query("latest Matrix bridge updates")
 
 ## API-Based Scrapers
 
-### \[`firecrawl`\]
+### [`firecrawl`]
 
 `firecrawl` is the hosted scraper on this page that covers scrape, crawl, map, and search from one API.
 
@@ -295,19 +295,19 @@ The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provid
 
 #### Configuration
 
-| Option           | Type       | Required | Default                     | Notes                                                                                                                     |
-| ---------------- | ---------- | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `api_key`        | `password` | `yes`    | `null`                      | Firecrawl API key, with `FIRECRAWL_API_KEY` as the SDK fallback.                                                          |
-| `enable_scrape`  | `boolean`  | `no`     | `true`                      | Enable `scrape_website()`.                                                                                                |
-| `enable_crawl`   | `boolean`  | `no`     | `false`                     | Enable `crawl_website()`.                                                                                                 |
-| `enable_mapping` | `boolean`  | `no`     | `false`                     | Enable `map_website()`.                                                                                                   |
-| `enable_search`  | `boolean`  | `no`     | `false`                     | Enable `search_web()`.                                                                                                    |
-| `all`            | `boolean`  | `no`     | `false`                     | Enable the full upstream toolkit surface.                                                                                 |
-| `formats`        | `string[]` | `no`     | `null`                      | Requested Firecrawl formats such as `markdown` or `html`, while the current MindRoom metadata exposes this field as text. |
-| `limit`          | `number`   | `no`     | `10`                        | Default page or result limit for crawl and search.                                                                        |
-| `poll_interval`  | `number`   | `no`     | `30`                        | Crawl polling interval in seconds.                                                                                        |
-| `search_params`  | `object`   | `no`     | `null`                      | Raw Firecrawl search parameters object, while the current MindRoom metadata exposes this field as text.                   |
-| `api_url`        | `url`      | `no`     | `https://api.firecrawl.dev` | Firecrawl API base URL.                                                                                                   |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | Firecrawl API key, with `FIRECRAWL_API_KEY` as the SDK fallback. |
+| `enable_scrape` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
+| `enable_crawl` | `boolean` | `no` | `false` | Enable `crawl_website()`. |
+| `enable_mapping` | `boolean` | `no` | `false` | Enable `map_website()`. |
+| `enable_search` | `boolean` | `no` | `false` | Enable `search_web()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `formats` | `string[]` | `no` | `null` | Requested Firecrawl formats such as `markdown` or `html`, while the current MindRoom metadata exposes this field as text. |
+| `limit` | `number` | `no` | `10` | Default page or result limit for crawl and search. |
+| `poll_interval` | `number` | `no` | `30` | Crawl polling interval in seconds. |
+| `search_params` | `object` | `no` | `null` | Raw Firecrawl search parameters object, while the current MindRoom metadata exposes this field as text. |
+| `api_url` | `url` | `no` | `https://api.firecrawl.dev` | Firecrawl API base URL. |
 
 #### Example
 
@@ -332,7 +332,7 @@ search_web("latest Matrix bridges")
 - `formats` and `search_params` are raw upstream arguments, so verify them against your Firecrawl plan and endpoint version.
 - This is usually a better fit than `crawl4ai` when you want provider-hosted crawling instead of local browser work.
 
-### \[`spider`\]
+### [`spider`]
 
 `spider` is Spider Cloud's search, scrape, and crawl toolkit for LLM-ready output.
 
@@ -346,15 +346,15 @@ The installed `spider-client` constructor raises when no API key is available, e
 
 #### Configuration
 
-| Option            | Type      | Required | Default | Notes                                                                                                                                     |
-| ----------------- | --------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `max_results`     | `number`  | `no`     | `null`  | Default result count override for `search_web()`.                                                                                         |
-| `url`             | `url`     | `no`     | `null`  | Optional default URL constructor argument from the upstream toolkit.                                                                      |
-| `optional_params` | `object`  | `no`     | `null`  | Raw Spider API parameters merged into search, scrape, and crawl requests, while the current MindRoom metadata exposes this field as text. |
-| `enable_search`   | `boolean` | `no`     | `true`  | Enable `search_web()`.                                                                                                                    |
-| `enable_scrape`   | `boolean` | `no`     | `true`  | Enable `scrape()`.                                                                                                                        |
-| `enable_crawl`    | `boolean` | `no`     | `true`  | Enable `crawl()`.                                                                                                                         |
-| `all`             | `boolean` | `no`     | `false` | Enable the full upstream toolkit surface.                                                                                                 |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `max_results` | `number` | `no` | `null` | Default result count override for `search_web()`. |
+| `url` | `url` | `no` | `null` | Optional default URL constructor argument from the upstream toolkit. |
+| `optional_params` | `object` | `no` | `null` | Raw Spider API parameters merged into search, scrape, and crawl requests, while the current MindRoom metadata exposes this field as text. |
+| `enable_search` | `boolean` | `no` | `true` | Enable `search_web()`. |
+| `enable_scrape` | `boolean` | `no` | `true` | Enable `scrape()`. |
+| `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -378,7 +378,7 @@ scrape("https://matrix.org/blog/")
 - `optional_params` is a raw provider object and is best used only when you already know the Spider API field names you want.
 - If you want a cleaner, explicitly credentialed hosted scraper with clearer metadata, `firecrawl` is usually simpler.
 
-### \[`scrapegraph`\]
+### [`scrapegraph`]
 
 `scrapegraph` is the prompt-driven extractor on this page for turning web pages into structured answers.
 
@@ -394,17 +394,17 @@ scrape("https://matrix.org/blog/")
 
 #### Configuration
 
-| Option                   | Type       | Required | Default | Notes                                                         |
-| ------------------------ | ---------- | -------- | ------- | ------------------------------------------------------------- |
-| `api_key`                | `password` | `yes`    | `null`  | ScrapeGraph API key, with `SGAI_API_KEY` as the SDK fallback. |
-| `enable_smartscraper`    | `boolean`  | `no`     | `true`  | Enable `smartscraper()`.                                      |
-| `enable_markdownify`     | `boolean`  | `no`     | `false` | Enable `markdownify()`.                                       |
-| `enable_crawl`           | `boolean`  | `no`     | `false` | Enable `crawl()`.                                             |
-| `enable_searchscraper`   | `boolean`  | `no`     | `false` | Enable `searchscraper()`.                                     |
-| `enable_agentic_crawler` | `boolean`  | `no`     | `false` | Enable `agentic_crawler()`.                                   |
-| `enable_scrape`          | `boolean`  | `no`     | `false` | Enable raw `scrape()`.                                        |
-| `render_heavy_js`        | `boolean`  | `no`     | `false` | Ask ScrapeGraph to render heavy JavaScript for `scrape()`.    |
-| `all`                    | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                     |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | ScrapeGraph API key, with `SGAI_API_KEY` as the SDK fallback. |
+| `enable_smartscraper` | `boolean` | `no` | `true` | Enable `smartscraper()`. |
+| `enable_markdownify` | `boolean` | `no` | `false` | Enable `markdownify()`. |
+| `enable_crawl` | `boolean` | `no` | `false` | Enable `crawl()`. |
+| `enable_searchscraper` | `boolean` | `no` | `false` | Enable `searchscraper()`. |
+| `enable_agentic_crawler` | `boolean` | `no` | `false` | Enable `agentic_crawler()`. |
+| `enable_scrape` | `boolean` | `no` | `false` | Enable raw `scrape()`. |
+| `render_heavy_js` | `boolean` | `no` | `false` | Ask ScrapeGraph to render heavy JavaScript for `scrape()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -428,7 +428,7 @@ markdownify("https://matrix.org/blog/")
 - Use `scrapegraph` when you want prompt-shaped extraction rather than generic page text.
 - For purely local extraction with no hosted API dependency, use `crawl4ai` or `trafilatura`.
 
-### \[`apify`\]
+### [`apify`]
 
 `apify` is the dynamic tool on this page, because its callable surface depends on which Actors you register.
 
@@ -442,10 +442,10 @@ This is best thought of as a hosted Actor adapter rather than a single scraper A
 
 #### Configuration
 
-| Option            | Type       | Required | Default | Notes                                                                                                                                                                                                   |
-| ----------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apify_api_token` | `password` | `yes`    | `null`  | Apify API token, with `APIFY_API_TOKEN` as the SDK fallback.                                                                                                                                            |
-| `actors`          | `text`     | `yes`    | `null`  | Actor ID string such as `apify/rag-web-browser`, with the current MindRoom metadata also claiming comma-separated lists even though the installed upstream class treats a plain string as one actor ID. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `apify_api_token` | `password` | `yes` | `null` | Apify API token, with `APIFY_API_TOKEN` as the SDK fallback. |
+| `actors` | `text` | `yes` | `null` | Actor ID string such as `apify/rag-web-browser`, with the current MindRoom metadata also claiming comma-separated lists even though the installed upstream class treats a plain string as one actor ID. |
 
 #### Example
 
@@ -463,7 +463,7 @@ agents:
 - The current metadata advertises comma-separated Actor IDs, but the installed upstream constructor does not split plain strings, so the safest documented path on this branch is a single Actor ID.
 - Generated tool names are derived from the Actor ID, so check the runtime tool list if you need the exact callable name.
 
-### \[`brightdata`\]
+### [`brightdata`]
 
 `brightdata` is the hosted toolkit for markdown scraping, screenshots, SERP queries, and provider-specific web data feeds.
 
@@ -478,18 +478,18 @@ Zone selection is controlled by `serp_zone` and `web_unlocker_zone`, which can a
 
 #### Configuration
 
-| Option                   | Type       | Required | Default         | Notes                                                                        |
-| ------------------------ | ---------- | -------- | --------------- | ---------------------------------------------------------------------------- |
-| `api_key`                | `password` | `yes`    | `null`          | Bright Data API key, with `BRIGHT_DATA_API_KEY` as the SDK fallback.         |
-| `enable_scrape_markdown` | `boolean`  | `no`     | `true`          | Enable `scrape_as_markdown()`.                                               |
-| `enable_screenshot`      | `boolean`  | `no`     | `true`          | Enable `get_screenshot()`.                                                   |
-| `enable_search_engine`   | `boolean`  | `no`     | `true`          | Enable `search_engine()`.                                                    |
-| `enable_web_data_feed`   | `boolean`  | `no`     | `true`          | Enable `web_data_feed()`.                                                    |
-| `all`                    | `boolean`  | `no`     | `false`         | Enable the full upstream toolkit surface.                                    |
-| `serp_zone`              | `text`     | `no`     | `serp_api`      | SERP zone, with `BRIGHT_DATA_SERP_ZONE` able to override it.                 |
-| `web_unlocker_zone`      | `text`     | `no`     | `web_unlocker1` | Web unlocker zone, with `BRIGHT_DATA_WEB_UNLOCKER_ZONE` able to override it. |
-| `verbose`                | `boolean`  | `no`     | `false`         | Emit extra Bright Data request logging.                                      |
-| `timeout`                | `number`   | `no`     | `600`           | Timeout in seconds.                                                          |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | Bright Data API key, with `BRIGHT_DATA_API_KEY` as the SDK fallback. |
+| `enable_scrape_markdown` | `boolean` | `no` | `true` | Enable `scrape_as_markdown()`. |
+| `enable_screenshot` | `boolean` | `no` | `true` | Enable `get_screenshot()`. |
+| `enable_search_engine` | `boolean` | `no` | `true` | Enable `search_engine()`. |
+| `enable_web_data_feed` | `boolean` | `no` | `true` | Enable `web_data_feed()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `serp_zone` | `text` | `no` | `serp_api` | SERP zone, with `BRIGHT_DATA_SERP_ZONE` able to override it. |
+| `web_unlocker_zone` | `text` | `no` | `web_unlocker1` | Web unlocker zone, with `BRIGHT_DATA_WEB_UNLOCKER_ZONE` able to override it. |
+| `verbose` | `boolean` | `no` | `false` | Emit extra Bright Data request logging. |
+| `timeout` | `number` | `no` | `600` | Timeout in seconds. |
 
 #### Example
 
@@ -513,7 +513,7 @@ search_engine("Matrix hosting", engine="google", num_results=5)
 - Zone environment variables can override the inline config values, so document your deployment defaults if multiple zones exist.
 - `get_screenshot()` returns an image artifact rather than a file path string, which is useful for agents that need to hand the screenshot to a model immediately.
 
-### \[`oxylabs`\]
+### [`oxylabs`]
 
 `oxylabs` is the e-commerce and SERP-oriented scraper on this page.
 
@@ -528,10 +528,10 @@ This tool is credentialed with a username and password pair rather than one API 
 
 #### Configuration
 
-| Option     | Type       | Required | Default | Notes                                                          |
-| ---------- | ---------- | -------- | ------- | -------------------------------------------------------------- |
-| `username` | `text`     | `yes`    | `null`  | Oxylabs username, with `OXYLABS_USERNAME` as the SDK fallback. |
-| `password` | `password` | `yes`    | `null`  | Oxylabs password, with `OXYLABS_PASSWORD` as the SDK fallback. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `username` | `text` | `yes` | `null` | Oxylabs username, with `OXYLABS_USERNAME` as the SDK fallback. |
+| `password` | `password` | `yes` | `null` | Oxylabs password, with `OXYLABS_PASSWORD` as the SDK fallback. |
 
 #### Example
 
@@ -555,7 +555,7 @@ search_amazon_products("ergonomic keyboard", domain_code="com")
 
 ## Browser Tools
 
-### \[`agentql`\]
+### [`agentql`]
 
 `agentql` is the browser-assisted extractor for sites where you want AgentQL queries rather than plain text scraping.
 
@@ -569,13 +569,13 @@ The current upstream implementation launches Playwright with `headless=False`, w
 
 #### Configuration
 
-| Option                         | Type       | Required | Default | Notes                                                                 |
-| ------------------------------ | ---------- | -------- | ------- | --------------------------------------------------------------------- |
-| `api_key`                      | `password` | `yes`    | `null`  | AgentQL API key, with `AGENTQL_API_KEY` as the SDK fallback.          |
-| `enable_scrape_website`        | `boolean`  | `no`     | `true`  | Enable `scrape_website()`.                                            |
-| `enable_custom_scrape_website` | `boolean`  | `no`     | `false` | Enable `custom_scrape_website()` when `agentql_query` is also useful. |
-| `all`                          | `boolean`  | `no`     | `false` | Enable the full upstream toolkit surface.                             |
-| `agentql_query`                | `text`     | `no`     | `""`    | Custom AgentQL query used by `custom_scrape_website()`.               |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | AgentQL API key, with `AGENTQL_API_KEY` as the SDK fallback. |
+| `enable_scrape_website` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
+| `enable_custom_scrape_website` | `boolean` | `no` | `false` | Enable `custom_scrape_website()` when `agentql_query` is also useful. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `agentql_query` | `text` | `no` | `""` | Custom AgentQL query used by `custom_scrape_website()`. |
 
 #### Example
 
@@ -602,7 +602,7 @@ custom_scrape_website("https://matrix.org/blog/")
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
-### \[`browserbase`\]
+### [`browserbase`]
 
 `browserbase` is the hosted browser session tool for navigation, screenshots, and page-content reads over a remote browser.
 
@@ -617,18 +617,18 @@ This is simpler than `browser` when you only need remote navigation, screenshots
 
 #### Configuration
 
-| Option                    | Type       | Required | Default  | Notes                                                                                        |
-| ------------------------- | ---------- | -------- | -------- | -------------------------------------------------------------------------------------------- |
-| `api_key`                 | `password` | `yes`    | `null`   | Browserbase API key, with `BROWSERBASE_API_KEY` as the SDK fallback.                         |
-| `project_id`              | `text`     | `yes`    | `null`   | Browserbase project ID, with `BROWSERBASE_PROJECT_ID` as the SDK fallback.                   |
-| `base_url`                | `url`      | `no`     | `null`   | Optional Browserbase API endpoint override, with `BROWSERBASE_BASE_URL` as the SDK fallback. |
-| `enable_navigate_to`      | `boolean`  | `no`     | `true`   | Enable `navigate_to()`.                                                                      |
-| `enable_screenshot`       | `boolean`  | `no`     | `true`   | Enable `screenshot()`.                                                                       |
-| `enable_get_page_content` | `boolean`  | `no`     | `true`   | Enable `get_page_content()`.                                                                 |
-| `enable_close_session`    | `boolean`  | `no`     | `true`   | Enable `close_session()`.                                                                    |
-| `all`                     | `boolean`  | `no`     | `false`  | Enable the full upstream toolkit surface.                                                    |
-| `parse_html`              | `boolean`  | `no`     | `true`   | Return cleaned visible text instead of raw HTML.                                             |
-| `max_content_length`      | `number`   | `no`     | `100000` | Maximum returned character count for page content.                                           |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | Browserbase API key, with `BROWSERBASE_API_KEY` as the SDK fallback. |
+| `project_id` | `text` | `yes` | `null` | Browserbase project ID, with `BROWSERBASE_PROJECT_ID` as the SDK fallback. |
+| `base_url` | `url` | `no` | `null` | Optional Browserbase API endpoint override, with `BROWSERBASE_BASE_URL` as the SDK fallback. |
+| `enable_navigate_to` | `boolean` | `no` | `true` | Enable `navigate_to()`. |
+| `enable_screenshot` | `boolean` | `no` | `true` | Enable `screenshot()`. |
+| `enable_get_page_content` | `boolean` | `no` | `true` | Enable `get_page_content()`. |
+| `enable_close_session` | `boolean` | `no` | `true` | Enable `close_session()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| `parse_html` | `boolean` | `no` | `true` | Return cleaned visible text instead of raw HTML. |
+| `max_content_length` | `number` | `no` | `100000` | Maximum returned character count for page content. |
 
 #### Example
 
@@ -652,7 +652,7 @@ get_page_content()
 - It still depends on local Playwright support because the client connects to the remote browser over CDP.
 - Use `browserbase` when you want a hosted browser session but do not need the broader local action surface of `browser`.
 
-### \[`browser`\]
+### [`browser`]
 
 `browser` is MindRoom's local browser controller for multi-step browser sessions, snapshots, screenshots, PDFs, uploads, dialogs, and low-level actions.
 
@@ -669,9 +669,9 @@ The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `googl
 
 #### Configuration
 
-| Option       | Type   | Required | Default | Notes                                                                                                                                |
-| ------------ | ------ | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `output_dir` | `text` | `no`     | `null`  | Optional directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `output_dir` | `text` | `no` | `null` | Optional directory for screenshots, PDFs, and other browser artifacts, with `<storage>/browser` as the runtime default when omitted. |
 
 #### Example
 
@@ -694,7 +694,7 @@ browser(action="screenshot", fullPage=True)
 
 - This tool is local Playwright automation rather than a hosted browser API.
 
-### \[`web_browser_tools`\]
+### [`web_browser_tools`]
 
 `web_browser_tools` is the simplest browser-related tool here, because it just opens a URL in the host's real browser.
 
@@ -707,10 +707,10 @@ This makes it useful for human handoff or local desktop workflows, but not for s
 
 #### Configuration
 
-| Option             | Type      | Required | Default | Notes                                     |
-| ------------------ | --------- | -------- | ------- | ----------------------------------------- |
-| `enable_open_page` | `boolean` | `no`     | `true`  | Enable `open_page()`.                     |
-| `all`              | `boolean` | `no`     | `false` | Enable the full upstream toolkit surface. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `enable_open_page` | `boolean` | `no` | `true` | Enable `open_page()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
 #### Example
 
@@ -734,5 +734,5 @@ open_page("https://matrix.org/blog/", new_window=True)
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)

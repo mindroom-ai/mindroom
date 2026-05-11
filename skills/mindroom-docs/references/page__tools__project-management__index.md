@@ -9,16 +9,16 @@ Use these tools when you need repository context, issue tracking, documentation 
 
 ## Tools On This Page
 
-- \[`github`\] - GitHub repositories, issues, pull requests, files, branches, code search, and review requests.
-- \[`bitbucket`\] - Bitbucket workspace and repository inspection for repositories, commits, pull requests, and issues.
-- \[`jira`\] - Jira issue lookup, creation, JQL search, comments, and worklogs.
-- \[`linear`\] - Linear GraphQL access for viewer info, teams, issues, and issue updates.
-- \[`clickup`\] - ClickUp space, list, task, and task-lifecycle operations.
-- \[`confluence`\] - Confluence page lookup, space discovery, page creation, and page updates.
-- \[`notion`\] - Notion database page creation, page appends, and tag-based search.
-- \[`trello`\] - Trello boards, lists, cards, and card moves.
-- \[`todoist`\] - Todoist task creation, updates, completion, deletion, and project discovery.
-- \[`zendesk`\] - Zendesk Help Center article search.
+- [`github`] - GitHub repositories, issues, pull requests, files, branches, code search, and review requests.
+- [`bitbucket`] - Bitbucket workspace and repository inspection for repositories, commits, pull requests, and issues.
+- [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs.
+- [`linear`] - Linear GraphQL access for viewer info, teams, issues, and issue updates.
+- [`clickup`] - ClickUp space, list, task, and task-lifecycle operations.
+- [`confluence`] - Confluence page lookup, space discovery, page creation, and page updates.
+- [`notion`] - Notion database page creation, page appends, and tag-based search.
+- [`trello`] - Trello boards, lists, cards, and card moves.
+- [`todoist`] - Todoist task creation, updates, completion, deletion, and project discovery.
+- [`zendesk`] - Zendesk Help Center article search.
 
 ## Common Setup Notes
 
@@ -29,7 +29,7 @@ Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOK
 Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
-## \[`github`\]
+## [`github`]
 
 `github` is the broadest repository-hosting tool on this page, covering repository search, repository stats, issues, pull requests, files, branches, and code search.
 
@@ -42,10 +42,10 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 
 ### Configuration
 
-| Option         | Type       | Required | Default | Notes                                                                                |
-| -------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------------ |
-| `access_token` | `password` | `no`     | `null`  | GitHub personal access token or GitHub App token.                                    |
-| `base_url`     | `url`      | `no`     | `null`  | Optional GitHub Enterprise API base URL such as `https://github.example.com/api/v3`. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `access_token` | `password` | `no` | `null` | GitHub personal access token or GitHub App token. |
+| `base_url` | `url` | `no` | `null` | Optional GitHub Enterprise API base URL such as `https://github.example.com/api/v3`. |
 
 ### Example
 
@@ -69,7 +69,7 @@ get_pull_request("mindroom-ai/mindroom", 123)
 - Use `base_url` only for GitHub Enterprise, and set it to the API endpoint such as `/api/v3` rather than the human-facing site root.
 - `github` is the best fit on this page when you need repository file operations or rich pull-request inspection in addition to issue tracking.
 
-## \[`bitbucket`\]
+## [`bitbucket`]
 
 `bitbucket` is the Bitbucket repository tool for a configured workspace and repository slug.
 
@@ -81,15 +81,15 @@ If `server_url` has no scheme, the upstream tool normalizes it to `https://<serv
 
 ### Configuration
 
-| Option        | Type       | Required | Default             | Notes                                                  |
-| ------------- | ---------- | -------- | ------------------- | ------------------------------------------------------ |
-| `username`    | `text`     | `yes`    | `null`              | Bitbucket username.                                    |
-| `password`    | `password` | `no`     | `null`              | App password, used when `token` is not supplied.       |
-| `token`       | `password` | `no`     | `null`              | Access token, used instead of `password` when present. |
-| `workspace`   | `text`     | `yes`    | `null`              | Bitbucket workspace name.                              |
-| `repo_slug`   | `text`     | `yes`    | `null`              | Repository slug used by most repository-scoped calls.  |
-| `server_url`  | `url`      | `no`     | `api.bitbucket.org` | Bitbucket host or full base URL.                       |
-| `api_version` | `text`     | `no`     | `2.0`               | Bitbucket REST API version appended to `server_url`.   |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `username` | `text` | `yes` | `null` | Bitbucket username. |
+| `password` | `password` | `no` | `null` | App password, used when `token` is not supplied. |
+| `token` | `password` | `no` | `null` | Access token, used instead of `password` when present. |
+| `workspace` | `text` | `yes` | `null` | Bitbucket workspace name. |
+| `repo_slug` | `text` | `yes` | `null` | Repository slug used by most repository-scoped calls. |
+| `server_url` | `url` | `no` | `api.bitbucket.org` | Bitbucket host or full base URL. |
+| `api_version` | `text` | `no` | `2.0` | Bitbucket REST API version appended to `server_url`. |
 
 ### Example
 
@@ -115,7 +115,7 @@ list_repository_commits(count=10)
 - `repo_slug` is not just a default, because most methods are hard-scoped to that repository and the current `create_repository()` call path also posts through the configured `repo_slug` endpoint on this branch.
 - `list_repositories()` is the workspace-wide overview method, while the pull-request, commit, and issue methods all use the configured repository context.
 
-## \[`jira`\]
+## [`jira`]
 
 `jira` is the issue-tracking toolkit for issue lookup, issue creation, JQL search, comments, and worklogs.
 
@@ -127,18 +127,18 @@ list_repository_commits(count=10)
 
 ### Configuration
 
-| Option                 | Type       | Required | Default | Notes                                                                          |
-| ---------------------- | ---------- | -------- | ------- | ------------------------------------------------------------------------------ |
-| `server_url`           | `url`      | `no`     | `null`  | Jira base URL such as `https://example.atlassian.net`.                         |
-| `username`             | `text`     | `no`     | `null`  | Jira username or Atlassian account email.                                      |
-| `password`             | `password` | `no`     | `null`  | Jira password for self-hosted deployments.                                     |
-| `token`                | `password` | `no`     | `null`  | Jira or Atlassian API token, preferred over `password` for cloud deployments.  |
-| `enable_get_issue`     | `boolean`  | `no`     | `true`  | Enable `get_issue()`.                                                          |
-| `enable_create_issue`  | `boolean`  | `no`     | `true`  | Enable `create_issue()`.                                                       |
-| `enable_search_issues` | `boolean`  | `no`     | `true`  | Enable `search_issues()`.                                                      |
-| `enable_add_comment`   | `boolean`  | `no`     | `true`  | Enable `add_comment()`.                                                        |
-| `enable_add_worklog`   | `boolean`  | `no`     | `true`  | Enable `add_worklog()`.                                                        |
-| `all`                  | `boolean`  | `no`     | `false` | Enable the full upstream Jira tool surface regardless of the per-method flags. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `server_url` | `url` | `no` | `null` | Jira base URL such as `https://example.atlassian.net`. |
+| `username` | `text` | `no` | `null` | Jira username or Atlassian account email. |
+| `password` | `password` | `no` | `null` | Jira password for self-hosted deployments. |
+| `token` | `password` | `no` | `null` | Jira or Atlassian API token, preferred over `password` for cloud deployments. |
+| `enable_get_issue` | `boolean` | `no` | `true` | Enable `get_issue()`. |
+| `enable_create_issue` | `boolean` | `no` | `true` | Enable `create_issue()`. |
+| `enable_search_issues` | `boolean` | `no` | `true` | Enable `search_issues()`. |
+| `enable_add_comment` | `boolean` | `no` | `true` | Enable `add_comment()`. |
+| `enable_add_worklog` | `boolean` | `no` | `true` | Enable `add_worklog()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream Jira tool surface regardless of the per-method flags. |
 
 ### Example
 
@@ -164,7 +164,7 @@ add_comment("PROJ-123", "Reviewed and ready for testing.")
 - For Atlassian Cloud, use `username` plus `token` instead of `password`.
 - If your Jira deployment allows anonymous API access, the tool can still work without credentials, but most hosted installations do not permit that.
 
-## \[`linear`\]
+## [`linear`]
 
 `linear` is the GraphQL-backed issue tracker tool for viewer info, teams, issues, and issue updates.
 
@@ -176,9 +176,9 @@ The read methods are useful for discovering the IDs you need before calling `cre
 
 ### Configuration
 
-| Option    | Type       | Required | Default | Notes           |
-| --------- | ---------- | -------- | ------- | --------------- |
-| `api_key` | `password` | `no`     | `null`  | Linear API key. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Linear API key. |
 
 ### Example
 
@@ -201,7 +201,7 @@ get_high_priority_issues()
 - `get_issue_details()` takes a Linear issue ID rather than an issue key, so use `get_teams_details()` or other Linear discovery steps first when you only know the human-readable issue key from the UI.
 - `linear` is the best fit on this page when your workflow is already centered on Linear IDs, teams, and workflow states rather than repository-native pull requests.
 
-## \[`clickup`\]
+## [`clickup`]
 
 `clickup` is the ClickUp task-management tool for spaces, lists, tasks, and task lifecycle operations.
 
@@ -214,10 +214,10 @@ Name-based space and list lookup is case-insensitive and also supports regex-sty
 
 ### Configuration
 
-| Option            | Type       | Required | Default | Notes                                                  |
-| ----------------- | ---------- | -------- | ------- | ------------------------------------------------------ |
-| `api_key`         | `password` | `yes`    | `null`  | ClickUp API key.                                       |
-| `master_space_id` | `text`     | `yes`    | `null`  | ClickUp team or workspace ID used to enumerate spaces. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | ClickUp API key. |
+| `master_space_id` | `text` | `yes` | `null` | ClickUp team or workspace ID used to enumerate spaces. |
 
 ### Example
 
@@ -241,7 +241,7 @@ create_task("Engineering", "ISSUE-075", "Draft the project-management tool page"
 - `create_task()` always uses the first list returned for the matching space on this branch, so use `list_lists()` first if list placement matters.
 - `update_task()` passes arbitrary keyword updates through to the ClickUp API, which makes it the most flexible write method once you have a task ID.
 
-## \[`confluence`\]
+## [`confluence`]
 
 `confluence` is the Atlassian wiki tool for space discovery and page retrieval, creation, and updates.
 
@@ -254,13 +254,13 @@ At runtime the tool accepts either `api_key` or `password`, with the current imp
 
 ### Configuration
 
-| Option       | Type       | Required | Default | Notes                                                                |
-| ------------ | ---------- | -------- | ------- | -------------------------------------------------------------------- |
-| `url`        | `url`      | `no`     | `null`  | Confluence base URL.                                                 |
-| `username`   | `text`     | `no`     | `null`  | Confluence username or Atlassian account email.                      |
-| `password`   | `password` | `no`     | `null`  | Confluence password for self-hosted deployments.                     |
-| `api_key`    | `password` | `no`     | `null`  | Confluence API key, preferred over `password` for cloud deployments. |
-| `verify_ssl` | `boolean`  | `no`     | `true`  | Verify TLS certificates when connecting to Confluence.               |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `url` | `url` | `no` | `null` | Confluence base URL. |
+| `username` | `text` | `no` | `null` | Confluence username or Atlassian account email. |
+| `password` | `password` | `no` | `null` | Confluence password for self-hosted deployments. |
+| `api_key` | `password` | `no` | `null` | Confluence API key, preferred over `password` for cloud deployments. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates when connecting to Confluence. |
 
 ### Example
 
@@ -285,7 +285,7 @@ create_page("Engineering", "Release Notes", "<p>Initial draft</p>")
 - For Atlassian Cloud, use `username` plus `api_key`, and reserve `password` for self-hosted or older installations.
 - Set `verify_ssl: false` only for self-signed or internal deployments where you understand the TLS tradeoff.
 
-## \[`notion`\]
+## [`notion`]
 
 `notion` is the Notion database tool for page creation, content appends, and tag-based search.
 
@@ -299,14 +299,14 @@ The current upstream implementation assumes the target database has a title prop
 
 ### Configuration
 
-| Option                | Type       | Required | Default | Notes                                                                            |
-| --------------------- | ---------- | -------- | ------- | -------------------------------------------------------------------------------- |
-| `api_key`             | `password` | `yes`    | `null`  | Notion integration token.                                                        |
-| `database_id`         | `text`     | `yes`    | `null`  | Notion database ID.                                                              |
-| `enable_create_page`  | `boolean`  | `no`     | `true`  | Enable `create_page()`.                                                          |
-| `enable_update_page`  | `boolean`  | `no`     | `true`  | Enable `update_page()`.                                                          |
-| `enable_search_pages` | `boolean`  | `no`     | `true`  | Enable `search_pages()`.                                                         |
-| `all`                 | `boolean`  | `no`     | `false` | Enable the full upstream Notion tool surface regardless of the per-method flags. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `yes` | `null` | Notion integration token. |
+| `database_id` | `text` | `yes` | `null` | Notion database ID. |
+| `enable_create_page` | `boolean` | `no` | `true` | Enable `create_page()`. |
+| `enable_update_page` | `boolean` | `no` | `true` | Enable `update_page()`. |
+| `enable_search_pages` | `boolean` | `no` | `true` | Enable `search_pages()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream Notion tool surface regardless of the per-method flags. |
 
 ### Example
 
@@ -331,7 +331,7 @@ update_page("PAGE_ID", "Added rollout notes")
 - The database schema must include a `Name` title property and a `Tag` select property, because those names are hard-coded in the current upstream implementation.
 - `all: true` overrides the individual enable flags when you want the full Notion surface.
 
-## \[`trello`\]
+## [`trello`]
 
 `trello` is the board-management tool for boards, lists, cards, and card moves.
 
@@ -344,11 +344,11 @@ If the Trello client cannot initialize, the current upstream methods return `"Tr
 
 ### Configuration
 
-| Option       | Type       | Required | Default | Notes              |
-| ------------ | ---------- | -------- | ------- | ------------------ |
-| `api_key`    | `password` | `no`     | `null`  | Trello API key.    |
-| `api_secret` | `password` | `no`     | `null`  | Trello API secret. |
-| `token`      | `password` | `no`     | `null`  | Trello user token. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_key` | `password` | `no` | `null` | Trello API key. |
+| `api_secret` | `password` | `no` | `null` | Trello API secret. |
+| `token` | `password` | `no` | `null` | Trello user token. |
 
 ### Example
 
@@ -371,7 +371,7 @@ create_card("BOARD_ID", "To Do", "Write docs", "Draft the new tool page")
 - `list_boards()` accepts filters such as `all`, `open`, `closed`, `organization`, `public`, and `starred`.
 - Use `get_board_lists()` first when you need list IDs for `move_card()` or when you want to confirm the exact list names present on a board.
 
-## \[`todoist`\]
+## [`todoist`]
 
 `todoist` is the personal task-management tool for creating, updating, completing, deleting, and listing tasks and projects.
 
@@ -384,9 +384,9 @@ create_card("BOARD_ID", "To Do", "Write docs", "Draft the new tool page")
 
 ### Configuration
 
-| Option      | Type       | Required | Default | Notes              |
-| ----------- | ---------- | -------- | ------- | ------------------ |
-| `api_token` | `password` | `no`     | `null`  | Todoist API token. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `api_token` | `password` | `no` | `null` | Todoist API token. |
 
 ### Example
 
@@ -409,7 +409,7 @@ close_task("TASK_ID")
 - Use `get_projects()` first when you want to target a specific project with `project_id`.
 - `priority` follows Todoist's `1` to `4` scale, where `4` is the highest priority.
 
-## \[`zendesk`\]
+## [`zendesk`]
 
 `zendesk` is the help-center search tool on this page.
 
@@ -422,13 +422,13 @@ This tool does not expose ticket lookup or ticket updates on this branch.
 
 ### Configuration
 
-| Option                  | Type       | Required | Default | Notes                                                                             |
-| ----------------------- | ---------- | -------- | ------- | --------------------------------------------------------------------------------- |
-| `username`              | `text`     | `no`     | `null`  | Zendesk username.                                                                 |
-| `password`              | `password` | `no`     | `null`  | Zendesk password.                                                                 |
-| `company_name`          | `text`     | `no`     | `null`  | Zendesk subdomain used to build the API URL.                                      |
-| `enable_search_zendesk` | `boolean`  | `no`     | `true`  | Enable `search_zendesk()`.                                                        |
-| `all`                   | `boolean`  | `no`     | `false` | Enable the full upstream Zendesk tool surface regardless of the per-method flags. |
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `username` | `text` | `no` | `null` | Zendesk username. |
+| `password` | `password` | `no` | `null` | Zendesk password. |
+| `company_name` | `text` | `no` | `null` | Zendesk subdomain used to build the API URL. |
+| `enable_search_zendesk` | `boolean` | `no` | `true` | Enable `search_zendesk()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full upstream Zendesk tool surface regardless of the per-method flags. |
 
 ### Example
 
@@ -453,6 +453,6 @@ search_zendesk("Matrix onboarding")
 
 ## Related Docs
 
-- [Tools Overview](https://docs.mindroom.chat/tools/index.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
-- [Dashboard](https://docs.mindroom.chat/dashboard/index.md)
+- [Dashboard](https://docs.mindroom.chat/dashboard/)
