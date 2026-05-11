@@ -21,26 +21,28 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
+    authorization: dict[str, object] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
-    config = Config.model_validate(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-            "agents": {
-                "general": {
-                    "display_name": "General",
-                    "role": "test",
-                    "tools": ["calculator"],
-                    "instructions": ["hi"],
-                    "rooms": ["lobby"],
-                },
-            },
-            "defaults": {
-                "markdown": True,
-                "worker_grantable_credentials": worker_grantable_credentials,
+    payload: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "role": "test",
+                "tools": ["calculator"],
+                "instructions": ["hi"],
+                "rooms": ["lobby"],
             },
         },
-    )
+        "defaults": {
+            "markdown": True,
+            "worker_grantable_credentials": worker_grantable_credentials,
+        },
+    }
+    if authorization is not None:
+        payload["authorization"] = authorization
+    config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
 
@@ -62,6 +64,35 @@ def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.or
     )
     initialize_api_app(api_app, owner_runtime_paths)
     return owner_runtime_paths
+
+
+def _use_trusted_upstream_runtime(api_app: object) -> constants.RuntimePaths:
+    runtime_paths = main._app_runtime_paths(api_app)
+    trusted_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        },
+    )
+    initialize_api_app(api_app, trusted_runtime_paths)
+    return trusted_runtime_paths
+
+
+def _trusted_upstream_headers(
+    *,
+    user_id: str,
+    email: str,
+    matrix_user_id: str,
+) -> dict[str, str]:
+    return {
+        "X-Trusted-User": user_id,
+        "X-Trusted-Email": email,
+        "X-Trusted-Matrix-User": matrix_user_id,
+    }
 
 
 @pytest.fixture
@@ -1387,6 +1418,33 @@ class TestCredentialsAPI:
 
         assert response.status_code == 404
         assert response.json()["detail"] == "Unknown agent: missing"
+
+    def test_agent_credentials_require_agent_reply_permission(self, client: TestClient) -> None:
+        """Agent-scoped credential routes should reject requesters outside the agent allowlist."""
+        _use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = _trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+
+        agent_response = client.get(
+            "/api/credentials/openai/api-key?agent_name=general",
+            headers=bob_headers,
+        )
+        global_response = client.get(
+            "/api/credentials/openai/api-key",
+            headers=bob_headers,
+        )
+
+        assert agent_response.status_code == 403
+        assert global_response.status_code == 200
+        assert global_response.json()["has_key"] is False
 
     def test_shared_agent_name_hides_non_allowlisted_shared_credentials(
         self,

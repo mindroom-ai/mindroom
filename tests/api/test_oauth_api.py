@@ -62,8 +62,12 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) ->
     return runtime_paths
 
 
-def _config_payload(worker_scope: str = "user_agent") -> dict[str, Any]:
-    return {
+def _config_payload(
+    worker_scope: str = "user_agent",
+    *,
+    authorization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {
@@ -76,6 +80,9 @@ def _config_payload(worker_scope: str = "user_agent") -> dict[str, Any]:
             },
         },
     }
+    if authorization is not None:
+        payload["authorization"] = authorization
+    return payload
 
 
 def _make_test_app(runtime_paths: constants.RuntimePaths, payload: dict[str, Any]) -> FastAPI:
@@ -2050,6 +2057,167 @@ def _trusted_upstream_headers(
         "X-Trusted-Email": email,
         "X-Trusted-Matrix-User": matrix_user_id,
     }
+
+
+def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.shared_manager().save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
+            "_oauth_claims_verified": True,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            status_response = client.get(
+                f"/api/oauth/{provider.id}/status?agent_name=general",
+                headers=_trusted_upstream_headers(),
+            )
+            disconnect_response = client.post(
+                f"/api/oauth/{provider.id}/disconnect?agent_name=general",
+                headers=_trusted_upstream_headers(),
+            )
+
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is True
+    assert disconnect_response.status_code == 200
+    assert manager.shared_manager().load_credentials(provider.credential_service) is None
+
+
+def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.shared_manager().save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+        },
+    )
+    bob_headers = _trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.com",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            connect_response = client.post(
+                f"/api/oauth/{provider.id}/connect?agent_name=general",
+                headers=bob_headers,
+            )
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared",
+                headers=bob_headers,
+                follow_redirects=False,
+            )
+            status_response = client.get(
+                f"/api/oauth/{provider.id}/status?agent_name=general",
+                headers=bob_headers,
+            )
+            disconnect_response = client.post(
+                f"/api/oauth/{provider.id}/disconnect?agent_name=general",
+                headers=bob_headers,
+            )
+
+    assert connect_response.status_code == 403
+    assert authorize_response.status_code == 403
+    assert status_response.status_code == 403
+    assert disconnect_response.status_code == 403
+    assert manager.shared_manager().load_credentials(provider.credential_service) is not None
+
+
+def test_global_oauth_status_keeps_existing_access_without_agent_name(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    bob_headers = _trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.com",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            status_response = client.get(
+                f"/api/oauth/{provider.id}/status",
+                headers=bob_headers,
+            )
+
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is False
+
+
+def test_connect_token_cannot_bypass_agent_reply_permission(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="user_agent",
+            authorization={"agent_reply_permissions": {"general": ["@bob:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                headers=_trusted_upstream_headers(),
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 403
 
 
 def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Path) -> None:

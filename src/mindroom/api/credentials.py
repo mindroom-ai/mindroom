@@ -14,6 +14,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
+from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.config.main import Config
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
@@ -411,6 +412,30 @@ def resolve_dashboard_agent_execution_scope_request(
     )
 
 
+def _require_agent_credential_management_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> ToolExecutionIdentity:
+    """Require the dashboard requester to be allowed to manage one agent's credentials."""
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        agent_name,
+        runtime_paths=runtime_paths,
+    )
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not is_sender_allowed_for_agent_credential_management(
+        requester_id,
+        agent_name=agent_name,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
+        raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
+    return execution_identity
+
+
 def _reject_raw_worker_targeting(request: Request) -> None:
     for param_name in ("worker_key", "source_worker_key"):
         if request.query_params.get(param_name):
@@ -474,6 +499,12 @@ def resolve_request_credentials_target(
             execution_identity=None,
             allowed_shared_services=None,
         )
+    execution_identity = _require_agent_credential_management_authorized(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=scope_request.agent_name,
+    )
     execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
         return RequestCredentialsTarget(
@@ -514,11 +545,6 @@ def resolve_request_credentials_target(
             ),
         )
 
-    execution_identity = build_dashboard_execution_identity(
-        request,
-        scope_request.agent_name,
-        runtime_paths=runtime_paths,
-    )
     _reject_unbound_private_dashboard_requester(execution_scope, execution_identity)
     worker_key = require_worker_key_for_scope(
         execution_scope,
