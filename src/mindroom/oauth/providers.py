@@ -507,9 +507,7 @@ class OAuthProvider:
         """Refresh expiring token data and return updated credentials, or None."""
         if not _token_data_needs_refresh(token_data):
             return None
-        refresh_token = token_data.get("refresh_token")
-        if not isinstance(refresh_token, str) or not refresh_token:
-            return None
+        refresh_token = cast("str", token_data["refresh_token"])
 
         client_config = self.require_client_config(runtime_paths)
         async with AsyncOAuth2Client(
@@ -556,6 +554,18 @@ class OAuthProvider:
             refresh_response["_oauth_claims_verified"] = True
         parser = self.token_parser or _default_token_parser
         result = parser(self, refresh_response, client_config, runtime_paths)
+        verified_claims = refresh_response.get("_oauth_claims")
+        if (
+            not result.claims_verified
+            and refresh_response.get("_oauth_claims_verified") is True
+            and isinstance(verified_claims, Mapping)
+        ):
+            result = OAuthTokenResult(
+                token_data=result.token_data,
+                claims=dict(verified_claims),
+                claims_verified=True,
+            )
+        result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
         self.validate_claims(result, runtime_paths)
         return self.token_result_with_safe_claims(result).token_data
 

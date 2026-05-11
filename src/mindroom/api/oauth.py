@@ -436,7 +436,8 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     has_client_config = client_config_resolution is not None
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     refresh_failed = False
-    if credentials and has_client_config and not has_service_account_config:
+    credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    if credentials_usable and has_client_config and not has_service_account_config:
         try:
             refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
         except OAuthProviderError as exc:

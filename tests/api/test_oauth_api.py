@@ -901,6 +901,129 @@ def test_provider_refresh_token_data_preserves_existing_refresh_token_when_respo
     assert refreshed["refresh_token"] == "stored-refresh-token"
 
 
+def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+
+    def _parse_minimal_token(
+        _provider: OAuthProvider,
+        token_response: dict[str, Any],
+        _client_config: OAuthClientConfig,
+        _runtime_paths: constants.RuntimePaths,
+    ) -> OAuthTokenResult:
+        return OAuthTokenResult(
+            token_data={
+                "token": token_response["access_token"],
+                "refresh_token": token_response["refresh_token"],
+            },
+        )
+
+    provider = OAuthProvider(
+        id="custom_refresh",
+        display_name="Custom Refresh",
+        authorization_url="https://auth.example.test/custom_refresh/authorize",
+        token_url="https://auth.example.test/custom_refresh/token",
+        scopes=("scope.read",),
+        credential_service="custom_refresh_oauth",
+        client_config_services=("test_drive_oauth_client",),
+        token_parser=_parse_minimal_token,
+    )
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
+            return {
+                "access_token": "refreshed-access-token",
+                "expires_in": 300,
+            }
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+
+    refreshed = asyncio.run(
+        provider.refresh_token_data(
+            {
+                "token": "expired-access-token",
+                "refresh_token": "stored-refresh-token",
+                "client_id": "client-id",
+                "scopes": ["scope.read"],
+                "expires_at": 900.0,
+            },
+            runtime_paths,
+        ),
+    )
+
+    assert refreshed is not None
+    assert refreshed["token"] == "refreshed-access-token"
+    assert refreshed["refresh_token"] == "stored-refresh-token"
+    assert refreshed["client_id"] == "client-id"
+    assert refreshed["scopes"] == ["scope.read"]
+    assert refreshed["_source"] == "oauth"
+    assert refreshed["_oauth_provider"] == provider.id
+
+
+def test_provider_refresh_token_data_preserves_verified_claims_for_default_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider(allowed_email_domains=("example.com",))
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
+            return {
+                "access_token": "refreshed-access-token",
+                "expires_in": 300,
+            }
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+
+    refreshed = asyncio.run(
+        provider.refresh_token_data(
+            {
+                "token": "expired-access-token",
+                "refresh_token": "stored-refresh-token",
+                "client_id": "client-id",
+                "scopes": ["scope.read"],
+                "expires_at": 900.0,
+                "_oauth_claims": {"email": "alice@example.com", "email_verified": True},
+                "_oauth_claims_verified": True,
+            },
+            runtime_paths,
+        ),
+    )
+
+    assert refreshed is not None
+    assert refreshed["_oauth_claims"] == {"email": "alice@example.com", "email_verified": True}
+    assert refreshed["_oauth_claims_verified"] is True
+
+
 def test_google_provider_refresh_preserves_verified_claim_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2986,6 +3109,69 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
     assert stored_credentials["token"] == "refreshed-access-token"
     assert stored_credentials["refresh_token"] == "stored-refresh-token"
     assert stored_credentials["expires_at"] == 1300.0
+
+
+def test_status_does_not_refresh_credentials_missing_required_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    scoped_manager = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org"))
+    scoped_manager.save_credentials(
+        provider.credential_service,
+        {
+            "token": "expired-access-token",
+            "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
+            "expires_at": 900.0,
+            "scopes": ["different.scope"],
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+    seen: dict[str, bool] = {}
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            seen["created"] = True
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
+            return {
+                "access_token": "refreshed-access-token",
+                "expires_in": 300,
+            }
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is False
+    assert "created" not in seen
+    stored_credentials = scoped_manager.load_credentials(provider.credential_service)
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "expired-access-token"
+    assert stored_credentials["scopes"] == ["different.scope"]
 
 
 def test_oauth_credentials_usable_rejects_refresh_only_without_expiry(tmp_path: Path) -> None:
