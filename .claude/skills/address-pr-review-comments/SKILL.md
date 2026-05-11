@@ -108,17 +108,24 @@ gh api repos/mindroom-ai/mindroom/pulls/<pr>/comments/<comment-id>/replies \
 
 Resolve inline review threads with GraphQL after replying.
 Fetch thread IDs from the PR review threads:
+Set `AFTER=null` for the first request.
+Paginate this query until `reviewThreads.pageInfo.hasNextPage` is false, passing each returned `endCursor` as `AFTER` on the next request.
 
 ```bash
 gh api graphql \
   -f owner=mindroom-ai \
   -f repo=mindroom \
   -F pr=<pr> \
+  -F after="$AFTER" \
   -f query='
-query($owner: String!, $repo: String!, $pr: Int!) {
+query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           isResolved
