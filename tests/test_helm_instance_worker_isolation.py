@@ -136,6 +136,13 @@ def test_instance_chart_worker_network_policy_has_no_static_external_egress() ->
     assert worker_policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
     assert worker_policy["spec"]["egress"] == [
         {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "kube-system"},
+                    },
+                },
+            ],
             "ports": [
                 {"port": 53, "protocol": "UDP"},
                 {"port": 53, "protocol": "TCP"},
@@ -399,10 +406,34 @@ def test_runtime_chart_worker_network_policy_has_empty_static_external_egress() 
     assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
     assert policy["spec"]["egress"] == [
         {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "kube-system"},
+                    },
+                },
+            ],
             "ports": [
                 {"port": 53, "protocol": "UDP"},
                 {"port": 53, "protocol": "TCP"},
             ],
+        },
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "default"},
+                    },
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/component": "runtime",
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/name": "mindroom-runtime",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"port": 8765, "protocol": "TCP"}],
         },
     ]
 

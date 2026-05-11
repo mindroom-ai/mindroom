@@ -32,9 +32,24 @@ spec:
   egress:
     # Static external worker egress is intentionally empty by default.
     # Use deployment-specific dynamic grants for exact external hostnames.
-    - ports:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+    # Allow workers to report results to the primary MindRoom runtime API.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.runtime.apiPort }}
 {{- end }}
