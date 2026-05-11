@@ -163,10 +163,9 @@ def is_sender_allowed_for_agent_credential_management(
     try:
         return is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths)
     except MissingManagedEntityAccountError:
-        # Dashboard/API credential requests can run before Matrix managed accounts exist.
-        # In that state the internal-sender bypass is unavailable, but the user allowlist
-        # remains the credential-management policy.
-        return _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config)
+        # The configured user allowlist was already checked. Missing managed accounts
+        # only mean the internal-sender bypass cannot be evaluated for dashboard/API requests.
+        return False
 
 
 def get_effective_sender_id_for_reply_permissions(

@@ -224,6 +224,11 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
+When `agent_name` is present, credential routes require the authenticated dashboard requester to be allowed by `authorization.agent_reply_permissions` for that agent.
+Unauthorized agent-scoped requests return HTTP 403.
+Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
+Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
+
 ### Knowledge
 
 | Method | Endpoint | Description |
