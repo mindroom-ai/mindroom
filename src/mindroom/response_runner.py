@@ -715,15 +715,33 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity | None,
     ) -> bool:
         """Return whether this scope should compact before creating a reply placeholder."""
-        storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
+        storage = None
         try:
+            storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
             session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
             if not isinstance(session, AgentSession | TeamSession):
                 return False
             state = read_scope_state(session, scope)
             return state.force_compact_before_next_run or has_pending_force_compaction_scope(session, scope)
+        except Exception as error:
+            self.deps.logger.warning(
+                "forced_compaction_placeholder_check_failed",
+                session_id=session_id,
+                scope=scope.key,
+                exception_type=error.__class__.__name__,
+            )
+            return False
         finally:
-            storage.close()
+            if storage is not None:
+                try:
+                    storage.close()
+                except Exception as error:
+                    self.deps.logger.warning(
+                        "forced_compaction_placeholder_storage_close_failed",
+                        session_id=session_id,
+                        scope=scope.key,
+                        exception_type=error.__class__.__name__,
+                    )
 
     async def _refresh_model_history_after_lock(
         self,
