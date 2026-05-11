@@ -385,7 +385,6 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.entity_resolution",
     "mindroom.execution_preparation",
     "mindroom.history",
     "mindroom.knowledge",
