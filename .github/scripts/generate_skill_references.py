@@ -22,6 +22,7 @@ SKILL_DIR = REPO_ROOT / "skills" / "mindroom-docs"
 REFERENCES_DIR = SKILL_DIR / "references"
 CACHE_PATH = REPO_ROOT / ".cache" / "mindroom-docs-skill-references.sha256"
 _MARKDOWN_LINK_TARGET_PATTERN = re.compile(r"(!?\[[^\]\n]+\]\()([^)]+)(\))")
+_FENCE_PATTERN = re.compile(r"^\s*([`~]{3,})")
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,6 @@ def _mkdocs_config(project: dict[str, Any], nav_pages: list[NavPage], site_dir: 
             "search",
             {
                 "llmstxt": {
-                    "full_output": "llms-full.txt",
                     "sections": {
                         "MindRoom Docs": [page.source_path for page in nav_pages],
                     },
@@ -215,23 +215,26 @@ def _source_to_public_path(source_path: str) -> str:
 
 def _rewrite_source_links(text: str, source_path: str, site_url: str) -> str:
     lines: list[str] = []
-    in_code = False
+    active_fence: str | None = None
+
+    def replace_match(match: re.Match[str]) -> str:
+        resolved_target = _resolve_source_link(source_path, match.group(2), site_url)
+        if resolved_target is None:
+            return match.group(0)
+        return f"{match.group(1)}{resolved_target}{match.group(3)}"
 
     for line in text.splitlines(keepends=True):
-        if line.lstrip().startswith("```"):
-            in_code = not in_code
+        if fence_match := _FENCE_PATTERN.match(line):
+            fence = fence_match.group(1)
+            if active_fence is None:
+                active_fence = fence
+            elif fence[0] == active_fence[0] and len(fence) >= len(active_fence):
+                active_fence = None
             lines.append(line)
             continue
-        if in_code:
+        if active_fence is not None:
             lines.append(line)
             continue
-
-        def replace_match(match: re.Match[str]) -> str:
-            resolved_target = _resolve_source_link(source_path, match.group(2), site_url)
-            if resolved_target is None:
-                return match.group(0)
-            return f"{match.group(1)}{resolved_target}{match.group(3)}"
-
         lines.append(_MARKDOWN_LINK_TARGET_PATTERN.sub(replace_match, line))
 
     return "".join(lines)

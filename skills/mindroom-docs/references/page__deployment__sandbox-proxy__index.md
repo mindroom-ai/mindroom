@@ -81,7 +81,8 @@ volumes:
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT]
-> The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume:
+> The `sandbox-workspace` Docker volume is created as root by default.
+> The runner runs as UID 1000, so you must fix ownership after first creating the volume:
 > ```bash
 > docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
 > ```

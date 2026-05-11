@@ -12653,7 +12653,7 @@ When no requester user ID is available, MindRoom defaults to streaming.
 
 ## In-Progress Marker
 
-While a response is being generated, the message ends with ` ⋯` followed by zero to two dots that cycle as edits arrive.
+While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive.
 This gives users a visual indicator that the agent is still working.
 
 ```
@@ -13131,7 +13131,8 @@ just start-mindroom-dev
 The API is available at `http://localhost:8765/v1/`.
 
 > [!IMPORTANT]
-> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
+> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`).
+> Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
 
 ### 3. Verify
 
@@ -13445,7 +13446,9 @@ Events are processed in background tasks:
 
 ### Streaming Responses
 
-Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users. See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
+Agents stream responses by progressively editing messages.
+Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 
@@ -14098,7 +14101,8 @@ Once linked:
 
 Repeat for any other Matrix rooms you want accessible from Telegram.
 
-> **Why can't I just invite the bot directly?** The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
+> **Why can't I just invite the bot directly?**
+> The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
 > To use Telegram as your client, there must be a Telegram group for the Telegram app to display.
 > The bridge connects that group to the Matrix room bidirectionally.
 
@@ -14755,7 +14759,8 @@ volumes:
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT]
-> The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume:
+> The `sandbox-workspace` Docker volume is created as root by default.
+> The runner runs as UID 1000, so you must fix ownership after first creating the volume:
 > ```bash
 > docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
 > ```

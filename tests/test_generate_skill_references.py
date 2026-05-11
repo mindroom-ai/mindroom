@@ -41,7 +41,7 @@ matrix_delivery:
     generator.DOCS_DIR = docs_dir
     try:
         page = generator.NavPage(title="Delivery", source_path="delivery.md", built_path="delivery/index.md")
-        assert generator._source_page_reference(page) == source_text
+        assert generator._source_page_reference(page, site_url="https://docs.example/") == source_text
     finally:
         generator.DOCS_DIR = original_docs_dir
 
@@ -71,6 +71,34 @@ See [Voice](../voice.md), [Models](models.md#file-based-secrets), and [External]
             "See [Voice](https://docs.mindroom.chat/voice/), "
             "[Models](https://docs.mindroom.chat/configuration/models/#file-based-secrets), "
             "and [External](https://example.com).\n"
+        )
+    finally:
+        generator.DOCS_DIR = original_docs_dir
+
+
+def test_source_page_reference_does_not_rewrite_links_inside_nested_fences(tmp_path: Path) -> None:
+    """Generated references should preserve nested Markdown examples as literal code."""
+    generator = _load_generator()
+    source_text = """\
+````markdown
+```interactive
+[Voice](voice.md)
+```
+````
+
+[Voice](voice.md)
+"""
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "example.md").write_text(f"---\ntitle: Example\n---\n{source_text}", encoding="utf-8")
+    (docs_dir / "voice.md").write_text("# Voice\n", encoding="utf-8")
+
+    original_docs_dir = generator.DOCS_DIR
+    generator.DOCS_DIR = docs_dir
+    try:
+        page = generator.NavPage(title="Example", source_path="example.md", built_path="example/index.md")
+        assert generator._source_page_reference(page, site_url="https://docs.example/") == (
+            "````markdown\n```interactive\n[Voice](voice.md)\n```\n````\n\n[Voice](https://docs.example/voice/)\n"
         )
     finally:
         generator.DOCS_DIR = original_docs_dir

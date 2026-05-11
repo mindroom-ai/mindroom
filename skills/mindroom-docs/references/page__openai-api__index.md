@@ -48,7 +48,8 @@ just start-mindroom-dev
 The API is available at `http://localhost:8765/v1/`.
 
 > [!IMPORTANT]
-> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
+> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`).
+> Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
 
 ### 3. Verify
 

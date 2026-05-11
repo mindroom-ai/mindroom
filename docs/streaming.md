@@ -75,7 +75,7 @@ When no requester user ID is available, MindRoom defaults to streaming.
 
 ## In-Progress Marker
 
-While a response is being generated, the message ends with ` ⋯` followed by zero to two dots that cycle as edits arrive.
+While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive.
 This gives users a visual indicator that the agent is still working.
 
 ```
