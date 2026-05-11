@@ -147,39 +147,39 @@ mindroom run
 
 ## Documentation
 
-- [Getting Started](getting-started.md) - Installation and first steps
-- [Hosted Matrix Deployment](deployment/hosted-matrix.md) - Run only `uvx mindroom` locally against hosted Matrix
-- [Configuration](configuration/index.md) - All configuration options
-- [Cultures](configuration/cultures.md) - Configure shared agent cultures
-- [Dashboard](dashboard.md) - Web UI for configuration
-- [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
-- [Tools](tools/index.md) - Available tool integrations
-- [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
-- [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
-- [Skills](skills.md) - OpenClaw-compatible skills system
-- [Plugins](plugins.md) - Extend with custom tools, OAuth providers, and skills
-- [OAuth Framework](oauth-framework.md) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](knowledge.md) - Configure RAG-backed document indexing
-- [Memory System](memory.md) - How agent memory works
-- [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
-- [Voice Messages](voice.md) - Voice message transcription
-- [Image Messages](images.md) - Image analysis with vision models
-- [File & Video Attachments](attachments.md) - Context-scoped file and video handling
-- [Streaming Responses](streaming.md) - Progressive message edits with presence-based gating
-- [Chat Commands](chat-commands.md) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
-- [Interactive Q&A](interactive.md) - Clickable multiple-choice questions via Matrix reactions
-- [Authorization](authorization.md) - User and room access control
-- [Matrix Space](matrix-space.md) - Optional root Matrix Space for grouping managed rooms
-- [Architecture](architecture/index.md) - How it works under the hood
-- [Deployment](deployment/index.md) - Docker and Kubernetes deployment
-- [Bridges](deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix
-- [Sandbox Proxy](deployment/sandbox-proxy.md) - Isolate code-execution tools in a sandbox
-- [Google Services OAuth](deployment/google-services-oauth.md) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
-- [Google Services OAuth (Individual)](deployment/google-services-user-oauth.md) - Single-user OAuth setup
-- [CLI Reference](cli.md) - Command-line interface
-- [Support](support.md) - Contact and troubleshooting help
-- [Privacy Policy](privacy.md) - Privacy and data handling information
-- [Terms of Service](terms.md) - Terms for using MindRoom services and clients
+- [Getting Started](https://docs.mindroom.chat/getting-started/) - Installation and first steps
+- [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) - Run only `uvx mindroom` locally against hosted Matrix
+- [Configuration](https://docs.mindroom.chat/configuration/) - All configuration options
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
+- [Dashboard](https://docs.mindroom.chat/dashboard/) - Web UI for configuration
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) - Use agents from any OpenAI-compatible client
+- [Tools](https://docs.mindroom.chat/tools/) - Available tool integrations
+- [OpenClaw Import](https://docs.mindroom.chat/openclaw/) - Reuse OpenClaw workspace files in MindRoom
+- [MCP](https://docs.mindroom.chat/mcp/) - Configure native MCP client servers and expose their tools to agents
+- [Skills](https://docs.mindroom.chat/skills/) - OpenClaw-compatible skills system
+- [Plugins](https://docs.mindroom.chat/plugins/) - Extend with custom tools, OAuth providers, and skills
+- [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) - Build scoped OAuth-backed tool integrations
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure RAG-backed document indexing
+- [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
+- [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
+- [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
+- [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
+- [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
+- [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!help [topic]`, `!reload-plugins`, `!config <operation>`, and `!hi` commands
+- [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
+- [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
+- [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
+- [Architecture](https://docs.mindroom.chat/architecture/) - How it works under the hood
+- [Deployment](https://docs.mindroom.chat/deployment/) - Docker and Kubernetes deployment
+- [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
+- [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) - Isolate code-execution tools in a sandbox
+- [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) - Admin OAuth setup for Gmail/Calendar/Drive/Sheets
+- [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Single-user OAuth setup
+- [CLI Reference](https://docs.mindroom.chat/cli/) - Command-line interface
+- [Support](https://docs.mindroom.chat/support/) - Contact and troubleshooting help
+- [Privacy Policy](https://docs.mindroom.chat/privacy/) - Privacy and data handling information
+- [Terms of Service](https://docs.mindroom.chat/terms/) - Terms for using MindRoom services and clients
 
 ## License
 
@@ -281,7 +281,7 @@ Protect the dashboard API in non-localhost environments by setting `MINDROOM_API
 **Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 
 For a detailed architecture and credential model, see:
-[Hosted Matrix deployment guide](deployment/hosted-matrix.md).
+[Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
 
 ## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
@@ -438,10 +438,10 @@ MindRoom will:
 
 ## Next Steps
 
-- Learn about [agent configuration](configuration/agents.md)
-- Learn about [OpenClaw workspace import](openclaw.md) if you want file-based memory/context patterns
-- Explore [available tools](tools/index.md)
-- Set up [teams for multi-agent collaboration](configuration/teams.md)
+- Learn about [agent configuration](https://docs.mindroom.chat/configuration/agents/)
+- Learn about [OpenClaw workspace import](https://docs.mindroom.chat/openclaw/) if you want file-based memory/context patterns
+- Explore [available tools](https://docs.mindroom.chat/tools/)
+- Set up [teams for multi-agent collaboration](https://docs.mindroom.chat/configuration/teams/)
 
 # Web Dashboard
 
@@ -757,7 +757,7 @@ mindroom config validate --path /path/to/config.yaml
 ## MCP Servers
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block.
-See [MCP](../mcp.md) for transport-specific config, tool naming, examples, and agent setup.
+See [MCP](https://docs.mindroom.chat/mcp/) for transport-specific config, tool naming, examples, and agent setup.
 
 ## Tool Approval
 
@@ -826,7 +826,7 @@ Set the API key for each provider you use in `config.yaml`:
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
-See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
+See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
 
 ### Codex CLI Subscription Auth
 
@@ -853,7 +853,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `OPENAI_COMPAT_API_KEYS` | Comma-separated API keys for authenticating `/v1/*` requests | _(none — locked without this or the flag below)_ |
 | `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Set to `true` to allow unauthenticated `/v1/*` access (local dev only) | _(unset — locked)_ |
 
-See [OpenAI-Compatible API](../openai-api.md) for the full auth matrix.
+See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) for the full auth matrix.
 
 ### Provisioning / Pairing
 
@@ -894,7 +894,7 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
 
-See [Sandbox Proxy](../deployment/sandbox-proxy.md) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
+See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
 
 ### SaaS-Only
 
@@ -1310,19 +1310,19 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 
 ## Sections
 
-- [Agents](agents.md) - Configure individual AI agents
-- [Models](models.md) - Configure AI model providers
-- [Teams](teams.md) - Configure multi-agent collaboration
-- [Toolkits](toolkits.md) - Configure dynamic tool bundles that agents load on demand
-- [Cultures](cultures.md) - Configure shared agent cultures
-- [Router](router.md) - Configure message routing
-- [Memory](../memory.md) - Configure memory providers and behavior
-- [Knowledge Bases](../knowledge.md) - Configure file-backed knowledge bases
-- [Voice](../voice.md) - Configure speech-to-text voice processing
-- [Authorization](../authorization.md) - Configure user and room access control
-- [Matrix Space](../matrix-space.md) - Configure the root Matrix Space for managed rooms
-- [Skills](../skills.md) - Skill format, gating, and allowlists
-- [Plugins](../plugins.md) - Plugin manifest and tool/skill loading
+- [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
+- [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
+- [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
+- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/) - Configure dynamic tool bundles that agents load on demand
+- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
+- [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
+- [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
+- [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
+- [Authorization](https://docs.mindroom.chat/authorization/) - Configure user and room access control
+- [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Configure the root Matrix Space for managed rooms
+- [Skills](https://docs.mindroom.chat/skills/) - Skill format, gating, and allowlists
+- [Plugins](https://docs.mindroom.chat/plugins/) - Plugin manifest and tool/skill loading
 
 ## Notes
 
@@ -1332,14 +1332,14 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
 - Approval-gated tools require the router to be joined to the Matrix room.
 - In ad-hoc invited rooms accepted through `accept_invites`, approval only works if the router is already joined to that room.
-- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](agents.md))
-- `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](agents.md))
+- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
+- `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
-- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
+- `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
@@ -1482,9 +1482,9 @@ agents:
 | `display_name` | string | *required* | Human-readable name shown in Matrix as the bot's display name |
 | `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
 | `model` | string | `"default"` | Model name (must match a key in the `models` section) |
-| `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](../tools/index.md) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
+| `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
 | `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
-| `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
+| `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools still require the router to be joined to the room, so ad-hoc invited rooms only support approval if the router is already joined there |
@@ -1504,7 +1504,7 @@ agents:
 | `compaction` | object | `defaults.compaction` | Per-agent required-compaction overrides |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
+| `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
@@ -1707,7 +1707,7 @@ Use `user_agent` if you need per-agent filesystem isolation.
 For per-workspace env that an agent can edit (PATH, package indexes, npm cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
 MindRoom-owned workspace identity, cache, and virtualenv env names are reasserted after the hook, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
 With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically.
-See [Workspace env hook](../deployment/sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
+See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
 
 ### Where Agent Data Lives
 
@@ -1726,7 +1726,7 @@ OAuth providers that support scoped dashboard flows, such as the Google Drive, G
 For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
-For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
+For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ## Private Instances
 
@@ -1800,7 +1800,7 @@ For a `mind` agent with `private.per: user`, different users get different priva
 | `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root. Must be a relative path and cannot escape with `..` |
 | `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root without overwriting existing files. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error when the directory does not exist |
 | `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
-| `private.knowledge` | object | `null` | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](../knowledge.md#private-agent-knowledge) |
+| `private.knowledge` | object | `null` | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge) |
 | `private.knowledge.enabled` | bool | `true` | Whether to index PrivateAgentKnowledge for this private agent instance. Set to `false` to disable indexing |
 | `private.knowledge.description` | string | `""` | Short description of what the private knowledge contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
 | `private.knowledge.path` | string | `null` | Path to a private knowledge directory relative to the private root |
@@ -2484,7 +2484,7 @@ When the responder is already clear, normalized audio follows the normal direct 
 By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
-See [Voice Messages](../voice.md) for the detailed dispatch behavior.
+See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 
@@ -2556,7 +2556,7 @@ In a new untagged message, automatic routing can still choose an agent or team w
 Dynamic toolkits are groups of tools that agents can load and unload at runtime.
 Define toolkit bundles in the top-level `toolkits` section and grant agents access via `allowed_toolkits` and `initial_toolkits`.
 
-See [Dynamic Toolkits](../tools/dynamic-toolkits.md) for the user-facing guide covering how agents interact with toolkits at runtime.
+See [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/) for the user-facing guide covering how agents interact with toolkits at runtime.
 
 ## Top-Level `toolkits` Section
 
@@ -2646,7 +2646,7 @@ Duplicate entries within one toolkit are rejected.
 
 ### Scope Compatibility
 
-Some integrations are restricted to shared or unscoped execution (see [Worker Routing](agents.md#worker-routing)).
+Some integrations are restricted to shared or unscoped execution (see [Worker Routing](https://docs.mindroom.chat/configuration/agents/#worker-routing)).
 If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit containing a shared-only integration, MindRoom rejects the config at startup.
 
 The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
@@ -2755,27 +2755,27 @@ defaults:
 `defaults.tools` are merged into each agent's own `tools` list with duplicates removed.
 Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
 When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both.
-See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration) for the full override syntax and merge order.
+See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order.
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
-See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
+See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and naming rules.
 
 ## Browse By Topic
 
-- [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](data-and-databases.md) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
-- [Web Search](web-search.md) - Search engines and search APIs.
-- [Web Scraping & Browser](web-scraping-and-browser.md) - Crawlers, extractors, browser automation, and page-reading tools.
-- [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
-- [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
-- [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
-- [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
-- [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, and task managers.
-- [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
-- [Memory & Storage](memory-and-storage.md) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](agent-orchestration.md) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
-- [Automation & Platforms](automation-and-platforms.md) - Infrastructure automation, generic APIs, and platform aggregators.
-- [Location, Commerce, & Home](location-commerce-and-home.md) - Maps, weather, commerce, and Home Assistant.
+- [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
+- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
+- [Web Search](https://docs.mindroom.chat/tools/web-search/) - Search engines and search APIs.
+- [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) - Crawlers, extractors, browser automation, and page-reading tools.
+- [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
+- [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
+- [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
+- [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
+- [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, and task managers.
+- [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
+- [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
+- [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 
 ## Tool Presets And Implied Tools
 
@@ -2803,7 +2803,7 @@ Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use 
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
 The current worker-routed defaults are `file`, `shell`, `python`, and `coding`.
-Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment details and worker-scope behavior.
+Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for deployment details and worker-scope behavior.
 
 ## Shared-Only Integrations
 
@@ -2818,11 +2818,11 @@ Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable that behavior.
 
 ## Related Docs
 
-- [MCP](../mcp.md) - Configure native MCP client servers and expose them as MindRoom tools.
-- [Plugins](../plugins.md) - Extend MindRoom with custom tools and skills.
-- [Attachments](../attachments.md) - Attachment lifecycle and context scoping.
-- [Scheduling](../scheduling.md) - Chat command scheduling and task behavior.
-- [OpenClaw Workspace Import](../openclaw.md) - `openclaw_compat` preset and workspace portability.
+- [MCP](https://docs.mindroom.chat/mcp/) - Configure native MCP client servers and expose them as MindRoom tools.
+- [Plugins](https://docs.mindroom.chat/plugins/) - Extend MindRoom with custom tools and skills.
+- [Attachments](https://docs.mindroom.chat/attachments/) - Attachment lifecycle and context scoping.
+- [Scheduling](https://docs.mindroom.chat/scheduling/) - Chat command scheduling and task behavior.
+- [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) - `openclaw_compat` preset and workspace portability.
 
 # Dynamic Toolkits
 
@@ -2931,9 +2931,9 @@ A typical conversation might look like:
 
 ## See Also
 
-- [Toolkit Configuration](../configuration/toolkits.md) — config reference for the `toolkits` section and per-agent settings
-- [Tools Overview](index.md) — enabling and configuring tools
-- [Built-in Tools](builtin.md) — complete list of available tools
+- [Toolkit Configuration](https://docs.mindroom.chat/configuration/toolkits/) — config reference for the `toolkits` section and per-agent settings
+- [Tools Overview](https://docs.mindroom.chat/tools/) — enabling and configuring tools
+- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/) — complete list of available tools
 
 # Execution & Coding
 
@@ -2967,7 +2967,7 @@ You can override the effective routed set with `defaults.worker_tools` or `agent
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
 `worker_scope` controls runtime reuse, not filesystem security.
-Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for the deployment model, storage visibility rules, and scope tradeoffs.
+Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the deployment model, storage visibility rules, and scope tradeoffs.
 
 When an agent has a canonical workspace root, MindRoom injects that workspace as `base_dir` for tools that expose a `base_dir` constructor field.
 In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-managed instead of something you set inline.
@@ -3496,9 +3496,9 @@ sleep(5)
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)
 
 # Data & Databases
 
@@ -3978,7 +3978,7 @@ google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 
 - `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
 - The provider requests Drive read-only access plus OpenID email/profile scopes.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 
 ## [`google_sheets`]
 
@@ -4026,7 +4026,7 @@ read_sheet(
 ### Notes
 
 - `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
 - The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
 ## [`openbb`]
@@ -4158,10 +4158,10 @@ get_news("TSLA", limit=10)
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
-- [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
 
 # Web Search
 
@@ -4644,8 +4644,8 @@ web_search_with_linkup(
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
 
 # Web Scraping & Browser
 
@@ -5383,8 +5383,8 @@ open_page("https://matrix.org/blog/", new_window=True)
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
 
 # Research Sources
 
@@ -5408,7 +5408,7 @@ All four tools are `setup_type: none`, so they work out of the box and do not re
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so these tools have no dedicated dashboard auth flow.
 Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 MindRoom does not add Matrix runtime-context behavior or worker-routing overrides for these tools.
-Use [Web Search](web-search.md) instead when you need broader web discovery, news search, or provider-backed search APIs.
+Use [Web Search](https://docs.mindroom.chat/tools/web-search/) instead when you need broader web discovery, news search, or provider-backed search APIs.
 
 ## [`arxiv`]
 
@@ -5448,7 +5448,7 @@ read_arxiv_papers(["2103.03404v1"], pages_to_read=3)
 
 - `read_arxiv_papers()` expects ArXiv IDs such as `2103.03404v1`, not a free-text search query.
 - If `download_dir` is not set, the upstream toolkit writes PDFs to its default local `arxiv_pdfs` directory before parsing them.
-- Use `duckduckgo`, `googlesearch`, or `exa` from [Web Search](web-search.md) when you need broader search beyond ArXiv papers.
+- Use `duckduckgo`, `googlesearch`, or `exa` from [Web Search](https://docs.mindroom.chat/tools/web-search/) when you need broader search beyond ArXiv papers.
 
 ## [`wikipedia`]
 
@@ -5484,7 +5484,7 @@ search_wikipedia("Matrix protocol")
 
 - `knowledge` is not a normal string option at runtime, so the usual MindRoom configuration is just `- wikipedia`.
 - Search uses the upstream `wikipedia.summary()` call, so ambiguous topics work best with a specific query.
-- Use [Web Search](web-search.md) when you need multiple result links or broader web coverage instead of one encyclopedia summary.
+- Use [Web Search](https://docs.mindroom.chat/tools/web-search/) when you need multiple result links or broader web coverage instead of one encyclopedia summary.
 
 ## [`pubmed`]
 
@@ -5565,13 +5565,13 @@ get_user_details("pg")
 
 - This tool uses public Hacker News endpoints and does not need credentials.
 - `get_top_hackernews_stories()` is best for front-page monitoring and lightweight discussion sourcing, not full web search.
-- Pair it with [Web Search](web-search.md) or [Web Scraping & Browser](web-scraping-and-browser.md) when you want to follow story links and inspect the linked pages themselves.
+- Pair it with [Web Search](https://docs.mindroom.chat/tools/web-search/) or [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) when you want to follow story links and inspect the linked pages themselves.
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Web Search](web-search.md)
-- [Web Scraping & Browser](web-scraping-and-browser.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Web Search](https://docs.mindroom.chat/tools/web-search/)
+- [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/)
 
 # AI & Generation
 
@@ -6135,8 +6135,8 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [OpenAI-Compatible API](../openai-api.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)
 
 # Media & Content
 
@@ -6436,9 +6436,9 @@ get_currently_playing()
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)
 
 # Matrix & Attachments
 
@@ -6694,7 +6694,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 - `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
 - Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
-- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](../attachments.md) guide.
+- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](https://docs.mindroom.chat/attachments/) guide.
 
 ## Related Matrix Runtime Features
 
@@ -6705,9 +6705,9 @@ The `thread_summary` tool complements that automatic behavior by letting an agen
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Attachments](../attachments.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Attachments](https://docs.mindroom.chat/attachments/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
 
 # Messaging & Social
 
@@ -7289,8 +7289,8 @@ get_meeting("81234567890")
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Automation & Platforms](automation-and-platforms.md) - For `aws_ses` when you want an alternative outbound-email provider.
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - For `aws_ses` when you want an alternative outbound-email provider.
 
 # Project Management
 
@@ -7747,9 +7747,9 @@ search_zendesk("Matrix onboarding")
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Dashboard](../dashboard.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Dashboard](https://docs.mindroom.chat/dashboard/)
 
 # Calendar & Scheduling
 
@@ -7771,7 +7771,7 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 `google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
 It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
-Use [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md) to connect Google before enabling `google_calendar`.
+Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
 Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
@@ -7920,15 +7920,15 @@ cancel_schedule("a1b2c3d4")
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
-- Use [Scheduling](../scheduling.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
+- Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Scheduling](../scheduling.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
-- [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Scheduling](https://docs.mindroom.chat/scheduling/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
 
 # Memory & Storage
 
@@ -7950,14 +7950,14 @@ Use these tools when you need explicit memory CRUD operations, direct provider-s
 `memory` is MindRoom-native and has no tool-specific configuration fields.
 It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the effective `mem0`, `file`, or `none` backend for that agent.
 If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent.
-Use [Memory System](../memory.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
+Use [Memory System](https://docs.mindroom.chat/memory/) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
 `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
 `mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
 `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
 If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 This page does not document conversation-scoped file attachments even though they are storage-like.
-Use [Matrix & Attachments](matrix-and-attachments.md) and [Attachments](../attachments.md) for attachment IDs, retention, and Matrix media flow.
+Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) and [Attachments](https://docs.mindroom.chat/attachments/) for attachment IDs, retention, and Matrix media flow.
 
 ## [`memory`]
 
@@ -7999,7 +7999,7 @@ delete_memory("abc123")
 
 ### Notes
 
-- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](../memory.md), not through tool-local options.
+- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](https://docs.mindroom.chat/memory/), not through tool-local options.
 - This is the right tool when you want explicit control over MindRoom's built-in durable memory rather than a separate provider account.
 - The tool returns user-facing error strings on failures instead of raising raw exceptions into the conversation.
 
@@ -8054,7 +8054,7 @@ delete_all_memories()
 
 - `api_key` is optional because the toolkit can use local/default upstream Mem0 initialization instead of the hosted Mem0 platform.
 - This toolkit is separate from MindRoom's `memory.backend: mem0` setting, so enabling `mem0` here does not configure or replace MindRoom's built-in memory backend.
-- If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](../memory.md) instead of relying on this toolkit alone.
+- If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](https://docs.mindroom.chat/memory/) instead of relying on this toolkit alone.
 - Store API keys outside authored YAML even when the current metadata marks them as optional.
 
 ## [`zep`]
@@ -8113,10 +8113,10 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Memory System](../memory.md)
-- [Matrix & Attachments](matrix-and-attachments.md)
-- [Attachments](../attachments.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Memory System](https://docs.mindroom.chat/memory/)
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
+- [Attachments](https://docs.mindroom.chat/attachments/)
 
 # Agent Orchestration
 
@@ -8335,7 +8335,7 @@ manage_team(
 
 - [`config_manager`] is broader and more privileged than [`self_config`] because it can inspect and modify other agents and teams.
 - `manage_team()` creates teams, but it does not expose a separate update operation on this branch.
-- Use [Agent Configuration](../configuration/agents.md) for the full authored schema outside the tool's curated helper surface.
+- Use [Agent Configuration](https://docs.mindroom.chat/configuration/agents/) for the full authored schema outside the tool's curated helper surface.
 
 ## [`self_config`]
 
@@ -8437,7 +8437,7 @@ agents:
 ### Notes
 
 - [`openclaw_compat`] is a preset name that belongs in `tools:` but does not expose callable runtime methods of its own.
-- Use the dedicated [OpenClaw Workspace Import](../openclaw.md) guide for workspace layout, file memory behavior, and migration details.
+- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) guide for workspace layout, file memory behavior, and migration details.
 - If you only need one or two of the member tools, configure those tools directly instead of using the preset.
 
 ## [`claude_agent`]
@@ -8533,14 +8533,14 @@ claude_end_session(session_label="bugfix")
 - For Anthropic-compatible gateways, set `anthropic_base_url` to the gateway root without `/v1`, because the Claude client appends its own API path.
 - Some gateways reject Claude beta headers, so `disable_experimental_betas: true` is the compatibility switch for that case.
 - When you use MindRoom's OpenAI-compatible API, keep the same `X-Session-Id` across requests so the same Claude session key is reused.
-- See [OpenAI-Compatible API](../openai-api.md) for request-level session continuity details.
+- See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) for request-level session continuity details.
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Agent Configuration](../configuration/agents.md)
-- [OpenClaw Workspace Import](../openclaw.md)
-- [OpenAI-Compatible API](../openai-api.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)
+- [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/)
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)
 
 # Automation & Platforms
 
@@ -8916,10 +8916,10 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Execution & Coding](execution-and-coding.md)
-- [Project Management](project-management.md)
-- [MCP](../mcp.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/)
+- [Project Management](https://docs.mindroom.chat/tools/project-management/)
+- [MCP](https://docs.mindroom.chat/mcp/)
 
 # Location, Commerce, & Home
 
@@ -9132,9 +9132,9 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)
 
 # Built-in Tools
 
@@ -9146,23 +9146,23 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 | Category | Tools | Link |
 |----------|-------|------|
-| **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](execution-and-coding.md) |
-| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](data-and-databases.md) |
-| **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](web-search.md) |
-| **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](web-scraping-and-browser.md) |
-| **Research Sources** | arxiv, wikipedia, pubmed, hackernews | [→ research-sources](research-sources.md) |
-| **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](ai-and-generation.md) |
-| **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](media-and-content.md) |
-| **Matrix & Attachments** | matrix_message, thread_tags, thread_summary, matrix_api, attachments | [→ matrix-and-attachments](matrix-and-attachments.md) |
-| **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](messaging-and-social.md) |
-| **Project Management** | github, jira, linear, clickup, notion, trello, todoist | [→ project-management](project-management.md) |
-| **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](calendar-and-scheduling.md) |
-| **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](memory-and-storage.md) |
-| **Agent Orchestration** | subagents, delegate, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](agent-orchestration.md) |
-| **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](automation-and-platforms.md) |
-| **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](location-commerce-and-home.md) |
+| **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](https://docs.mindroom.chat/tools/execution-and-coding/) |
+| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](https://docs.mindroom.chat/tools/data-and-databases/) |
+| **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](https://docs.mindroom.chat/tools/web-search/) |
+| **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) |
+| **Research Sources** | arxiv, wikipedia, pubmed, hackernews | [→ research-sources](https://docs.mindroom.chat/tools/research-sources/) |
+| **AI & Generation** | openai, gemini, groq, replicate, fal, dalle, eleven_labs | [→ ai-and-generation](https://docs.mindroom.chat/tools/ai-and-generation/) |
+| **Media & Content** | youtube, spotify, giphy, moviepy, unsplash, brandfetch | [→ media-and-content](https://docs.mindroom.chat/tools/media-and-content/) |
+| **Matrix & Attachments** | matrix_message, thread_tags, thread_summary, matrix_api, attachments | [→ matrix-and-attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) |
+| **Messaging & Social** | gmail, slack, discord, telegram, whatsapp, email, x, reddit | [→ messaging-and-social](https://docs.mindroom.chat/tools/messaging-and-social/) |
+| **Project Management** | github, jira, linear, clickup, notion, trello, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
+| **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
+| **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
+| **Agent Orchestration** | subagents, delegate, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
+| **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
+| **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
 
-For tool configuration, presets, and runtime context, see the [Tools Overview](index.md).
+For tool configuration, presets, and runtime context, see the [Tools Overview](https://docs.mindroom.chat/tools/).
 
 # MCP
 
@@ -9658,7 +9658,7 @@ Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical
 MindRoom includes built-in context controls for OpenClaw-style agents:
 
 - **Conversation history** is stored in Agno sessions, but MindRoom decides what replay summary and raw history messages are injected into each run.
-- **Replay depth** is controlled with `num_history_runs` or `num_history_messages`, and optional required compaction is controlled with `compaction` (see [Agents](configuration/agents.md)).
+- **Replay depth** is controlled with `num_history_runs` or `num_history_messages`, and optional required compaction is controlled with `compaction` (see [Agents](https://docs.mindroom.chat/configuration/agents/)).
 - **Preloaded role context** from `context_files` is hard-capped by `defaults.max_preload_chars` (configured in `config.yaml` under `defaults`). When the combined context exceeds this limit, chunks are trimmed from the end and a truncation marker is inserted.
 
 ## Known limitations
@@ -9674,7 +9674,7 @@ MindRoom includes built-in context controls for OpenClaw-style agents:
 
 ## Skills
 
-For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`), see [Skills](skills.md).
+For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `openclaw.always`), see [Skills](https://docs.mindroom.chat/skills/).
 
 Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
 
@@ -9755,7 +9755,7 @@ Skills without `metadata.openclaw` are always eligible.
 MindRoom resolves skills for each agent from these locations, in this order:
 
 1. Bundled skills: `skills/` at the repository root (if present)
-2. Plugin-provided skill directories (see [Plugins](plugins.md))
+2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
 3. User skills: `~/.mindroom/skills/`
 4. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
 
@@ -9826,7 +9826,7 @@ For workspace skills created during an agent turn, assume they become available 
 > A malicious plugin has full access to your credentials, Matrix sessions, file system, and network.
 > Only install plugins you trust and have reviewed.
 
-MindRoom plugins extend agents with custom tools, [hooks](hooks.md), and skills.
+MindRoom plugins extend agents with custom tools, [hooks](https://docs.mindroom.chat/hooks/), and skills.
 A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
 Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
@@ -10230,7 +10230,7 @@ def needs_runtime_tools() -> type[Toolkit]:
 
 ## MCP via plugins (advanced)
 
-MindRoom supports native MCP servers in `config.yaml` — see [MCP](mcp.md) for the normal setup path.
+MindRoom supports native MCP servers in `config.yaml` — see [MCP](https://docs.mindroom.chat/mcp/) for the normal setup path.
 This plugin pattern is still useful when you want a custom wrapper around Agno `MCPTools`:
 
 ```python
@@ -10287,7 +10287,7 @@ Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name,
 ## Hooks
 
 Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool call gating, reactions, schedules, and custom events.
-See the [Hooks](hooks.md) page for full documentation including:
+See the [Hooks](https://docs.mindroom.chat/hooks/) page for full documentation including:
 
 - The `@hook` decorator and all parameters
 - The built-in events and their execution modes
@@ -10393,7 +10393,7 @@ plugins:
 
 Hooks let plugins observe, enrich, and transform messages as they flow through MindRoom.
 A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot.
-Hooks integrate with the existing [plugin system](plugins.md) and are configured through `config.yaml`.
+Hooks integrate with the existing [plugin system](https://docs.mindroom.chat/plugins/) and are configured through `config.yaml`.
 
 ## Quick start
 
@@ -10852,7 +10852,7 @@ Failure semantics are mode-aware:
 
 ### No quarantine, no cooldown
 
-A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
+A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 
@@ -11563,7 +11563,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 
 ## API Endpoints
 
-See the [Dashboard API reference](dashboard.md#knowledge) for the full list of knowledge base endpoints (list, upload, delete, reindex, status).
+See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledge) for the full list of knowledge base endpoints (list, upload, delete, reindex, status).
 
 ## Hot Reload
 
@@ -12072,7 +12072,7 @@ These are separate from voice message transcription and allow agents to generate
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
 
-See the [Tools documentation](tools/index.md) for configuration details.
+See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
 
 ## Voice Fallback (No STT Available)
 
@@ -12085,7 +12085,7 @@ When STT is unavailable, disabled, or transcription fails, MindRoom falls back t
 
 This means voice messages still reach responders even without STT.
 Agents or teams with audio-capable models can process the raw audio directly, and tool-using responders can retrieve the file by attachment ID.
-Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](attachments.md).
+Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/).
 
 ## Limitations
 
@@ -12162,7 +12162,7 @@ This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/
 
 Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
 In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls.
-See [Attachments](attachments.md) for details on retention and context scoping.
+See [Attachments](https://docs.mindroom.chat/attachments/) for details on retention and context scoping.
 
 ## Encryption
 
@@ -12240,7 +12240,7 @@ Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
-Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](voice.md#voice-fallback-no-stt-available).
+Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
 
 ## The `attachments` Tool
 
@@ -12330,7 +12330,7 @@ Voice messages that contain commands (e.g., spoken `!schedule`) are recognized a
 
 Commands are subject to the same authorization rules as normal messages.
 The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
-See [Authorization](authorization.md) for details.
+See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
@@ -12401,7 +12401,7 @@ The scheduler validates that mentioned agents and teams are available in the roo
 
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
-See [Scheduling](scheduling.md) for full details.
+See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
 
 ### `!list_schedules`
 
@@ -12492,7 +12492,7 @@ Force-reload every configured plugin from disk. Admin-only.
 !reload-plugins
 ```
 
-Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](plugins.md#live-development-hot-reload) for details.
+Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details.
 This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
 
 **Reply format:**
@@ -12514,7 +12514,7 @@ The agent finalizes the partial text with `**[Response cancelled by user]**`.
 The stop button only works on messages currently being generated.
 Only non-agent users can trigger cancellation — agent reactions are ignored.
 
-See [Streaming — Cancellation](streaming.md#cancellation-and-errors) for details on how cancelled responses are finalized.
+See [Streaming — Cancellation](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for details on how cancelled responses are finalized.
 
 ## Unknown Commands
 
@@ -12683,7 +12683,7 @@ When no requester user ID is available, MindRoom defaults to streaming.
 
 ## In-Progress Marker
 
-While a response is being generated, the message ends with ` ⋯` followed by zero to two dots that cycle as edits arrive.
+While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive.
 This gives users a visual indicator that the agent is still working.
 
 ```
@@ -12730,7 +12730,7 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 
 ## Cancellation and Errors
 
-Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](chat-commands.md#stop-button)).
+Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
 An explicit user stop finalizes the streamed message with:
 
 ```
@@ -12764,7 +12764,7 @@ If an error occurs during streaming, the message is finalized with:
 ## Large Streamed Messages
 
 If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
-See [Matrix Integration — Large Messages](architecture/matrix.md#large-messages) for details.
+See [Matrix Integration — Large Messages](https://docs.mindroom.chat/architecture/matrix/#large-messages) for details.
 
 ## Visibility Toggles
 
@@ -12790,7 +12790,7 @@ Streaming itself still works — only the cancellation affordance is removed.
 
 ## Room Mode
 
-When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](configuration/agents.md#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
+When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/agents/#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
 This is used for bridges and mobile clients that don't support Matrix threads.
 
 ## Replacement Streaming
@@ -13102,7 +13102,7 @@ bot_accounts:
   - "@slack_bot:example.com"
 ```
 
-For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](configuration/router.md) page.
+For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](https://docs.mindroom.chat/configuration/router/) page.
 
 # Matrix Space
 
@@ -13180,7 +13180,8 @@ just start-mindroom-dev
 The API is available at `http://localhost:8765/v1/`.
 
 > [!IMPORTANT]
-> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
+> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`).
+> Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
 
 ### 3. Verify
 
@@ -13293,7 +13294,7 @@ Two different API keys using the same `X-Session-Id` value will not share a sess
 
 If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns.
 This lets a user continue one long coding flow instead of starting a fresh Claude process on every request.
-See the `claude_agent` section in [Agent Orchestration](tools/agent-orchestration.md) for configuration details.
+See the `claude_agent` section in [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 
@@ -13375,8 +13376,8 @@ MindRoom's architecture consists of several key components working together.
 
 ## Components
 
-- [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
-- [Agent Orchestration](orchestration.md) - How agents are managed
+- [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
+- [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 
 ## Key Internal Modules
 
@@ -13496,7 +13497,9 @@ Events are processed in background tasks:
 
 ### Streaming Responses
 
-Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users. See [Streaming Responses](../streaming.md) for the full feature documentation.
+Agents stream responses by progressively editing messages.
+Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 
@@ -13785,29 +13788,29 @@ MindRoom can be deployed in various ways depending on your needs.
 
 | Method | Best For |
 |--------|----------|
-| [Hosted Matrix + local MindRoom](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Simplest setup: run only `uvx mindroom run` locally |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
-| [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
-| [Trusted upstream browser auth](trusted-upstream-auth.md) | Hosted private agents behind an authenticated access layer |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
+| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted private agents behind an authenticated access layer |
 | Direct | Development, simple setups |
 
 ## Bridges
 
 Connect external messaging platforms to Matrix:
 
-- [Bridges overview](bridges/index.md) - available bridges and how they work
-- [Telegram bridge](bridges/telegram.md) - bridge Telegram chats via mautrix-telegram
+- [Bridges overview](https://docs.mindroom.chat/deployment/bridges/) - available bridges and how they work
+- [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/) - bridge Telegram chats via mautrix-telegram
 
 ## Google Services (Gmail/Calendar/Drive/Sheets)
 
 Use these guides if you want users to connect Google accounts in the MindRoom frontend:
 
-- [Google Services OAuth (Admin Setup)](google-services-oauth.md) - one-time setup for shared/team deployments
-- [Google Services OAuth (Individual Setup)](google-services-user-oauth.md) - single-user bring-your-own OAuth app setup
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) - one-time setup for shared/team deployments
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - single-user bring-your-own OAuth app setup
 
-For private personal-agent tools, use the generic [OAuth Framework](../oauth-framework.md) and the Google Drive section in the individual setup guide.
-For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](trusted-upstream-auth.md) so agent-issued OAuth links authenticate as the requester that triggered them.
+For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) and the Google Drive section in the individual setup guide.
+For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) so agent-issued OAuth links authenticate as the requester that triggered them.
 
 ## Quick Start
 
@@ -13824,7 +13827,7 @@ uvx mindroom run
 Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
-See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
+See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
 
 ### Full Stack (recommended)
 
@@ -13868,11 +13871,11 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
-See the [Docker deployment guide](docker.md) for the full single-container setup.
+See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/) for the full single-container setup.
 
 ### Kubernetes
 
-See the [Kubernetes deployment guide](kubernetes.md) for Helm chart configuration.
+See the [Kubernetes deployment guide](https://docs.mindroom.chat/deployment/kubernetes/) for Helm chart configuration.
 
 ## Required Configuration
 
@@ -13890,7 +13893,7 @@ Direct and single-container deployments:
 2. **AI provider keys** - At least one of `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.
 3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
 
-See the [Docker guide](docker.md#environment-variables) for the complete environment variable reference.
+See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
 
 Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
 
@@ -14015,7 +14018,7 @@ MindRoom uses [mautrix](https://docs.mau.fi/bridges/) bridges to connect externa
 
 | Bridge | Platform | Mode | Status |
 |--------|----------|------|--------|
-| [Telegram](telegram.md) | Telegram | Puppet (login as yourself) | Available |
+| [Telegram](https://docs.mindroom.chat/deployment/bridges/telegram/) | Telegram | Puppet (login as yourself) | Available |
 | Slack | Slack | - | Planned |
 | Email | IMAP/SMTP | - | Planned |
 
@@ -14159,7 +14162,8 @@ Once linked:
 
 Repeat for any other Matrix rooms you want accessible from Telegram.
 
-> **Why can't I just invite the bot directly?** The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
+> **Why can't I just invite the bot directly?**
+> The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
 > To use Telegram as your client, there must be a Telegram group for the Telegram app to display.
 > The bridge connects that group to the Matrix room bidirectionally.
 
@@ -14432,7 +14436,7 @@ Changing `client_id` requires submitting the matching new `client_secret`.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.
-Use [Trusted Upstream Browser Auth](trusted-upstream-auth.md) for those deployments.
+Use [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) for those deployments.
 
 ## Connect
 
@@ -14728,7 +14732,7 @@ MindRoom stores data in the `mindroom_data` directory:
 
 When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
 
-See [Sandbox Proxy Isolation](sandbox-proxy.md) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 
 > [!TIP]
 > For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
@@ -14816,7 +14820,8 @@ volumes:
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT]
-> The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume:
+> The `sandbox-workspace` Docker volume is created as root by default.
+> The runner runs as UID 1000, so you must fix ownership after first creating the volume:
 > ```bash
 > docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
 > ```
@@ -14888,7 +14893,7 @@ Untrusted code-execution tools may still share the runner container's process na
 For dedicated Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
 This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
 
-For the full Helm-side deployment guidance, see [Kubernetes Deployment](kubernetes.md).
+For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/).
 
 ### Host machine + Docker sandbox container
 
@@ -14960,7 +14965,7 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 
 When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints through the Kubernetes backend and does not use `MINDROOM_SANDBOX_PROXY_URL`.
 The Helm chart sets the Kubernetes backend environment variables automatically.
-If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
+If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
 
 ### Sandbox runner
 
@@ -15100,7 +15105,7 @@ Credential leases are single-use: once consumed by an `/execute` call, the lease
 MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`.
 
 Per-agent tool config overrides (inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists) are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides.
-See [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration) for the full syntax.
+See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full syntax.
 
 ```yaml
 defaults:
@@ -15377,7 +15382,7 @@ Important behavior and constraints:
 - The one sandbox-control value intentionally allowed through Kubernetes worker extra env is `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, so operators can tune runner subprocess timeouts.
 - Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while basic runtime plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
 - This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
-- For agent-editable per-workspace env (extra PATH entries, package indexes, npm cache dirs, etc.), use the request-time `.mindroom/worker-env.sh` overlay documented in [Sandbox Proxy Isolation](sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh). The overlay is sourced inside the running worker per request, so it does not change the worker Deployment, the startup manifest, the pod-template hash, or any Helm value, and does not require a worker restart when edited.
+- For agent-editable per-workspace env (extra PATH entries, package indexes, npm cache dirs, etc.), use the request-time `.mindroom/worker-env.sh` overlay documented in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh). The overlay is sourced inside the running worker per request, so it does not change the worker Deployment, the startup manifest, the pod-template hash, or any Helm value, and does not require a worker restart when edited.
 - MindRoom-owned workspace identity, cache, and virtualenv env names remain controlled by the worker runtime and cannot be redirected by `.mindroom/worker-env.sh`: `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, and `VIRTUAL_ENV`.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
@@ -15403,7 +15408,7 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 
 The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually.
 Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`.
-See [Sandbox Proxy Isolation](sandbox-proxy.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the execution model, credential leases, and non-Kubernetes deployment modes.
 
 ## Secrets Management
 

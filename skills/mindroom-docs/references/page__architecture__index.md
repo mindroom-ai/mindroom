@@ -35,8 +35,8 @@ MindRoom's architecture consists of several key components working together.
 
 ## Components
 
-- [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
-- [Agent Orchestration](orchestration.md) - How agents are managed
+- [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
+- [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 
 ## Key Internal Modules
 

@@ -61,7 +61,7 @@ This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/
 
 Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
 In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls.
-See [Attachments](attachments.md) for details on retention and context scoping.
+See [Attachments](https://docs.mindroom.chat/attachments/) for details on retention and context scoping.
 
 ## Encryption
 

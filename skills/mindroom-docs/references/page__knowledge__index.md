@@ -342,7 +342,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 
 ## API Endpoints
 
-See the [Dashboard API reference](dashboard.md#knowledge) for the full list of knowledge base endpoints (list, upload, delete, reindex, status).
+See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledge) for the full list of knowledge base endpoints (list, upload, delete, reindex, status).
 
 ## Hot Reload
 

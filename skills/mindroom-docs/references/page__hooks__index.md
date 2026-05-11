@@ -2,7 +2,7 @@
 
 Hooks let plugins observe, enrich, and transform messages as they flow through MindRoom.
 A single `@hook("event")` decorator turns any async function into a typed event handler that runs with per-hook timeouts, per-event fault isolation, and zero risk of crashing the bot.
-Hooks integrate with the existing [plugin system](plugins.md) and are configured through `config.yaml`.
+Hooks integrate with the existing [plugin system](https://docs.mindroom.chat/plugins/) and are configured through `config.yaml`.
 
 ## Quick start
 
@@ -461,7 +461,7 @@ Failure semantics are mode-aware:
 
 ### No quarantine, no cooldown
 
-A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
+A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 

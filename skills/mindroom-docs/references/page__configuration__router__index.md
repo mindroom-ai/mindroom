@@ -102,7 +102,7 @@ When the responder is already clear, normalized audio follows the normal direct 
 By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
-See [Voice Messages](../voice.md) for the detailed dispatch behavior.
+See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 

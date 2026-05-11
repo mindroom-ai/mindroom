@@ -68,7 +68,7 @@ Skills without `metadata.openclaw` are always eligible.
 MindRoom resolves skills for each agent from these locations, in this order:
 
 1. Bundled skills: `skills/` at the repository root (if present)
-2. Plugin-provided skill directories (see [Plugins](plugins.md))
+2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
 3. User skills: `~/.mindroom/skills/`
 4. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
 

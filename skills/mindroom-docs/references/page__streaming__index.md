@@ -71,7 +71,7 @@ When no requester user ID is available, MindRoom defaults to streaming.
 
 ## In-Progress Marker
 
-While a response is being generated, the message ends with ` ⋯` followed by zero to two dots that cycle as edits arrive.
+While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive.
 This gives users a visual indicator that the agent is still working.
 
 ```
@@ -118,7 +118,7 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 
 ## Cancellation and Errors
 
-Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](chat-commands.md#stop-button)).
+Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
 An explicit user stop finalizes the streamed message with:
 
 ```
@@ -152,7 +152,7 @@ If an error occurs during streaming, the message is finalized with:
 ## Large Streamed Messages
 
 If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
-See [Matrix Integration — Large Messages](architecture/matrix.md#large-messages) for details.
+See [Matrix Integration — Large Messages](https://docs.mindroom.chat/architecture/matrix/#large-messages) for details.
 
 ## Visibility Toggles
 
@@ -178,7 +178,7 @@ Streaming itself still works — only the cancellation affordance is removed.
 
 ## Room Mode
 
-When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](configuration/agents.md#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
+When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/agents/#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
 This is used for bridges and mobile clients that don't support Matrix threads.
 
 ## Replacement Streaming

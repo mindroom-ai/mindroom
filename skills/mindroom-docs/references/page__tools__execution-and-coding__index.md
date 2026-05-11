@@ -30,7 +30,7 @@ You can override the effective routed set with `defaults.worker_tools` or `agent
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
 `worker_scope` controls runtime reuse, not filesystem security.
-Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for the deployment model, storage visibility rules, and scope tradeoffs.
+Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the deployment model, storage visibility rules, and scope tradeoffs.
 
 When an agent has a canonical workspace root, MindRoom injects that workspace as `base_dir` for tools that expose a `base_dir` constructor field.
 In normal `config.yaml` authoring, `base_dir` is therefore usually runtime-managed instead of something you set inline.
@@ -559,6 +559,6 @@ sleep(5)
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)

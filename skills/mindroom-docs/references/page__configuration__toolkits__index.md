@@ -3,7 +3,7 @@
 Dynamic toolkits are groups of tools that agents can load and unload at runtime.
 Define toolkit bundles in the top-level `toolkits` section and grant agents access via `allowed_toolkits` and `initial_toolkits`.
 
-See [Dynamic Toolkits](../tools/dynamic-toolkits.md) for the user-facing guide covering how agents interact with toolkits at runtime.
+See [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/) for the user-facing guide covering how agents interact with toolkits at runtime.
 
 ## Top-Level `toolkits` Section
 
@@ -93,7 +93,7 @@ Duplicate entries within one toolkit are rejected.
 
 ### Scope Compatibility
 
-Some integrations are restricted to shared or unscoped execution (see [Worker Routing](agents.md#worker-routing)).
+Some integrations are restricted to shared or unscoped execution (see [Worker Routing](https://docs.mindroom.chat/configuration/agents/#worker-routing)).
 If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit containing a shared-only integration, MindRoom rejects the config at startup.
 
 The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:

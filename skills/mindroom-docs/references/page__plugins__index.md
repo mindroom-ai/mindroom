@@ -5,7 +5,7 @@
 > A malicious plugin has full access to your credentials, Matrix sessions, file system, and network.
 > Only install plugins you trust and have reviewed.
 
-MindRoom plugins extend agents with custom tools, [hooks](hooks.md), and skills.
+MindRoom plugins extend agents with custom tools, [hooks](https://docs.mindroom.chat/hooks/), and skills.
 A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
 Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
@@ -409,7 +409,7 @@ def needs_runtime_tools() -> type[Toolkit]:
 
 ## MCP via plugins (advanced)
 
-MindRoom supports native MCP servers in `config.yaml` — see [MCP](mcp.md) for the normal setup path.
+MindRoom supports native MCP servers in `config.yaml` — see [MCP](https://docs.mindroom.chat/mcp/) for the normal setup path.
 This plugin pattern is still useful when you want a custom wrapper around Agno `MCPTools`:
 
 ```python
@@ -466,7 +466,7 @@ Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name,
 ## Hooks
 
 Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool call gating, reactions, schedules, and custom events.
-See the [Hooks](hooks.md) page for full documentation including:
+See the [Hooks](https://docs.mindroom.chat/hooks/) page for full documentation including:
 
 - The `@hook` decorator and all parameters
 - The built-in events and their execution modes

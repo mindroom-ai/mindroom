@@ -201,4 +201,4 @@ bot_accounts:
   - "@slack_bot:example.com"
 ```
 
-For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](configuration/router.md) page.
+For more details on how `bot_accounts` affects routing behavior, see the [Router configuration](https://docs.mindroom.chat/configuration/router/) page.

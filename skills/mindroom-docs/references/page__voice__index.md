@@ -210,7 +210,7 @@ These are separate from voice message transcription and allow agents to generate
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
 
-See the [Tools documentation](tools/index.md) for configuration details.
+See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
 
 ## Voice Fallback (No STT Available)
 
@@ -223,7 +223,7 @@ When STT is unavailable, disabled, or transcription fails, MindRoom falls back t
 
 This means voice messages still reach responders even without STT.
 Agents or teams with audio-capable models can process the raw audio directly, and tool-using responders can retrieve the file by attachment ID.
-Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](attachments.md).
+Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/).
 
 ## Limitations
 

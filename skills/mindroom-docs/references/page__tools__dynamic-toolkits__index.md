@@ -105,6 +105,6 @@ A typical conversation might look like:
 
 ## See Also
 
-- [Toolkit Configuration](../configuration/toolkits.md) — config reference for the `toolkits` section and per-agent settings
-- [Tools Overview](index.md) — enabling and configuring tools
-- [Built-in Tools](builtin.md) — complete list of available tools
+- [Toolkit Configuration](https://docs.mindroom.chat/configuration/toolkits/) — config reference for the `toolkits` section and per-agent settings
+- [Tools Overview](https://docs.mindroom.chat/tools/) — enabling and configuring tools
+- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/) — complete list of available tools

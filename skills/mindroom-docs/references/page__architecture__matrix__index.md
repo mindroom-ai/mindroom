@@ -82,7 +82,9 @@ Events are processed in background tasks:
 
 ### Streaming Responses
 
-Agents stream responses by progressively editing messages. Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users. See [Streaming Responses](../streaming.md) for the full feature documentation.
+Agents stream responses by progressively editing messages.
+Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 

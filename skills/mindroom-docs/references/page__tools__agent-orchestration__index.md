@@ -215,7 +215,7 @@ manage_team(
 
 - [`config_manager`] is broader and more privileged than [`self_config`] because it can inspect and modify other agents and teams.
 - `manage_team()` creates teams, but it does not expose a separate update operation on this branch.
-- Use [Agent Configuration](../configuration/agents.md) for the full authored schema outside the tool's curated helper surface.
+- Use [Agent Configuration](https://docs.mindroom.chat/configuration/agents/) for the full authored schema outside the tool's curated helper surface.
 
 ## [`self_config`]
 
@@ -317,7 +317,7 @@ agents:
 ### Notes
 
 - [`openclaw_compat`] is a preset name that belongs in `tools:` but does not expose callable runtime methods of its own.
-- Use the dedicated [OpenClaw Workspace Import](../openclaw.md) guide for workspace layout, file memory behavior, and migration details.
+- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) guide for workspace layout, file memory behavior, and migration details.
 - If you only need one or two of the member tools, configure those tools directly instead of using the preset.
 
 ## [`claude_agent`]
@@ -413,11 +413,11 @@ claude_end_session(session_label="bugfix")
 - For Anthropic-compatible gateways, set `anthropic_base_url` to the gateway root without `/v1`, because the Claude client appends its own API path.
 - Some gateways reject Claude beta headers, so `disable_experimental_betas: true` is the compatibility switch for that case.
 - When you use MindRoom's OpenAI-compatible API, keep the same `X-Session-Id` across requests so the same Claude session key is reused.
-- See [OpenAI-Compatible API](../openai-api.md) for request-level session continuity details.
+- See [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) for request-level session continuity details.
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Agent Configuration](../configuration/agents.md)
-- [OpenClaw Workspace Import](../openclaw.md)
-- [OpenAI-Compatible API](../openai-api.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Agent Configuration](https://docs.mindroom.chat/configuration/agents/)
+- [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/)
+- [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/)

@@ -18,7 +18,7 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 `google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
 It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
-Use [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md) to connect Google before enabling `google_calendar`.
+Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) to connect Google before enabling `google_calendar`.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
 Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
@@ -167,12 +167,12 @@ cancel_schedule("a1b2c3d4")
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
-- Use [Scheduling](../scheduling.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
+- Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Scheduling](../scheduling.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
-- [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Scheduling](https://docs.mindroom.chat/scheduling/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
+- [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)

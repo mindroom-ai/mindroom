@@ -48,7 +48,8 @@ just start-mindroom-dev
 The API is available at `http://localhost:8765/v1/`.
 
 > [!IMPORTANT]
-> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
+> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`).
+> Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
 
 ### 3. Verify
 
@@ -161,7 +162,7 @@ Two different API keys using the same `X-Session-Id` value will not share a sess
 
 If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns.
 This lets a user continue one long coding flow instead of starting a fresh Claude process on every request.
-See the `claude_agent` section in [Agent Orchestration](tools/agent-orchestration.md) for configuration details.
+See the `claude_agent` section in [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 

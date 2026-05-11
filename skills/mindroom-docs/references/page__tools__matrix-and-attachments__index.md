@@ -252,7 +252,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 - `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
 - Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
-- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](../attachments.md) guide.
+- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](https://docs.mindroom.chat/attachments/) guide.
 
 ## Related Matrix Runtime Features
 
@@ -263,6 +263,6 @@ The `thread_summary` tool complements that automatic behavior by letting an agen
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Attachments](../attachments.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Attachments](https://docs.mindroom.chat/attachments/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)

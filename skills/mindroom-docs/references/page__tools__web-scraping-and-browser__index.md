@@ -734,5 +734,5 @@ open_page("https://matrix.org/blog/", new_window=True)
 
 ## Related Docs
 
-- [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Tools Overview](https://docs.mindroom.chat/tools/)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)

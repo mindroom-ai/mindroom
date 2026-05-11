@@ -120,7 +120,8 @@ Once linked:
 
 Repeat for any other Matrix rooms you want accessible from Telegram.
 
-> **Why can't I just invite the bot directly?** The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
+> **Why can't I just invite the bot directly?**
+> The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
 > To use Telegram as your client, there must be a Telegram group for the Telegram app to display.
 > The bridge connects that group to the Matrix room bidirectionally.
 

@@ -93,7 +93,7 @@ Protect the dashboard API in non-localhost environments by setting `MINDROOM_API
 **Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 
 For a detailed architecture and credential model, see:
-[Hosted Matrix deployment guide](deployment/hosted-matrix.md).
+[Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
 
 ## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
@@ -250,7 +250,7 @@ MindRoom will:
 
 ## Next Steps
 
-- Learn about [agent configuration](configuration/agents.md)
-- Learn about [OpenClaw workspace import](openclaw.md) if you want file-based memory/context patterns
-- Explore [available tools](tools/index.md)
-- Set up [teams for multi-agent collaboration](configuration/teams.md)
+- Learn about [agent configuration](https://docs.mindroom.chat/configuration/agents/)
+- Learn about [OpenClaw workspace import](https://docs.mindroom.chat/openclaw/) if you want file-based memory/context patterns
+- Explore [available tools](https://docs.mindroom.chat/tools/)
+- Set up [teams for multi-agent collaboration](https://docs.mindroom.chat/configuration/teams/)
