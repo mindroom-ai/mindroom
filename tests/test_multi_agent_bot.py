@@ -2244,7 +2244,7 @@ class TestAgentBot:
         """The orchestrator should scope dedicated workers to the active runtime storage root."""
         reset_runtime_state()
         mock_orchestrator = MagicMock()
-        mock_orchestrator.start = AsyncMock(side_effect=KeyboardInterrupt())
+        mock_orchestrator.start = AsyncMock(side_effect=asyncio.CancelledError())
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
         storage_path_calls: list[Path | None] = []
@@ -2256,7 +2256,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
                 "mindroom.orchestrator.set_primary_worker_storage_path",
@@ -2278,7 +2278,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator") as mock_orchestrator_cls,
+            patch("mindroom.orchestrator._MultiAgentOrchestrator") as mock_orchestrator_cls,
             patch(
                 "mindroom.orchestrator.set_primary_worker_storage_path",
                 side_effect=lambda storage_path: worker_storage_path_calls.append(storage_path),

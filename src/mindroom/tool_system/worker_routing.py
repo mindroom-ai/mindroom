@@ -223,6 +223,11 @@ def _normalize_worker_key_part(value: str) -> str:
     return normalized or "default"
 
 
+def normalize_worker_key_part(value: str) -> str:
+    """Return one normalized worker-key component."""
+    return _normalize_worker_key_part(value)
+
+
 def _normalize_worker_requester_part(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", value.strip()).strip("_")
     return normalized or "default"
@@ -554,6 +559,11 @@ def _worker_key_agent_name(worker_key: str) -> str | None:
     if min_parts is None or len(parts) < min_parts:
         return None
     return parts[3] if scope in {"shared", "unscoped"} else parts[-1]
+
+
+def worker_key_agent_name(worker_key: str) -> str | None:
+    """Return the encoded agent name for one resolved worker key, when present."""
+    return _worker_key_agent_name(worker_key)
 
 
 def _resolve_execution_identity_for_worker_scope(

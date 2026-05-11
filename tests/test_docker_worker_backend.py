@@ -23,7 +23,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
 )
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_unscoped_worker_key,

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import mindroom.constants as constants_mod
+import mindroom.credentials as credentials_module
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
@@ -221,7 +222,7 @@ class TestCredentialsManager:
         encryption_key = _test_encryption_key()
         captured_logger = CapturingLogger()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
+        monkeypatch.setattr(credentials_module, "logger", captured_logger)
         manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         creds_path.write_text('{"token":"plaintext-token"}', encoding="utf-8")
@@ -269,7 +270,7 @@ class TestCredentialsManager:
 
         captured_logger = CapturingLogger()
         monkeypatch.delenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY")
-        monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
+        monkeypatch.setattr(credentials_module, "logger", captured_logger)
         plaintext_manager = CredentialsManager(tmp_path / "credentials")
 
         assert plaintext_manager.load_credentials("oauth_service") is None
@@ -358,7 +359,7 @@ class TestCredentialsManager:
         """Encrypted scoped credentials should harden pre-existing credential-owned parents."""
         encryption_key = _test_encryption_key()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        requester_dir = mindroom.credentials._scoped_credentials_dir_part("@user:example.test")
+        requester_dir = credentials_module._scoped_credentials_dir_part("@user:example.test")
         scoped_root = tmp_path / "private_oauth"
         scoped_requester_path = scoped_root / requester_dir
         scoped_requester_path.mkdir(parents=True)
@@ -406,7 +407,7 @@ class TestCredentialsManager:
             },
         )
 
-        isolated_runtime_paths = constants_mod.isolated_runtime_paths(runtime_paths)
+        isolated_runtime_paths = constants_mod._isolated_runtime_paths(runtime_paths)
 
         loaded_credentials = (
             get_runtime_credentials_manager(isolated_runtime_paths)

@@ -18,6 +18,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
 )
 from mindroom.credentials import runtime_credentials_manager_key
+from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
@@ -29,15 +30,29 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
+__all__ = [
+    "DEFAULT_WORKER_PORT",
+    "DOCKER_RESERVED_EXTRA_ENV_NAMES",
+    "DockerWorkerBackendConfig",
+    "docker_backend_config_signature",
+    "docker_workers_root",
+    "normalize_docker_name_prefix",
+    "resolve_docker_storage_path",
+    "validate_docker_endpoint_host",
+    "validate_docker_extra_labels",
+    "validate_docker_mount_layout",
+]
+
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
-_DEFAULT_WORKER_PORT = 8766
+DEFAULT_WORKER_PORT = 8766
+_DEFAULT_WORKER_PORT = DEFAULT_WORKER_PORT
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_PUBLISH_HOST = "127.0.0.1"
 
-_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
+_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _IMAGE_ENV = "MINDROOM_DOCKER_WORKER_IMAGE"
 _PORT_ENV = "MINDROOM_DOCKER_WORKER_PORT"
 _STORAGE_MOUNT_PATH_ENV = "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH"
@@ -51,12 +66,13 @@ _ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
 _USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
-_DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
+DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     {
         "MINDROOM_RUNTIME_PATHS_JSON",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
+        SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
+_DOCKER_RESERVED_EXTRA_ENV_NAMES = DOCKER_RESERVED_EXTRA_ENV_NAMES
 _DOCKER_RESERVED_LABEL_NAMES = frozenset(
     {
         "mindroom.ai/component",
@@ -259,6 +275,9 @@ class _DockerWorkerBackendConfig:
     @classmethod
     def from_env(cls) -> _DockerWorkerBackendConfig:
         return cls.from_runtime(resolve_primary_runtime_paths(process_env=dict(os.environ)))
+
+
+DockerWorkerBackendConfig = _DockerWorkerBackendConfig
 
 
 def docker_backend_config_signature(

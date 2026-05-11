@@ -158,7 +158,11 @@ def request_execution_env(
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
         return {key: value for key, value in execution_env.items() if key not in protected_env_names}
     if tool_name == "shell":
-        source_env = execution_env or runtime_paths.process_env
+        source_env = (
+            runtime_paths.process_env
+            if runner_uses_dedicated_worker(runtime_paths)
+            else {**os.environ, **runtime_paths.process_env}
+        )
         return dict(
             constants.sandbox_shell_execution_runtime_env_values(
                 runtime_paths,
@@ -208,6 +212,17 @@ def tool_runtime_paths_with_request_env(
         if include_base_execution_env
         else {}
     )
+    if protected_env_names:
+        process_env.update(
+            {key: runtime_paths.process_env[key] for key in protected_env_names if key in runtime_paths.process_env},
+        )
+        env_file_values.update(
+            {
+                key: runtime_paths.env_file_values[key]
+                for key in protected_env_names
+                if key in runtime_paths.env_file_values
+            },
+        )
     env_file_values.update(overlay_env)
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
@@ -262,7 +277,7 @@ def generic_subprocess_env() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             env[key] = value
-    python_path_parts = [str(project_src_path())]
+    python_path_parts = [str(_project_src_path())]
     existing_python_path = os.environ.get("PYTHONPATH", "")
     if existing_python_path:
         python_path_parts.append(existing_python_path)

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
@@ -42,6 +43,28 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesWorkerBackendConfig
+
+__all__ = [
+    "ANNOTATION_CREATED_AT",
+    "ANNOTATION_FAILURE_COUNT",
+    "ANNOTATION_FAILURE_REASON",
+    "ANNOTATION_LAST_STARTED_AT",
+    "ANNOTATION_LAST_USED_AT",
+    "ANNOTATION_STARTUP_COUNT",
+    "ANNOTATION_STATE_SUBPATH",
+    "ANNOTATION_WORKER_KEY",
+    "ANNOTATION_WORKER_STATUS",
+    "DeploymentApplyResult",
+    "KubernetesDeployment",
+    "KubernetesResourceManager",
+    "lifecycle_state_from_annotations",
+    "metadata_annotations",
+    "parse_annotation_float",
+    "parse_annotation_int",
+    "service_host",
+    "worker_auth_token",
+    "worker_id_for_key",
+]
 
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _READY_POLL_INTERVAL_SECONDS = 1.0
@@ -313,7 +336,7 @@ def _template_hash(template: dict[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _runtime_namespace(*, config: _KubernetesWorkerBackendConfig, storage_root: Path) -> str:
+def _runtime_namespace(*, config: KubernetesWorkerBackendConfig, storage_root: Path) -> str:
     payload = json.dumps(
         {
             "namespace": config.namespace,
@@ -487,7 +510,6 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return DeploymentApplyResult(recreated=False)
         return DeploymentApplyResult(recreated=False)
 
     def patch_deployment(
@@ -707,7 +729,11 @@ class KubernetesResourceManager:
 
     def _auth_secret_manifest(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
         worker_token = self._worker_auth_token(worker_key)
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        worker_labels = _labels(
+            extra_labels=self.config.extra_labels,
+            runtime_namespace=self.runtime_namespace,
+            worker_id=worker_id,
+        )
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -730,7 +756,11 @@ class KubernetesResourceManager:
 
     def _auth_secret_patch(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
         worker_token = self._worker_auth_token(worker_key)
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        worker_labels = _labels(
+            extra_labels=self.config.extra_labels,
+            runtime_namespace=self.runtime_namespace,
+            worker_id=worker_id,
+        )
         metadata: dict[str, object] = {"labels": worker_labels}
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
@@ -1009,6 +1039,10 @@ class KubernetesResourceManager:
         local_dedicated_root: Path,
     ) -> RuntimePaths:
         config_path = Path(self.config.config_path)
+        extra_env = worker_extra_env(self.config.extra_env)
+        extra_env[KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]] = (
+            self.config.storage_subpath_prefix
+        )
         return build_dedicated_worker_runtime_paths(
             runtime_paths=self.runtime_paths,
             backend_name="Kubernetes",
@@ -1018,7 +1052,7 @@ class KubernetesResourceManager:
             local_dedicated_root=local_dedicated_root,
             worker_port=self.config.worker_port,
             shared_storage_root=self.config.storage_mount_path,
-            extra_env=self.config.extra_env,
+            extra_env=extra_env,
         )
 
     def _volume_mounts(

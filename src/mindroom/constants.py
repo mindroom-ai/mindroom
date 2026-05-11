@@ -54,7 +54,7 @@ WORKER_RUNTIME_ENV_NAMES = frozenset(
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_ID",
         "MINDROOM_LOCAL_CLIENT_SECRET",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
+        runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
 WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
@@ -610,7 +610,7 @@ def execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[st
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+def _isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
     process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     return RuntimePaths(
@@ -652,13 +652,17 @@ def runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | No
 
 
 def sandbox_shell_execution_runtime_env_values(
-    _runtime_paths: RuntimePaths,
+    runtime_paths: RuntimePaths,
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied shell execution."""
     merged_env = dict(_sandbox_shell_system_env_values(process_env=process_env))
+    for name in ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SERVICE_ACCOUNT_FILE", "OPENAI_API_KEY_FILE"):
+        source_path = runtime_env_source_path(runtime_paths, name)
+        if source_path is not None:
+            merged_env[name] = str(source_path.resolve())
     merged_env.update(
         shell_extra_env_values(
             extra_env_passthrough=extra_env_passthrough,

@@ -465,7 +465,7 @@ class TestCredentialsSync:
         )
 
         public_runtime = constants_mod._serialize_public_runtime_paths(runtime_paths)
-        isolated_runtime = constants_mod.isolated_runtime_paths(runtime_paths)
+        isolated_runtime = constants_mod._isolated_runtime_paths(runtime_paths)
         public_and_execution_envs = [
             public_runtime["process_env"],
             public_runtime["env_file_values"],

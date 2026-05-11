@@ -35,7 +35,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     RuntimePaths,
-    isolated_runtime_paths,
+    _isolated_runtime_paths,
     resolve_runtime_paths,
     sandbox_shell_execution_runtime_env_values,
     shell_execution_runtime_env_values,
@@ -1390,7 +1390,7 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
             captured["project"] = project
             captured["credentials"] = credentials
 
-    monkeypatch.setitem(_TOOL_REGISTRY, "google_bigquery", lambda: _FakeGoogleBigQueryTools)
+    monkeypatch.setitem(TOOL_REGISTRY, "google_bigquery", lambda: _FakeGoogleBigQueryTools)
 
     tool = get_tool_by_name("google_bigquery", runtime_paths, worker_target=None)
 
@@ -1733,7 +1733,7 @@ def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
         },
     )
 
-    worker_paths = isolated_runtime_paths(runtime_paths)
+    worker_paths = _isolated_runtime_paths(runtime_paths)
     shell_env = sandbox_shell_execution_runtime_env_values(
         worker_paths,
         extra_env_passthrough="OPENAI_API_KEY",
@@ -1756,7 +1756,7 @@ def test_worker_env_includes_extra_env_passthrough(tmp_path: Path) -> None:
         },
     )
 
-    worker_paths = isolated_runtime_paths(runtime_paths)
+    worker_paths = _isolated_runtime_paths(runtime_paths)
     shell_env = sandbox_shell_execution_runtime_env_values(
         worker_paths,
         extra_env_passthrough="MY_VAR",
@@ -4566,7 +4566,11 @@ def test_worker_routed_oauth_connection_result_survives_proxy_boundary(
     assert entrypoint is not None
 
     with (
-        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch.object(
+            sandbox_proxy_module,
+            "lease_primary_worker_manager",
+            lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+        ),
         patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _OAuthResultClient),
     ):
         result = entrypoint("missing.txt")

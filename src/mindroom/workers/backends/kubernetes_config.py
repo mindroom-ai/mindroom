@@ -22,6 +22,13 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
+__all__ = [
+    "KubernetesWorkerBackendConfig",
+    "credentials_encryption_key_hash",
+    "is_kubernetes_worker_backend_config_env_name",
+    "kubernetes_backend_config_signature",
+]
+
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 _DEFAULT_WORKER_PORT = 8766

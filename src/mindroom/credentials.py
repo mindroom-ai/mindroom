@@ -39,6 +39,22 @@ _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
 logger = get_logger(__name__)
 
+__all__ = [
+    "CredentialsManager",
+    "credentials_manager_key",
+    "delete_scoped_credentials",
+    "get_credentials_manager",
+    "get_runtime_credentials_manager",
+    "get_runtime_shared_credentials_manager",
+    "list_worker_grantable_shared_services",
+    "load_scoped_credentials",
+    "load_worker_grantable_shared_credentials",
+    "runtime_credentials_manager_key",
+    "save_scoped_credentials",
+    "sync_shared_credentials_to_worker",
+    "validate_service_name",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class _CredentialsManagerKey:
@@ -460,7 +476,7 @@ def _credentials_manager_key(
 
 def credentials_manager_key(*, storage_root: Path) -> _CredentialsManagerKey:
     """Return the cache key for one shared credentials manager root."""
-    base_path = credentials_base_path(storage_root)
+    base_path = _credentials_base_path(storage_root)
     return _credentials_manager_key(
         base_path=base_path,
         shared_base_path=_default_shared_credentials_base_path(base_path),
@@ -470,7 +486,7 @@ def credentials_manager_key(*, storage_root: Path) -> _CredentialsManagerKey:
 
 def runtime_credentials_manager_key(runtime_paths: RuntimePaths) -> _CredentialsManagerKey:
     """Return the cache key for one explicit runtime credential context."""
-    base_path = credentials_base_path(runtime_paths.storage_root)
+    base_path = _credentials_base_path(runtime_paths.storage_root)
     return _credentials_manager_key(
         base_path=base_path,
         shared_base_path=_runtime_shared_credentials_base_path(runtime_paths, base_path),

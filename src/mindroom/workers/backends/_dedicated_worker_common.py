@@ -16,7 +16,7 @@ from mindroom.constants import (
     runtime_env_source_path,
     serialize_public_runtime_paths,
 )
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
@@ -31,17 +31,37 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerHandle, WorkerStatus
 
+__all__ = [
+    "DedicatedWorkerLifecycleState",
+    "ScopedVisibleStateRoot",
+    "build_backend_config_signature",
+    "build_dedicated_worker_runtime_paths",
+    "dedicated_worker_lifecycle_from_handle",
+    "initial_dedicated_worker_lifecycle_state",
+    "mark_dedicated_worker_failed",
+    "mark_dedicated_worker_idle",
+    "mark_dedicated_worker_ready",
+    "plan_scoped_visible_state_roots",
+    "prepare_dedicated_worker_ensure_lifecycle",
+    "resolved_agent_policies_from_runtime_config",
+    "stable_signature_json",
+    "touch_dedicated_worker_lifecycle",
+    "validate_dedicated_worker_extra_env",
+    "validate_private_user_agent_visibility",
+    "validate_unique_worker_visible_paths",
+]
+
 
 _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
     {
         "HOME",
         "MINDROOM_CONFIG_PATH",
-        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
-        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
-        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE",
-        "MINDROOM_SANDBOX_RUNNER_MODE",
-        "MINDROOM_SANDBOX_RUNNER_PORT",
-        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"],
         "MINDROOM_STORAGE_PATH",
         SHARED_CREDENTIALS_PATH_ENV,
     },
@@ -351,15 +371,15 @@ def build_dedicated_worker_runtime_paths(
 
     process_env.update(
         {
-            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
-            "MINDROOM_SANDBOX_RUNNER_PORT": str(worker_port),
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
+            SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]: str(worker_port),
             "MINDROOM_CONFIG_PATH": str(config_path),
             "MINDROOM_STORAGE_PATH": str(dedicated_root),
-            "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": shared_storage_root,
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: shared_storage_root,
             SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(dedicated_root),
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
         },
     )
     process_env.update(extra_env)
@@ -491,8 +511,11 @@ def _rewrite_worker_file_env_values(
     process_env: dict[str, str],
     env_file_values: dict[str, str],
 ) -> None:
-    for env_name in sorted({*process_env, *env_file_values}):
+    blocked_file_env_names = _blocked_worker_file_env_names(runtime_paths)
+    for env_name in sorted({*process_env, *env_file_values, *runtime_paths.env_file_values}):
         if not env_name.endswith("_FILE"):
+            continue
+        if env_name in blocked_file_env_names:
             continue
         process_env.pop(env_name, None)
         env_file_values.pop(env_name, None)

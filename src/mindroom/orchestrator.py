@@ -2099,7 +2099,7 @@ async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
         await task
 
 
-async def main(
+async def main(  # noqa: PLR0915
     log_level: str,
     runtime_paths: RuntimePaths,
     *,

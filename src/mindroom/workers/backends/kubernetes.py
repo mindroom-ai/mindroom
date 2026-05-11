@@ -367,7 +367,7 @@ class KubernetesWorkerBackend:
             for current_sink in self._progress_sinks.get(progress.worker_key, ()):
                 current_sink(progress)
 
-    def ensure_worker(  # noqa: C901, PLR0915
+    def ensure_worker(  # noqa: PLR0915
         self,
         spec: WorkerSpec,
         *,

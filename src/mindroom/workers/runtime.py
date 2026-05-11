@@ -26,6 +26,19 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
 
+__all__ = [
+    "PrimaryWorkerManagerLease",
+    "clear_worker_validation_snapshot_cache",
+    "get_primary_worker_manager",
+    "lease_primary_worker_manager",
+    "primary_worker_backend_available",
+    "primary_worker_backend_is_dedicated",
+    "primary_worker_backend_name",
+    "serialized_kubernetes_worker_validation_snapshot",
+    "set_primary_worker_storage_path",
+    "shutdown_primary_worker_manager",
+]
+
 _PRIMARY_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
@@ -60,7 +73,7 @@ class PrimaryWorkerManagerLease:
         """Enter the lease context and return the borrowed manager."""
         return self.manager
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
         """Release the borrowed manager when the context exits."""
         self.release()
         return False
@@ -378,17 +391,14 @@ def _resolve_primary_worker_manager_entry(
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    built_manager: WorkerManager | None = None
+    with _PRIMARY_WORKER_MANAGER_CONDITION:
+        active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
+        if active_entry is not None and active_entry.config_signature == config_signature:
+            if acquire_lease:
+                active_entry.active_leases += 1
+            return active_entry, [], None
 
-    while True:
-        with _PRIMARY_WORKER_MANAGER_CONDITION:
-            active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
-            if active_entry is not None and active_entry.config_signature == config_signature:
-                if acquire_lease:
-                    active_entry.active_leases += 1
-                return active_entry, [], None
-
-        if built_manager is None:
+        try:
             built_manager = _build_primary_worker_manager(
                 runtime_paths,
                 proxy_url=proxy_url,
@@ -397,30 +407,23 @@ def _resolve_primary_worker_manager_entry(
                 kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
                 worker_grantable_credentials=worker_grantable_credentials,
             )
-
-        with _PRIMARY_WORKER_MANAGER_CONDITION:
-            active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
-            if active_entry is not None and active_entry.config_signature == config_signature:
-                if acquire_lease:
-                    active_entry.active_leases += 1
-                discarded_manager = built_manager
-                built_manager = None
-                return active_entry, [], discarded_manager
-
-            previous_entry = _PRIMARY_WORKER_MANAGER_ENTRY
-            new_entry = _WorkerManagerEntry(
-                manager=built_manager,
-                config_signature=config_signature,
-                active_leases=1 if acquire_lease else 0,
-            )
-            built_manager = None
-            _PRIMARY_WORKER_MANAGER_ENTRY = new_entry
-            if previous_entry is not None:
-                previous_entry.retired = True
-                _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(previous_entry)
-            managers_to_shutdown = _drain_retired_entries_locked()
+        except Exception:
             _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-            return new_entry, managers_to_shutdown, None
+            raise
+
+        previous_entry = _PRIMARY_WORKER_MANAGER_ENTRY
+        new_entry = _WorkerManagerEntry(
+            manager=built_manager,
+            config_signature=config_signature,
+            active_leases=1 if acquire_lease else 0,
+        )
+        _PRIMARY_WORKER_MANAGER_ENTRY = new_entry
+        if previous_entry is not None:
+            previous_entry.retired = True
+            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(previous_entry)
+        managers_to_shutdown = _drain_retired_entries_locked()
+        _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
+        return new_entry, managers_to_shutdown, None
 
 
 def _release_primary_worker_manager_entry(entry: _WorkerManagerEntry) -> None:

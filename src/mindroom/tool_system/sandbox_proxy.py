@@ -395,7 +395,7 @@ def _create_credential_lease(
     return lease_data["lease_id"]
 
 
-def _build_worker_routing_payload(
+def _build_worker_routing_payload(  # noqa: C901, PLR0912
     *,
     runtime_paths: RuntimePaths,
     tool_name: str,

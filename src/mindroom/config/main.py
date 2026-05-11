@@ -56,9 +56,9 @@ from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    config_relative_path,
     matrix_state_file,
     resolve_config_relative_path,
-    config_relative_path,
     runtime_matrix_homeserver,
 )
 from mindroom.git_urls import credential_free_repo_url
