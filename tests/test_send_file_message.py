@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -21,9 +21,6 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
 )
 from mindroom.matrix.voice_message import VoiceMessagePayload
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -671,6 +668,35 @@ class TestSendFileMessage:
             await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
 
         assert not prepared.exists()
+
+    @pytest.mark.asyncio
+    async def test_send_file_message_voice_cleanup_failure_does_not_override_success(self, tmp_path: Path) -> None:
+        """Best-effort voice tempfile cleanup should not hide a delivered event."""
+        client = _mock_client(encrypted=False)
+        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        original = tmp_path / "reply.wav"
+        original.write_bytes(b"wav")
+        prepared = tmp_path / "prepared.ogg"
+        prepared.write_bytes(b"opus")
+        payload = VoiceMessagePayload(
+            source_path=prepared,
+            cleanup=True,
+            duration_ms=1000,
+            waveform=[512] * 30,
+            mimetype="audio/ogg",
+        )
+
+        with (
+            patch("mindroom.matrix.client_delivery.build_voice_message_payload", new=AsyncMock(return_value=payload)),
+            patch(
+                "mindroom.matrix.client_delivery.send_message_result",
+                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$voice", content_sent={})),
+            ),
+            patch.object(Path, "unlink", side_effect=OSError("cleanup failed")),
+        ):
+            event_id = await send_file_message(client, "!room:localhost", original, config=Config(), as_voice=True)
+
+        assert event_id == "$voice"
 
     @pytest.mark.asyncio
     async def test_send_file_message_voice_in_encrypted_room(self, tmp_path: Path) -> None:

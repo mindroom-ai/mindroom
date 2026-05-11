@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import wave
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class _FakeProcess:
-    def __init__(self, *, returncode: int, stdout: bytes = b"") -> None:
+    def __init__(self, *, returncode: int | None, stdout: bytes = b"") -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.killed = False
@@ -34,7 +35,13 @@ class _FakeProcess:
 
     async def wait(self) -> int:
         self.waited = True
+        self.returncode = -9
         return self.returncode
+
+
+class _CancellingFakeProcess(_FakeProcess):
+    async def communicate(self) -> tuple[bytes, bytes]:
+        raise asyncio.CancelledError
 
 
 def _probe_payload(
@@ -84,7 +91,7 @@ async def test_build_voice_message_payload_returns_none_on_ffmpeg_timeout(tmp_pa
     audio = tmp_path / "audio.wav"
     audio.write_bytes(b"fake")
     probe = _FakeProcess(returncode=0, stdout=_probe_payload())
-    ffmpeg = _FakeProcess(returncode=0)
+    ffmpeg = _FakeProcess(returncode=None)
 
     async def fake_create_subprocess_exec(*args: str, **_kwargs: object) -> _FakeProcess:
         return probe if args[0] == "ffprobe" else ffmpeg
@@ -115,6 +122,24 @@ async def test_build_voice_message_payload_returns_none_on_ffmpeg_timeout(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_run_media_command_kills_process_on_cancellation() -> None:
+    """Cancelled media commands should not leave the child process running."""
+    proc = _CancellingFakeProcess(returncode=None)
+
+    async def fake_create_subprocess_exec(*_args: str, **_kwargs: object) -> _FakeProcess:
+        return proc
+
+    with (
+        patch("mindroom.matrix.voice_message.asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await voice_message._run_media_command("ffmpeg")
+
+    assert proc.killed is True
+    assert proc.waited is True
+
+
+@pytest.mark.asyncio
 async def test_build_voice_message_payload_returns_none_on_zero_size_output(tmp_path: Path) -> None:
     """A zero-byte ffmpeg output should be rejected."""
     audio = tmp_path / "audio.wav"
@@ -131,6 +156,37 @@ async def test_build_voice_message_payload_returns_none_on_zero_size_output(tmp_
         patch("mindroom.matrix.voice_message.asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec),
     ):
         assert await build_voice_message_payload(audio) is None
+
+
+@pytest.mark.asyncio
+async def test_transcode_voice_payload_removes_tempfile_on_cancellation(tmp_path: Path) -> None:
+    """Cancelled transcoding should remove the incomplete output file."""
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"fake")
+    output = tmp_path / "prepared.ogg"
+
+    class FakeNamedTemporaryFile:
+        name = str(output)
+
+        def __enter__(self) -> FakeNamedTemporaryFile:
+            output.write_bytes(b"partial")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    async def fake_run_media_command(*_args: str) -> tuple[int, bytes, bytes] | None:
+        raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.matrix.voice_message._FFMPEG", "ffmpeg"),
+        patch("mindroom.matrix.voice_message.tempfile.NamedTemporaryFile", return_value=FakeNamedTemporaryFile()),
+        patch("mindroom.matrix.voice_message._run_media_command", side_effect=fake_run_media_command),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await voice_message._transcode_voice_payload(audio, duration_ms=1000, waveform=[512] * 30)
+
+    assert not output.exists()
 
 
 @pytest.mark.asyncio

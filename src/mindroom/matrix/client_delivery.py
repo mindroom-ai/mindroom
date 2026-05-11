@@ -79,6 +79,17 @@ def _log_matrix_delivery_exception(
     )
 
 
+def _cleanup_voice_payload_source(voice_payload: VoiceMessagePayload) -> None:
+    try:
+        voice_payload.source_path.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning(
+            "matrix_voice_tempfile_cleanup_failed",
+            path=str(voice_payload.source_path),
+            exception_type=error.__class__.__name__,
+        )
+
+
 async def _send_prepared_room_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -498,7 +509,7 @@ async def send_file_message(
     finally:
         voice_payload = prepared.voice_payload if prepared is not None else None
         if voice_payload is not None and voice_payload.cleanup:
-            voice_payload.source_path.unlink(missing_ok=True)
+            _cleanup_voice_payload_source(voice_payload)
 
 
 def build_threaded_edit_content(

@@ -31,6 +31,23 @@ class VoiceMessagePayload:
     mimetype: str
 
 
+async def _kill_media_process(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    await proc.wait()
+
+
+def _unlink_tempfile(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 async def _run_media_command(*args: str) -> tuple[int, bytes, bytes] | None:
     try:
         proc = await asyncio.create_subprocess_exec(*args, stdout=PIPE, stderr=PIPE)
@@ -39,9 +56,11 @@ async def _run_media_command(*args: str) -> tuple[int, bytes, bytes] | None:
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_VOICE_TIMEOUT_SECONDS)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _kill_media_process(proc)
         return None
+    except asyncio.CancelledError:
+        await _kill_media_process(proc)
+        raise
     if proc.returncode is None:
         return None
     return proc.returncode, stdout, stderr
@@ -116,39 +135,44 @@ async def _transcode_voice_payload(
     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tempfile_handle:
         output_path = Path(tempfile_handle.name)
 
-    result = await _run_media_command(
-        _FFMPEG,
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-i",
-        str(input_path),
-        "-vn",
-        "-ac",
-        "1",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "32k",
-        "-application",
-        "voip",
-        "-map_metadata",
-        "-1",
-        str(output_path),
-    )
-    valid_output = result is not None and result[0] == 0 and output_path.exists() and output_path.stat().st_size > 0
-    if not valid_output:
-        output_path.unlink(missing_ok=True)
-        return None
-    return VoiceMessagePayload(
-        source_path=output_path,
-        cleanup=True,
-        duration_ms=duration_ms,
-        waveform=waveform,
-        mimetype=_VOICE_MIMETYPE,
-    )
+    keep_output = False
+    try:
+        result = await _run_media_command(
+            _FFMPEG,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            "-application",
+            "voip",
+            "-map_metadata",
+            "-1",
+            str(output_path),
+        )
+        valid_output = result is not None and result[0] == 0 and output_path.exists() and output_path.stat().st_size > 0
+        if not valid_output:
+            return None
+        keep_output = True
+        return VoiceMessagePayload(
+            source_path=output_path,
+            cleanup=True,
+            duration_ms=duration_ms,
+            waveform=waveform,
+            mimetype=_VOICE_MIMETYPE,
+        )
+    finally:
+        if not keep_output:
+            _unlink_tempfile(output_path)
 
 
 async def build_voice_message_payload(audio_path: Path) -> VoiceMessagePayload | None:
