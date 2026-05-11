@@ -97,8 +97,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
-    _MatrixSyncCancellationTimeoutError,
     _matrix_homeserver_startup_timeout_seconds_from_env,
+    _MatrixSyncCancellationTimeoutError,
     _SyncIteration,
     run_with_retry,
     wait_for_matrix_homeserver,

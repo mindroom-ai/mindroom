@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import time
-import traceback
 import weakref
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -212,9 +212,11 @@ class _MatrixSyncCancellationTimeoutError(RuntimeError):
     """Raised when a Matrix sync task refuses to finish after cancellation."""
 
 
-def _format_task_stack(task: asyncio.Task[Any]) -> tuple[str, ...]:
+def _format_task_stack(task: asyncio.Task[Any]) -> str:
     """Return a compact formatted stack for one asyncio task."""
-    return tuple("".join(traceback.format_stack(frame, limit=8)).rstrip() for frame in task.get_stack(limit=8))
+    buffer = io.StringIO()
+    task.print_stack(file=buffer, limit=8)
+    return buffer.getvalue().rstrip()
 
 
 async def _cancel_sync_task_with_timeout(
@@ -237,6 +239,7 @@ async def _cancel_sync_task_with_timeout(
         cancel_timeout_seconds=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS,
         sync_task_name=sync_task.get_name(),
         sync_task_done=sync_task.done(),
+        sync_task_cancelling=sync_task.cancelling(),
         sync_task_cancelled=sync_task.cancelled(),
         sync_task_stack=_format_task_stack(sync_task),
     )
@@ -625,8 +628,12 @@ async def _handle_sync_iteration_cleanup_timeout(
     iteration: _SyncIteration,
 ) -> None:
     """Hold the supervisor open when iteration cleanup leaves a sync task running."""
-    logger.exception("sync_loop_cleanup_cancellation_timed_out", agent=bot.agent_name)
+    logger.error("sync_loop_cleanup_cancellation_timed_out", agent=bot.agent_name)
     if iteration.sync_task is None:
+        return
+    supervisor_task = asyncio.current_task()
+    if supervisor_task is not None and supervisor_task.cancelling():
+        _UNRESPONSIVE_MATRIX_SYNC_TASKS[supervisor_task] = iteration.sync_task
         return
     await _hold_supervisor_until_sync_task_finishes(bot, iteration.sync_task)
 

@@ -293,6 +293,7 @@ async def test_watchdog_times_out_sync_restart_cancellation(
     assert timeout_log["agent_name"] == "wedged_agent"
     assert timeout_log["sync_task_name"] == "matrix_sync_wedged_agent"
     assert timeout_log["sync_task_done"] is False
+    assert timeout_log["sync_task_cancelling"] > 0
     assert timeout_log["sync_task_stack"]
 
     release_sync_task.set()
