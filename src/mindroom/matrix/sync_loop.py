@@ -4,35 +4,29 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
+from mindroom.matrix.client_session import PermanentMatrixStartupError
+
 if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
 
-_SLIDING_SYNC_REQUIRED_STATE: list[list[str]] = [
-    ["m.room.create", ""],
-    ["m.room.name", ""],
-    ["m.room.topic", ""],
-    ["m.room.avatar", ""],
-    ["m.room.encryption", ""],
-    ["m.room.member", "$LAZY"],
-]
+_SLIDING_SYNC_REQUIRED_STATE: tuple[tuple[str, str], ...] = (
+    ("m.room.create", ""),
+    ("m.room.name", ""),
+    ("m.room.topic", ""),
+    ("m.room.avatar", ""),
+    ("m.room.encryption", ""),
+    ("m.room.member", "$LAZY"),
+)
 _SLIDING_SYNC_LIST_ROOM_COUNT = 100
 
 
 @runtime_checkable
-class SlidingSyncClient(Protocol):
+class _SlidingSyncClient(Protocol):
     """Client API provided by mindroom-nio for MSC4186 sync loops."""
 
-    async def sliding_sync_forever(
-        self,
-        *,
-        timeout: int,  # noqa: ASYNC109 - forwarded to matrix-nio for Matrix long-polling.
-        conn_id: str,
-        lists: dict[str, object],
-        room_subscriptions: dict[str, object],
-        extensions: dict[str, object],
-    ) -> None:
+    async def sliding_sync_forever(self, **kwargs: object) -> None:
         """Run a Simplified Sliding Sync loop."""
         ...
 
@@ -41,11 +35,11 @@ def _sliding_room_config(timeline_limit: int) -> dict[str, object]:
     """Return the shared room request config for Simplified Sliding Sync."""
     return {
         "timeline_limit": timeline_limit,
-        "required_state": _SLIDING_SYNC_REQUIRED_STATE,
+        "required_state": [list(entry) for entry in _SLIDING_SYNC_REQUIRED_STATE],
     }
 
 
-def sliding_sync_lists(timeline_limit: int) -> dict[str, object]:
+def _sliding_sync_lists(timeline_limit: int) -> dict[str, object]:
     """Return list subscriptions that preserve invite and recently-active-room ingress."""
     return {
         "mindroom": {
@@ -55,13 +49,12 @@ def sliding_sync_lists(timeline_limit: int) -> dict[str, object]:
     }
 
 
-def sliding_sync_room_subscriptions(room_ids: list[str], timeline_limit: int) -> dict[str, object]:
+def _sliding_sync_room_subscriptions(room_ids: list[str], timeline_limit: int) -> dict[str, object]:
     """Return explicit room subscriptions for resolved Matrix room IDs."""
-    room_config = _sliding_room_config(timeline_limit)
-    return {room_id: dict(room_config) for room_id in room_ids if room_id.startswith("!")}
+    return {room_id: _sliding_room_config(timeline_limit) for room_id in room_ids if room_id.startswith("!")}
 
 
-def sliding_sync_extensions() -> dict[str, object]:
+def _sliding_sync_extensions() -> dict[str, object]:
     """Return extension subscriptions required for a bot account sync loop."""
     return {
         "to_device": {"enabled": True},
@@ -81,7 +74,7 @@ async def _run_classic_sync_forever(
 
 
 async def _run_sliding_sync_forever(
-    client: SlidingSyncClient,
+    client: _SlidingSyncClient,
     *,
     agent_name: str,
     room_ids: list[str],
@@ -92,9 +85,9 @@ async def _run_sliding_sync_forever(
     await client.sliding_sync_forever(
         timeout=timeout_ms,
         conn_id=f"mindroom-{agent_name}",
-        lists=sliding_sync_lists(timeline_limit),
-        room_subscriptions=sliding_sync_room_subscriptions(room_ids, timeline_limit),
-        extensions=sliding_sync_extensions(),
+        lists=_sliding_sync_lists(timeline_limit),
+        room_subscriptions=_sliding_sync_room_subscriptions(room_ids, timeline_limit),
+        extensions=_sliding_sync_extensions(),
     )
 
 
@@ -113,17 +106,17 @@ async def run_matrix_sync_forever(
         await _run_classic_sync_forever(client, timeout_ms=timeout_ms, first_sync_done=first_sync_done)
         return
 
-    if sync_mode == "auto" and not isinstance(client, SlidingSyncClient):
+    if sync_mode == "auto" and not isinstance(client, _SlidingSyncClient):
         await _run_classic_sync_forever(client, timeout_ms=timeout_ms, first_sync_done=first_sync_done)
         return
 
-    if not isinstance(client, SlidingSyncClient):
+    if not isinstance(client, _SlidingSyncClient):
         msg = "matrix_sync.mode='sliding' requires mindroom-nio with sliding_sync_forever support"
-        raise TypeError(msg)
+        raise PermanentMatrixStartupError(msg)
 
     timeline_limit = config.matrix_sync.sliding_timeline_limit
     await _run_sliding_sync_forever(
-        cast("SlidingSyncClient", client),
+        cast("_SlidingSyncClient", client),
         agent_name=agent_name,
         room_ids=room_ids,
         timeout_ms=timeout_ms,

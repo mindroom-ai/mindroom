@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
 _MultiUserJoinRule = Literal["public", "knock"]
-MatrixSyncMode = Literal["auto", "classic", "sliding"]
+_MatrixSyncMode = Literal["auto", "classic", "sliding"]
 RoomJoinRule = Literal["invite", "public", "knock"]
 RoomDirectoryVisibility = Literal["public", "private"]
 _MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
@@ -33,7 +33,7 @@ class MatrixSyncConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: MatrixSyncMode = Field(
+    mode: _MatrixSyncMode = Field(
         default="auto",
         description=(
             "Matrix sync transport. 'auto' uses MSC4186 Simplified Sliding Sync when supported by the Matrix "

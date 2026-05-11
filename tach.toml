@@ -1466,12 +1466,18 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.bot",
     "mindroom.matrix.client",
+    "mindroom.matrix.sync_loop",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.matrix.sync_loop"
+depends_on = ["mindroom.matrix.client_session"]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.matrix.client_visible_messages"
@@ -1637,6 +1643,7 @@ depends_on = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
+    "mindroom.matrix.sync_loop",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
     "mindroom.post_response_effects",
