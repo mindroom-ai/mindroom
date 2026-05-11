@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import HTTPError
 
 from mindroom import constants
 from mindroom.api import auth, main
@@ -3109,6 +3110,73 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
     assert stored_credentials["token"] == "refreshed-access-token"
     assert stored_credentials["refresh_token"] == "stored-refresh-token"
     assert stored_credentials["expires_at"] == 1300.0
+
+
+def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
+        provider.credential_service,
+        {
+            "token": "still-valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
+            "expires_at": 1030.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+    seen: dict[str, bool] = {}
+
+    class FakeOAuth2Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def refresh_token(self, _url: str, **_kwargs: object) -> dict[str, Any]:
+            seen["refresh"] = True
+            msg = "transient refresh failure"
+            raise HTTPError(msg)
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+    monkeypatch.setattr("mindroom.oauth.service.time.time", lambda: 1000.0)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is True
+    assert seen["refresh"] is True
+    stored_credentials = scoped_manager.load_credentials(provider.credential_service)
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "still-valid-access-token"
+    assert stored_credentials["expires_at"] == 1030.0
 
 
 def test_status_does_not_refresh_credentials_missing_required_scopes(
