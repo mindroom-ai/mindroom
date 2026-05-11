@@ -71,7 +71,6 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
         "tools_schema",
     },
 )
-_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
 
@@ -1288,8 +1287,7 @@ def _compaction_replay_messages(
     run: RunOutput | TeamRunOutput,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    skip_roles = set(_history_skip_roles(history_settings) or [])
-    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
+    messages = [deepcopy(message) for message in run.messages or []]
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     _strip_stale_anthropic_replay_fields(messages)
@@ -1580,12 +1578,11 @@ def _agent_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
+        return session.get_messages(agent_id=scope_id, last_n_runs=limit)
     if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
+        return session.get_messages(agent_id=scope_id, limit=limit)
+    return session.get_messages(agent_id=scope_id)
 
 
 def _team_session_history_messages(
@@ -1595,21 +1592,11 @@ def _team_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
+        return session.get_messages(team_id=scope_id, last_n_runs=limit)
     if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
-
-
-def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
-    """Return the effective Agno skip_roles filter for persisted history replay."""
-    if not history_settings.skip_history_system_role:
-        return None
-    if history_settings.system_message_role in _STANDARD_HISTORY_ROLES:
-        return None
-    return [history_settings.system_message_role]
+        return session.get_messages(team_id=scope_id, limit=limit)
+    return session.get_messages(team_id=scope_id)
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
