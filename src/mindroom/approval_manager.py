@@ -213,7 +213,7 @@ def _normalized_hostname_text(hostname: str) -> str | None:
     if (
         not normalized
         or "*" in normalized
-        or any(character.isspace() or character in "/\\?#@%" for character in normalized)
+        or any(character.isspace() or character in "/\\?#@%;" for character in normalized)
     ):
         return None
     if ":" in normalized:

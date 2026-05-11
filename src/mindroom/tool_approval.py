@@ -70,7 +70,12 @@ class ToolApprovalScriptError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ToolApprovalCall:
-    """One tool call that may require a Matrix approval card."""
+    """One tool call that may require a Matrix approval card.
+
+    ``arguments`` is the live tool-call argument mapping.
+    Domain-grant normalization updates it in place so the approved tool executes
+    with the same hostname shown in the approval card.
+    """
 
     config: Config
     runtime_paths: RuntimePaths
