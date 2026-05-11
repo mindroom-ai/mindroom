@@ -275,12 +275,16 @@ def _domain_grant_hostname(arguments: dict[str, Any]) -> str | None:
     return hostname
 
 
+def _is_explicit_domain_grant_request(tool_name: str, arguments: dict[str, Any]) -> bool:
+    return tool_name in _DOMAIN_GRANT_TOOL_NAMES and arguments.get("approval_kind") == "domain_grant"
+
+
 def _is_domain_grant_approval(tool_name: str, arguments: dict[str, Any]) -> bool:
-    return tool_name in _DOMAIN_GRANT_TOOL_NAMES and _domain_grant_hostname(arguments) is not None
+    return _is_explicit_domain_grant_request(tool_name, arguments) and _domain_grant_hostname(arguments) is not None
 
 
-def _is_domain_grant_request(tool_name: str, _arguments: dict[str, Any]) -> bool:
-    return tool_name in _DOMAIN_GRANT_TOOL_NAMES
+def _is_domain_grant_request(tool_name: str, arguments: dict[str, Any]) -> bool:
+    return _is_explicit_domain_grant_request(tool_name, arguments)
 
 
 def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:

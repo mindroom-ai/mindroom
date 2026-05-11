@@ -2609,6 +2609,35 @@ def test_tool_action_approval_payload_is_distinct_from_domain_grant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_network_access_tool_action_does_not_require_domain_grant_payload(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="network_access",
+            arguments={"remote": "https://example.com/path"},
+            room_id="!room:localhost",
+            agent_name="code",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    try:
+        await _wait_for_pending(store, sender=sender)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    card = sender.await_args.args[2]
+    assert card["approval_type"] == "tool_action"
+    assert card["body"] == "Tool/action approval required: network_access"
+    assert "normalized_hostname" not in card
+
+
+@pytest.mark.asyncio
 async def test_domain_grant_arguments_are_normalized_before_tool_continues(tmp_path: Path) -> None:
     arguments = {
         "approval_kind": "domain_grant",
