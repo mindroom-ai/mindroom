@@ -126,7 +126,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_space",
     "matrix_delivery",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval", "matrix_sync")
 
 
 class ConfigRuntimeValidationError(ValueError):
