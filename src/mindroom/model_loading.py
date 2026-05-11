@@ -181,20 +181,26 @@ def get_model_instance(
 
 def configure_model_for_compaction(model: Model) -> Model:
     """Tune a freshly-created model for deterministic background summary calls."""
-    if isinstance(model, Claude):
-        model.cache_system_prompt = False
-        model.extended_cache_time = False
-        model.max_tokens = (
-            min(model.max_tokens, MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
-            if model.max_tokens
-            else (MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
+    if not isinstance(model, Claude):
+        logger.debug(
+            "compaction_model_provider_tuning_skipped",
+            model_type=type(model).__name__,
+            reason="provider_specific_tuning_only_supported_for_claude",
         )
-        model.timeout = (
-            min(model.timeout, MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS)
-            if model.timeout
-            else (MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS)
-        )
-        client_params = dict(model.client_params or {})
-        client_params["max_retries"] = 0
-        model.client_params = client_params
+        return model
+    model.cache_system_prompt = False
+    model.extended_cache_time = False
+    model.max_tokens = (
+        min(model.max_tokens, MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
+        if model.max_tokens
+        else (MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS)
+    )
+    model.timeout = (
+        min(model.timeout, MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS)
+        if model.timeout
+        else (MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS)
+    )
+    client_params = dict(model.client_params or {})
+    client_params["max_retries"] = 0
+    model.client_params = client_params
     return model
