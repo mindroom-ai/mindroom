@@ -1,6 +1,6 @@
 ---
 name: apr
-description: Use when addressing PR review comments from GitHub, copied text, cloud AI reviewers, or other coding agents in the MindRoom repository.
+description: Use when fetching, triaging, or addressing PR review comments from GitHub, copied text, cloud AI reviewers, or other coding agents in the MindRoom repository.
 ---
 
 # APR
