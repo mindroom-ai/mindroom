@@ -2140,8 +2140,7 @@ class TurnController:
                     response_envelope=envelope,
                 )
             elif target is not None and not self._same_response_lifecycle_target(target, normalized_target):
-                if queued_notice_reservation is not None:
-                    queued_notice_reservation.cancel()
+                queued_notice_reservation.cancel()
                 queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                     target=normalized_target,
                     response_envelope=envelope,

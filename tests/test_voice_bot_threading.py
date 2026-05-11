@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -293,6 +294,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         await allow_prepare.wait()
 
     queued_signal.begin_response_turn()
+    task: asyncio.Task[None] | None = None
     try:
         with (
             patch.object(
@@ -313,6 +315,10 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
             allow_prepare.set()
             await task
     finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
@@ -556,6 +562,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         reservation.cancel()
 
     queued_signal.begin_response_turn()
+    task: asyncio.Task[None] | None = None
     try:
         with (
             patch.object(
@@ -578,6 +585,10 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             allow_prepare.set()
             await task
     finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         queued_signal.finish_response_turn()
 
     assert len(captured_reservations) == 1
