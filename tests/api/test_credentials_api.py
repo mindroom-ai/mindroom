@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import Request
@@ -1433,6 +1433,36 @@ class TestCredentialsAPI:
         assert agent_response.status_code == 403
         assert global_response.status_code == 200
         assert global_response.json()["has_key"] is False
+
+    def test_homeassistant_token_connect_authorizes_before_probe(self, client: TestClient) -> None:
+        """Unauthorized agent-scoped Home Assistant connects should not contact the provider."""
+        _use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+
+        with patch(
+            "mindroom.api.homeassistant_integration._test_connection",
+            new_callable=AsyncMock,
+        ) as test_connection:
+            response = client.post(
+                "/api/homeassistant/connect/token?agent_name=general",
+                headers=bob_headers,
+                json={
+                    "instance_url": "homeassistant.local:8123",
+                    "long_lived_token": "ha-token",
+                },
+            )
+
+        assert response.status_code == 403
+        test_connection.assert_not_awaited()
 
     def test_shared_agent_name_hides_non_allowlisted_shared_credentials(
         self,

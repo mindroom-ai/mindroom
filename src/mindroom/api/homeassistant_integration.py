@@ -263,6 +263,11 @@ async def connect_token(
 
     # Normalize the instance URL
     instance_url = _normalize_instance_url(config.instance_url)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=("homeassistant",),
+    )
 
     # Test the connection
     try:
@@ -275,8 +280,6 @@ async def connect_token(
             detail=f"Failed to connect to Home Assistant: {e!s}",
         ) from e
 
-    # Save configuration
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     _save_config(
         target,
         {
