@@ -29,11 +29,13 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.matrix.message_extras import build_message_extras_content
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.message_extras import MessageExtraSection
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -67,6 +69,7 @@ class MatrixMessageOperations:
         text: str,
         thread_id: str | None,
         ignore_mentions: bool,
+        message_extras: list[MessageExtraSection] | None,
     ) -> str | None:
         formatted_text = parse_and_format_interactive(text, extract_mapping=False).formatted_text
         latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
@@ -79,6 +82,8 @@ class MatrixMessageOperations:
             extra_content["com.mindroom.skip_mentions"] = True
         elif context.requester_id != context.client.user_id:
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
+        if message_extras:
+            extra_content.update(build_message_extras_content(message_extras))
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
@@ -140,6 +145,7 @@ class MatrixMessageOperations:
         room_id: str,
         effective_thread_id: str | None,
         ignore_mentions: bool,
+        message_extras: list[MessageExtraSection] | None,
     ) -> MatrixMessageOperationResult:
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
             return self._result("error", action=action, message="thread_id is required for replies.")
@@ -162,6 +168,7 @@ class MatrixMessageOperations:
                 text=text,
                 thread_id=effective_thread_id,
                 ignore_mentions=ignore_mentions,
+                message_extras=message_extras,
             )
         if text is not None and event_id is None:
             return self._result(
@@ -609,6 +616,7 @@ class MatrixMessageOperations:
         thread_id: str | None,
         target: str | None,
         message: str | None,
+        message_extras: list[MessageExtraSection] | None,
     ) -> MatrixMessageOperationResult:
         if target is None:
             return self._result("error", action="edit", message="target event_id is required for edit.")
@@ -635,6 +643,7 @@ class MatrixMessageOperations:
             formatted_text,
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
+            extra_content=build_message_extras_content(message_extras) if message_extras else None,
         )
         delivered = await edit_message_result(
             context.client,
@@ -696,6 +705,7 @@ class MatrixMessageOperations:
         target: str | None,
         thread_id: str | None,
         ignore_mentions: bool,
+        message_extras: list[MessageExtraSection] | None,
         read_limit: int,
         page_token: str | None,
         room_timeline_sentinel: str,
@@ -719,6 +729,7 @@ class MatrixMessageOperations:
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
                 ignore_mentions=ignore_mentions,
+                message_extras=message_extras,
             )
         if action == "react":
             return await self._message_react(
@@ -773,6 +784,7 @@ class MatrixMessageOperations:
                 thread_id=safe_thread,
                 target=target,
                 message=message,
+                message_extras=message_extras,
             )
         return self._result(
             "error",

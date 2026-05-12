@@ -248,6 +248,94 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_send_includes_message_extras() -> None:
+    """Send action should attach validated MindRoom message extras."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="Short answer.",
+                message_extras=[
+                    {
+                        "title": "Evidence",
+                        "content_type": "text/html",
+                        "content": "<table><tr><td>42</td></tr></table>",
+                        "collapsed": False,
+                    },
+                ],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["body"] == "Short answer."
+    assert sent_content["com.mindroom.message_extras"] == {
+        "version": 2,
+        "sections": [
+            {
+                "title": "Evidence",
+                "content_type": "text/html",
+                "content": "<table><tr><td>42</td></tr></table>",
+                "collapsed": False,
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_invalid_message_extras() -> None:
+    """Invalid extras should return a tool error instead of sending."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="Short answer.",
+                message_extras=[
+                    {
+                        "title": "Raw",
+                        "content_type": "application/json",
+                        "content": "{}",
+                    },
+                ],
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "content_type" in payload["message"]
+    mock_send.assert_not_awaited()
+
+
+def test_matrix_message_tool_description_documents_message_extras() -> None:
+    """The model-facing tool description should briefly explain extras with an example."""
+    description = MatrixMessageTools.matrix_message.__doc__
+
+    assert description is not None
+    assert "message_extras" in description
+    assert "text/plain" in description
+    assert "text/markdown" in description
+    assert "text/html" in description
+    assert '"title": "Evidence"' in description
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     """thread_id='room' should disable thread metadata for sends."""
     tool = MatrixMessageTools()
