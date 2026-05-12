@@ -557,7 +557,7 @@ class _KnowledgePathFilter:
     root: Path
     _directory_symlink_cache: dict[Path, bool] = field(default_factory=dict)
 
-    def include_file(self, file_path: Path) -> bool:
+    def include_file(self, file_path: Path, *, check_directory_symlinks: bool = True) -> bool:
         """Return whether a file belongs to the managed semantic file set."""
         candidate = file_path if file_path.is_absolute() else self.root / file_path
         try:
@@ -567,7 +567,7 @@ class _KnowledgePathFilter:
 
         if not include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path.as_posix()):
             return False
-        if self._directory_is_symlink_or_under_symlink(candidate.parent):
+        if check_directory_symlinks and self._directory_is_symlink_or_under_symlink(candidate.parent):
             return False
         if candidate.is_symlink():
             return False
@@ -609,7 +609,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
         dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
         for filename in filenames:
             path = current_dir / filename
-            if path_filter.include_file(path):
+            if path_filter.include_file(path, check_directory_symlinks=False):
                 files.append(path)
     return sorted(files)
 
