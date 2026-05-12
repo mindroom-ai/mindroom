@@ -408,11 +408,11 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path) -> None:
-    """Coalesce two quick text messages into one combined prompt."""
+    """Coalesce two quick thread messages into one combined prompt."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[str, str, list[str]]] = []
 
     async def record_dispatch(
@@ -440,7 +440,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await bot._coalescing_gate.drain_all()
 
     assert calls == [
         (
@@ -454,11 +454,11 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: Path) -> None:
-    """Coalesced dispatch should forward the per-source prompt map."""
+    """Thread-scoped coalesced dispatch should forward the per-source prompt map."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
         await bot._turn_controller._enqueue_for_dispatch(
@@ -473,7 +473,7 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await bot._coalescing_gate.drain_all()
 
     assert mock_dispatch.await_count == 1
     handled_turn = mock_dispatch.await_args.kwargs["handled_turn"]
@@ -486,11 +486,11 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> None:
-    """Coalesce image uploads and follow-up text into one dispatch."""
+    """Coalesce thread image uploads and follow-up text into one dispatch."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    image_event = _image_event(event_id="$img1", server_timestamp=1000)
-    text_event = _text_event(event_id="$m2", body="describe it", server_timestamp=1001)
+    image_event = _image_event(event_id="$img1", server_timestamp=1000, thread_id="$thread")
+    text_event = _text_event(event_id="$m2", body="describe it", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[str, list[str], int]] = []
 
     async def record_dispatch(
@@ -535,8 +535,8 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
     """Do not add upload-grace delay once media already joined during debounce."""
     bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=200)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000)
-    image_event = _image_event(event_id="$img1", server_timestamp=1001)
+    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000, thread_id="$thread")
+    image_event = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[list[str], int]] = []
 
     async def record_dispatch(
@@ -571,11 +571,11 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
 
 @pytest.mark.asyncio
 async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> None:
-    """Hold a text-only batch briefly so a late image joins the first dispatch."""
+    """Hold a thread text-only batch briefly so a late image joins the first dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000)
-    image_event = _image_event(event_id="$img1", server_timestamp=1001)
+    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000, thread_id="$thread")
+    image_event = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[str, list[str], int]] = []
 
     async def record_dispatch(
@@ -621,12 +621,12 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: Path) -> None:
-    """Merge several uploads that arrive during upload grace into one batch."""
+    """Merge several thread uploads that arrive during upload grace into one batch."""
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="summarize these", server_timestamp=1000)
-    first_image = _image_event(event_id="$img1", server_timestamp=1001)
-    second_image = _image_event(event_id="$img2", server_timestamp=1002)
+    text_event = _text_event(event_id="$m1", body="summarize these", server_timestamp=1000, thread_id="$thread")
+    first_image = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
+    second_image = _image_event(event_id="$img2", server_timestamp=1002, thread_id="$thread")
     calls: list[tuple[list[str], int]] = []
 
     async def record_dispatch(
@@ -672,11 +672,11 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_turn(tmp_path: Path) -> None:
-    """Plain text should not join an upload-grace batch meant only for late media."""
+    """Plain thread text should not join an upload-grace batch meant only for late media."""
     bot = _make_bot(tmp_path, debounce_ms=40, upload_grace_ms=200)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="first turn", server_timestamp=1000)
-    second = _text_event(event_id="$m2", body="second turn", server_timestamp=1001)
+    first = _text_event(event_id="$m1", body="first turn", server_timestamp=1000, thread_id="$thread")
+    second = _text_event(event_id="$m2", body="second turn", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -1152,8 +1152,8 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
     """Commands should bypass upload grace rather than waiting for its timer."""
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=200)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    command_event = _text_event(event_id="$m2", body="!help", server_timestamp=1001)
+    text_event = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
+    command_event = _text_event(event_id="$m2", body="!help", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -1785,7 +1785,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
     """Flush a text-only batch immediately when shutdown interrupts upload grace."""
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=200)
     room = _make_room()
-    event = _text_event(event_id="$m1", body="hello")
+    event = _text_event(event_id="$m1", body="hello", thread_id="$thread")
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -2887,12 +2887,12 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
     # Hard cap = max(0.1, min(0.4, 2.0)) = 0.4s.
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=100)
     room = _make_room()
-    text_event = _text_event(event_id="$m1", body="describe", server_timestamp=1000)
+    text_event = _text_event(event_id="$m1", body="describe", server_timestamp=1000, thread_id="$thread")
     image_events = [
-        _image_event(event_id="$img1", server_timestamp=1001),
-        _image_event(event_id="$img2", server_timestamp=1002),
-        _image_event(event_id="$img3", server_timestamp=1003),
-        _image_event(event_id="$img4", server_timestamp=1004),
+        _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread"),
+        _image_event(event_id="$img2", server_timestamp=1002, thread_id="$thread"),
+        _image_event(event_id="$img3", server_timestamp=1003, thread_id="$thread"),
+        _image_event(event_id="$img4", server_timestamp=1004, thread_id="$thread"),
     ]
     calls: list[list[str]] = []
 
@@ -2940,8 +2940,8 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
     """Mark every source event ID from a coalesced batch as responded."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
     dispatch = _prepared_dispatch(event_id="$m2")
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
@@ -3591,6 +3591,7 @@ def _mention_text_event(
     mentioned_user_ids: list[str],
     sender: str = "@user:localhost",
     server_timestamp: int = 1000,
+    thread_id: str | None = None,
 ) -> nio.RoomMessageText:
     """Build a text event with m.mentions metadata."""
     content: dict[str, object] = {
@@ -3598,6 +3599,8 @@ def _mention_text_event(
         "body": body,
         "m.mentions": {"user_ids": mentioned_user_ids},
     }
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     return cast(
         "nio.RoomMessageText",
         nio.RoomMessageText.from_dict(
@@ -4410,7 +4413,24 @@ async def _capture_gate_dispatches(
         payload_requests.append(request)
         return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
 
+    coalescing_thread_id_overrides = {
+        event.event_id: metadata["coalescing_thread_id"]
+        for event, _source_kind, _dispatch_policy_source_kind, metadata in enqueued
+        if "coalescing_thread_id" in metadata
+    }
+    original_coalescing_thread_id = bot._conversation_resolver.coalescing_thread_id
+
+    async def coalescing_thread_id(room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+        if event.event_id in coalescing_thread_id_overrides:
+            return cast("str | None", coalescing_thread_id_overrides[event.event_id])
+        return await original_coalescing_thread_id(room, event)
+
     with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=coalescing_thread_id),
+        ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
@@ -4719,14 +4739,26 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
         sender="@user:localhost",
         event_id="$att1",
         body="first attachment",
-        source={"content": {"msgtype": "m.text", "body": "first attachment", ATTACHMENT_IDS_KEY: ["att-001"]}},
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "first attachment",
+                ATTACHMENT_IDS_KEY: ["att-001"],
+            },
+        },
         server_timestamp=1000,
     )
     second = PreparedTextEvent(
         sender="@user:localhost",
         event_id="$att2",
         body="second attachment",
-        source={"content": {"msgtype": "m.text", "body": "second attachment", ATTACHMENT_IDS_KEY: ["att-002"]}},
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "second attachment",
+                ATTACHMENT_IDS_KEY: ["att-002"],
+            },
+        },
         server_timestamp=1001,
     )
 
@@ -4734,8 +4766,18 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
         bot,
         room,
         [
-            (first, "message", None, {"trust_internal_payload_metadata": True}),
-            (second, "message", None, {"trust_internal_payload_metadata": True}),
+            (
+                first,
+                "message",
+                None,
+                {"coalescing_thread_id": "$thread", "trust_internal_payload_metadata": True},
+            ),
+            (
+                second,
+                "message",
+                None,
+                {"coalescing_thread_id": "$thread", "trust_internal_payload_metadata": True},
+            ),
         ],
     )
 
@@ -4761,8 +4803,8 @@ async def test_coalesced_non_primary_mention_reaches_final_envelope(tmp_path: Pa
         bot,
         room,
         [
-            (first, "message", None, {}),
-            (second, "message", None, {}),
+            (first, "message", None, {"coalescing_thread_id": "$thread"}),
+            (second, "message", None, {"coalescing_thread_id": "$thread"}),
         ],
     )
 
@@ -4857,8 +4899,8 @@ async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_enve
         bot,
         room,
         [
-            (first, "message", None, {}),
-            (second, "message", None, {}),
+            (first, "message", None, {"coalescing_thread_id": "$thread"}),
+            (second, "message", None, {"coalescing_thread_id": "$thread"}),
         ],
         captured_plan_extra_content=captured_extra_content,
     )

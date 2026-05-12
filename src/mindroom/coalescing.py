@@ -264,10 +264,12 @@ class CoalescingGate:
         return [gate.queue.popleft().pending_event for _ in range(count)]
 
     @staticmethod
-    def _front_normal_run_length(gate: _GateEntry) -> int:
+    def _front_normal_run_length(gate: _GateEntry, *, coalesce_normal_events: bool) -> int:
         count = 0
         for queued in gate.queue:
             if queued.kind is not _QueueKind.NORMAL:
+                break
+            if count > 0 and not coalesce_normal_events:
                 break
             count += 1
         return count
@@ -283,8 +285,11 @@ class CoalescingGate:
         return count
 
     @staticmethod
-    def _has_barrier_after_front_normal_run(gate: _GateEntry) -> bool:
-        normal_count = CoalescingGate._front_normal_run_length(gate)
+    def _has_barrier_after_front_normal_run(gate: _GateEntry, *, coalesce_normal_events: bool) -> bool:
+        normal_count = CoalescingGate._front_normal_run_length(
+            gate,
+            coalesce_normal_events=coalesce_normal_events,
+        )
         return normal_count < len(gate.queue)
 
     @staticmethod
@@ -509,7 +514,7 @@ class CoalescingGate:
             else:
                 return True
 
-    async def _wait_for_debounce(self, gate: _GateEntry) -> None:
+    async def _wait_for_debounce(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> None:
         """Wait for the normal debounce window, returning early when a barrier appears."""
         gate.phase = GatePhase.DEBOUNCE
         gate.grace_deadline = None
@@ -517,7 +522,7 @@ class CoalescingGate:
         if debounce_seconds <= 0 or self._is_shutting_down() or gate.drain_all_requested:
             gate.deadline = time.monotonic()
             return
-        if self._has_barrier_after_front_normal_run(gate):
+        if self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce_normal_events):
             gate.deadline = time.monotonic()
             return
         gate.deadline = time.monotonic() + debounce_seconds
@@ -525,7 +530,11 @@ class CoalescingGate:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
                 return
-            if self._is_shutting_down() or gate.drain_all_requested or self._has_barrier_after_front_normal_run(gate):
+            if (
+                self._is_shutting_down()
+                or gate.drain_all_requested
+                or self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce_normal_events)
+            ):
                 return
             gate.deadline = time.monotonic() + debounce_seconds
 
@@ -543,7 +552,10 @@ class CoalescingGate:
         gate.phase = GatePhase.GRACE
         gate.grace_deadline = time.monotonic() + self._upload_grace_hard_cap_seconds()
         gate.deadline = time.monotonic() + min(grace_seconds, self._upload_grace_hard_cap_seconds())
+        original_candidate_count = candidate_count
         candidate_count = self._extend_candidate_with_grace_media(gate, candidate_count)
+        if candidate_count > original_candidate_count:
+            return candidate_count
         if self._has_item_after_candidate(gate, candidate_count):
             return candidate_count
         grace_start = time.monotonic()
@@ -705,10 +717,14 @@ class CoalescingGate:
                     )
                     continue
 
-                await self._wait_for_debounce(gate)
+                coalesce_normal_events = current_key[1] is not None
+                await self._wait_for_debounce(gate, coalesce_normal_events=coalesce_normal_events)
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
-                use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
-                candidate_count = self._front_normal_run_length(gate)
+                use_upload_grace = not bypass_grace and coalesce_normal_events and self._upload_grace_seconds() > 0
+                candidate_count = self._front_normal_run_length(
+                    gate,
+                    coalesce_normal_events=coalesce_normal_events,
+                )
                 if candidate_count == 0:
                     continue
                 candidate_events = self._queue_pending_events(gate, candidate_count)
