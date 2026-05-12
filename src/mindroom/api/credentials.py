@@ -430,7 +430,6 @@ def _require_agent_credential_management_authorized(
         requester_id,
         agent_name=agent_name,
         config=config,
-        runtime_paths=runtime_paths,
     ):
         raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
     return execution_identity

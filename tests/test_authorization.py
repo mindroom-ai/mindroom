@@ -93,6 +93,15 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
     )
 
 
+def is_sender_allowed_for_agent_credential_management(sender_id: str, agent_name: str, config: Config) -> bool:
+    """Run credential-management permission checks with the test config's bound runtime context."""
+    return mindroom.authorization.is_sender_allowed_for_agent_credential_management(
+        sender_id,
+        agent_name,
+        config,
+    )
+
+
 def get_effective_sender_id_for_reply_permissions(
     sender_id: str,
     event_source: dict[str, object] | None,
@@ -1299,6 +1308,39 @@ def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp
     state.save(runtime_paths=runtime_paths)
 
     assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
+
+
+def test_credential_management_does_not_bypass_agent_allowlist_for_internal_accounts(tmp_path: Path) -> None:
+    """Dashboard credential management is user-initiated and should not inherit reply-time internal trust."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
+    assert (
+        is_sender_allowed_for_agent_credential_management(
+            "@mindroom_assistant_oldns:example.com",
+            "assistant",
+            config,
+        )
+        is False
+    )
+    assert is_sender_allowed_for_agent_credential_management("@alice:example.com", "assistant", config) is True
 
 
 def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:

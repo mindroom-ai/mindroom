@@ -10,7 +10,6 @@ import nio
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import (
-    MissingManagedEntityAccountError,
     configured_routable_entity_ids_for_room,
     current_internal_sender_ids,
     entity_identity_registry,
@@ -157,15 +156,9 @@ def is_sender_allowed_for_agent_credential_management(
     sender_id: str,
     agent_name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> bool:
     """Check whether a dashboard requester may manage credentials for one agent."""
-    try:
-        return is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths)
-    except MissingManagedEntityAccountError:
-        # The configured user allowlist was already checked. Missing managed accounts
-        # only mean the internal-sender bypass cannot be evaluated for dashboard/API requests.
-        return False
+    return _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config)
 
 
 def get_effective_sender_id_for_reply_permissions(
