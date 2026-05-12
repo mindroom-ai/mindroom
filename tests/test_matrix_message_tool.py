@@ -364,6 +364,9 @@ def test_matrix_message_tool_description_documents_message_extras() -> None:
     assert "text/plain" in description
     assert "text/markdown" in description
     assert "text/html" in description
+    assert "sanitized rich fragments" in description
+    assert "tables" in description
+    assert "Do not include scripts" in description
     assert '"title": "Evidence"' in description
 
 

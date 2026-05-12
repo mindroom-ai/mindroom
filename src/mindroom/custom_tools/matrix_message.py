@@ -263,6 +263,8 @@ class MatrixMessageTools(Toolkit):
         - Keep the visible `message` brief; put supporting evidence in extras.
         - Each section has `title`, `content`, optional `content_type`, and optional `collapsed`.
         - Supported `content_type` values are `text/plain`, `text/markdown`, and `text/html`; default is `text/markdown`.
+        - HTML content may use sanitized rich fragments: paragraphs, headings, lists, tables, blockquotes, code/pre blocks, basic inline formatting, and links.
+          Do not include scripts, styles, images, forms, media, SVG/math, or interactive elements; links should use `http`, `https`, or `mailto`.
         - Example: `message_extras=[{"title": "Evidence", "content_type": "text/html", "content": "<table><tr><td>42</td></tr></table>", "collapsed": true}]`.
 
         Args:
@@ -274,7 +276,7 @@ class MatrixMessageTools(Toolkit):
             target (str | None): Event ID to react to for `react` or to edit for `edit`.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             ignore_mentions (bool): Text-send safety flag for `send`, `reply`, and `thread-reply`; default `True` writes `com.mindroom.skip_mentions=True` to suppress mention-triggered agent dispatch, while `False` keeps mentions active and also writes `com.mindroom.original_sender=<human requester id>` when the requester is not the sending bot.
-            message_extras (list[dict[str, object]] | None): Optional collapsible MindRoom sections for supporting evidence. Each section supports title, content, content_type (`text/plain`, `text/markdown`, or `text/html`), and collapsed.
+            message_extras (list[dict[str, object]] | None): Optional collapsible MindRoom sections for supporting evidence. Each section supports title, content, content_type (`text/plain`, `text/markdown`, or sanitized `text/html`), and collapsed.
             limit (int | None): Maximum messages returned for `read` or `thread-list`, or thread roots returned for `room-threads`; defaults to 20 and is capped at 50.
             page_token (str | None): Pagination token for `room-threads`, returned by a previous `room-threads` call to fetch the next page of thread roots.
 
