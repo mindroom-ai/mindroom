@@ -2200,8 +2200,10 @@ async def main(  # noqa: PLR0915
         for task in auxiliary_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        if orchestrator is not None:
-            await orchestrator.stop()
-        reset_matrix_sync_health()
-        reset_runtime_state()
-        set_primary_worker_storage_path(None)
+        try:
+            if orchestrator is not None:
+                await orchestrator.stop()
+        finally:
+            reset_matrix_sync_health()
+            reset_runtime_state()
+            set_primary_worker_storage_path(None)

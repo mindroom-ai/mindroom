@@ -325,11 +325,15 @@ class KubernetesWorkerBackend:
         failures: list[str] = []
         for deployment in self._resources.list_deployments():
             worker_id = str(deployment.metadata.name)
-            try:
-                self._resources.delete_service(worker_id)
-                self._resources.delete_deployment(worker_id)
-            except WorkerBackendError as exc:
-                failures.append(str(exc))
+            for delete_operation in (
+                self._resources.delete_service,
+                self._resources.delete_deployment,
+                self._resources.delete_secret,
+            ):
+                try:
+                    delete_operation(worker_id)
+                except Exception as exc:
+                    failures.append(str(exc))
         with self._progress_sinks_lock:
             self._progress_sinks.clear()
             self._progress_snapshots.clear()

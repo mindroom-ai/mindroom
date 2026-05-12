@@ -1015,6 +1015,14 @@ def _call_proxy_sync(  # noqa: C901, PLR0912, PLR0915
 
         if not isinstance(data, Mapping):
             msg = "Sandbox proxy returned a non-object response."
+            _record_proxy_response_failure_for_worker(
+                worker_handle=worker_handle,
+                runtime_paths=runtime_paths,
+                proxy_config=proxy_config,
+                error=msg,
+                failure_kind=None,
+                worker_manager=worker_manager,
+            )
             raise TypeError(msg)
         if data.get("ok") is True:
             if worker_handle is not None:

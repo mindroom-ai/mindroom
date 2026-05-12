@@ -334,10 +334,11 @@ Writable file-memory paths are rewritten into worker-owned state instead of bein
 Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
 A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-The shared-only integrations require `worker_scope` unset or `shared`.
+Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
 OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
-Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+`gmail`, `google_calendar`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 

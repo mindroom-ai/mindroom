@@ -606,6 +606,26 @@ def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
     assert config.host_config_path == host_config_path.resolve()
 
 
+def test_docker_worker_host_config_path_rejects_directories(tmp_path: Path) -> None:
+    """Docker host-config path must point at a file when explicitly configured."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    host_config_dir = tmp_path / "host-config"
+    host_config_dir.mkdir()
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": str(host_config_dir),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="points to a directory"):
+        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
 def test_runtime_paths_with_storage_root_updates_primary_path_env(tmp_path: Path) -> None:
     """Rebased primary runtimes should keep their exported path contract internally consistent."""
     config_path = tmp_path / "config.yaml"
@@ -895,6 +915,24 @@ def test_docker_worker_config_rejects_reserved_extra_labels_from_env(
         _DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
+def test_docker_worker_config_rejects_malformed_json_mapping_env(tmp_path: Path) -> None:
+    """Malformed Docker JSON env values should fail closed instead of silently becoming empty mappings."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_ENV_JSON": "{not-json",
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_ENV_JSON must contain a JSON object"):
+        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+
 @pytest.mark.parametrize(
     ("storage_mount_path", "config_path"),
     [
@@ -1075,7 +1113,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     labels = run_call["labels"]
     assert isinstance(labels, dict)
     assert labels["mindroom.ai/component"] == "worker"
-    assert labels["mindroom.ai/worker-key"] == _TEST_UNSCOPED_WORKER_KEY
+    assert "mindroom.ai/worker-key" not in labels
     assert labels["mindroom.ai/runtime-namespace"]
     assert labels["mindroom.ai/tenant"] == "test"
 
@@ -1440,6 +1478,55 @@ def test_docker_backend_commits_relative_file_backed_secrets_into_worker_payload
         == "/app/worker/.runtime/file-secrets/OPENAI_API_KEY_FILE/openai.key"
     )
     assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+
+
+def test_docker_backend_commits_relative_process_file_backed_secrets_into_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated Docker workers should preserve relative *_FILE secrets supplied by process env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_path.write_text(config_text, encoding="utf-8")
+    secret_path = config_dir / "secrets" / "openai.key"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text("sk-process-relative\n", encoding="utf-8")
+    runtime_storage = (tmp_path / "runtime-storage").resolve()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=runtime_storage,
+        process_env={"OPENAI_API_KEY_FILE": "secrets/openai.key"},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_storage,
+        host_config_path=config_path,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    local_secret_copy = (
+        worker_root_path(runtime_storage, _TEST_UNSCOPED_WORKER_KEY)
+        / ".runtime"
+        / "file-secrets"
+        / "OPENAI_API_KEY_FILE"
+        / "openai.key"
+    )
+
+    assert (
+        committed_runtime.env_value("OPENAI_API_KEY_FILE")
+        == "/app/worker/.runtime/file-secrets/OPENAI_API_KEY_FILE/openai.key"
+    )
+    assert local_secret_copy.read_text(encoding="utf-8") == "sk-process-relative\n"
 
 
 def test_docker_backend_preserves_container_config_path_without_host_projection(
@@ -2209,6 +2296,32 @@ def test_docker_backend_recreates_container_when_extra_stale_mount_is_present(
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_backend_ignores_container_runtime_non_bind_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Anonymous volumes and tmpfs mounts should not force otherwise compatible workers to restart."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    existing_container.attrs["Mounts"].append(
+        {
+            "Type": "volume",
+            "Name": "anonymous-volume",
+            "Destination": "/var/lib/mindroom/runtime-volume",
+            "Mode": "",
+            "RW": True,
+        },
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert fake_client.containers.by_name[handle.worker_id] is existing_container
+    assert existing_container.removed == 0
+    assert len(fake_client.containers.run_calls) == 1
 
 
 def test_docker_backend_recreates_container_when_host_config_contents_change(

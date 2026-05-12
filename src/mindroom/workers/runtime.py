@@ -88,6 +88,7 @@ class PrimaryWorkerManagerLease:
 
 _PRIMARY_WORKER_MANAGER_ENTRY: _WorkerManagerEntry | None = None
 _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES: list[_WorkerManagerEntry] = []
+_PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES: set[tuple[str, ...]] = set()
 
 
 def _stable_json_digest(payload: object) -> str:
@@ -392,25 +393,40 @@ def _resolve_primary_worker_manager_entry(
         worker_grantable_credentials=worker_grantable_credentials,
     )
     with _PRIMARY_WORKER_MANAGER_CONDITION:
+        while True:
+            active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
+            if active_entry is not None and active_entry.config_signature == config_signature:
+                if acquire_lease:
+                    active_entry.active_leases += 1
+                return active_entry, [], None
+            if config_signature not in _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES:
+                _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.add(config_signature)
+                break
+            _PRIMARY_WORKER_MANAGER_CONDITION.wait()
+
+    try:
+        built_manager = _build_primary_worker_manager(
+            runtime_paths,
+            proxy_url=proxy_url,
+            proxy_token=proxy_token,
+            storage_root=storage_root,
+            kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+            worker_grantable_credentials=worker_grantable_credentials,
+        )
+    except Exception:
+        with _PRIMARY_WORKER_MANAGER_CONDITION:
+            _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
+            _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
+        raise
+
+    with _PRIMARY_WORKER_MANAGER_CONDITION:
+        _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
         active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         if active_entry is not None and active_entry.config_signature == config_signature:
             if acquire_lease:
                 active_entry.active_leases += 1
-            return active_entry, [], None
-
-        try:
-            built_manager = _build_primary_worker_manager(
-                runtime_paths,
-                proxy_url=proxy_url,
-                proxy_token=proxy_token,
-                storage_root=storage_root,
-                kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-                worker_grantable_credentials=worker_grantable_credentials,
-            )
-        except Exception:
             _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-            raise
-
+            return active_entry, [], built_manager
         previous_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         new_entry = _WorkerManagerEntry(
             manager=built_manager,
@@ -515,7 +531,7 @@ def shutdown_primary_worker_manager(
     timeout_seconds: float = _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS,
 ) -> None:
     """Drain and shut down the cached primary worker manager from a real shutdown path."""
-    global _PRIMARY_WORKER_MANAGER_ENTRY, _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES
+    global _PRIMARY_WORKER_MANAGER_ENTRY
 
     deadline = time.monotonic() + max(timeout_seconds, 0.0)
     failures: list[str] = []
@@ -540,7 +556,6 @@ def shutdown_primary_worker_manager(
                         "Skipping shutdown of %s leased primary worker managers",
                         len(_RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES),
                     )
-                    _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES = []
                     break
                 _PRIMARY_WORKER_MANAGER_CONDITION.wait(timeout=remaining)
                 continue

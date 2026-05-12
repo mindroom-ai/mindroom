@@ -73,6 +73,15 @@ _DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES = frozenset(
         "MINDROOM_LOCAL_CLIENT_SECRET",
     },
 )
+_SOURCE_PROCESS_FILE_SECRET_SUFFIXES = (
+    "_API_KEY_FILE",
+    "_CREDENTIAL_FILE",
+    "_CREDENTIALS_FILE",
+    "_PASSWORD_FILE",
+    "_SECRET_FILE",
+    "_SERVICE_ACCOUNT_FILE",
+    "_TOKEN_FILE",
+)
 _WORKER_FILE_SECRET_ROOT = Path(".runtime") / "file-secrets"
 
 
@@ -365,6 +374,7 @@ def build_dedicated_worker_runtime_paths(
         backend_name=backend_name,
         dedicated_root=dedicated_root,
         local_dedicated_root=local_dedicated_root,
+        source_process_env=runtime_paths.process_env,
         process_env=process_env,
         env_file_values=env_file_values,
     )
@@ -508,11 +518,21 @@ def _rewrite_worker_file_env_values(
     backend_name: str,
     dedicated_root: Path,
     local_dedicated_root: Path,
+    source_process_env: Mapping[str, str],
     process_env: dict[str, str],
     env_file_values: dict[str, str],
 ) -> None:
     blocked_file_env_names = _blocked_worker_file_env_names(runtime_paths)
-    for env_name in sorted({*process_env, *env_file_values, *runtime_paths.env_file_values}):
+    source_process_file_env_names = {
+        env_name for env_name in source_process_env if env_name.endswith(_SOURCE_PROCESS_FILE_SECRET_SUFFIXES)
+    }
+    candidate_env_names = {
+        *source_process_file_env_names,
+        *process_env,
+        *env_file_values,
+        *runtime_paths.env_file_values,
+    }
+    for env_name in sorted(candidate_env_names):
         if not env_name.endswith("_FILE"):
             continue
         if env_name in blocked_file_env_names:

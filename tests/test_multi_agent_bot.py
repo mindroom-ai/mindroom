@@ -2295,6 +2295,36 @@ class TestAgentBot:
         mock_orchestrator_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_resets_primary_worker_storage_path_when_stop_fails(self, tmp_path: Path) -> None:
+        """Shutdown failures should not leave the primary worker storage root pinned."""
+        reset_runtime_state()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_orchestrator.stop = AsyncMock(side_effect=RuntimeError("stop boom"))
+        mock_orchestrator.running = False
+        worker_storage_path_calls: list[Path | None] = []
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        runtime_paths = self._runtime_paths(tmp_path)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator.set_primary_worker_storage_path",
+                side_effect=lambda storage_path: worker_storage_path_calls.append(storage_path),
+            ),
+            pytest.raises(RuntimeError, match="stop boom"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        assert worker_storage_path_calls == [runtime_paths.storage_root, None]
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
         config = self._config_for_storage(tmp_path)

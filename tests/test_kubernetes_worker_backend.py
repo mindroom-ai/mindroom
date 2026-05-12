@@ -380,6 +380,7 @@ def _backend(
     resource_requests: dict[str, str] | None = None,
     resource_limits: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
+    extra_labels: dict[str, str] | None = None,
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
@@ -402,7 +403,7 @@ def _backend(
         node_name=node_name,
         colocate_with_control_plane_node=colocate_with_control_plane_node,
         extra_env=extra_env or {},
-        extra_labels={"mindroom.ai/tenant": "test"},
+        extra_labels=extra_labels or {"mindroom.ai/tenant": "test"},
         extra_annotations=extra_annotations or {},
         owner_deployment_name=owner_deployment_name,
         resource_requests=resource_requests if resource_requests is not None else {"memory": "256Mi", "cpu": "100m"},
@@ -1301,6 +1302,51 @@ def test_kubernetes_backend_commits_relative_file_backed_secrets_into_worker_pay
         expected_worker_root / ".runtime" / "file-secrets" / "OPENAI_API_KEY_FILE" / "openai.key",
     )
     assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+
+
+def test_kubernetes_backend_commits_relative_process_file_backed_secrets_into_worker_payload(tmp_path: Path) -> None:
+    """Dedicated Kubernetes workers should preserve relative *_FILE secrets supplied by process env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    secret_path = config_dir / "secrets" / "openai.key"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_path.write_text("sk-process-relative\n", encoding="utf-8")
+    storage_mount_path = tmp_path / "worker-storage"
+    storage_mount_path.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={"OPENAI_API_KEY_FILE": "secrets/openai.key"},
+    )
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(storage_mount_path),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    expected_worker_root = committed_runtime.storage_root
+    local_secret_copy = (
+        runtime_paths.storage_root
+        / "workers"
+        / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+        / ".runtime"
+        / "file-secrets"
+        / "OPENAI_API_KEY_FILE"
+        / "openai.key"
+    )
+
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") == str(
+        expected_worker_root / ".runtime" / "file-secrets" / "OPENAI_API_KEY_FILE" / "openai.key",
+    )
+    assert local_secret_copy.read_text(encoding="utf-8") == "sk-process-relative\n"
 
 
 def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_paths_differ(tmp_path: Path) -> None:
@@ -2264,8 +2310,51 @@ def test_kubernetes_backend_shutdown_is_scoped_to_runtime_namespace() -> None:
 
     assert apps_api.deleted_names == [handle.worker_id]
     assert core_api.deleted_names == [handle.worker_id]
+    assert core_api.deleted_secret_names == [handle.worker_id]
     assert unrelated_name in apps_api.deployments
     assert unrelated_name in core_api.services
+
+
+def test_kubernetes_backend_extra_labels_cannot_override_runtime_namespace() -> None:
+    """Backend-owned runtime namespace labels must win over caller-supplied extra labels."""
+    backend, apps_api, _core_api = _backend(
+        extra_labels={
+            "mindroom.ai/tenant": "test",
+            "mindroom.ai/runtime-namespace": "spoofed-runtime",
+        },
+    )
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    runtime_namespace = apps_api.created_bodies[0]["metadata"]["labels"]["mindroom.ai/runtime-namespace"]
+    assert runtime_namespace != "spoofed-runtime"
+    assert apps_api.created_bodies[0]["spec"]["selector"]["matchLabels"]["mindroom.ai/runtime-namespace"] == (
+        runtime_namespace
+    )
+
+    workers = backend.list_workers(now=10.0)
+
+    assert [worker.worker_key for worker in workers] == [handle.worker_key]
+    assert f"mindroom.ai/runtime-namespace={runtime_namespace}" in apps_api.list_label_selectors[-1]
+    assert "mindroom.ai/runtime-namespace=spoofed-runtime" not in apps_api.list_label_selectors[-1]
+
+
+def test_kubernetes_backend_shutdown_attempts_all_resources_after_raw_delete_failure() -> None:
+    """Shutdown should collect raw Kubernetes API failures and continue deleting related resources."""
+    backend, apps_api, core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    def fail_delete_service(name: str, namespace: str) -> None:
+        del name, namespace
+        msg = "service api failed"
+        raise RuntimeError(msg)
+
+    core_api.delete_namespaced_service = fail_delete_service  # type: ignore[method-assign]
+
+    with pytest.raises(WorkerBackendError, match="service api failed"):
+        backend.shutdown()
+
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert core_api.deleted_secret_names == [handle.worker_id]
 
 
 def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:

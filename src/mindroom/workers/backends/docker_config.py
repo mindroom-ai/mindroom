@@ -114,10 +114,12 @@ def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
         return {}
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as exc:
+        msg = f"{name} must contain a JSON object."
+        raise WorkerBackendError(msg) from exc
     if not isinstance(parsed, dict):
-        return {}
+        msg = f"{name} must contain a JSON object."
+        raise WorkerBackendError(msg)
     cleaned: dict[str, str] = {}
     for key, value in parsed.items():
         if not isinstance(key, str):
@@ -165,6 +167,9 @@ def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) 
         resolved = resolve_config_relative_path(configured, runtime_paths)
         if not resolved.exists():
             msg = f"{_HOST_CONFIG_PATH_ENV} points to a missing file: {resolved}"
+            raise WorkerBackendError(msg)
+        if resolved.is_dir():
+            msg = f"{_HOST_CONFIG_PATH_ENV} points to a directory, not a config file: {resolved}"
             raise WorkerBackendError(msg)
         return resolved
     runtime_config_path = runtime_paths.config_path.expanduser().resolve()

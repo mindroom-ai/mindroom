@@ -353,25 +353,29 @@ def _runtime_namespace(*, config: KubernetesWorkerBackendConfig, storage_root: P
 
 
 def _labels(*, extra_labels: dict[str, str], runtime_namespace: str, worker_id: str) -> dict[str, str]:
-    labels = {
-        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
-        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
-        _LABEL_NAME: _LABEL_NAME_VALUE,
-        _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
-    }
-    labels.update(extra_labels)
-    labels[_LABEL_WORKER_ID] = worker_id
+    labels = dict(extra_labels)
+    labels.update(
+        {
+            _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+            _LABEL_NAME: _LABEL_NAME_VALUE,
+            _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
+            _LABEL_WORKER_ID: worker_id,
+        },
+    )
     return labels
 
 
 def _list_selector(*, extra_labels: dict[str, str], runtime_namespace: str) -> str:
-    selector = {
-        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
-        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
-        _LABEL_NAME: _LABEL_NAME_VALUE,
-        _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
-    }
-    selector.update(extra_labels)
+    selector = dict(extra_labels)
+    selector.update(
+        {
+            _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+            _LABEL_NAME: _LABEL_NAME_VALUE,
+            _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
+        },
+    )
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
 
 

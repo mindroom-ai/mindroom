@@ -435,12 +435,13 @@ class DockerWorkerBackend:
         """Return the current worker handle for one worker key, if present."""
         timestamp = time.time() if now is None else now
         paths = self._state_paths(worker_key)
-        metadata = self._load_metadata(paths)
-        if metadata is None:
-            return None
-        container = self._read_container(metadata.container_name)
-        metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
-        return self._to_handle(metadata, container, now=timestamp, paths=paths)
+        with self._worker_lock(worker_key):
+            metadata = self._load_metadata(paths)
+            if metadata is None:
+                return None
+            container = self._read_container(metadata.container_name)
+            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
+            return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
@@ -467,14 +468,18 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            container = self._read_container(metadata.container_name)
-            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
-            handle = self._to_handle(
-                metadata,
-                container,
-                now=timestamp,
-                paths=paths,
-            )
+            with self._worker_lock(metadata.worker_key):
+                metadata = self._load_metadata(paths)
+                if metadata is None:
+                    continue
+                container = self._read_container(metadata.container_name)
+                metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
+                handle = self._to_handle(
+                    metadata,
+                    container,
+                    now=timestamp,
+                    paths=paths,
+                )
             if include_idle or handle.status != "idle":
                 handles.append(handle)
         return sorted(handles, key=lambda handle: handle.last_used_at, reverse=True)
@@ -1437,7 +1442,6 @@ class DockerWorkerBackend:
             _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
             _LABEL_NAME: _LABEL_NAME_VALUE,
             _LABEL_WORKER_ID: metadata.worker_id,
-            _LABEL_WORKER_KEY: metadata.worker_key,
             _LABEL_LAUNCH_CONFIG_HASH: self._launch_config_hash,
             _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
         }
@@ -1543,7 +1547,7 @@ class DockerWorkerBackend:
             source = mount_data.get("Source")
             destination = mount_data.get("Destination")
             if mount_type != "bind" or not isinstance(source, str) or not isinstance(destination, str):
-                return False
+                continue
             writable = mount_data.get("RW")
             if isinstance(writable, bool):
                 read_only = not writable
