@@ -2144,6 +2144,47 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
     assert manager.shared_manager().load_credentials(provider.credential_service) is not None
 
 
+def test_agent_oauth_callback_rechecks_agent_reply_permission(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(
+            worker_scope="shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        ),
+    )
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    manager = get_runtime_credentials_manager(runtime_paths)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared",
+                headers=trusted_upstream_headers(),
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            _publish_config(
+                api_app,
+                runtime_paths,
+                _config_payload(
+                    worker_scope="shared",
+                    authorization={"agent_reply_permissions": {"general": ["@bob:example.org"]}},
+                ),
+            )
+            _use_runtime_auth_settings(api_app)
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                headers=trusted_upstream_headers(),
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 403
+    assert manager.shared_manager().load_credentials(provider.credential_service) is None
+
+
 def test_global_oauth_status_keeps_existing_access_without_agent_name(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(
