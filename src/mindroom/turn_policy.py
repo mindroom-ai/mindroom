@@ -637,7 +637,7 @@ class TurnPolicy:
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_matrix_id = registry.current_id(self.deps.agent_name)
         agent_is_responder_candidate = agent_matrix_id.full_id in {
-            agent.full_id for agent in available_responders_in_room
+            responder.full_id for responder in available_responders_in_room
         }
         team_action = self.explicit_configured_team_rejection_action(
             context,

@@ -786,16 +786,16 @@ def _select_team_request(
     available_responders = available_responders_in_room
     if available_responders is None:
         available_responders = get_available_responders_in_room(room, config, runtime_paths)
-    normalized_available_agents = _normalize_team_request_members(available_responders, config, runtime_paths)
-    if len(normalized_available_agents) <= 1:
+    normalized_available_responders = _normalize_team_request_members(available_responders, config, runtime_paths)
+    if len(normalized_available_responders) <= 1:
         return _SelectedTeamRequest(None, [])
 
     logger.info(
         "team_formation_requested",
         trigger="dm_room_multiple_agents",
-        agents=[agent.full_id for agent in normalized_available_agents],
+        agents=[responder.full_id for responder in normalized_available_responders],
     )
-    return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_agents)
+    return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_responders)
 
 
 def _sender_unavailable_team_agents_message(agent_names: list[str], *, prefix: str = "Team request") -> str:

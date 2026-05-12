@@ -773,12 +773,17 @@ async def _parse_workflow_schedule(
     if current_time is None:
         current_time = datetime.now(UTC)
 
-    assert available_responders, "No agents or teams available for scheduling"
+    if not available_responders:
+        return _WorkflowParseError(
+            error="No agents or teams available for scheduling.",
+            suggestion="Try again in a room or thread where at least one agent or team can respond.",
+        )
     registry = entity_identity_registry(config, runtime_paths)
     agent_list = ", ".join(
         f"@{entity_name}"
-        for agent_id in available_responders
-        if (entity_name := registry.current_entity_name_for_user_id(agent_id.full_id, include_router=False)) is not None
+        for responder_id in available_responders
+        if (entity_name := registry.current_entity_name_for_user_id(responder_id.full_id, include_router=False))
+        is not None
     )
 
     prompt = config.render_prompt(

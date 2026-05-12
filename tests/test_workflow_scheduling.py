@@ -278,6 +278,24 @@ class TestParseWorkflowSchedule:
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
 
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_empty_available_responders_returns_parse_error(
+        self,
+        mock_agent_class: Mock,
+        mock_config: MagicMock,
+    ) -> None:
+        """Empty responder sets should fail deterministically for direct callers."""
+        result = await _parse_workflow_schedule(
+            "Schedule something",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_responders=[],
+        )
+
+        assert isinstance(result, _WorkflowParseError)
+        assert result.error == "No agents or teams available for scheduling."
+        mock_agent_class.assert_not_called()
+
     @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
     async def test_parse_formats_available_agents_without_double_at(
