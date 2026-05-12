@@ -12,6 +12,7 @@ from agno.models.groq import Groq
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
+from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 from mindroom.codex_model import CodexResponses, derive_codex_prompt_cache_key, normalize_codex_model_id
 from mindroom.constants import (
@@ -181,7 +182,7 @@ def get_model_instance(
 
 def configure_model_for_compaction(model: Model) -> Model:
     """Tune a freshly-created model for deterministic background summary calls."""
-    if not isinstance(model, Claude):
+    if not isinstance(model, (Claude, VertexAIClaude)):
         logger.debug(
             "compaction_model_provider_tuning_skipped",
             model_type=type(model).__name__,
