@@ -119,12 +119,20 @@ export function VoiceConfig() {
   // Get available models from config
   const availableModels = config?.models ? Object.keys(config.models) : [];
   const normalizedHost = normalizeHost(voiceConfig.stt.host);
-  const effectiveEndpoint = normalizedHost
-    ? `${normalizedHost}/v1/audio/transcriptions`
-    : OPENAI_TRANSCRIPTION_ENDPOINT;
-  const effectiveMode = normalizedHost ? "OpenAI-compatible API" : "OpenAI API";
   const providerLabel =
     voiceConfig.stt.provider || DEFAULT_VOICE_CONFIG.stt.provider;
+  const normalizedSttProvider = providerLabel.toLowerCase();
+  const isOpenAISttProvider = normalizedSttProvider === "openai";
+  const effectiveEndpoint = isOpenAISttProvider
+    ? normalizedHost
+      ? `${normalizedHost.replace(/\/v1$/, "")}/v1/audio/transcriptions`
+      : OPENAI_TRANSCRIPTION_ENDPOINT
+    : "Unsupported provider";
+  const effectiveMode = isOpenAISttProvider
+    ? normalizedHost
+      ? "OpenAI-compatible API"
+      : "OpenAI API"
+    : "Unsupported provider";
   const defaultSttConnection = defaultConnectionIdForPurpose(
     voiceConfig.stt.provider,
     "voice_stt",

@@ -27,6 +27,16 @@ describe("ModelConfig", () => {
           service: "anthropic",
           auth_kind: "api_key",
         },
+        "openrouter/default": {
+          provider: "openrouter",
+          service: "openrouter",
+          auth_kind: "api_key",
+        },
+        "openai/default": {
+          provider: "openai",
+          service: "openai",
+          auth_kind: "api_key",
+        },
       },
       models: {
         default: { provider: "ollama", id: "devstral:24b" },
@@ -159,9 +169,6 @@ describe("ModelConfig", () => {
         target: { value: "http://localhost:11434/v1" },
       },
     );
-    fireEvent.change(within(row).getByDisplayValue("16384"), {
-      target: { value: "32768" },
-    });
     fireEvent.change(within(row).getByDisplayValue("16384"), {
       target: { value: "32768" },
     });

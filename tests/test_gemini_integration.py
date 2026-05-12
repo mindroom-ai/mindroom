@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.model_loading import get_model_instance
 
 
 def _config_with_runtime_paths() -> tuple[Config, RuntimePaths]:

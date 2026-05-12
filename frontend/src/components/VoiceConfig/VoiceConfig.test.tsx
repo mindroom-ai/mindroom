@@ -129,7 +129,7 @@ describe("VoiceConfig", () => {
     await waitFor(() => {
       expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
         enabled: true,
-        visible_router_echo: false,
+        visible_router_echo: true,
         stt: {
           provider: "groq",
           model: "whisper-large-v3",
@@ -150,7 +150,7 @@ describe("VoiceConfig", () => {
     await waitFor(() => {
       expect(mockUpdateVoiceConfig).toHaveBeenLastCalledWith({
         enabled: true,
-        visible_router_echo: false,
+        visible_router_echo: true,
         stt: {
           provider: "groq",
           model: "whisper-large-v3",
@@ -357,7 +357,7 @@ describe("VoiceConfig", () => {
     await waitFor(() => {
       expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
         enabled: true,
-        visible_router_echo: false,
+        visible_router_echo: true,
         stt: {
           provider: "openai",
           model: "whisper-1",

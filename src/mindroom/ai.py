@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import inspect
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
@@ -106,10 +105,6 @@ def __getattr__(name: str) -> object:
     """Keep legacy imports working without re-exporting low-level model loading."""
     if name != "get_model_instance":
         raise AttributeError(name)
-
-    for frame in inspect.stack()[1:3]:
-        if frame.filename.endswith("tests/test_routing.py"):
-            raise AttributeError(name)
     # Legacy import support only; keep the low-level loader out of ai.py's runtime boundary.
     return importlib.import_module("mindroom.model_loading").get_model_instance
 

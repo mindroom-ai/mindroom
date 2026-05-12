@@ -211,7 +211,7 @@ Reply-permission checks still use the original human sender, not a later router 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Seeds the default `openai/stt` connection |
+| `OPENAI_API_KEY` | Seeds the default OpenAI API-key connections, including `openai/default`, `openai/stt`, and `openai/embeddings`; define explicit `connections` entries when chat, speech-to-text, or embeddings should use separate projects or keys |
 
 ## Text-to-Speech Tools
 

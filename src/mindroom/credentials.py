@@ -313,7 +313,8 @@ class CredentialsManager:
 
     def set_api_key(self, service: str, api_key: str, key_name: str = "api_key") -> None:
         """Save one API key credential field for a service."""
-        credentials = self.load_credentials(service) or {}
+        loaded_credentials = self.load_credentials(service)
+        credentials = dict(loaded_credentials) if isinstance(loaded_credentials, Mapping) else {}
         credentials[key_name] = api_key
         self.save_credentials(service, credentials)
 

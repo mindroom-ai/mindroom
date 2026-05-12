@@ -1153,6 +1153,19 @@ class TestCredentialsAPI:
         assert status_response.status_code == 200
         assert status_response.json()["key_names"] == ["access_token"]
 
+    def test_generic_credentials_reject_oauth_token_documents_for_non_oauth_services(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Generic credential documents should not accept OAuth token payloads."""
+        response = client.post(
+            "/api/credentials/openai",
+            json={"credentials": {"access_token": "access", "refresh_token": "refresh"}},
+        )
+
+        assert response.status_code == 400
+        assert "OAuth token credentials" in response.json()["detail"]
+
     def test_oauth_tool_settings_do_not_touch_private_token_service(
         self,
         client: TestClient,

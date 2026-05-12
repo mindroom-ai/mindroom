@@ -6,7 +6,7 @@ import inspect
 import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -226,28 +226,15 @@ def _published_snapshot(
     backend_managed_services: frozenset[str] | object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
-    updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
-    updated_config_data = snapshot.config_data if config_data is None else config_data
-    updated_runtime_config = snapshot.runtime_config if runtime_config is _UNSET else runtime_config
-    updated_config_load_result = (
-        snapshot.config_load_result
-        if config_load_result is _UNSET
-        else cast("ConfigLoadResult | None", config_load_result)
-    )
-    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
-    updated_backend_managed_services = (
-        snapshot.backend_managed_services
-        if backend_managed_services is _UNSET
-        else cast("frozenset[str]", backend_managed_services)
-    )
-    return ApiSnapshot(
-        generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
-        runtime_paths=updated_runtime_paths,
-        config_data=updated_config_data,
-        runtime_config=cast("Config | None", updated_runtime_config),
-        config_load_result=updated_config_load_result,
-        auth_state=updated_auth_state,
-        backend_managed_services=updated_backend_managed_services,
+    return config_lifecycle._published_snapshot(
+        snapshot,
+        increment_generation=increment_generation,
+        runtime_paths=runtime_paths,
+        config_data=config_data,
+        runtime_config=runtime_config,
+        config_load_result=config_load_result,
+        auth_state=auth_state,
+        backend_managed_services=backend_managed_services,
     )
 
 

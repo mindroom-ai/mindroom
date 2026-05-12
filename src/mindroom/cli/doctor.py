@@ -307,7 +307,7 @@ def _validate_openai_transcriptions_endpoint(
     model: str,
 ) -> tuple[bool | None, str]:
     """Validate an OpenAI-compatible STT endpoint with the runtime request path."""
-    url = f"{base_url.rstrip('/')}/v1/audio/transcriptions" if base_url else _OPENAI_TRANSCRIPTION_ENDPOINT
+    url = f"{base_url.rstrip('/')}/audio/transcriptions" if base_url else _OPENAI_TRANSCRIPTION_ENDPOINT
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     files = {"file": ("doctor.wav", b"RIFF\x00\x00\x00\x00WAVE", "audio/wav")}
     form_data = {"model": model}

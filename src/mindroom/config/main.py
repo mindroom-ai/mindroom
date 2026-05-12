@@ -1121,7 +1121,7 @@ class Config(BaseModel):
             msg = f"Agent configuration file not found: {path}"
             raise FileNotFoundError(msg)
 
-        with path.open() as f:
+        with path.open(encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
         runtime_paths = resolve_runtime_paths(config_path=path)

@@ -266,8 +266,17 @@ def _persist_runtime_validated_config(
             locked_snapshots.append((state, snapshot))
 
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        removed_oauth_client_services: set[str] = set()
+        next_oauth_client_services = _google_oauth_client_services(runtime_config)
+        for _state, snapshot in locked_snapshots:
+            removed_oauth_client_services.update(
+                _google_oauth_client_services(snapshot.runtime_config) - next_oauth_client_services,
+            )
+        if removed_oauth_client_services:
+            shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
+            for service in sorted(removed_oauth_client_services):
+                shared_manager.delete_credentials(service)
         for state, snapshot in locked_snapshots:
-            _cleanup_removed_google_oauth_client_services(snapshot.runtime_config, runtime_config, runtime_paths)
             state.snapshot = _published_snapshot(
                 snapshot,
                 config_data=deepcopy(validated_payload),

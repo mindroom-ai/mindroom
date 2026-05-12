@@ -289,9 +289,6 @@ def activate_cli_runtime(
     )
 
 
-_activate_cli_runtime = activate_cli_runtime
-
-
 def _get_editor() -> str:
     """Get the user's preferred editor.
 

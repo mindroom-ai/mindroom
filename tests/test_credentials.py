@@ -122,6 +122,18 @@ class TestCredentialsManager:
         loaded_creds = credentials_manager.load_credentials("test_service")
         assert loaded_creds == test_creds
 
+    def test_set_api_key_replaces_malformed_non_object_credentials(
+        self,
+        credentials_manager: CredentialsManager,
+    ) -> None:
+        """Malformed JSON payloads should not make API-key writes crash."""
+        credentials_path = credentials_manager.get_credentials_path("openai")
+        credentials_path.write_text('"not-an-object"', encoding="utf-8")
+
+        credentials_manager.set_api_key("openai", "sk-test")
+
+        assert credentials_manager.load_credentials("openai") == {"api_key": "sk-test"}
+
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
         tmp_path: Path,

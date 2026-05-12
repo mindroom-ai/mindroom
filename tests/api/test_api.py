@@ -3637,6 +3637,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
 def test_api_config_save_accepts_missing_plugin_path_in_degraded_mode(temp_config_file: Path) -> None:
     """API config writes should use the same degraded plugin tolerance as reads."""
     authored_config = {
+        "connections": {},
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
@@ -3666,6 +3667,7 @@ def test_api_raw_config_save_accepts_missing_plugin_path_in_degraded_mode(temp_c
     """Raw config writes should use the same degraded plugin tolerance as reads."""
     source = yaml.safe_dump(
         {
+            "connections": {},
             "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
             "router": {"model": "default"},
             "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -58,7 +57,6 @@ _OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed throug
 _OAUTH_CLIENT_CONFIG_FIELDS = frozenset({"client_id", "client_secret", "redirect_uri"})
 _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS = _OAUTH_CLIENT_CONFIG_FIELDS - {"client_secret"}
 _PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
-_pending_oauth_state_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -1062,6 +1060,7 @@ async def set_credentials(
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
 
+    _reject_oauth_credentials_document(payload.credentials)
     creds = access.credentials_for_save(service, payload.credentials)
     access.save(service, creds)
 

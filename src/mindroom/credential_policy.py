@@ -103,6 +103,14 @@ def looks_like_oauth_credentials(credentials: dict[str, object]) -> bool:
         or isinstance(credentials.get("_oauth_provider"), str)
         or isinstance(credentials.get("_id_token"), str)
         or isinstance(credentials.get("_oauth_claims"), dict)
+        or (
+            isinstance(credentials.get("refresh_token"), str)
+            and (
+                isinstance(credentials.get("access_token"), str)
+                or isinstance(credentials.get("token"), str)
+                or isinstance(credentials.get("id_token"), str)
+            )
+        )
     )
 
 
