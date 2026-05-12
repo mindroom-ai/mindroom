@@ -62,3 +62,19 @@ def test_parse_message_extra_sections_rejects_unsupported_content_type() -> None
                 },
             ],
         )
+
+
+@pytest.mark.parametrize(
+    ("section", "match"),
+    [
+        ({"title": 42, "content": "details"}, "string title"),
+        ({"title": "Details", "content": "details", "collapsed": "yes"}, "boolean"),
+    ],
+)
+def test_parse_message_extra_sections_rejects_invalid_field_types(
+    section: dict[str, object],
+    match: str,
+) -> None:
+    """Malformed model inputs should fail with precise type errors."""
+    with pytest.raises(TypeError, match=match):
+        parse_message_extra_sections([section])

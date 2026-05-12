@@ -66,7 +66,10 @@ def parse_message_extra_sections(sections: Sequence[Mapping[str, object]]) -> li
             msg = f"message_extras section {index} must be an object."
             raise TypeError(msg)
         raw_title = section.get("title")
-        title = raw_title.strip() if isinstance(raw_title, str) else ""
+        if not isinstance(raw_title, str):
+            msg = f"message_extras section {index} requires a string title."
+            raise TypeError(msg)
+        title = raw_title.strip()
         if not title:
             msg = f"message_extras section {index} requires a non-empty title."
             raise ValueError(msg)
@@ -87,12 +90,15 @@ def parse_message_extra_sections(sections: Sequence[Mapping[str, object]]) -> li
 
         content_type = _parse_content_type(section.get("content_type", "text/markdown"))
         collapsed = section.get("collapsed", True)
+        if not isinstance(collapsed, bool):
+            msg = f"message_extras section {index} requires a boolean for collapsed."
+            raise TypeError(msg)
         parsed_sections.append(
             MessageExtraSection(
                 title=title,
                 content=raw_content,
                 content_type=content_type,
-                collapsed=collapsed if isinstance(collapsed, bool) else True,
+                collapsed=collapsed,
             ),
         )
 

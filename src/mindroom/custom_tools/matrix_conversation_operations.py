@@ -151,6 +151,13 @@ class MatrixMessageOperations:
             return self._result("error", action=action, message="thread_id is required for replies.")
 
         text = message.strip() if isinstance(message, str) and message.strip() else None
+        if text is None and message_extras:
+            return self._result(
+                "error",
+                action=action,
+                room_id=room_id,
+                message="message_extras requires a non-empty message body.",
+            )
         if text is None and not attachment_ids and not attachment_file_paths:
             return self._result(
                 "error",
@@ -637,13 +644,14 @@ class MatrixMessageOperations:
         clear_interactive_question(target)
         interactive_response = parse_and_format_interactive(new_text, extract_mapping=True)
         formatted_text = interactive_response.formatted_text
+        extras_content = build_message_extras_content(message_extras) if message_extras else None
         content = format_message_with_mentions(
             context.config,
             context.runtime_paths,
             formatted_text,
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
-            extra_content=build_message_extras_content(message_extras) if message_extras else None,
+            extra_content=extras_content,
         )
         delivered = await edit_message_result(
             context.client,
@@ -652,6 +660,7 @@ class MatrixMessageOperations:
             content,
             formatted_text,
             config=context.config,
+            extra_content=extras_content,
         )
         if delivered is None:
             return self._result(

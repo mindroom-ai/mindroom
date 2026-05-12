@@ -27,6 +27,7 @@ class MatrixMessageTools(Toolkit):
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
     _ROOM_TIMELINE_SENTINEL: ClassVar[str] = "room"
+    _MESSAGE_EXTRAS_ACTIONS: ClassVar[frozenset[str]] = frozenset({"send", "thread-reply", "reply", "edit"})
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"send", "thread-reply", "reply", "react", "read", "room-threads", "thread-list", "edit", "context"},
     )
@@ -68,9 +69,9 @@ class MatrixMessageTools(Toolkit):
     def _action_supports_attachments(action: str) -> bool:
         return action in {"send", "thread-reply", "reply"}
 
-    @staticmethod
-    def _action_supports_message_extras(action: str) -> bool:
-        return action in {"send", "thread-reply", "reply", "edit"}
+    @classmethod
+    def _action_supports_message_extras(cls, action: str) -> bool:
+        return action in cls._MESSAGE_EXTRAS_ACTIONS
 
     def _validate_matrix_message_request(
         self,
@@ -122,10 +123,11 @@ class MatrixMessageTools(Toolkit):
         if not message_extras:
             return None, None
         if not self._action_supports_message_extras(action):
+            allowed_actions = ", ".join(sorted(self._MESSAGE_EXTRAS_ACTIONS))
             return None, self._payload(
                 "error",
                 action=action,
-                message="message_extras is only supported for send, reply, thread-reply, and edit actions.",
+                message=f"message_extras is only supported for {allowed_actions} actions.",
             )
         try:
             return parse_message_extra_sections(message_extras), None
