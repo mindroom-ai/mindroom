@@ -1341,6 +1341,39 @@ async def test_matrix_message_edit_includes_message_extras_on_replacement_wrappe
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_edit_rejects_invalid_message_extras() -> None:
+    """Invalid edit extras should fail before edit delivery."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
+        ) as mock_edit,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="edit",
+                message="Updated answer.",
+                target="$target",
+                message_extras=[
+                    {
+                        "title": "Raw",
+                        "content_type": "application/json",
+                        "content": "{}",
+                    },
+                ],
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "content_type" in payload["message"]
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_edit_plain_text_clears_existing_interactive_question() -> None:
     """Editing away an interactive block should clear the tracked question."""
     tool = MatrixMessageTools()
