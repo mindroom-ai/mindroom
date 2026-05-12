@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
@@ -76,13 +76,16 @@ def mock_config() -> Config:
                 "shell": AgentConfig(display_name="Shell"),
                 "analyst": AgentConfig(display_name="Analyst"),
             },
+            teams={
+                "ops": TeamConfig(display_name="Ops Team", role="Operations team", agents=["research", "analyst"]),
+            },
             models={"default": ModelConfig(provider="test", id="test-model")},
         ),
     )
     persist_entity_accounts(
         config,
         runtime_paths_for(config),
-        usernames={alias: alias for alias in ["router", *config.agents]},
+        usernames={alias: alias for alias in ["router", *config.agents, *config.teams]},
     )
     return config
 
@@ -323,13 +326,14 @@ class TestParseWorkflowSchedule:
             available_responders=[
                 _mid("general"),
                 _mid("research"),
+                _mid("ops"),
                 _mid("finance"),
                 _mid("analyst"),
             ],
         )
 
         prompt = mock_agent.arun.call_args.args[0]
-        assert "Available agents and teams: @general, @research, @finance, @analyst" in prompt
+        assert "Available agents and teams: @general, @research, @ops, @finance, @analyst" in prompt
         assert "@@" not in prompt
 
     @patch("mindroom.model_loading.get_model_instance")

@@ -674,6 +674,8 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
         if team_action is None:
+            # Use sender-visible responders here so explicit team requests can distinguish
+            # hidden members from visible-but-not-materializable members.
             form_team = await self.decide_team_for_sender(
                 agents_in_thread,
                 context,
