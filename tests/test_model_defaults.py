@@ -51,3 +51,17 @@ def test_saas_default_config_models_match_central_defaults() -> None:
     assert config["memory"]["llm"]["config"]["model"] == model_defaults.OPENAI_GPT_NANO
     assert config["memory"]["embedder"]["config"]["model"] == model_defaults.OPENAI_EMBEDDING_SMALL
     assert config["voice"]["stt"]["model"] == model_defaults.OPENAI_TRANSCRIPTION
+
+
+def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> None:
+    """Config init should comment every non-default OpenRouter model alias we expose elsewhere."""
+    openrouter_saas_aliases = {
+        name
+        for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()
+        if preset.provider == "openrouter" and name not in {"default", "sonnet"}
+    }
+    openrouter_alternative_aliases = {
+        name for name, _preset in model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"]
+    }
+
+    assert openrouter_alternative_aliases == openrouter_saas_aliases

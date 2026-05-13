@@ -219,7 +219,7 @@ agents:
     - Highlight key developments and their significance.
     learning: true
     learning_mode: always
-    model: gpt_oss_120b
+    model: nemotron
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -427,9 +427,13 @@ models:
     provider: openrouter
     id: moonshotai/kimi-k2.6
     context_window: 262144
-  gpt_oss_120b:
+  tencent_hy3:
     provider: openrouter
-    id: openai/gpt-oss-120b
+    id: tencent/hy3-preview
+    context_window: 64000
+  nemotron:
+    provider: openrouter
+    id: nvidia/nemotron-3-super-120b-a12b:free
     context_window: 128000
 plugins: []
 room_models:

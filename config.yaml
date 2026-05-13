@@ -222,7 +222,7 @@ agents:
     - Highlight key developments and their significance.
     learning: true
     learning_mode: always
-    model: gpt_oss_120b
+    model: nemotron
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -489,11 +489,11 @@ models:
   deepseek:
     id: deepseek/deepseek-v3.2
     provider: openrouter
-  gpt_oss:
-    id: openai/gpt-oss-120b
+  nemotron:
+    id: nvidia/nemotron-3-super-120b-a12b:free
     provider: openrouter
-  gpt_oss_120b:
-    id: openai/gpt-oss-120b
+  tencent_hy3:
+    id: tencent/hy3-preview
     provider: openrouter
 plugins: []
 room_models:

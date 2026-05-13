@@ -87,10 +87,11 @@ _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5"
 _OPENROUTER_GEMINI_FLASH = "google/gemini-3-flash-preview"
 _OPENROUTER_GEMINI_LITE = "google/gemini-3.1-flash-lite-preview"
 _OPENROUTER_OPENAI_MINI = "openai/gpt-5.4-mini"
-_OPENROUTER_OPENAI_GPT_OSS_120B = "openai/gpt-oss-120b"
+_OPENROUTER_NEMOTRON = "nvidia/nemotron-3-super-120b-a12b:free"
 _OPENROUTER_DEEPSEEK_CHAT = "deepseek/deepseek-v4-pro"
 _OPENROUTER_GLM = "z-ai/glm-5.1"
 _OPENROUTER_KIMI = "moonshotai/kimi-k2.6"
+_OPENROUTER_TENCENT_HY3 = "tencent/hy3-preview"
 
 OLLAMA_GEMMA = "gemma4"
 OLLAMA_QWEN = "qwen3.6:27b"
@@ -143,10 +144,16 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("openai_nano", ModelPreset("openai", OPENAI_GPT_NANO, 400_000)),
         ),
         "openrouter": (
+            ("gpt5mini", ModelPreset("openrouter", _OPENROUTER_OPENAI_MINI, 400_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000)),
             ("gemini_flash", ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_000_000)),
             ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE)),
+            ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK_CHAT, 1_048_576)),
+            ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 202_752)),
+            ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 262_144)),
+            ("tencent_hy3", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 64_000)),
+            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 128_000)),
         ),
         "vertexai_claude": (
             ("opus", ModelPreset("vertexai_claude", _ANTHROPIC_OPUS, 1_000_000)),
@@ -168,7 +175,8 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK_CHAT, 1_048_576),
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 202_752),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 262_144),
-        "gpt_oss_120b": ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT_OSS_120B, 128_000),
+        "tencent_hy3": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 64_000),
+        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 128_000),
     },
 )
 
