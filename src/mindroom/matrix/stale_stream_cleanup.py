@@ -278,6 +278,8 @@ async def _cleanup_room_stale_streaming_messages(
         assert state.latest_body is not None  # guaranteed by filter above
         if _is_outside_startup_cleanup_window(state.latest_timestamp, now_ms=current_time_ms):
             continue
+
+        interrupted = None
         if _is_cleanup_candidate(state):
             edited, interrupted = await _cleanup_candidate_message(
                 client,
@@ -296,10 +298,7 @@ async def _cleanup_room_stale_streaming_messages(
 
             cleaned_count += 1
             prior_edit_succeeded = True
-            _append_interrupted_thread(interrupted_threads, interrupted)
-            continue
-
-        if _has_resumable_interrupted_note(state):
+        elif _has_resumable_interrupted_note(state):
             repaired, interrupted = await _handle_terminal_interrupted_message(
                 client,
                 room_id=room_id,
@@ -316,18 +315,13 @@ async def _cleanup_room_stale_streaming_messages(
             if repaired:
                 cleaned_count += 1
                 prior_edit_succeeded = True
-            _append_interrupted_thread(interrupted_threads, interrupted)
+        else:
+            continue
+
+        if interrupted is not None:
+            interrupted_threads.append(interrupted)
 
     return cleaned_count, interrupted_threads
-
-
-def _append_interrupted_thread(
-    interrupted_threads: list[InterruptedThread],
-    interrupted: InterruptedThread | None,
-) -> None:
-    """Append one interrupted-thread record when present."""
-    if interrupted is not None:
-        interrupted_threads.append(interrupted)
 
 
 async def _handle_terminal_interrupted_message(
