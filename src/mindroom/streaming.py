@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "INTERRUPTED_RESPONSE_NOTE",
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
     "SYNC_RESTART_CANCEL_MSG",
@@ -82,7 +83,8 @@ __all__ = [
 _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
-_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
+INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
+_INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]

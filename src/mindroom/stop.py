@@ -137,11 +137,13 @@ class StopManager:
     ) -> int:
         """Cancel active response tasks that are ending because the sync loop is stopping."""
         active_tasks: list[asyncio.Task[None]] = []
+        tracked_by_task: dict[asyncio.Task[None], tuple[str, _TrackedMessage]] = {}
         for message_id, tracked in list(self.tracked_messages.items()):
             if tracked.task.done() or tracked.cancel_requested:
                 continue
             tracked.cancel_requested = True
             active_tasks.append(tracked.task)
+            tracked_by_task[tracked.task] = (message_id, tracked)
             logger.info(
                 "Cancelling active response during sync shutdown",
                 message_id=message_id,
@@ -149,9 +151,25 @@ class StopManager:
                 **self._log_target(tracked.target),
             )
             request_task_cancel(tracked.task, cancel_msg=cancel_msg)
+            if tracked.run_id:
+                logger.info(
+                    "Scheduling best-effort Agno run cleanup after sync-shutdown cancel",
+                    message_id=message_id,
+                    run_id=tracked.run_id,
+                    **self._log_target(tracked.target),
+                )
+                self._schedule_graceful_run_cancel(message_id, tracked.run_id)
 
         if active_tasks:
-            await asyncio.wait(active_tasks, timeout=wait_seconds)
+            _, pending_tasks = await asyncio.wait(active_tasks, timeout=wait_seconds)
+            for pending_task in pending_tasks:
+                message_id, tracked = tracked_by_task[pending_task]
+                logger.warning(
+                    "Active response did not stop during sync shutdown grace period",
+                    message_id=message_id,
+                    run_id=tracked.run_id,
+                    **self._log_target(tracked.target),
+                )
         return len(active_tasks)
 
     def get_tracked_target(self, message_id: str) -> MessageTarget | None:

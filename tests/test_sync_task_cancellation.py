@@ -155,6 +155,67 @@ async def test_stop_manager_cancels_active_responses_as_sync_restart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_manager_schedules_run_cleanup_for_sync_shutdown_cancel() -> None:
+    """Known provider runs should be cancelled after sync-shutdown task cancellation."""
+    stop_manager = StopManager()
+    target = MagicMock()
+    target.room_id = "!room:example.com"
+    target.resolved_thread_id = "$thread-root"
+
+    async def response_task() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(response_task())
+    stop_manager.set_current("$message", target, task, run_id="run-123")
+    await asyncio.sleep(0)
+
+    with patch.object(stop_manager, "_schedule_graceful_run_cancel") as schedule_graceful_run_cancel:
+        cancelled_count = await stop_manager.cancel_active_responses(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
+    assert cancelled_count == 1
+    schedule_graceful_run_cancel.assert_called_once_with("$message", "run-123")
+
+
+@pytest.mark.asyncio
+async def test_stop_manager_logs_responses_still_pending_after_sync_shutdown_cancel() -> None:
+    """Shutdown cancellation should surface tasks that ignore the cancellation grace."""
+    stop_manager = StopManager()
+    target = MagicMock()
+    target.room_id = "!room:example.com"
+    target.resolved_thread_id = "$thread-root"
+
+    async def stubborn_response_task() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(stubborn_response_task())
+    stop_manager.set_current("$message", target, task, run_id="run-123")
+    await asyncio.sleep(0)
+
+    try:
+        with patch("mindroom.stop.logger.warning") as warning:
+            cancelled_count = await stop_manager.cancel_active_responses(
+                cancel_msg=SYNC_RESTART_CANCEL_MSG,
+                wait_seconds=0.01,
+            )
+
+        assert cancelled_count == 1
+        warning.assert_any_call(
+            "Active response did not stop during sync shutdown grace period",
+            message_id="$message",
+            run_id="run-123",
+            room_id="!room:example.com",
+            thread_id="$thread-root",
+        )
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_stop_manager_does_not_reclassify_user_cancelled_responses() -> None:
     """Shutdown should not turn an already user-cancelled response into an auto-resumable restart."""
     stop_manager = StopManager()

@@ -39,6 +39,7 @@ from mindroom.matrix.thread_projection import (
     resolve_thread_ids_for_event_infos,
 )
 from mindroom.streaming import (
+    INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
     clean_partial_reply_text,
@@ -70,7 +71,6 @@ _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _AUTO_RESUME_MESSAGE = (
     "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
 )
-_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _TERMINAL_STREAM_STATUSES = frozenset(
     {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED},
 )
@@ -1416,7 +1416,7 @@ def _has_restart_interrupted_note(body: str) -> bool:
 
 def _has_generic_interrupted_note(body: str) -> bool:
     """Return whether the body has a terminal generic interrupted note."""
-    return body.rstrip().endswith(_INTERRUPTED_RESPONSE_NOTE)
+    return body.rstrip().endswith(INTERRUPTED_RESPONSE_NOTE)
 
 
 def _has_resumable_interrupted_note(state: _MessageState) -> bool:

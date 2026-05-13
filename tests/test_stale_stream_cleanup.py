@@ -1529,7 +1529,7 @@ async def test_cleanup_returns_generic_interrupted_thread_from_graceful_restart(
         _make_message_event(
             event_id="$cancelled",
             body="User-stopped answer\n\n**[Response cancelled by user]**",
-            timestamp_ms=NOW_MS - (STALE_AGE_MS - 1),
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 1),
             relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
             extra_content={STREAM_STATUS_KEY: "cancelled"},
         ),
