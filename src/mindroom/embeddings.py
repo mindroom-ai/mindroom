@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.utils.log import log_info, log_warning
 
+from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS, SENTENCE_TRANSFORMERS_DEFAULT
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
 if TYPE_CHECKING:
@@ -17,11 +18,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_OPENAI_EMBEDDING_DIMENSIONS = {
-    "text-embedding-3-large": 3072,
-    "text-embedding-3-small": 1536,
-}
-_DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_OPENAI_EMBEDDING_DIMENSIONS = OPENAI_EMBEDDING_DIMENSIONS
+_DEFAULT_SENTENCE_TRANSFORMERS_MODEL = SENTENCE_TRANSFORMERS_DEFAULT
 _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 

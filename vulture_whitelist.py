@@ -75,6 +75,9 @@ _.get_embedding_and_usage  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embedding  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embedding_and_usage  # unused method (src/mindroom/knowledge/manager.py)
 _.async_get_embeddings_batch_and_usage  # unused method (src/mindroom/embeddings.py)
+DEEPSEEK_REASONER  # used by scripts/utilities/rewrite_git_commits_ai.py
+SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
+_.to_config_dict  # used by scripts/sync_config.py
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)
 clear_auth_session  # unused function (src/mindroom/api/auth.py)
 _.validate_unique_tools  # unused method (src/mindroom/config/agent.py)

@@ -29,6 +29,14 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PL
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
+from mindroom.model_defaults import (
+    CONFIG_INIT_MODEL_PRESETS,
+    LLAMA_CPP_GEMMA,
+    LLAMA_CPP_QWEN,
+    OLLAMA_GEMMA,
+    OLLAMA_QWEN,
+    llama_cpp_server_command,
+)
 from mindroom.startup_errors import PermanentStartupError
 from tests.conftest import load_config_yaml, normalize_console_output
 
@@ -164,7 +172,7 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "openai"
-        assert config["models"]["default"]["id"] == "gpt-5.4"
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
 
     def test_init_full_profile_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
         """Full template should include MindRoom-style Mind memory/context setup."""
@@ -502,8 +510,8 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
-        assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["codex"].id
+        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["codex"].context_window
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
         assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
@@ -520,6 +528,80 @@ class TestConfigInit:
         assert "mindroom connect --pair-code" in output
         assert "codex login" in output
 
+    def test_init_profile_public_ollama_writes_hosted_ollama_defaults(self, tmp_path: Path) -> None:
+        """Hosted Ollama profile should use local Ollama models and hosted Matrix settings."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-ollama"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "ollama"
+        assert config["models"]["default"]["id"] == OLLAMA_GEMMA
+        assert config["models"]["default"]["host"] == "http://localhost:11434"
+        assert config["models"]["default"]["context_window"] == 128_000
+        assert config["models"]["qwen3_6_27b"]["provider"] == "ollama"
+        assert config["models"]["qwen3_6_27b"]["id"] == OLLAMA_QWEN
+        assert config["models"]["qwen3_6_27b"]["host"] == "http://localhost:11434"
+        assert config["models"]["qwen3_6_27b"]["context_window"] == 256_000
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "OLLAMA_HOST=http://localhost:11434" in env_content
+        assert f"ollama pull {OLLAMA_GEMMA}" in env_content
+        assert f"ollama pull {OLLAMA_QWEN}" in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+
+        output = normalize_console_output(result.output)
+        assert "mindroom connect --pair-code" in output
+        assert f"ollama pull {OLLAMA_GEMMA}" in output
+        assert f"ollama pull {OLLAMA_QWEN}" in output
+        assert "Ollama" in output
+
+    def test_init_profile_llama_cpp_writes_hosted_openai_compatible_defaults(self, tmp_path: Path) -> None:
+        """llama-cpp profile should use local OpenAI-compatible server defaults and hosted Matrix."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "llama-cpp"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "openai"
+        assert config["models"]["default"]["id"] == LLAMA_CPP_GEMMA
+        assert config["models"]["default"]["context_window"] == 128_000
+        assert config["models"]["default"]["extra_kwargs"] == {
+            "api_key": "sk-no-key-required",
+            "base_url": "http://localhost:8080/v1",
+        }
+        assert config["models"]["qwen3_6_27b"]["provider"] == "openai"
+        assert config["models"]["qwen3_6_27b"]["id"] == LLAMA_CPP_QWEN
+        assert config["models"]["qwen3_6_27b"]["context_window"] == 256_000
+        assert config["models"]["qwen3_6_27b"]["extra_kwargs"] == {
+            "api_key": "sk-no-key-required",
+            "base_url": "http://localhost:8080/v1",
+        }
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "OPENAI_BASE_URL=http://localhost:8080/v1" in env_content
+        assert "OPENAI_API_KEY=sk-no-key-required" in env_content
+        assert llama_cpp_server_command(LLAMA_CPP_GEMMA) in env_content
+        assert llama_cpp_server_command(LLAMA_CPP_QWEN) in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+
+        output = normalize_console_output(result.output)
+        assert "mindroom connect --pair-code" in output
+        assert llama_cpp_server_command(LLAMA_CPP_GEMMA) in output
+        assert llama_cpp_server_command(LLAMA_CPP_QWEN) in output
+        assert "llama.cpp" in output
+
     def test_init_profile_codex_alias_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """The concise codex profile alias should use hosted Codex defaults."""
         target = tmp_path / "config.yaml"
@@ -532,8 +614,8 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "codex"
-        assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["codex"].id
+        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["codex"].context_window
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
 
     @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
@@ -700,8 +782,8 @@ class TestConfigInit:
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "openai"
-        assert config["models"]["default"]["id"] == "gpt-5.4"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
+        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["openai"].context_window
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
         """Config init --provider anthropic prepopulates Anthropic defaults."""
@@ -751,8 +833,8 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "codex"
-        assert config["models"]["default"]["id"] == "gpt-5.5"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["codex"].id
+        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["codex"].context_window
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
 

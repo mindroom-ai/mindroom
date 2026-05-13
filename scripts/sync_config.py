@@ -6,68 +6,39 @@
 # ///
 """Sync config.yaml to saas-platform, but override models with OpenRouter."""
 
+import importlib.util
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import yaml
 
-# OpenRouter models to use in SaaS platform
-SAAS_MODELS = {
-    "default": {
-        "provider": "openrouter",
-        "id": "google/gemini-2.5-flash",
-    },
-    "gpt5nano": {
-        "provider": "openai",
-        "id": "gpt-5-nano-2025-08-07",
-    },
-    "sonnet": {
-        "provider": "openrouter",
-        "id": "anthropic/claude-sonnet-4-5",
-    },
-    "deepseek": {
-        "provider": "openrouter",
-        "id": "deepseek/deepseek-chat-v3.1:free",
-    },
-    "gemini_flash": {
-        "provider": "openrouter",
-        "id": "google/gemini-2.5-flash",
-    },
-    "glm45": {
-        "provider": "openrouter",
-        "id": "z-ai/glm-4.5",
-    },
-    # Map any other model names to OpenRouter equivalents
-    "gpt5mini": {
-        "provider": "openrouter",
-        "id": "google/gemini-2.5-flash",
-    },
-    "haiku": {
-        "provider": "openrouter",
-        "id": "google/gemini-2.5-flash",
-    },
-    "opus": {
-        "provider": "openrouter",
-        "id": "anthropic/claude-sonnet-4-5",
-    },
-    "gpt4o": {
-        "provider": "openrouter",
-        "id": "anthropic/claude-sonnet-4-5",
-    },
-    "gpt_oss_120b": {
-        "provider": "openrouter",
-        "id": "google/gemini-2.5-flash",
-    },
-}
+ROOT_DIR = Path(__file__).parent.parent
+_MODEL_DEFAULTS_PATH = ROOT_DIR / "src" / "mindroom" / "model_defaults.py"
+
+
+def _load_model_defaults() -> ModuleType:
+    """Load model defaults without importing the full mindroom package in the uv-script environment."""
+    spec = importlib.util.spec_from_file_location("_mindroom_model_defaults", _MODEL_DEFAULTS_PATH)
+    if spec is None or spec.loader is None:
+        msg = f"Could not load model defaults from {_MODEL_DEFAULTS_PATH}"
+        raise RuntimeError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+model_defaults = _load_model_defaults()
+SAAS_MODELS = {name: preset.to_config_dict() for name, preset in model_defaults.SAAS_MODEL_PRESETS.items()}
 
 
 def main() -> int:
     """Copy entire config but override models for SaaS."""
-    root_dir = Path(__file__).parent.parent
-    source_path = root_dir / "config.yaml"
+    source_path = ROOT_DIR / "config.yaml"
 
     # Write directly to the k8s instance directory
-    target_path = root_dir / "cluster" / "k8s" / "instance" / "default-config.yaml"
+    target_path = ROOT_DIR / "cluster" / "k8s" / "instance" / "default-config.yaml"
 
     # Load source config
     with source_path.open() as f:
@@ -87,18 +58,18 @@ def main() -> int:
             config["memory"]["llm"] = {
                 "provider": "openai",
                 "config": {
-                    "model": "gpt-5-nano-2025-08-07",
+                    "model": model_defaults.OPENAI_GPT_NANO,
                     "temperature": 0.1,
                     "top_p": 1,
                 },
             }
 
-        # Override embedder to use OpenAI's text-embedding-3-small
+        # Override embedder to use OpenAI's default embedding model.
         if "embedder" in config["memory"]:
             config["memory"]["embedder"] = {
                 "provider": "openai",
                 "config": {
-                    "model": "text-embedding-3-small",
+                    "model": model_defaults.OPENAI_EMBEDDING_SMALL,
                 },
             }
 
@@ -106,13 +77,16 @@ def main() -> int:
     if "router" in config:
         config["router"]["model"] = "gpt5nano"
 
+    if "voice" in config and "stt" in config["voice"]:
+        config["voice"]["stt"]["model"] = model_defaults.OPENAI_TRANSCRIPTION
+
     # Save to target location
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     with target_path.open("w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
 
-    print(f"✅ Synced config with OpenRouter models to {target_path.relative_to(root_dir)}")
+    print(f"✅ Synced config with OpenRouter models to {target_path.relative_to(ROOT_DIR)}")
 
     return 0
 

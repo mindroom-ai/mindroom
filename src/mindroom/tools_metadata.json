@@ -2037,7 +2037,7 @@
       "config_fields": [
         {
           "authored_override": true,
-          "default": "dall-e-3",
+          "default": "gpt-image-2",
           "description": null,
           "label": "Model",
           "name": "model",
@@ -4642,7 +4642,7 @@
         },
         {
           "authored_override": true,
-          "default": "whisper-1",
+          "default": "gpt-4o-transcribe",
           "description": null,
           "label": "Transcription Model",
           "name": "transcription_model",
@@ -4666,7 +4666,7 @@
         },
         {
           "authored_override": true,
-          "default": "tts-1",
+          "default": "gpt-4o-mini-tts",
           "description": null,
           "label": "Text To Speech Model",
           "name": "text_to_speech_model",
@@ -4690,7 +4690,7 @@
         },
         {
           "authored_override": true,
-          "default": "dall-e-3",
+          "default": "gpt-image-2",
           "description": null,
           "label": "Image Model",
           "name": "image_model",
