@@ -552,10 +552,7 @@ class CoalescingGate:
         gate.phase = GatePhase.GRACE
         gate.grace_deadline = time.monotonic() + self._upload_grace_hard_cap_seconds()
         gate.deadline = time.monotonic() + min(grace_seconds, self._upload_grace_hard_cap_seconds())
-        original_candidate_count = candidate_count
         candidate_count = self._extend_candidate_with_grace_media(gate, candidate_count)
-        if candidate_count > original_candidate_count:
-            return candidate_count
         if self._has_item_after_candidate(gate, candidate_count):
             return candidate_count
         grace_start = time.monotonic()
@@ -720,7 +717,7 @@ class CoalescingGate:
                 coalesce_normal_events = current_key[1] is not None
                 await self._wait_for_debounce(gate, coalesce_normal_events=coalesce_normal_events)
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
-                use_upload_grace = not bypass_grace and coalesce_normal_events and self._upload_grace_seconds() > 0
+                use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
                 candidate_count = self._front_normal_run_length(
                     gate,
                     coalesce_normal_events=coalesce_normal_events,
