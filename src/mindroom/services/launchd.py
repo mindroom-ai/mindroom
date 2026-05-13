@@ -11,7 +11,9 @@ from pathlib import Path
 
 from mindroom.services.config import (
     InstallResult,
+    ServiceActionResult,
     ServiceManager,
+    SERVICE_NOT_INSTALLED_MESSAGE,
     ServiceStatus,
     UninstallResult,
     build_service_command,
@@ -139,6 +141,89 @@ def _install_service() -> InstallResult:
     return InstallResult(success=True, message="Installed and started", log_dir=log_dir)
 
 
+def _launchctl_error_result(
+    result: subprocess.CompletedProcess[str],
+    failure_action: str,
+) -> ServiceActionResult | None:
+    """Return a lifecycle error result when launchctl fails."""
+    if result.returncode == 0:
+        return None
+
+    detail = result.stderr.strip()
+    message = f"Failed to {failure_action} service"
+    if detail:
+        message = f"{message}: {detail}"
+    return ServiceActionResult(success=False, message=message)
+
+
+def _start_service() -> ServiceActionResult:
+    """Start the installed launchd service."""
+    status = _get_service_status()
+    if not status.installed:
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
+    if status.running:
+        return ServiceActionResult(success=True, message="Service already running")
+
+    plist_path = _get_plist_path()
+    result = subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    error = _launchctl_error_result(result, "start")
+    if error is not None:
+        return error
+    return ServiceActionResult(success=True, message="Service started")
+
+
+def _stop_service() -> ServiceActionResult:
+    """Stop the installed launchd service without removing it."""
+    status = _get_service_status()
+    if not status.installed:
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
+    if not status.running:
+        return ServiceActionResult(success=True, message="Service already stopped")
+
+    plist_path = _get_plist_path()
+    result = subprocess.run(
+        ["launchctl", "bootout", f"gui/{os.getuid()}", str(plist_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    error = _launchctl_error_result(result, "stop")
+    if error is not None:
+        return error
+    return ServiceActionResult(success=True, message="Service stopped")
+
+
+def _restart_service() -> ServiceActionResult:
+    """Restart the installed launchd service."""
+    status = _get_service_status()
+    if not status.installed:
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
+
+    plist_path = _get_plist_path()
+    uid = os.getuid()
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
+        capture_output=True,
+        check=False,
+    )
+
+    result = subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    error = _launchctl_error_result(result, "restart")
+    if error is not None:
+        return error
+    return ServiceActionResult(success=True, message="Service restarted")
+
+
 def _uninstall_service() -> UninstallResult:
     """Stop and remove the launchd service."""
     plist_path = _get_plist_path()
@@ -170,6 +255,9 @@ manager = ServiceManager(
     install_uv=install_uv,
     install_service=_install_service,
     uninstall_service=_uninstall_service,
+    start_service=_start_service,
+    stop_service=_stop_service,
+    restart_service=_restart_service,
     get_service_status=_get_service_status,
     get_log_command=_get_log_command,
     get_recent_logs=_get_recent_logs,

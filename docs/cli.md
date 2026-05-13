@@ -277,6 +277,9 @@ On Linux, MindRoom uses systemd user services.
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ install     Install and start MindRoom as a background user service.                   │
 │ uninstall   Stop and remove the MindRoom user service.                                 │
+│ start       Start the installed MindRoom user service.                                 │
+│ stop        Stop the installed MindRoom user service without removing it.              │
+│ restart     Restart the installed MindRoom user service.                               │
 │ status      Show MindRoom service status and recent logs.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
