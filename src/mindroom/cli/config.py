@@ -10,7 +10,6 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
@@ -104,26 +103,9 @@ _MATRIX_SERVER_HELP = (
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = "anthropic, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
-_PROVIDER_SETUP_COMMAND_CHOICES_TEXT = "{openrouter,ollama,openai,codex,claude,llama.cpp,vertexai_claude}"
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
   ignore_unverified_devices: false"""
-
-
-@dataclass(frozen=True)
-class _ConfigInitResult:
-    """Details about a generated starter config."""
-
-    config_path: Path
-    env_path: Path
-    env_changed: bool
-    matrix_server: _MatrixServerPreset
-    provider_preset: _ProviderPreset
-
-
-def provider_setup_command_choices_text() -> str:
-    """Return provider choices formatted for copyable setup guidance."""
-    return _PROVIDER_SETUP_COMMAND_CHOICES_TEXT
 
 
 def _config_init_storage_plan(
@@ -131,12 +113,8 @@ def _config_init_storage_plan(
     env_path: Path,
     *,
     replace_env_file: bool,
-    storage_root_override: Path | None = None,
 ) -> tuple[Path, bool]:
     """Return the storage root and whether the starter config can use the env placeholder."""
-    if storage_root_override is not None:
-        return storage_root_override.expanduser().resolve(), replace_env_file
-
     runtime_paths = constants.resolve_runtime_paths(config_path=config_dir / "config.yaml")
     if replace_env_file:
         return runtime_paths.storage_root, True
@@ -440,6 +418,7 @@ def config_init(
     Generates a YAML config with starter agents, one model, and sensible defaults.
     """
     target = _resolve_config_path(path)
+    env_path = target.parent / ".env"
 
     if target.exists() and not force and not print_config:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
@@ -447,28 +426,17 @@ def config_init(
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
-    if not print_config:
-        initialize_config_file(
-            target,
-            force=force,
-            matrix_server=matrix_server,
-            provider=provider,
-            interactive=True,
-            replace_env_file=None,
-            print_next_steps=True,
-        )
-        return
-
     selected_matrix_server, selected_preset = _resolve_config_init_selection(
         matrix_server,
         provider=provider,
-        interactive=False,
+        interactive=not print_config,
     )
 
+    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force)
     storage_root, use_storage_env_placeholder = _config_init_storage_plan(
         target.parent,
-        target.parent / ".env",
-        replace_env_file=False,
+        env_path,
+        replace_env_file=replace_env_file,
     )
 
     content = _full_template(
@@ -487,85 +455,29 @@ def config_init(
 
         content = replace_owner_placeholders_in_text(content, owner_user_id)
 
-    console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
-
-
-def initialize_config_file(
-    target: Path,
-    *,
-    force: bool,
-    matrix_server: str,
-    provider: str | None,
-    interactive: bool,
-    replace_env_file: bool | None,
-    print_next_steps: bool,
-    storage_root: Path | None = None,
-) -> _ConfigInitResult:
-    """Create a starter config and adjacent .env file."""
-    env_path = target.parent / ".env"
-    if target.exists() and not force:
-        console.print(f"[yellow]Config file already exists:[/yellow] {target}")
-        raise typer.Exit(1)
-
-    selected_matrix_server, selected_preset = _resolve_config_init_selection(
-        matrix_server,
-        provider=provider,
-        interactive=interactive,
-    )
-
-    should_replace_env_file = replace_env_file
-    if should_replace_env_file is None:
-        should_replace_env_file = _should_replace_env_file(env_path, force=force)
-    config_storage_root, use_storage_env_placeholder = _config_init_storage_plan(
-        target.parent,
-        env_path,
-        replace_env_file=should_replace_env_file,
-        storage_root_override=storage_root,
-    )
-
-    content = _full_template(
-        selected_preset,
-        target.parent,
-        storage_root=config_storage_root,
-        use_storage_env_placeholder=use_storage_env_placeholder,
-        matrix_server=selected_matrix_server,
-    )
-
-    # `connect` can run before `config init`, when no config exists to patch.
-    # In that order, connect persists the owner MXID in .env so init can render
-    # authorization defaults without leaving pairing placeholders behind.
-    if owner_user_id := _config_init_owner_user_id(target):
-        from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
-
-        content = replace_owner_placeholders_in_text(content, owner_user_id)
+    if print_config:
+        console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
+        return
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
-    _ensure_mind_workspace(_default_mind_workspace(config_storage_root), force=force)
+    _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
 
     env_changed = _write_env_file(
         env_path,
         selected_matrix_server,
         selected_preset,
-        storage_root=config_storage_root,
-        replace_existing=should_replace_env_file,
+        storage_root=storage_root,
+        replace_existing=replace_env_file,
     )
 
     console.print(f"[green]Config created:[/green] {target}")
-    if print_next_steps:
-        _print_config_init_next_steps(
-            env_path,
-            env_changed=env_changed,
-            matrix_server=selected_matrix_server,
-            selected_preset=selected_preset,
-        )
-    return _ConfigInitResult(
-        config_path=target,
-        env_path=env_path,
+    _print_config_init_next_steps(
+        env_path,
         env_changed=env_changed,
         matrix_server=selected_matrix_server,
-        provider_preset=selected_preset,
+        selected_preset=selected_preset,
     )
 
 

@@ -1311,46 +1311,20 @@ class TestRunErrorHandling:
     """Tests for friendly error messages in `mindroom run`."""
 
     def test_run_missing_config(self, tmp_path: Path) -> None:
-        """Run initializes the hosted starter config when config is missing."""
+        """Run suggests config setup commands when config is missing."""
         cfg = tmp_path / "no_such_config.yaml"
-        (tmp_path / ".env").write_text("EXISTING=value\n", encoding="utf-8")
         mock_main = AsyncMock()
 
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run"], cfg)
 
-        assert result.exit_code == 0
-        assert "No config found, starting setup..." in result.output
-        provider_guidance = "mindroom config init --force --provider {openrouter,ollama,openai,codex,claude"
+        assert result.exit_code == 1
+        assert "No config found" in result.output
+        assert "mindroom config init" in result.output
+        provider_guidance = "mindroom config init --provider {openrouter,ollama,openai,codex,claude"
         assert provider_guidance in result.output
-        assert "Overwrite existing .env" not in result.output
         mock_main.assert_not_awaited()
-
-        generated_config = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-        assert generated_config["models"]["default"]["provider"] == "openai"
-        assert "mindroom_user" not in generated_config
-
-        env_content = (tmp_path / ".env").read_text(encoding="utf-8")
-        assert "EXISTING=value" in env_content
-        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
-        assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
-
-    def test_run_missing_config_continues_when_hosted_pairing_exists(self, tmp_path: Path) -> None:
-        """Run should start immediately when config is missing but hosted pairing already exists."""
-        cfg = tmp_path / "config.yaml"
-        (tmp_path / ".env").write_text(
-            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"
-            "MINDROOM_LOCAL_CLIENT_ID=client-123\n"
-            "MINDROOM_LOCAL_CLIENT_SECRET=secret-123\n",
-            encoding="utf-8",
-        )
-        mock_main = AsyncMock()
-
-        with patch("mindroom.orchestrator.main", mock_main):
-            result = _invoke_with_runtime(["run"], cfg, env={"OPENAI_API_KEY": "sk-test"})
-
-        assert result.exit_code == 0
-        mock_main.assert_awaited_once()
+        assert not cfg.exists()
 
     def test_load_active_config_or_exit_uses_runtime_process_env_for_missing_config(
         self,

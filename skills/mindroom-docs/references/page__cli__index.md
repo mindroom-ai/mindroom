@@ -671,9 +671,6 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 mindroom run
 ```
 
-If no config exists, `mindroom run` creates the hosted `mindroom.chat` starter config, prints provider override guidance, and exits with pairing instructions.
-After pairing, run `mindroom run` again to start MindRoom.
-
 ### Debug logging
 
 ```bash

@@ -9,36 +9,35 @@ You only run MindRoom locally.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Start local setup
+### 1. Initialize local config
 
 ```bash
-uvx mindroom run
+uvx mindroom config init
 ```
 
-When no config exists, `mindroom run` creates the hosted starter files and exits with pairing instructions.
 This creates:
 
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
 The default `--matrix-server mindroom.chat` preset uses hosted Matrix and defaults to the `openai` provider.
-If you want a different provider before pairing, rerun setup with `--force`:
+Use `--provider` to select a different provider preset:
 
 ```bash
 # Use Anthropic Claude
-uvx mindroom config init --force --provider anthropic
+uvx mindroom config init --provider anthropic
 
 # Use Codex CLI ChatGPT subscription auth
-uvx mindroom config init --force --provider codex
+uvx mindroom config init --provider codex
 
 # Use local Ollama
-uvx mindroom config init --force --provider ollama
+uvx mindroom config init --provider ollama
 
 # Use local llama.cpp through its OpenAI-compatible server
-uvx mindroom config init --force --provider llama.cpp
+uvx mindroom config init --provider llama.cpp
 
 # Use Vertex AI Claude (Google Cloud)
-uvx mindroom config init --force --provider vertexai_claude
+uvx mindroom config init --provider vertexai_claude
 ```
 
 Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.

@@ -168,18 +168,17 @@ Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, and 
 Use this path if you want to run MindRoom locally while using hosted chat + Matrix on `mindroom.chat`.
 
 ```bash
-# First run creates ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
-uvx mindroom run
+# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
+uvx mindroom config init
 
-# Add model auth, or rerun setup with another provider first:
-# uvx mindroom config init --force --provider codex
+# Add model auth, or run `uvx mindroom config init --provider codex` and `codex login`
 $EDITOR ~/.mindroom/.env
 
 # Generate pair code in https://chat.mindroom.chat:
 # Settings -> Local MindRoom -> Generate Pair Code
 uvx mindroom connect --pair-code ABCD-EFGH
 
-# Start MindRoom after pairing
+# Start MindRoom
 uvx mindroom run
 ```
 
