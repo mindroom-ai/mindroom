@@ -39,6 +39,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom config init[/cyan]   Create a starter config
   [cyan]mindroom run[/cyan]           Start the system\
 """
+_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,codex,claude,llama.cpp,vertexai_claude}"
 
 app = typer.Typer(
     help=_HELP,
@@ -419,11 +420,15 @@ def _local_client_fingerprint(*, config_path: Path) -> str:
 
 
 def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
-    console.print("[red]Error:[/red] No config.yaml found.\n")
+    console.print("[red]Error:[/red] No config found.\n")
     console.print("MindRoom needs a configuration file to know which agents to run.\n")
     console.print("Quick start:")
-    console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
-    console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
+    console.print("  [cyan]mindroom config init[/cyan]    Create a hosted starter config")
+    console.print(
+        f"  [cyan]mindroom config init --provider {_CONFIG_INIT_PROVIDER_CHOICES}[/cyan]    Choose a model provider",
+        soft_wrap=True,
+    )
+    console.print("  [cyan]mindroom run[/cyan]            Start MindRoom after setup\n")
     print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 

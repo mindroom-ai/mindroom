@@ -1311,11 +1311,20 @@ class TestRunErrorHandling:
     """Tests for friendly error messages in `mindroom run`."""
 
     def test_run_missing_config(self, tmp_path: Path) -> None:
-        """Run shows friendly error when config is missing."""
-        result = _invoke_with_runtime(["run"], tmp_path / "no_such_config.yaml")
+        """Run suggests config setup commands when config is missing."""
+        cfg = tmp_path / "no_such_config.yaml"
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg)
+
         assert result.exit_code == 1
-        assert "No config.yaml found" in result.output
+        assert "No config found" in result.output
         assert "mindroom config init" in result.output
+        provider_guidance = "mindroom config init --provider {openrouter,ollama,openai,codex,claude"
+        assert provider_guidance in result.output
+        mock_main.assert_not_awaited()
+        assert not cfg.exists()
 
     def test_load_active_config_or_exit_uses_runtime_process_env_for_missing_config(
         self,
