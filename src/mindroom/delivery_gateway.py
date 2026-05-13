@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.cancellation import CancelSource
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history import (
@@ -225,7 +226,7 @@ class CancelledVisibleNoteRequest:
     target: MessageTarget
     event_id: str
     existing_event_is_placeholder: bool
-    cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
+    cancel_source: CancelSource
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str

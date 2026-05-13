@@ -234,6 +234,92 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
 
 
 @pytest.mark.asyncio
+async def test_handle_media_event_drops_when_response_ingress_closed(tmp_path: Path) -> None:
+    """Closed response ingress should reject media before enqueueing response work."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    replace_turn_controller_deps(bot, accepts_response_work=lambda: False)
+    bot._turn_controller._enqueue_media_for_dispatch = AsyncMock()
+    room = MagicMock()
+    room.room_id = "!test:localhost"
+    event = MagicMock()
+    event.event_id = "$media:localhost"
+    event.sender = "@user:localhost"
+    event.source = {"content": {"msgtype": "m.image", "body": "image"}}
+
+    await bot._turn_controller.handle_media_event(room, event)
+
+    bot._turn_controller._enqueue_media_for_dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_drops_before_ack_when_response_ingress_closed(
+    tmp_path: Path,
+) -> None:
+    """Closed response ingress should not emit an orphan interactive acknowledgment."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
+    replace_turn_controller_deps(
+        bot,
+        delivery_gateway=bot._delivery_gateway,
+        accepts_response_work=lambda: False,
+    )
+    generate_response_mock = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, generate_response_mock)
+    room = MagicMock()
+    room.room_id = "!test:localhost"
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        selection_key="1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+
+    await bot._turn_controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id="@user:localhost",
+    )
+
+    bot._delivery_gateway.send_text.assert_not_awaited()
+    generate_response_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_on_message_passes_resolved_thread_id_to_interactive_text_response(
     tmp_path: Path,
 ) -> None:

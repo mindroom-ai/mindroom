@@ -490,6 +490,18 @@ class CoalescingGate:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
         self._gates.clear()
 
+    async def discard_all(self) -> None:
+        """Drop queued coalescing work without cancelling in-flight dispatch."""
+        for key, gate in list(self._gates.items()):
+            close_pending_event_metadata([queued.pending_event for queued in gate.queue])
+            gate.queue.clear()
+            gate.drain_all_requested = True
+            gate.deadline = time.monotonic()
+            gate.grace_deadline = None
+            self._wake(gate)
+            if gate.phase is not GatePhase.IN_FLIGHT:
+                self._gates.pop(key, None)
+
     def _upload_grace_hard_cap_seconds(self) -> float:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
         return max(

@@ -13,6 +13,7 @@ import httpx
 
 from mindroom import constants
 from mindroom.cancellation import (
+    ENTITY_TEARDOWN_CANCEL_MSG,
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
     CancelSource,
@@ -52,6 +53,7 @@ _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
 
 __all__ = [
+    "ENTITY_TEARDOWN_CANCEL_MSG",
     "STARTUP_RETRY_INITIAL_DELAY_SECONDS",
     "STARTUP_RETRY_MAX_DELAY_SECONDS",
     "SYNC_RESTART_CANCEL_MSG",
@@ -483,7 +485,7 @@ async def stop_entities(
     for entity_name in entities_to_restart:
         bot = agent_bots.get(entity_name)
         if bot is not None:
-            await bot.prepare_for_entity_shutdown()
+            await bot.prepare_for_entity_shutdown(cancel_msg=ENTITY_TEARDOWN_CANCEL_MSG)
 
     # Cancel sync tasks next so restarted entities do not accumulate duplicate loops.
     for entity_name in entities_to_restart:

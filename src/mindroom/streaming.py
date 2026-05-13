@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
+    RESPONSE_CANCEL_SOURCE_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -229,7 +230,7 @@ def _normalize_stream_accumulated_text(text: str) -> str:
 def build_cancelled_response_update(
     text: str,
     *,
-    cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
+    cancel_source: CancelSource,
 ) -> tuple[str, _TerminalStreamStatus]:
     """Return the final visible body and stream status for one cancellation source."""
     if cancel_source == "sync_restart":
@@ -468,7 +469,7 @@ class StreamingResponse:
         *,
         cancelled: bool,
         restart_interrupted: bool,
-        cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None,
+        cancel_source: CancelSource | None,
         error: Exception | None,
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
@@ -497,7 +498,7 @@ class StreamingResponse:
         *,
         cancelled: bool = False,
         restart_interrupted: bool = False,
-        cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None,
+        cancel_source: CancelSource | None = None,
         error: Exception | None = None,
     ) -> StreamTransportOutcome:
         """Send the terminal update and return immutable transport facts."""
@@ -511,6 +512,10 @@ class StreamingResponse:
                 resolved_cancel_source = "sync_restart"
             elif cancelled:
                 resolved_cancel_source = "user_stop"
+        if resolved_cancel_source is not None:
+            extra_content = dict(self.extra_content or {})
+            extra_content[RESPONSE_CANCEL_SOURCE_KEY] = resolved_cancel_source
+            self.extra_content = extra_content
         had_body_before_terminal = bool(self.accumulated_text.strip())
         final_stream_status = self._prepare_terminal_text_and_status(
             cancelled=cancelled,

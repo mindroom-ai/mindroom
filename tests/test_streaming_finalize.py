@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -16,7 +16,7 @@ from mindroom import interactive
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.constants import RESPONSE_CANCEL_SOURCE_KEY, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
@@ -27,6 +27,7 @@ from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
@@ -177,6 +178,38 @@ async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behi
     sleep_mock.assert_not_awaited()
     assert outcome.terminal_status == "cancelled"
     assert outcome.failure_reason == "sync_restart_cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_source", ["sync_restart", "entity_teardown"])
+async def test_cancelled_stream_terminal_edit_persists_cancel_source_metadata(
+    tmp_path: Path,
+    cancel_source: str,
+) -> None:
+    """Terminal stream edits should persist explicit cancellation provenance."""
+    config = _config(tmp_path)
+    streaming = _streaming_response(config)
+    streaming.event_id = "$placeholder"
+    streaming.accumulated_text = "partial answer"
+    captured_edits: list[dict[str, object]] = []
+
+    async def record_edit(*args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        content = cast("dict[str, object]", args[3])
+        edit_content = build_edit_event_content(
+            event_id=cast("str", args[2]),
+            new_content=content,
+            new_text=cast("str", args[4]),
+        )
+        captured_edits.append(dict(edit_content))
+        return DeliveredMatrixEvent(event_id="$edit", content_sent=edit_content)
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+        outcome = await streaming.finalize(_client(), cancel_source=cancel_source)
+
+    assert outcome.terminal_status == "cancelled"
+    assert captured_edits[-1][RESPONSE_CANCEL_SOURCE_KEY] == cancel_source
+    new_content = cast("dict[str, object]", captured_edits[-1]["m.new_content"])
+    assert new_content[RESPONSE_CANCEL_SOURCE_KEY] == cancel_source
 
 
 @pytest.mark.asyncio

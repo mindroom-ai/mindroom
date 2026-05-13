@@ -70,6 +70,7 @@ from .agents import create_agent, get_rooms_for_entity, show_tool_calls_for_agen
 from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
+from .coalescing_batch import close_coalesced_batch_metadata
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
@@ -504,6 +505,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
+                accepts_response_work=lambda: not self._response_ingress_closed(),
             ),
         )
 
@@ -1284,11 +1286,12 @@ class AgentBot:
             logger.exception("agent_start_failed", agent=self.agent_name)
             return False
 
-    async def cleanup(self) -> None:
+    async def cleanup(self, *, response_cancel_msg: str | None = None) -> None:
         """Clean up the agent by leaving all rooms and stopping.
 
         This method ensures clean shutdown when an agent is removed from config.
         """
+        await self.prepare_for_entity_shutdown(cancel_msg=response_cancel_msg)
         assert self.client is not None
         # Leave all rooms (preserving DM rooms)
         try:
@@ -1299,9 +1302,14 @@ class AgentBot:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
-        await self.stop(reason="entity_removed")
+        await self.stop(reason="entity_removed", response_cancel_msg=response_cancel_msg)
 
-    async def stop(self, *, reason: str | None = None) -> None:
+    async def stop(
+        self,
+        *,
+        reason: str | None = None,
+        response_cancel_msg: str | None = None,
+    ) -> None:
         """Stop the agent bot."""
         self.running = False
         self.last_sync_time = None
@@ -1312,7 +1320,7 @@ class AgentBot:
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
 
-        await self.prepare_for_entity_shutdown()
+        await self.prepare_for_entity_shutdown(cancel_msg=response_cancel_msg)
 
         # Wait for any pending background tasks (like memory saves) to complete
         try:
@@ -1399,7 +1407,7 @@ class AgentBot:
         await asyncio.gather(prewarm_task, return_exceptions=True)
 
     async def prepare_for_sync_shutdown(self) -> None:
-        """Cancel work that must not outlive the Matrix sync loop."""
+        """Cancel work that must not outlive one Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
@@ -1410,14 +1418,23 @@ class AgentBot:
 
         await self._cancel_deferred_overdue_task_drain()
 
-    async def prepare_for_entity_shutdown(self) -> None:
-        """Cancel work that must not outlive entity/client teardown."""
+    async def prepare_for_entity_shutdown(self, *, cancel_msg: str | None) -> None:
+        """Close ingress and cancel work that must not outlive entity/client teardown."""
         if self._entity_shutdown_prepared:
             return
         self._entity_shutdown_prepared = True
         self._sync_shutting_down = True
-        await self.stop_manager.cancel_active_responses()
-        await self.prepare_for_sync_shutdown()
+        await self._cancel_startup_thread_prewarm()
+        await self._coalescing_gate.discard_all()
+        if self._sync_trust_state is SyncTrustState.CERTIFIED:
+            self._save_sync_checkpoint(self._sync_checkpoint)
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._cancel_deferred_overdue_task_drain()
+        await self.stop_manager.cancel_active_responses(cancel_msg=cancel_msg)
+
+    def _response_ingress_closed(self) -> bool:
+        """Return whether this bot must not admit new response-producing work."""
+        return self._entity_shutdown_prepared
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
@@ -1429,6 +1446,14 @@ class AgentBot:
 
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Delegate one flushed coalesced batch to the turn engine."""
+        if self._response_ingress_closed():
+            close_coalesced_batch_metadata(batch)
+            self.logger.info(
+                "Dropping coalesced batch during entity shutdown",
+                source_event_ids=batch.source_event_ids,
+                room_id=batch.room.room_id,
+            )
+            return
         await self._turn_controller.handle_coalesced_batch(batch)
 
     def _log_matrix_event_callback_started(
@@ -1456,6 +1481,13 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="message")
+        if self._response_ingress_closed():
+            self.logger.info(
+                "Dropping inbound message during entity shutdown",
+                event_id=event.event_id,
+                room_id=room.room_id,
+            )
+            return
         if await maybe_handle_tool_approval_reply(
             room=room,
             event=event,
@@ -1653,6 +1685,13 @@ class AgentBot:
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="media")
+        if self._response_ingress_closed():
+            self.logger.info(
+                "Dropping inbound media during entity shutdown",
+                event_id=event.event_id,
+                room_id=room.room_id,
+            )
+            return
         await self._turn_controller.handle_media_event(room, event)
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:

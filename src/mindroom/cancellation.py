@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
-CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
+CancelSource = Literal["user_stop", "sync_restart", "entity_teardown", "interrupted"]
 USER_STOP_CANCEL_MSG = "user_stop"
 SYNC_RESTART_CANCEL_MSG = "sync_restart"
+ENTITY_TEARDOWN_CANCEL_MSG = "entity_teardown"
 
 _TASK_CANCEL_SOURCES: dict[asyncio.Task[Any], str] = {}
 
@@ -46,6 +47,8 @@ def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
         return "user_stop"
     if exc.args[0] == SYNC_RESTART_CANCEL_MSG:
         return "sync_restart"
+    if exc.args[0] == ENTITY_TEARDOWN_CANCEL_MSG:
+        return "entity_teardown"
     return "interrupted"
 
 
@@ -53,6 +56,8 @@ def _cancel_failure_reason(cancel_source: CancelSource) -> str:
     """Return the canonical failure reason for one cancellation provenance."""
     if cancel_source == "sync_restart":
         return "sync_restart_cancelled"
+    if cancel_source == "entity_teardown":
+        return "entity_teardown_cancelled"
     if cancel_source == "user_stop":
         return "cancelled_by_user"
     return "interrupted"
@@ -62,6 +67,8 @@ def cancel_source_from_failure_reason(failure_reason: str | None) -> CancelSourc
     """Return cancellation provenance from one canonical failure reason."""
     if failure_reason == "sync_restart_cancelled":
         return "sync_restart"
+    if failure_reason == "entity_teardown_cancelled":
+        return "entity_teardown"
     if failure_reason == "cancelled_by_user":
         return "user_stop"
     return "interrupted"

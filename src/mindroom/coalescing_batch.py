@@ -155,6 +155,12 @@ def close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
             item.close()
 
 
+def close_coalesced_batch_metadata(batch: CoalescedBatch) -> None:
+    """Close PendingDispatchMetadata items owned by a coalesced batch that will not dispatch."""
+    for item in batch.dispatch_metadata:
+        item.close()
+
+
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
     return {
         pending_event.event.event_id: dispatch_prompt_for_event(pending_event.event)
