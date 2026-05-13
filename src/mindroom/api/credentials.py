@@ -412,7 +412,7 @@ def resolve_dashboard_agent_execution_scope_request(
     )
 
 
-def _require_agent_credential_management_authorized(
+def require_agent_credential_management_authorized(
     request: Request,
     *,
     config: Config,
@@ -498,7 +498,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
             allowed_shared_services=None,
         )
-    execution_identity = _require_agent_credential_management_authorized(
+    execution_identity = require_agent_credential_management_authorized(
         request,
         config=config,
         runtime_paths=runtime_paths,
@@ -855,7 +855,6 @@ class _DashboardCredentialAccess:
     ) -> _DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
         oauth_services = _oauth_services_for_request(request)
-        oauth_services.reject_non_editable_services(service_names)
         allow_oauth_private_scopes = any(
             oauth_services.allows_private_scope_for(service) for service in service_names
         ) and _request_may_target_scoped_credentials(request, agent_name)
@@ -865,6 +864,7 @@ class _DashboardCredentialAccess:
             service_names=service_names,
             allow_private_scopes=allow_private_scopes or allow_oauth_private_scopes,
         )
+        oauth_services.reject_non_editable_services(service_names)
         return cls(target=target, oauth_services=oauth_services)
 
     def match(self, service: str) -> _OAuthCredentialServiceMatch | None:
@@ -1167,16 +1167,14 @@ async def copy_credentials(
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    destination_match = _oauth_service_match(request, service)
-    source_match = _oauth_service_match(request, source_service)
-    _reject_oauth_token_service(destination_match)
-    _reject_oauth_token_service(source_match)
-    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service, source_service),
     )
+    destination_match = _oauth_service_match(request, service)
+    source_match = _oauth_service_match(request, source_service)
+    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     source_creds = access.load(source_service)
     destination_creds = access.load(service)
 
@@ -1202,9 +1200,9 @@ async def validate_credentials(
 ) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
-    _reject_oauth_token_service(_oauth_service_match(request, service))
     # This is a placeholder - actual testing would depend on the service
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    _reject_oauth_token_service(_oauth_service_match(request, service))
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:

@@ -1434,6 +1434,32 @@ class TestCredentialsAPI:
         assert global_response.status_code == 200
         assert global_response.json()["has_key"] is False
 
+    def test_agent_oauth_token_credentials_authorize_before_generic_rejection(self, client: TestClient) -> None:
+        """Unauthorized agent-scoped OAuth token routes should return 403 before route-specific 400s."""
+        _use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+
+        token_response = client.get(
+            "/api/credentials/google_drive_oauth?agent_name=general",
+            headers=bob_headers,
+        )
+        copy_response = client.post(
+            "/api/credentials/copied_service/copy-from/google_drive_oauth?agent_name=general",
+            headers=bob_headers,
+        )
+
+        assert token_response.status_code == 403
+        assert copy_response.status_code == 403
+
     def test_homeassistant_token_connect_authorizes_before_probe(self, client: TestClient) -> None:
         """Unauthorized agent-scoped Home Assistant connects should not contact the provider."""
         _use_trusted_upstream_runtime(client.app)

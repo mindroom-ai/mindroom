@@ -34,6 +34,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
+from tests.api.conftest import trusted_upstream_headers
 
 TEST_WORKER_AUTH = "token"
 
@@ -81,28 +82,46 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
+    authorization: dict[str, Any] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
-    config = Config.model_validate(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-            "agents": {
-                "general": {
-                    "display_name": "General",
-                    "role": "test",
-                    "tools": ["homeassistant"],
-                    "instructions": ["hi"],
-                    "rooms": ["lobby"],
-                },
-            },
-            "defaults": {
-                "markdown": True,
-                "worker_grantable_credentials": worker_grantable_credentials,
+    payload: dict[str, Any] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "role": "test",
+                "tools": ["homeassistant"],
+                "instructions": ["hi"],
+                "rooms": ["lobby"],
             },
         },
-    )
+        "defaults": {
+            "markdown": True,
+            "worker_grantable_credentials": worker_grantable_credentials,
+        },
+    }
+    if authorization is not None:
+        payload["authorization"] = authorization
+    config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
+
+
+def _use_trusted_upstream_runtime(api_app: FastAPI) -> constants.RuntimePaths:
+    runtime_paths = main._app_runtime_paths(api_app)
+    trusted_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        },
+    )
+    main.initialize_api_app(api_app, trusted_runtime_paths)
+    return trusted_runtime_paths
 
 
 def _authored_config_payload(agent_name: str) -> dict[str, Any]:
@@ -1577,6 +1596,42 @@ def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Unknown agent: missing"
+
+
+def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:
+    """Agent-scoped tool availability should not expose credential-backed state to unauthorized users."""
+    runtime_paths = _use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "shared",
+        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+    )
+    tools = [
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "Home automation",
+            "category": "home",
+            "status": "requires_config",
+            "setup_type": "special",
+            "auth_provider": None,
+            "config_fields": [],
+        },
+    ]
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.org",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
+    ):
+        response = test_client.get("/api/tools/?agent_name=general", headers=bob_headers)
+
+    assert response.status_code == 403
+    mock_load_scoped_credentials.assert_not_called()
 
 
 def test_get_tools_marks_allowlisted_shared_ui_scoped_tools_available(test_client: TestClient) -> None:
