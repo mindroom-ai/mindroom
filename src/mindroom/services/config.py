@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 
 SERVICE_NAME = "mindroom"
+SERVICE_NOT_INSTALLED_MESSAGE = "Service is not installed. Run `mindroom service install` first."
 _PACKAGE_NAME = "mindroom"
 
 

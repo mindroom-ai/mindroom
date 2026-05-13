@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mindroom.services.config import (
     SERVICE_NAME,
+    SERVICE_NOT_INSTALLED_MESSAGE,
     InstallResult,
     ServiceActionResult,
     ServiceManager,
@@ -20,7 +21,6 @@ from mindroom.services.config import (
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 
 _LINUX_UV_PATHS = [Path("/usr/bin/uv")]
-_SERVICE_NOT_INSTALLED_MESSAGE = "Service is not installed. Run `mindroom service install` first."
 
 
 def _get_unit_name() -> str:
@@ -173,7 +173,7 @@ def _run_systemctl_action(action: str, success_message: str) -> ServiceActionRes
     """Run one systemd user-service lifecycle action."""
     unit_path = _get_unit_path()
     if not unit_path.exists():
-        return ServiceActionResult(success=False, message=_SERVICE_NOT_INSTALLED_MESSAGE)
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
 
     result = subprocess.run(
         ["systemctl", "--user", action, _get_unit_name()],

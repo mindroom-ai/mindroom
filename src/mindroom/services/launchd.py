@@ -13,6 +13,7 @@ from mindroom.services.config import (
     InstallResult,
     ServiceActionResult,
     ServiceManager,
+    SERVICE_NOT_INSTALLED_MESSAGE,
     ServiceStatus,
     UninstallResult,
     build_service_command,
@@ -23,7 +24,6 @@ from mindroom.services.runtime import ServiceConfigMissingError, resolve_service
 
 _MACOS_UV_PATHS = [Path("/opt/homebrew/bin/uv")]
 _LABEL = "chat.mindroom.local"
-_SERVICE_NOT_INSTALLED_MESSAGE = "Service is not installed. Run `mindroom service install` first."
 
 
 def _get_plist_path() -> Path:
@@ -141,14 +141,11 @@ def _install_service() -> InstallResult:
     return InstallResult(success=True, message="Installed and started", log_dir=log_dir)
 
 
-def _run_launchctl(args: list[str], failure_action: str) -> ServiceActionResult | None:
-    """Run launchctl and return an error result on failure."""
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _launchctl_error_result(
+    result: subprocess.CompletedProcess[str],
+    failure_action: str,
+) -> ServiceActionResult | None:
+    """Return a lifecycle error result when launchctl fails."""
     if result.returncode == 0:
         return None
 
@@ -163,15 +160,18 @@ def _start_service() -> ServiceActionResult:
     """Start the installed launchd service."""
     status = _get_service_status()
     if not status.installed:
-        return ServiceActionResult(success=False, message=_SERVICE_NOT_INSTALLED_MESSAGE)
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
     if status.running:
         return ServiceActionResult(success=True, message="Service already running")
 
     plist_path = _get_plist_path()
-    error = _run_launchctl(
+    result = subprocess.run(
         ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)],
-        "start",
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    error = _launchctl_error_result(result, "start")
     if error is not None:
         return error
     return ServiceActionResult(success=True, message="Service started")
@@ -181,15 +181,18 @@ def _stop_service() -> ServiceActionResult:
     """Stop the installed launchd service without removing it."""
     status = _get_service_status()
     if not status.installed:
-        return ServiceActionResult(success=False, message=_SERVICE_NOT_INSTALLED_MESSAGE)
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
     if not status.running:
         return ServiceActionResult(success=True, message="Service already stopped")
 
     plist_path = _get_plist_path()
-    error = _run_launchctl(
+    result = subprocess.run(
         ["launchctl", "bootout", f"gui/{os.getuid()}", str(plist_path)],
-        "stop",
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    error = _launchctl_error_result(result, "stop")
     if error is not None:
         return error
     return ServiceActionResult(success=True, message="Service stopped")
@@ -199,22 +202,23 @@ def _restart_service() -> ServiceActionResult:
     """Restart the installed launchd service."""
     status = _get_service_status()
     if not status.installed:
-        return ServiceActionResult(success=False, message=_SERVICE_NOT_INSTALLED_MESSAGE)
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
 
     plist_path = _get_plist_path()
     uid = os.getuid()
-    if status.running:
-        error = _run_launchctl(
-            ["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
-            "restart",
-        )
-        if error is not None:
-            return error
-
-    error = _run_launchctl(
-        ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
-        "restart",
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}", str(plist_path)],
+        capture_output=True,
+        check=False,
     )
+
+    result = subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    error = _launchctl_error_result(result, "restart")
     if error is not None:
         return error
     return ServiceActionResult(success=True, message="Service restarted")

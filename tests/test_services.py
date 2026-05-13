@@ -224,12 +224,36 @@ def test_systemd_lifecycle_actions_use_systemctl(mock_run: MagicMock, tmp_path: 
 
 
 def test_systemd_lifecycle_action_requires_installed_unit(tmp_path: Path) -> None:
-    """Starting a missing systemd service should tell users to install first."""
+    """Missing systemd lifecycle actions should tell users to install first."""
     with patch("mindroom.services.systemd._get_unit_path", return_value=tmp_path / "missing.service"):
-        result = _start_systemd_service()
+        start_result = _start_systemd_service()
+        stop_result = _stop_systemd_service()
+        restart_result = _restart_systemd_service()
 
-    assert result.success is False
-    assert "service install" in result.message
+    expected_message = "Service is not installed. Run `mindroom service install` first."
+    assert start_result == ServiceActionResult(success=False, message=expected_message)
+    assert stop_result == ServiceActionResult(success=False, message=expected_message)
+    assert restart_result == ServiceActionResult(success=False, message=expected_message)
+
+
+@patch("mindroom.services.systemd.subprocess.run")
+def test_systemd_lifecycle_actions_propagate_systemctl_errors(mock_run: MagicMock, tmp_path: Path) -> None:
+    """systemd lifecycle actions surface non-zero systemctl results."""
+    unit_path = tmp_path / "mindroom.service"
+    unit_path.touch()
+    mock_run.return_value = MagicMock(returncode=1, stderr="unit failed")
+
+    with patch("mindroom.services.systemd._get_unit_path", return_value=unit_path):
+        start_result = _start_systemd_service()
+        stop_result = _stop_systemd_service()
+        restart_result = _restart_systemd_service()
+
+    assert start_result.success is False
+    assert start_result.message == "Failed to start service: unit failed"
+    assert stop_result.success is False
+    assert stop_result.message == "Failed to stop service: unit failed"
+    assert restart_result.success is False
+    assert restart_result.message == "Failed to restart service: unit failed"
 
 
 @patch("mindroom.services.launchd.os.getuid", return_value=501)
@@ -286,7 +310,7 @@ def test_launchd_restart_starts_stopped_service(
     mock_getuid: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Restarting a stopped launchd service should start it without requiring bootout."""
+    """Restarting a stopped launchd service should still clear any loaded job."""
     plist_path = tmp_path / "chat.mindroom.local.plist"
     plist_path.touch()
     mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -301,17 +325,114 @@ def test_launchd_restart_starts_stopped_service(
     assert result.success is True
     mock_getuid.assert_called_once_with()
     assert [call.args[0] for call in mock_run.call_args_list] == [
+        ["launchctl", "bootout", "gui/501", str(plist_path)],
         ["launchctl", "bootstrap", "gui/501", str(plist_path)],
     ]
 
 
 def test_launchd_lifecycle_action_requires_installed_plist(tmp_path: Path) -> None:
-    """Starting a missing launchd service should tell users to install first."""
+    """Missing launchd lifecycle actions should tell users to install first."""
     with patch("mindroom.services.launchd._get_plist_path", return_value=tmp_path / "missing.plist"):
-        result = _start_launchd_service()
+        start_result = _start_launchd_service()
+        stop_result = _stop_launchd_service()
+        restart_result = _restart_launchd_service()
 
-    assert result.success is False
-    assert "service install" in result.message
+    expected_message = "Service is not installed. Run `mindroom service install` first."
+    assert start_result == ServiceActionResult(success=False, message=expected_message)
+    assert stop_result == ServiceActionResult(success=False, message=expected_message)
+    assert restart_result == ServiceActionResult(success=False, message=expected_message)
+
+
+@patch("mindroom.services.launchd.os.getuid", return_value=501)
+@patch("mindroom.services.launchd.subprocess.run")
+def test_launchd_lifecycle_actions_propagate_launchctl_errors(
+    mock_run: MagicMock,
+    mock_getuid: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """launchd lifecycle actions surface non-zero launchctl results."""
+    plist_path = tmp_path / "chat.mindroom.local.plist"
+    plist_path.touch()
+    status = ServiceStatus(installed=True, running=False)
+    mock_run.return_value = MagicMock(returncode=1, stderr="bootstrap failed")
+
+    with (
+        patch("mindroom.services.launchd._get_plist_path", return_value=plist_path),
+        patch("mindroom.services.launchd._get_service_status", return_value=status),
+    ):
+        start_result = _start_launchd_service()
+
+    assert start_result.success is False
+    assert start_result.message == "Failed to start service: bootstrap failed"
+    mock_getuid.assert_called_once_with()
+
+
+@patch("mindroom.services.launchd.os.getuid", return_value=501)
+@patch("mindroom.services.launchd.subprocess.run")
+def test_launchd_stop_service_propagates_launchctl_errors(
+    mock_run: MagicMock,
+    mock_getuid: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """launchd stop surfaces bootout failures."""
+    plist_path = tmp_path / "chat.mindroom.local.plist"
+    plist_path.touch()
+    status = ServiceStatus(installed=True, running=True, pid=123)
+    mock_run.return_value = MagicMock(returncode=1, stderr="bootout failed")
+
+    with (
+        patch("mindroom.services.launchd._get_plist_path", return_value=plist_path),
+        patch("mindroom.services.launchd._get_service_status", return_value=status),
+    ):
+        stop_result = _stop_launchd_service()
+
+    assert stop_result.success is False
+    assert stop_result.message == "Failed to stop service: bootout failed"
+    mock_getuid.assert_called_once_with()
+
+
+@patch("mindroom.services.launchd.os.getuid", return_value=501)
+@patch("mindroom.services.launchd.subprocess.run")
+def test_launchd_restart_service_propagates_bootstrap_errors(
+    mock_run: MagicMock,
+    mock_getuid: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """launchd restart ignores bootout failures but surfaces bootstrap failures."""
+    plist_path = tmp_path / "chat.mindroom.local.plist"
+    plist_path.touch()
+    status = ServiceStatus(installed=True, running=True, pid=123)
+    mock_run.side_effect = [
+        MagicMock(returncode=1, stderr="ignored bootout failure"),
+        MagicMock(returncode=1, stderr="bootstrap failed"),
+    ]
+
+    with (
+        patch("mindroom.services.launchd._get_plist_path", return_value=plist_path),
+        patch("mindroom.services.launchd._get_service_status", return_value=status),
+    ):
+        restart_result = _restart_launchd_service()
+
+    assert restart_result.success is False
+    assert restart_result.message == "Failed to restart service: bootstrap failed"
+    mock_getuid.assert_called_once_with()
+
+
+@patch("mindroom.services.launchd.subprocess.run")
+def test_launchd_stop_service_already_stopped(mock_run: MagicMock, tmp_path: Path) -> None:
+    """Stopping an installed but stopped launchd service should be a no-op."""
+    plist_path = tmp_path / "chat.mindroom.local.plist"
+    plist_path.touch()
+    status = ServiceStatus(installed=True, running=False)
+
+    with (
+        patch("mindroom.services.launchd._get_plist_path", return_value=plist_path),
+        patch("mindroom.services.launchd._get_service_status", return_value=status),
+    ):
+        result = _stop_launchd_service()
+
+    assert result == ServiceActionResult(success=True, message="Service already stopped")
+    mock_run.assert_not_called()
 
 
 def test_service_help_is_registered() -> None:
@@ -413,3 +534,31 @@ def test_service_start_failure_exits_with_message(mock_get_manager: MagicMock) -
 
     assert result.exit_code == 1
     assert "Service is not installed" in result.output
+
+
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_stop_failure_exits_with_message(mock_get_manager: MagicMock) -> None:
+    """Service stop failures should print a concise error and exit non-zero."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.stop_service.return_value = ServiceActionResult(success=False, message="stop failed")
+    mock_get_manager.return_value = mock_manager
+
+    result = runner.invoke(app, ["service", "stop"])
+
+    assert result.exit_code == 1
+    assert "stop failed" in result.output
+    mock_manager.stop_service.assert_called_once_with()
+
+
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_restart_failure_exits_with_message(mock_get_manager: MagicMock) -> None:
+    """Service restart failures should print a concise error and exit non-zero."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.restart_service.return_value = ServiceActionResult(success=False, message="restart failed")
+    mock_get_manager.return_value = mock_manager
+
+    result = runner.invoke(app, ["service", "restart"])
+
+    assert result.exit_code == 1
+    assert "restart failed" in result.output
+    mock_manager.restart_service.assert_called_once_with()
