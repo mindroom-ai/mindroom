@@ -127,6 +127,45 @@ def test_build_frontend_retries_bun_install_only(
     ]
 
 
+def test_build_frontend_rejects_git_lfs_pointer_assets(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Wheel builds must fail instead of bundling unresolved Git LFS pointers."""
+    frontend_dir = tmp_path / "frontend"
+    output_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+
+    def fake_run_command(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        retries: int = 1,
+        retry_delay_seconds: float = 0.0,
+    ) -> None:
+        if cmd[-2:] == ["--outDir", str(output_dir)]:
+            output_dir.mkdir(exist_ok=True)
+            (output_dir / "logo.png").write_text(
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:4aab59a2761edf3b65c4f82cd0a0f13cb0ab782a4c1ef345034d1f9724cec4f1\n"
+                "size 685151\n",
+            )
+
+    monkeypatch.setattr(hatch_build_module, "_run_command", fake_run_command)
+
+    with pytest.raises(RuntimeError, match="Run git lfs pull before building"):
+        hatch_build_module._build_frontend(frontend_dir, output_dir, "/usr/local/bin/bun")
+
+
+def test_dashboard_shell_uses_canonical_png_logo() -> None:
+    """The installed dashboard should use the canonical PNG logo assets."""
+    repo_root = Path(__file__).resolve().parents[1]
+
+    assert 'href="/favicon.png"' in (repo_root / "frontend/index.html").read_text()
+    assert 'src="/logo.png"' in (repo_root / "frontend/src/App.tsx").read_text()
+
+
 def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
     """Wheel builds should not ship repo avatar assets inside the package."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
