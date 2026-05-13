@@ -1648,6 +1648,44 @@ class TestAgentBot:
         mock_error.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_run_api_server_converts_uvicorn_system_exit_to_runtime_error(self, tmp_path: Path) -> None:
+        """Uvicorn bind failures call sys.exit; the embedded task should report a normal runtime failure."""
+
+        class ExitingServer:
+            should_exit = False
+            force_exit = False
+
+            def __init__(self, _config: object, _shutdown_requested: asyncio.Event | None) -> None:
+                pass
+
+            async def serve(self) -> None:
+                raise SystemExit(1)
+
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ExitingServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
+            patch("mindroom.orchestrator.logger.error") as mock_error,
+            pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly") as exc_info,
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                0,
+                "INFO",
+                self._runtime_paths(tmp_path),
+                shutdown_requested=asyncio.Event(),
+            )
+
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, SystemExit)
+        assert cause.code == 1
+        mock_error.assert_called_once()
+        assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
+        assert mock_error.call_args.kwargs["reason"] == "server.serve() raised SystemExit"
+        assert mock_error.call_args.kwargs["exc_info"] == (SystemExit, cause, cause.__traceback__)
+
+    @pytest.mark.asyncio
     async def test_runtime_completion_raises_done_orchestrator_failure_before_clean_shutdown_return(self) -> None:
         """Simultaneous shutdown/API completion must not hide orchestrator failures."""
         shutdown_requested = asyncio.Event()

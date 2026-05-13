@@ -153,14 +153,22 @@ def _signal_name(sig: int) -> str:
     return str(sig)
 
 
-def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, reason: str) -> NoReturn:
+def _raise_embedded_api_server_exit(
+    api_server: _EmbeddedApiServerContext,
+    *,
+    reason: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
     """Raise the fatal lifecycle error for an unexpected API server exit."""
     logger.error(
         "fatal_embedded_api_server_exit",
         **api_server.log_context(),
         reason=reason,
+        exc_info=(type(cause), cause, cause.__traceback__) if cause is not None else None,
     )
     msg = "Embedded API server exited unexpectedly"
+    if cause is not None:
+        raise RuntimeError(msg) from cause
     raise RuntimeError(msg)
 
 
@@ -1853,7 +1861,10 @@ async def _run_api_server(
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
     logger.info("embedded_api_server_started", **api_server.log_context())
-    await server.serve()
+    try:
+        await server.serve()
+    except SystemExit as exc:
+        _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
     logger.info(
         "embedded_api_server_serve_returned",
