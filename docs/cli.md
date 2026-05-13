@@ -466,7 +466,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama_cpp`, `ollama`, `openai`, `openai_mini`, `openai_nano`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openai_mini`, `openai_nano`, `openrouter`, or `vertexai_claude`.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
@@ -482,7 +482,7 @@ mindroom config init --matrix-server mindroom.chat --provider codex
 mindroom config init --matrix-server mindroom.chat --provider ollama
 
 # Hosted Matrix with llama.cpp
-mindroom config init --matrix-server mindroom.chat --provider llama_cpp
+mindroom config init --matrix-server mindroom.chat --provider llama.cpp
 
 # Hosted Matrix with Vertex AI Claude
 mindroom config init --matrix-server mindroom.chat --provider vertexai_claude
@@ -510,7 +510,7 @@ ollama pull gemma4
 ollama pull qwen3.6:27b
 ```
 
-The `--provider llama_cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
+The `--provider llama.cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
 Start llama.cpp with one of the configured model refs before running MindRoom:
 
 ```bash

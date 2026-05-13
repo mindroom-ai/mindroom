@@ -80,6 +80,7 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "claude": "anthropic",
     "a": "anthropic",
     "codex": "codex",
+    "llama.cpp": "llama_cpp",
     "llama-cpp": "llama_cpp",
     "llama_cpp": "llama_cpp",
     "ollama": "ollama",
@@ -109,12 +110,9 @@ _MATRIX_SERVER_CHOICES_TEXT = "self-hosted or mindroom.chat"
 _MATRIX_SERVER_HELP = (
     "Matrix defaults: self-hosted = configure your own homeserver; mindroom.chat = hosted Matrix pairing defaults."
 )
-_PROVIDER_HELP = (
-    "Default model provider. Use with --matrix-server mindroom.chat for hosted Matrix, "
-    "for example --matrix-server mindroom.chat --provider codex."
-)
+_PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = (
-    "anthropic, codex, llama_cpp, ollama, openai, openai_mini, openai_nano, openrouter, or vertexai_claude"
+    "anthropic, codex, llama.cpp, ollama, openai, openai_mini, openai_nano, openrouter, or vertexai_claude"
 )
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
@@ -743,7 +741,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/codex/llama_cpp/ollama/openai/openai_mini/openai_nano/"
+            "Choose provider preset [anthropic/codex/llama.cpp/ollama/openai/openai_mini/openai_nano/"
             "openrouter/vertexai_claude]",
             default="openai",
             show_default=True,

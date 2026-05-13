@@ -580,7 +580,7 @@ class TestConfigInit:
         assert f"ollama pull {OLLAMA_QWEN}" in output
         assert "Ollama" in output
 
-    @pytest.mark.parametrize("provider_name", ["llama-cpp", "llama_cpp"])
+    @pytest.mark.parametrize("provider_name", ["llama.cpp", "llama-cpp", "llama_cpp"])
     def test_init_mindroom_chat_llama_cpp_writes_hosted_openai_compatible_defaults(
         self,
         tmp_path: Path,
@@ -635,6 +635,9 @@ class TestConfigInit:
         assert "self-hosted" in output
         assert "mindroom.chat" in output
         assert "Default model provider" in output
+        assert "llama.cpp" in output
+        assert "llama_cpp" not in output
+        assert "Use with --matrix-server" not in output
         assert "--profile" not in output
         assert "--minimal" not in output
         assert "--template" not in output
