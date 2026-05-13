@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import nio
 from agno.run.cancel import acancel_run
 
-from mindroom.cancellation import USER_STOP_CANCEL_MSG, request_task_cancel
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import build_reaction_content
@@ -128,6 +128,31 @@ class StopManager:
         if tracked is None or tracked.task.done():
             return None
         return tracked
+
+    async def cancel_active_responses(
+        self,
+        *,
+        cancel_msg: str | None = SYNC_RESTART_CANCEL_MSG,
+        wait_seconds: float = _GRACEFUL_CANCEL_FALLBACK_SECONDS,
+    ) -> int:
+        """Cancel active response tasks that are ending because the sync loop is stopping."""
+        active_tasks: list[asyncio.Task[None]] = []
+        for message_id, tracked in list(self.tracked_messages.items()):
+            if tracked.task.done() or tracked.cancel_requested:
+                continue
+            tracked.cancel_requested = True
+            active_tasks.append(tracked.task)
+            logger.info(
+                "Cancelling active response during sync shutdown",
+                message_id=message_id,
+                run_id=tracked.run_id,
+                **self._log_target(tracked.target),
+            )
+            request_task_cancel(tracked.task, cancel_msg=cancel_msg)
+
+        if active_tasks:
+            await asyncio.wait(active_tasks, timeout=wait_seconds)
+        return len(active_tasks)
 
     def get_tracked_target(self, message_id: str) -> MessageTarget | None:
         """Return the tracked delivery target for one message when available."""

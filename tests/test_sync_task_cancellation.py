@@ -32,6 +32,7 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.stop import StopManager
 from tests.conftest import (
     TEST_PASSWORD,
     make_event_cache_mock,
@@ -123,6 +124,59 @@ async def test_cancel_sync_task_missing_entity() -> None:
     await cancel_sync_task("non_existent", sync_tasks)
 
     assert len(sync_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_manager_cancels_active_responses_as_sync_restart() -> None:
+    """Graceful service restart should propagate restart provenance to active response tasks."""
+    stop_manager = StopManager()
+    target = MagicMock()
+    target.room_id = "!room:example.com"
+    target.resolved_thread_id = "$thread-root"
+
+    seen_cancel_args: tuple[object, ...] | None = None
+
+    async def response_task() -> None:
+        nonlocal seen_cancel_args
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            seen_cancel_args = exc.args
+            raise
+
+    task = asyncio.create_task(response_task())
+    stop_manager.set_current("$message", target, task)
+    await asyncio.sleep(0)
+
+    cancelled_count = await stop_manager.cancel_active_responses(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
+    assert cancelled_count == 1
+    assert seen_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
+
+
+@pytest.mark.asyncio
+async def test_stop_manager_does_not_reclassify_user_cancelled_responses() -> None:
+    """Shutdown should not turn an already user-cancelled response into an auto-resumable restart."""
+    stop_manager = StopManager()
+    target = MagicMock()
+    target.room_id = "!room:example.com"
+    target.resolved_thread_id = "$thread-root"
+
+    async def response_task() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(response_task())
+    stop_manager.set_current("$message", target, task)
+    tracked = stop_manager.tracked_messages["$message"]
+    tracked.cancel_requested = True
+
+    cancelled_count = await stop_manager.cancel_active_responses(cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
+    assert cancelled_count == 0
+    assert not task.cancelled()
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

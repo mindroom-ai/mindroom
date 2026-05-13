@@ -1399,6 +1399,7 @@ class AgentBot:
     async def prepare_for_sync_shutdown(self) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
+        await self.stop_manager.cancel_active_responses()
         await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
         if self._sync_trust_state is SyncTrustState.CERTIFIED:
