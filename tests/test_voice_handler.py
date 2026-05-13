@@ -122,6 +122,20 @@ class TestVoiceHandler:
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
 
+    def test_stt_upload_metadata_preserves_matrix_audio_mp4(self) -> None:
+        """Matrix m4a voice messages should be uploaded to STT as m4a/audio-mp4."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("audio/mp4")
+
+        assert filename == "audio.m4a"
+        assert mime_type == "audio/mp4"
+
+    def test_stt_upload_metadata_defaults_to_ogg(self) -> None:
+        """Missing Matrix MIME metadata should keep the legacy OGG upload shape."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type(None)
+
+        assert filename == "audio.ogg"
+        assert mime_type == "audio/ogg"
+
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""
         config = _runtime_bound_config(
@@ -221,13 +235,15 @@ class TestVoiceHandler:
                 "mindroom.voice_handler._download_audio",
                 new=AsyncMock(return_value=Audio(content=b"audio", mime_type="audio/ogg")),
             ),
-            patch("mindroom.voice_handler._transcribe_audio", return_value="help me"),
+            patch("mindroom.voice_handler._transcribe_audio", return_value="help me") as mock_transcribe,
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
             result = await _handle_voice_message(client, room, event, config)
 
         assert result == "🎤 @openclaw help me"
+        mock_transcribe.assert_awaited_once()
+        assert mock_transcribe.await_args.kwargs["mime_type"] == "audio/ogg"
         assert mock_process.await_count == 1
         assert mock_process.await_args.kwargs["available_agent_names"] == ["openclaw"]
         assert mock_process.await_args.kwargs["available_team_names"] == []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import re
 import uuid
 from collections import OrderedDict
@@ -33,6 +34,20 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/m4a": ".m4a",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/webm": ".webm",
+    "audio/x-m4a": ".m4a",
+    "audio/x-wav": ".wav",
+}
 _VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?P<localpart>[A-Za-z0-9._=/+\-]+)(?::(?P<domain>[A-Za-z0-9.\-:\[\]]+))?",
 )
@@ -285,7 +300,12 @@ async def _handle_voice_message(
             return None
 
         # Transcribe the audio
-        transcription = await _transcribe_audio(voice_audio.content, config, runtime_paths)
+        transcription = await _transcribe_audio(
+            voice_audio.content,
+            config,
+            runtime_paths,
+            mime_type=voice_audio.mime_type,
+        )
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
             return None
@@ -333,13 +353,29 @@ async def _download_audio(
     return Audio(content=audio_data, mime_type=media_mime_type(event))
 
 
-async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: RuntimePaths) -> str | None:
+def _stt_upload_filename_and_mime_type(mime_type: str | None) -> tuple[str, str]:
+    """Return multipart filename and MIME type for an STT upload."""
+    normalized_mime_type = (mime_type or "audio/ogg").split(";", 1)[0].strip().lower() or "audio/ogg"
+    extension = _STT_AUDIO_EXTENSION_BY_MIME_TYPE.get(normalized_mime_type)
+    if extension is None:
+        extension = mimetypes.guess_extension(normalized_mime_type) or ".bin"
+    return f"audio{extension}", normalized_mime_type
+
+
+async def _transcribe_audio(
+    audio_data: bytes,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    mime_type: str | None = None,
+) -> str | None:
     """Transcribe audio using OpenAI-compatible API.
 
     Args:
         audio_data: Audio file bytes
         config: Application configuration
         runtime_paths: Explicit runtime context for STT credential lookup
+        mime_type: Matrix-declared MIME type for the audio payload
 
     Returns:
         Transcription text or None if failed
@@ -355,7 +391,8 @@ async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: Ru
             return None
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        files = {"file": ("audio.ogg", audio_data, "audio/ogg")}
+        filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
+        files = {"file": (filename, audio_data, upload_mime_type)}
         form_data = {"model": config.voice.stt.model}
 
         async with httpx.AsyncClient(verify=False) as http_client:  # noqa: S501
