@@ -139,11 +139,20 @@ class StopManager:
         active_tasks: list[asyncio.Task[None]] = []
         tracked_by_task: dict[asyncio.Task[None], tuple[str, _TrackedMessage]] = {}
         for message_id, tracked in list(self.tracked_messages.items()):
-            if tracked.task.done() or tracked.cancel_requested:
+            if tracked.task.done():
                 continue
-            tracked.cancel_requested = True
             active_tasks.append(tracked.task)
             tracked_by_task[tracked.task] = (message_id, tracked)
+            if tracked.cancel_requested:
+                logger.info(
+                    "Waiting for previously requested response cancel during sync shutdown",
+                    message_id=message_id,
+                    run_id=tracked.run_id,
+                    **self._log_target(tracked.target),
+                )
+                continue
+
+            tracked.cancel_requested = True
             logger.info(
                 "Cancelling active response during sync shutdown",
                 message_id=message_id,

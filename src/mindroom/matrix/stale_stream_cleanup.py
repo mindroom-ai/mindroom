@@ -443,7 +443,7 @@ async def _cleanup_one_stale_message(
             room_id=room_id,
             thread_id=state.thread_id,
             target_event_id=target_event_id,
-            partial_text=_truncate_partial_text(_extract_partial_text(state.latest_body)),
+            partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
             agent_name=agent_name,
             original_sender_id=state.requester_user_id,
             timestamp_ms=state.latest_timestamp,
@@ -1360,11 +1360,6 @@ async def _iter_reaction_relation_events(
         yield related_event
 
 
-def _extract_partial_text(body: str) -> str:
-    """Return partial text without the restart interruption note."""
-    return clean_partial_reply_text(body)
-
-
 def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_LIMIT) -> str:
     """Return a compact partial-text preview."""
     stripped_text = text.strip()
@@ -1439,7 +1434,7 @@ def _interrupted_thread_from_terminal_state(
         room_id=room_id,
         thread_id=state.thread_id,
         target_event_id=target_event_id,
-        partial_text=_truncate_partial_text(_extract_partial_text(state.latest_body)),
+        partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
         agent_name=agent_name,
         original_sender_id=state.requester_user_id,
         timestamp_ms=state.latest_timestamp,

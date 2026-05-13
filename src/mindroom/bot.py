@@ -268,6 +268,7 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _sync_shutting_down: bool
+    _entity_shutdown_prepared: bool
 
     # Shared runtime state and extracted collaborators
     _hook_registry_state: HookRegistryState
@@ -316,6 +317,7 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._entity_shutdown_prepared = False
         self._sync_trust_state = SyncTrustState.COLD
         self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
@@ -1310,7 +1312,7 @@ class AgentBot:
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
 
-        await self.prepare_for_sync_shutdown()
+        await self.prepare_for_entity_shutdown()
 
         # Wait for any pending background tasks (like memory saves) to complete
         try:
@@ -1399,7 +1401,6 @@ class AgentBot:
     async def prepare_for_sync_shutdown(self) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
-        await self.stop_manager.cancel_active_responses()
         await self._cancel_startup_thread_prewarm()
         await self._coalescing_gate.drain_all()
         if self._sync_trust_state is SyncTrustState.CERTIFIED:
@@ -1408,6 +1409,15 @@ class AgentBot:
             return
 
         await self._cancel_deferred_overdue_task_drain()
+
+    async def prepare_for_entity_shutdown(self) -> None:
+        """Cancel work that must not outlive entity/client teardown."""
+        if self._entity_shutdown_prepared:
+            return
+        self._entity_shutdown_prepared = True
+        self._sync_shutting_down = True
+        await self.stop_manager.cancel_active_responses()
+        await self.prepare_for_sync_shutdown()
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""

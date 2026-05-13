@@ -483,7 +483,7 @@ async def stop_entities(
     for entity_name in entities_to_restart:
         bot = agent_bots.get(entity_name)
         if bot is not None:
-            await bot.prepare_for_sync_shutdown()
+            await bot.prepare_for_entity_shutdown()
 
     # Cancel sync tasks next so restarted entities do not accumulate duplicate loops.
     for entity_name in entities_to_restart:
