@@ -9,6 +9,7 @@ from pathlib import Path
 from mindroom.services.config import (
     SERVICE_NAME,
     InstallResult,
+    ServiceActionResult,
     ServiceManager,
     ServiceStatus,
     UninstallResult,
@@ -19,6 +20,7 @@ from mindroom.services.config import (
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 
 _LINUX_UV_PATHS = [Path("/usr/bin/uv")]
+_SERVICE_NOT_INSTALLED_MESSAGE = "Service is not installed. Run `mindroom service install` first."
 
 
 def _get_unit_name() -> str:
@@ -167,6 +169,43 @@ def _install_service() -> InstallResult:
     return InstallResult(success=True, message="Installed and started")
 
 
+def _run_systemctl_action(action: str, success_message: str) -> ServiceActionResult:
+    """Run one systemd user-service lifecycle action."""
+    unit_path = _get_unit_path()
+    if not unit_path.exists():
+        return ServiceActionResult(success=False, message=_SERVICE_NOT_INSTALLED_MESSAGE)
+
+    result = subprocess.run(
+        ["systemctl", "--user", action, _get_unit_name()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        message = f"Failed to {action} service"
+        if detail:
+            message = f"{message}: {detail}"
+        return ServiceActionResult(success=False, message=message)
+
+    return ServiceActionResult(success=True, message=success_message)
+
+
+def _start_service() -> ServiceActionResult:
+    """Start the installed systemd user service."""
+    return _run_systemctl_action("start", "Service started")
+
+
+def _stop_service() -> ServiceActionResult:
+    """Stop the installed systemd user service without removing it."""
+    return _run_systemctl_action("stop", "Service stopped")
+
+
+def _restart_service() -> ServiceActionResult:
+    """Restart the installed systemd user service."""
+    return _run_systemctl_action("restart", "Service restarted")
+
+
 def _uninstall_service() -> UninstallResult:
     """Stop and remove the systemd user service."""
     unit_path = _get_unit_path()
@@ -197,6 +236,9 @@ manager = ServiceManager(
     install_uv=install_uv,
     install_service=_install_service,
     uninstall_service=_uninstall_service,
+    start_service=_start_service,
+    stop_service=_stop_service,
+    restart_service=_restart_service,
     get_service_status=_get_service_status,
     get_log_command=_get_log_command,
     get_recent_logs=_get_recent_logs,
