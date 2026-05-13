@@ -6061,6 +6061,7 @@ class TestUserIdPassthrough:
                 True,
             ),
             ("Error code: 500 - audio input is not supported", True),
+            ("Error code: 404 - No endpoints found that support input audio", True),
             ("invalid_request_error: max_tokens must be <= 4096", False),
             ("Rate limit exceeded", False),
         ],
