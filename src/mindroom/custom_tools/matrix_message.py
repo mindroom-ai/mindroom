@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from threading import Lock
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from agno.tools import Toolkit
 
@@ -14,6 +14,9 @@ from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.message_extras import MessageExtraSection, parse_message_extra_sections
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class MatrixMessageTools(Toolkit):
@@ -31,11 +34,11 @@ class MatrixMessageTools(Toolkit):
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"send", "thread-reply", "reply", "react", "read", "room-threads", "thread-list", "edit", "context"},
     )
-    _operations: ClassVar[matrix_conversation_operations.MatrixMessageOperations] = (
-        matrix_conversation_operations.MatrixMessageOperations()
-    )
 
-    def __init__(self) -> None:
+    def __init__(self, *, tool_output_workspace_root: Path | None = None) -> None:
+        self._operations = matrix_conversation_operations.MatrixMessageOperations(
+            tool_output_workspace_root=tool_output_workspace_root,
+        )
         super().__init__(
             name="matrix_message",
             tools=[self.matrix_message],
@@ -255,6 +258,7 @@ class MatrixMessageTools(Toolkit):
         - Attachments are only supported for `send`, `reply`, and `thread-reply`.
         - `attachment_ids` are context-scoped `att_*` IDs.
         - `attachment_file_paths` are local file paths that will be registered into the current attachment context before sending.
+          Relative paths resolve from the agent workspace, the same root used as `HOME` in worker-routed tools.
         - The combined limit of `attachment_ids` plus `attachment_file_paths` is 5 per call.
         - A send or reply call may include text, attachments, or both, but not neither.
 
@@ -271,7 +275,7 @@ class MatrixMessageTools(Toolkit):
             action (str): Supported actions are `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`; they send text or attachments, react to an event, read messages, list room thread roots or thread messages, edit a prior event, or return targeting metadata.
             message (str | None): Text body for `send`, `reply`, `thread-reply`, and `edit`; reaction emoji for `react` with a thumbs-up default when empty; use `None` for `read`, `room-threads`, `thread-list`, and `context`.
             attachment_ids (list[str] | None): Context-scoped `att_*` attachment IDs; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_file_paths` cannot exceed 5.
-            attachment_file_paths (list[str] | None): Local file paths to register and send in the current context; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_ids` cannot exceed 5.
+            attachment_file_paths (list[str] | None): Local file paths to register and send in the current context; relative paths resolve from the agent workspace. Only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_ids` cannot exceed 5.
             room_id (str | None): Optional target room ID or alias; defaults to the current room context when omitted.
             target (str | None): Event ID to react to for `react` or to edit for `edit`.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.

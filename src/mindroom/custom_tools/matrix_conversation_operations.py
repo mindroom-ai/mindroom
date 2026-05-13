@@ -33,6 +33,7 @@ from mindroom.matrix.message_extras import build_message_extras_content
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.message_extras import MessageExtraSection
@@ -56,6 +57,9 @@ class MatrixMessageOperations:
         nio.RoomMessageText,
         nio.RoomMessageNotice,
     )
+
+    def __init__(self, *, tool_output_workspace_root: Path | None = None) -> None:
+        self._tool_output_workspace_root = tool_output_workspace_root
 
     @staticmethod
     def _result(status: Literal["ok", "error"], **kwargs: object) -> MatrixMessageOperationResult:
@@ -212,6 +216,7 @@ class MatrixMessageOperations:
                         context,
                         attachment_ids=attachment_ids,
                         attachment_file_paths=attachment_file_paths,
+                        workspace_root=self._tool_output_workspace_root,
                     )
                 )
                 if resolve_error is not None:
@@ -290,6 +295,7 @@ class MatrixMessageOperations:
                     thread_id=attachment_thread_id,
                     require_joined_room=False,
                     inherit_context_thread=False,
+                    workspace_root=self._tool_output_workspace_root,
                 )
                 if send_result is not None:
                     attachment_thread_id = send_result.thread_id

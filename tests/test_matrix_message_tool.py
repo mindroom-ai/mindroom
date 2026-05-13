@@ -972,6 +972,49 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_workspace(tmp_path: Path) -> None:
+    """Relative attachment_file_paths should resolve from the agent workspace root."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    generated_file = workspace_root / "scratch" / "generated.txt"
+    generated_file.parent.mkdir()
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = MatrixMessageTools(tool_output_workspace_root=workspace_root)
+    ctx = _make_context(storage_path=tmp_path)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="hello",
+                attachment_file_paths=["scratch/generated.txt"],
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["attachment_event_ids"] == ["$file_evt"]
+    mock_send_file.assert_awaited_once_with(
+        ctx.client,
+        ctx.room_id,
+        generated_file.resolve(),
+        config=ctx.config,
+        thread_id="$evt",
+        latest_thread_event_id="$evt",
+        conversation_cache=ctx.conversation_cache,
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_send_text_failure_does_not_attempt_attachments(tmp_path: Path) -> None:
     """Attachment sends should not start when the text send fails."""
     tool = MatrixMessageTools()

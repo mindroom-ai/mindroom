@@ -190,12 +190,19 @@ def _resolve_attachment_ids(
 def _register_attachment_file_path(
     context: ToolRuntimeContext,
     file_path: str,
+    *,
+    workspace_root: Path | None = None,
 ) -> tuple[AttachmentRecord | None, str | None]:
     """Register a local file path in the current tool context."""
     if context.storage_path is None:
         return None, "Attachment storage path is unavailable in this runtime path."
 
-    resolved_path = Path(file_path).expanduser().resolve()
+    requested_path = Path(file_path).expanduser()
+    resolved_path = (
+        requested_path.resolve()
+        if requested_path.is_absolute() or workspace_root is None
+        else (workspace_root / requested_path).resolve()
+    )
     kind, filename, mime_type = _infer_local_attachment_metadata(resolved_path)
     attachment_record = register_local_attachment(
         context.storage_path,
@@ -217,6 +224,8 @@ def _register_attachment_file_path(
 def _resolve_attachment_file_paths(
     context: ToolRuntimeContext,
     attachment_file_paths: list[str],
+    *,
+    workspace_root: Path | None = None,
 ) -> tuple[list[Path], list[str], str | None]:
     """Register file paths and return local paths plus generated attachment IDs."""
     if not attachment_file_paths:
@@ -225,7 +234,11 @@ def _resolve_attachment_file_paths(
     resolved_paths: list[Path] = []
     newly_registered_attachment_ids: list[str] = []
     for attachment_file_path in attachment_file_paths:
-        attachment_record, register_error = _register_attachment_file_path(context, attachment_file_path)
+        attachment_record, register_error = _register_attachment_file_path(
+            context,
+            attachment_file_path,
+            workspace_root=workspace_root,
+        )
         if register_error is not None:
             return [], [], register_error
         if attachment_record is None:
@@ -241,6 +254,7 @@ def resolve_send_attachments(
     *,
     attachment_ids: list[str],
     attachment_file_paths: list[str],
+    workspace_root: Path | None = None,
 ) -> tuple[list[Path], list[str], list[str], str | None]:
     """Resolve context IDs and/or local file paths to sendable attachment paths."""
     attachment_paths, resolved_attachment_ids, attachment_error = _resolve_attachment_ids(
@@ -252,6 +266,7 @@ def resolve_send_attachments(
     file_paths, newly_registered_attachment_ids, file_path_error = _resolve_attachment_file_paths(
         context,
         attachment_file_paths,
+        workspace_root=workspace_root,
     )
     if file_path_error is not None:
         return [], [], [], file_path_error
@@ -303,6 +318,7 @@ async def send_context_attachments(
     thread_id: str | None = None,
     require_joined_room: bool = True,
     inherit_context_thread: bool = True,
+    workspace_root: Path | None = None,
 ) -> tuple[_AttachmentSendResult | None, str | None]:
     """Resolve and send context-scoped attachments to Matrix."""
     attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
@@ -310,6 +326,7 @@ async def send_context_attachments(
             context,
             attachment_ids=attachment_ids,
             attachment_file_paths=attachment_file_paths,
+            workspace_root=workspace_root,
         )
     )
     if resolve_error is not None:
