@@ -3,13 +3,16 @@
 # Import the app after we can mock the config path
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
 from mindroom.api import config_lifecycle
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 def trusted_upstream_headers(
@@ -24,6 +27,26 @@ def trusted_upstream_headers(
         "X-Trusted-Email": email,
         "X-Trusted-Matrix-User": matrix_user_id,
     }
+
+
+def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
+    """Reinitialize one API app with trusted-upstream auth enabled."""
+    from mindroom import constants  # noqa: PLC0415
+    from mindroom.api import main  # noqa: PLC0415
+
+    runtime_paths = main._app_runtime_paths(api_app)
+    trusted_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        },
+    )
+    main.initialize_api_app(api_app, trusted_runtime_paths)
+    return trusted_runtime_paths
 
 
 @pytest.fixture

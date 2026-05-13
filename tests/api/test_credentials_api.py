@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
-from tests.api.conftest import trusted_upstream_headers
+from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 
 def _config_with_worker_scope(
@@ -65,22 +65,6 @@ def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.or
     )
     initialize_api_app(api_app, owner_runtime_paths)
     return owner_runtime_paths
-
-
-def _use_trusted_upstream_runtime(api_app: object) -> constants.RuntimePaths:
-    runtime_paths = main._app_runtime_paths(api_app)
-    trusted_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=runtime_paths.config_path,
-        storage_path=runtime_paths.storage_root,
-        process_env={
-            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
-        },
-    )
-    initialize_api_app(api_app, trusted_runtime_paths)
-    return trusted_runtime_paths
 
 
 @pytest.fixture
@@ -1409,7 +1393,7 @@ class TestCredentialsAPI:
 
     def test_agent_credentials_require_agent_reply_permission(self, client: TestClient) -> None:
         """Agent-scoped credential routes should reject requesters outside the agent allowlist."""
-        _use_trusted_upstream_runtime(client.app)
+        use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
             authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
@@ -1436,7 +1420,7 @@ class TestCredentialsAPI:
 
     def test_agent_oauth_token_credentials_authorize_before_generic_rejection(self, client: TestClient) -> None:
         """Unauthorized agent-scoped OAuth token routes should return 403 before route-specific 400s."""
-        _use_trusted_upstream_runtime(client.app)
+        use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
             authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
@@ -1462,7 +1446,7 @@ class TestCredentialsAPI:
 
     def test_homeassistant_token_connect_authorizes_before_probe(self, client: TestClient) -> None:
         """Unauthorized agent-scoped Home Assistant connects should not contact the provider."""
-        _use_trusted_upstream_runtime(client.app)
+        use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
             authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},

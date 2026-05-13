@@ -34,7 +34,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
-from tests.api.conftest import trusted_upstream_headers
+from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 TEST_WORKER_AUTH = "token"
 
@@ -106,22 +106,6 @@ def _config_with_worker_scope(
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
-
-
-def _use_trusted_upstream_runtime(api_app: FastAPI) -> constants.RuntimePaths:
-    runtime_paths = main._app_runtime_paths(api_app)
-    trusted_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=runtime_paths.config_path,
-        storage_path=runtime_paths.storage_root,
-        process_env={
-            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
-        },
-    )
-    main.initialize_api_app(api_app, trusted_runtime_paths)
-    return trusted_runtime_paths
 
 
 def _authored_config_payload(agent_name: str) -> dict[str, Any]:
@@ -1600,7 +1584,7 @@ def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
 
 def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:
     """Agent-scoped tool availability should not expose credential-backed state to unauthorized users."""
-    runtime_paths = _use_trusted_upstream_runtime(main.app)
+    runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "shared",
         authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
