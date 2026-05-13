@@ -18,8 +18,10 @@ from .config import (
     config_app,
     console,
     format_validation_errors,
+    initialize_config_file,
     load_config_quiet,
     print_config_search_locations,
+    provider_setup_command_choices_text,
 )
 from .local_stack import local_stack_setup
 from .service import service_app
@@ -164,6 +166,10 @@ async def _run(
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(storage_path=storage_path)
+    if _initialize_config_for_run_if_missing(runtime_paths):
+        runtime_paths = activate_cli_runtime(storage_path=storage_path)
+        if _hosted_pairing_required(runtime_paths):
+            return
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
@@ -208,6 +214,47 @@ async def _run(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+def _initialize_config_for_run_if_missing(runtime_paths: RuntimePaths) -> bool:
+    """Create the hosted starter config when `mindroom run` is invoked first."""
+    from mindroom.constants import ensure_writable_config_path  # noqa: PLC0415
+
+    if ensure_writable_config_path(runtime_paths=runtime_paths):
+        return False
+
+    console.print("[yellow]No config found, starting setup...[/yellow]")
+    env_path = runtime_paths.config_path.parent / ".env"
+    result = initialize_config_file(
+        runtime_paths.config_path,
+        force=False,
+        matrix_server="mindroom.chat",
+        provider="openai",
+        interactive=False,
+        replace_env_file=not env_path.exists(),
+        print_next_steps=False,
+        storage_root=runtime_paths.storage_root,
+    )
+    console.print(f"Using hosted Matrix defaults with provider: [cyan]{result.provider_preset}[/cyan].")
+    console.print("To choose a different provider, rerun setup:")
+    console.print(
+        f"  [cyan]mindroom config init --force --provider {provider_setup_command_choices_text()}[/cyan]",
+        soft_wrap=True,
+    )
+    console.print("Then pair with hosted Matrix:")
+    console.print("  [cyan]mindroom connect --pair-code XXXX[/cyan]")
+    console.print("Then start MindRoom:")
+    console.print("  [cyan]mindroom run[/cyan]\n")
+    return True
+
+
+def _hosted_pairing_required(runtime_paths: RuntimePaths) -> bool:
+    """Return whether first-run hosted setup still needs browser pairing."""
+    provisioning_url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip()
+    registration_token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
+    client_id = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") or "").strip()
+    client_secret = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_SECRET") or "").strip()
+    return bool(provisioning_url and not registration_token and not (client_id and client_secret))
 
 
 @app.command()

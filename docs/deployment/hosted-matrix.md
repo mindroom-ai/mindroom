@@ -25,14 +25,14 @@ This guide covers the simplest production-like setup:
 - A Matrix account that can sign in to `chat.mindroom.chat`
 - At least one AI provider API key, or a local Codex CLI ChatGPT subscription login
 
-## 1. Initialize Local Config
+## 1. Start Local Setup
 
 ```bash
-uvx mindroom config init
+uvx mindroom run
 ```
 
-This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
-Use `uvx mindroom config init --provider codex` if you want the starter config to use `provider: codex`.
+When no config exists, `mindroom run` creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults, then exits with pairing instructions.
+Use `uvx mindroom config init --force --provider codex` before pairing if you want the starter config to use `provider: codex`.
 
 ## 2. Add AI Provider Key
 
