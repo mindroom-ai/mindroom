@@ -216,51 +216,51 @@ Use `--provider` to select a different provider preset:
 uvx mindroom config init --profile public --provider anthropic
 
 # Use Codex CLI ChatGPT subscription auth
-uvx mindroom config init --profile public-codex
+uvx mindroom config init --profile public --provider codex
 
 # Use local Ollama
-uvx mindroom config init --profile public-ollama
+uvx mindroom config init --profile public --provider ollama
 
 # Use local llama.cpp through its OpenAI-compatible server
-uvx mindroom config init --profile llama-cpp
+uvx mindroom config init --profile public --provider llama_cpp
 
 # Use Vertex AI Claude (Google Cloud)
-uvx mindroom config init --profile public-vertexai-anthropic
+uvx mindroom config init --profile public --provider vertexai_claude
 ```
 
-`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
-The shorter `codex` profile alias is also accepted.
-Run `codex login` before starting MindRoom when using this profile.
+Use `--profile public` for hosted Matrix and `--provider` for the model provider.
+Shortcuts such as `--profile public-codex`, `--profile public-ollama`, `--profile llama-cpp`, and `--profile public-vertexai-anthropic` are still accepted.
+Run `codex login` before starting MindRoom when using `--provider codex`.
 
-`public-ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
-The shorter `ollama` profile alias is also accepted.
+`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
 Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
 
-`llama-cpp` and `public-llama-cpp` use a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
+`--provider llama_cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
 Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
 These local provider profiles run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
 
-`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
-Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
+Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted as profile shortcuts.
 
 Other profiles:
 
 - `--profile full` — rich starter config with interactive provider selection (default)
 - `--profile minimal` or `--minimal` — bare-minimum config
 
-### 2. Add model API key(s)
+### 2. Add remote-provider credentials when needed
 
 ```bash
 $EDITOR ~/.mindroom/.env
 ```
 
-Set at least one key:
+For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI subscription auth: run `codex login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
+Skip this step for `--provider ollama` or `--provider llama_cpp` unless you also add a remote provider.
 
 ### 3. Pair your local install from chat UI
 
@@ -16021,17 +16021,14 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 Create a starter `config.yaml` with example agents, models, and sensible defaults.
 
-Profiles control the template style:
+Profiles control the template shape:
 
 - `--profile full` (default) — rich example config with interactive provider selection
 - `--profile minimal` — bare-minimum config
 - `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
-- `--profile public-codex` — hosted Matrix with Codex CLI subscription defaults
-- `--profile public-ollama` or `--profile ollama` — hosted Matrix with local Ollama defaults
-- `--profile llama-cpp` or `--profile public-llama-cpp` — hosted Matrix with local llama.cpp OpenAI-compatible defaults
-- `--profile public-vertexai-anthropic` — hosted Matrix with Vertex AI Claude defaults
 
 Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama_cpp`, `ollama`, `openai`, `openai_mini`, `openai_nano`, `openrouter`, or `vertexai_claude`.
+For hosted Matrix with a specific provider, prefer the composable form `--profile public --provider <preset>`.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
@@ -16041,27 +16038,33 @@ mindroom config init --profile public
 mindroom config init --minimal --provider anthropic
 
 # Hosted Matrix with Codex CLI ChatGPT subscription auth
-mindroom config init --profile public-codex
+mindroom config init --profile public --provider codex
 
 # Hosted Matrix with Ollama
-mindroom config init --profile public-ollama
+mindroom config init --profile public --provider ollama
 
 # Hosted Matrix with llama.cpp
-mindroom config init --profile llama-cpp
+mindroom config init --profile public --provider llama_cpp
 
 # Hosted Matrix with Vertex AI Claude
-mindroom config init --profile public-vertexai-anthropic
+mindroom config init --profile public --provider vertexai_claude
+
+# Preview generated YAML without writing files
+mindroom config init --profile public --provider ollama --print
 
 # Force overwrite existing config
 mindroom config init --force
 ```
 
-The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
+Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
+It does not create or modify `config.yaml`, `.env`, or starter workspace files.
+
+The `--provider codex` preset generates `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
-The `public-ollama` profile and `ollama` profile alias generate `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
+The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:
 
 ```bash
@@ -16069,13 +16072,15 @@ ollama pull gemma4
 ollama pull qwen3.6:27b
 ```
 
-The `llama-cpp` and `public-llama-cpp` profiles generate OpenAI-compatible local server config for Unsloth GGUF models.
+The `--provider llama_cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
 Start llama.cpp with one of the configured model refs before running MindRoom:
 
 ```bash
 llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
 llama-server -hf unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
 ```
+
+Shortcuts such as `--profile public-codex`, `--profile public-ollama`, `--profile llama-cpp`, and `--profile public-vertexai-anthropic` are still accepted for convenience.
 
 ### config show
 

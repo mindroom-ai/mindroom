@@ -638,6 +638,85 @@ class TestConfigInit:
         assert result.exit_code == 2
         assert "Invalid profile" in normalize_console_output(result.output)
 
+    def test_init_help_separates_template_profiles_from_provider_presets(self) -> None:
+        """Config init help should present provider selection through --provider, not profile variants."""
+        result = runner.invoke(app, ["config", "init", "--help"])
+        assert result.exit_code == 0
+
+        output = normalize_console_output(result.output)
+        assert "Template shape: full, minimal, or public" in output
+        assert "Default model provider for the selected template" in output
+        assert "--profile public --provider codex" in output
+        assert "--print" in output
+
+    def test_init_print_outputs_config_without_writing_files(self, tmp_path: Path) -> None:
+        """Config init --print should preview YAML without creating config side effects."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--profile",
+                "public",
+                "--provider",
+                "ollama",
+                "--print",
+            ],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(result.output)
+        assert config["models"]["default"]["provider"] == "ollama"
+        assert config["models"]["default"]["id"] == "gemma4"
+        assert config["models"]["qwen3_6_27b"]["id"] == "qwen3.6:27b"
+        assert not target.exists()
+        assert not (tmp_path / ".env").exists()
+        assert not (tmp_path / "mindroom_data").exists()
+
+        output = normalize_console_output(result.output)
+        assert "Config created" not in output
+        assert "Next steps" not in output
+
+    def test_init_print_defaults_to_openai_without_prompting(self, tmp_path: Path) -> None:
+        """Config init --print should produce only YAML when no provider is specified."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--print"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(result.output)
+        assert config["models"]["default"]["provider"] == "openai"
+        assert "Choose provider preset" not in normalize_console_output(result.output)
+        assert not target.exists()
+
+    def test_init_print_ignores_existing_config_without_prompting(self, tmp_path: Path) -> None:
+        """Config init --print should not prompt for or overwrite an existing config."""
+        target = tmp_path / "config.yaml"
+        target.write_text("existing: true\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--profile",
+                "public",
+                "--provider",
+                "codex",
+                "--print",
+            ],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(result.output)
+        assert config["models"]["default"]["provider"] == "codex"
+        assert target.read_text(encoding="utf-8") == "existing: true\n"
+        assert "Overwrite existing config file?" not in normalize_console_output(result.output)
+
     def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
         """Full profile next steps should NOT mention pairing."""
         target = tmp_path / "config.yaml"

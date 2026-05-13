@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 import typer
 from rich.console import Console
+from rich.syntax import Syntax
 
 from mindroom import constants
 from mindroom.model_defaults import (
@@ -129,11 +130,22 @@ _CANONICAL_INIT_PROFILES: tuple[str, ...] = (
     "full",
     "minimal",
     "public",
-    "llama-cpp",
     "public-codex",
     "public-ollama",
+    "llama-cpp",
     "public-llama-cpp",
     "public-vertexai-anthropic",
+)
+_PROFILE_HELP = (
+    "Template shape: full, minimal, or public. Provider shortcuts also work, "
+    "for example codex, public-codex, public-ollama, llama-cpp, and public-vertexai-anthropic."
+)
+_PROVIDER_HELP = (
+    "Default model provider for the selected template. Use with --profile public for hosted Matrix, "
+    "for example --profile public --provider codex."
+)
+_PROVIDER_CHOICES_TEXT = (
+    "anthropic, codex, llama_cpp, ollama, openai, openai_mini, openai_nano, openrouter, or vertexai_claude"
 )
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
@@ -432,18 +444,17 @@ def config_init(
     profile: str = typer.Option(
         "full",
         "--profile",
-        help=(
-            "Template profile: full, minimal, public, codex, llama-cpp, public-codex, public-ollama, "
-            "public-llama-cpp, or public-vertexai-anthropic (hosted Matrix with provider defaults)."
-        ),
+        help=_PROFILE_HELP,
     ),
     provider: str | None = typer.Option(
         None,
         "--provider",
-        help=(
-            "Provider preset for generated config: anthropic, codex, llama_cpp, ollama, openai, openai_mini, "
-            "openai_nano, openrouter, or vertexai_claude."
-        ),
+        help=f"{_PROVIDER_HELP} Choices: {_PROVIDER_CHOICES_TEXT}.",
+    ),
+    print_config: bool = typer.Option(
+        False,
+        "--print",
+        help="Print generated config YAML with syntax highlighting instead of writing files.",
     ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
@@ -453,7 +464,7 @@ def config_init(
     target = _resolve_config_path(path)
     env_path = target.parent / ".env"
 
-    if target.exists() and not force:
+    if target.exists() and not force and not print_config:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
         if not typer.confirm("Overwrite existing config file?"):
             console.print("[dim]Aborted.[/dim]")
@@ -463,8 +474,10 @@ def config_init(
         profile,
         minimal=minimal,
         provider=provider,
+        interactive=not print_config,
     )
-    replace_env_file = _should_replace_env_file(env_path, force=force)
+
+    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force)
     storage_root, use_storage_env_placeholder = _config_init_storage_plan(
         target.parent,
         env_path,
@@ -490,6 +503,20 @@ def config_init(
         from mindroom.cli.owner import replace_owner_placeholders_in_text  # noqa: PLC0415
 
         content = replace_owner_placeholders_in_text(content, owner_user_id)
+
+    if print_config:
+        code_width = max((len(line) for line in content.splitlines()), default=0)
+        syntax = Syntax(
+            content,
+            "yaml",
+            theme="monokai",
+            line_numbers=False,
+            word_wrap=False,
+            code_width=code_width,
+            background_color="default",
+        )
+        console.print(syntax, soft_wrap=True)
+        return
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
@@ -543,8 +570,6 @@ def config_show(
     if raw:
         print(content, end="")
         return
-
-    from rich.syntax import Syntax  # noqa: PLC0415
 
     console.print(f"[bold green]Config file:[/bold green] {config_file}\n")
     syntax = Syntax(content, "yaml", theme="monokai", line_numbers=True, word_wrap=True)
@@ -713,6 +738,7 @@ def _resolve_config_init_selection(
     *,
     minimal: bool,
     provider: str | None,
+    interactive: bool = True,
 ) -> tuple[_ConfigInitProfile, _ProviderPreset]:
     """Resolve the requested `config init` profile and provider preset."""
     profile_value = "minimal" if minimal else profile.strip().lower()
@@ -724,10 +750,7 @@ def _resolve_config_init_selection(
 
     provider_preset = _normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
-        console.print(
-            "[red]Invalid --provider value.[/red] Use: anthropic, codex, llama_cpp, ollama, openai, "
-            "openai_mini, openai_nano, openrouter, or vertexai_claude.",
-        )
+        console.print(f"[red]Invalid --provider value.[/red] Use: {_PROVIDER_CHOICES_TEXT}.")
         raise typer.Exit(1)
 
     if selected_profile == "minimal":
@@ -737,6 +760,8 @@ def _resolve_config_init_selection(
     if profile_preset is not None:
         return selected_profile, profile_preset
     if selected_profile == "public":
+        return selected_profile, "openai"
+    if not interactive:
         return selected_profile, "openai"
     return selected_profile, _prompt_provider_preset()
 
@@ -773,10 +798,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
         provider_preset = _normalize_provider_preset(raw_value)
         if provider_preset is not None:
             return provider_preset
-        console.print(
-            "[red]Invalid choice.[/red] Enter anthropic, codex, llama_cpp, ollama, openai, openai_mini, "
-            "openai_nano, openrouter, or vertexai_claude.",
-        )
+        console.print(f"[red]Invalid choice.[/red] Enter {_PROVIDER_CHOICES_TEXT}.")
 
 
 def _model_template_block(provider_preset: _ProviderPreset) -> str:
