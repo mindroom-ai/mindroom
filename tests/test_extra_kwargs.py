@@ -11,10 +11,12 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
+from pydantic import BaseModel
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS
 from mindroom.model_loading import get_model_instance
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
@@ -165,6 +167,46 @@ def test_get_model_instance_with_extra_kwargs() -> None:
 
     # Check that temperature was also passed
     assert model.temperature == 0.8
+
+
+def test_openrouter_uses_prompt_only_structured_outputs_by_default() -> None:
+    """OpenRouter model routing makes native response_format support provider-dependent."""
+    os.environ["OPENROUTER_API_KEY"] = "test-key"
+
+    class SummarySchema(BaseModel):
+        summary: str
+
+    config_data = {
+        "models": {
+            "test_model": {
+                "provider": "openrouter",
+                "id": CONFIG_INIT_MODEL_PRESETS["openrouter"].id,
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "test_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+
+    model = get_model_instance(config, runtime_paths, "test_model")
+    request_params = model.get_request_params(response_format=SummarySchema)
+
+    assert model.supports_native_structured_outputs is False
+    assert "response_format" not in request_params
 
 
 def test_different_providers_with_extra_kwargs() -> None:

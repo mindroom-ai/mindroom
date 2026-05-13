@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.models.anthropic import Claude
@@ -27,6 +28,8 @@ from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cac
 
 if TYPE_CHECKING:
     from agno.models.base import Model
+    from agno.run.agent import RunOutput
+    from pydantic import BaseModel
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
@@ -35,6 +38,31 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["get_model_instance"]
+
+
+@dataclass
+class _PromptOnlyStructuredOutputOpenRouter(OpenRouter):
+    """OpenRouter wrapper that defaults structured outputs to prompt-only mode."""
+
+    supports_native_structured_outputs: bool = False
+    supports_json_schema_outputs: bool = False
+
+    def get_request_params(
+        self,
+        response_format: dict[Any, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+    ) -> dict[str, Any]:
+        request_params = super().get_request_params(
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+        )
+        if response_format is not None and not self.supports_native_structured_outputs:
+            request_params.pop("response_format", None)
+        return request_params
 
 
 def _canonical_provider(provider: str) -> str:
@@ -97,7 +125,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
-        return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
+        return _PromptOnlyStructuredOutputOpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
 
     if canonical_provider in {"codex", "openai_codex"}:
         extra_kwargs.pop("api_key", None)
