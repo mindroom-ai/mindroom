@@ -463,38 +463,32 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with example agents, models, and sensible defaults.
+Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
 
-Profiles control the template shape:
-
-- `--profile full` (default) — rich example config with interactive provider selection
-- `--profile minimal` — bare-minimum config
-- `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
-
+Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
 Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama_cpp`, `ollama`, `openai`, `openai_mini`, `openai_nano`, `openrouter`, or `vertexai_claude`.
-For hosted Matrix with a specific provider, prefer the composable form `--profile public --provider <preset>`.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
-mindroom config init --profile public
+mindroom config init
 
-# Minimal config with Anthropic
-mindroom config init --minimal --provider anthropic
+# Self-hosted Matrix with Anthropic
+mindroom config init --matrix-server self-hosted --provider anthropic
 
 # Hosted Matrix with Codex CLI ChatGPT subscription auth
-mindroom config init --profile public --provider codex
+mindroom config init --matrix-server mindroom.chat --provider codex
 
 # Hosted Matrix with Ollama
-mindroom config init --profile public --provider ollama
+mindroom config init --matrix-server mindroom.chat --provider ollama
 
 # Hosted Matrix with llama.cpp
-mindroom config init --profile public --provider llama_cpp
+mindroom config init --matrix-server mindroom.chat --provider llama_cpp
 
 # Hosted Matrix with Vertex AI Claude
-mindroom config init --profile public --provider vertexai_claude
+mindroom config init --matrix-server mindroom.chat --provider vertexai_claude
 
 # Preview generated YAML without writing files
-mindroom config init --profile public --provider ollama --print
+mindroom config init --matrix-server mindroom.chat --provider ollama --print
 
 # Force overwrite existing config
 mindroom config init --force
@@ -523,8 +517,6 @@ Start llama.cpp with one of the configured model refs before running MindRoom:
 llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
 llama-server -hf unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
 ```
-
-Shortcuts such as `--profile public-codex`, `--profile public-ollama`, `--profile llama-cpp`, and `--profile public-vertexai-anthropic` are still accepted for convenience.
 
 ### config show
 
@@ -740,7 +732,7 @@ mindroom doctor
 ### Initialize a config
 
 ```bash
-mindroom config init --profile public
+mindroom config init
 ```
 
 ### Validate your config

@@ -166,8 +166,8 @@ class TestConfigInit:
         assert "matrix_delivery:\n  ignore_unverified_devices: false" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
-    def test_init_prompt_defaults_to_openai(self, tmp_path: Path) -> None:
-        """Pressing enter at the provider prompt should keep OpenAI as the starter default."""
+    def test_init_defaults_to_openai_for_mindroom_chat(self, tmp_path: Path) -> None:
+        """mindroom.chat should default to OpenAI without prompting for a provider."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target)], input="\n")
         assert result.exit_code == 0
@@ -176,8 +176,8 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
 
-    def test_init_full_profile_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
-        """Full template should include MindRoom-style Mind memory/context setup."""
+    def test_init_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
+        """Starter config should include MindRoom-style Mind memory/context setup."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
@@ -224,8 +224,8 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert f"MINDROOM_STORAGE_PATH={(tmp_path / 'mindroom_data').resolve()}" in env_content
 
-    def test_init_full_profile_creates_mind_workspace_files(self, tmp_path: Path) -> None:
-        """Full template should scaffold the required canonical workspace files."""
+    def test_init_creates_mind_workspace_files(self, tmp_path: Path) -> None:
+        """Starter config should scaffold the required canonical workspace files."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
@@ -242,12 +242,12 @@ class TestConfigInit:
         assert (workspace / "MEMORY.md").exists()
         assert not (workspace / "BOOT.md").exists()
 
-    def test_init_full_profile_respects_storage_path_override(
+    def test_init_respects_storage_path_override(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Full template should scaffold the Mind workspace under MINDROOM_STORAGE_PATH when set."""
+        """Starter config should scaffold the Mind workspace under MINDROOM_STORAGE_PATH when set."""
         target = tmp_path / "config.yaml"
         storage_root = tmp_path / "custom-storage"
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
@@ -268,12 +268,12 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert f"MINDROOM_STORAGE_PATH={storage_root.resolve()}" in env_content
 
-    def test_init_full_profile_runtime_storage_override_keeps_mind_workspace_and_kb_in_sync(
+    def test_init_runtime_storage_override_keeps_mind_workspace_and_kb_in_sync(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The starter Mind profile should follow the active runtime storage root, not the init-time one."""
+        """The starter Mind workspace should follow the active runtime storage root, not the init-time one."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
@@ -333,7 +333,7 @@ class TestConfigInit:
 
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--provider", "openai"],
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--provider", "openai"],
             input="n\n",
         )
 
@@ -344,32 +344,10 @@ class TestConfigInit:
         assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace").exists()
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
-    def test_init_minimal(self, tmp_path: Path) -> None:
-        """Config init --minimal creates a bare-minimum config."""
+    def test_init_mindroom_chat_writes_hosted_matrix_defaults(self, tmp_path: Path) -> None:
+        """mindroom.chat should prefill hosted Matrix defaults and token placeholder."""
         target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--minimal"])
-        assert result.exit_code == 0
-        content = target.read_text()
-        assert "agents:" in content
-        assert "# MindRoom Configuration (minimal)" in content
-        assert "authorization:" in content
-        assert "matrix_space:" in content
-        assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
-        assert "matrix_delivery:\n  ignore_unverified_devices: false" in content
-        assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
-
-    def test_init_profile_minimal(self, tmp_path: Path) -> None:
-        """Config init --profile minimal creates the minimal template."""
-        target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "minimal"])
-        assert result.exit_code == 0
-        content = target.read_text()
-        assert "# MindRoom Configuration (minimal)" in content
-
-    def test_init_profile_public_writes_public_matrix_defaults(self, tmp_path: Path) -> None:
-        """Public profile should prefill hosted Matrix defaults and token placeholder."""
-        target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", "public"])
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat"])
         assert result.exit_code == 0
         config_content = target.read_text()
         assert "mindroom_user:" not in config_content
@@ -381,16 +359,24 @@ class TestConfigInit:
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
         assert "\n\n\n# AI provider API keys" not in env_content
 
-        # Public profile next steps must include the pairing command
         output = normalize_console_output(result.output)
         assert "mindroom connect --pair-code" in output
 
-    def test_init_profile_public_vertexai_anthropic_writes_hosted_vertex_defaults(self, tmp_path: Path) -> None:
-        """Hosted Vertex profile should use Vertex Claude defaults and hosted Matrix settings."""
+    def test_init_mindroom_chat_vertexai_claude_writes_hosted_vertex_defaults(self, tmp_path: Path) -> None:
+        """Hosted Vertex config should use Vertex Claude defaults and hosted Matrix settings."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "vertexai_claude",
+            ],
         )
         assert result.exit_code == 0
 
@@ -413,11 +399,11 @@ class TestConfigInit:
         assert "Google" in output
         assert "auth" in output
 
-    def test_init_profile_public_vertexai_anthropic_updates_existing_env_with_hosted_defaults(
+    def test_init_mindroom_chat_vertexai_claude_updates_existing_env_with_hosted_defaults(
         self,
         tmp_path: Path,
     ) -> None:
-        """Hosted profiles should append Matrix defaults when preserving an existing `.env`."""
+        """mindroom.chat should append Matrix defaults when preserving an existing `.env`."""
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text(
@@ -427,7 +413,16 @@ class TestConfigInit:
 
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "vertexai_claude",
+            ],
             input="n\n",
         )
 
@@ -441,11 +436,11 @@ class TestConfigInit:
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
         assert "Env file updated" in normalize_console_output(result.output)
 
-    def test_init_profile_public_updates_connect_created_env_with_hosted_defaults(
+    def test_init_mindroom_chat_updates_connect_created_env_with_hosted_defaults(
         self,
         tmp_path: Path,
     ) -> None:
-        """Running `connect` before `config init` should not strand public Matrix defaults."""
+        """Running `connect` before `config init` should not strand hosted Matrix defaults."""
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text(
@@ -458,7 +453,16 @@ class TestConfigInit:
 
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "vertexai_claude",
+            ],
             input="n\n",
         )
 
@@ -471,7 +475,7 @@ class TestConfigInit:
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
 
-    def test_init_profile_public_uses_connect_created_owner_env(
+    def test_init_mindroom_chat_uses_connect_created_owner_env(
         self,
         tmp_path: Path,
     ) -> None:
@@ -489,7 +493,16 @@ class TestConfigInit:
 
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "vertexai_claude",
+            ],
             input="n\n",
         )
 
@@ -500,12 +513,12 @@ class TestConfigInit:
         assert config["authorization"]["global_users"] == ["@alice:mindroom.chat"]
         assert config["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat"]
 
-    def test_init_profile_public_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
-        """Hosted Codex profile should use Codex defaults and hosted Matrix settings."""
+    def test_init_mindroom_chat_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
+        """Hosted Codex config should use Codex defaults and hosted Matrix settings."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "public-codex"],
+            ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--provider", "codex"],
         )
         assert result.exit_code == 0
 
@@ -530,17 +543,15 @@ class TestConfigInit:
         assert "mindroom connect --pair-code" in output
         assert "codex login" in output
 
-    @pytest.mark.parametrize("profile_name", ["public-ollama", "ollama"])
-    def test_init_profile_public_ollama_writes_hosted_ollama_defaults(
+    def test_init_mindroom_chat_ollama_writes_hosted_ollama_defaults(
         self,
         tmp_path: Path,
-        profile_name: str,
     ) -> None:
-        """Hosted Ollama profile should use local Ollama models and hosted Matrix settings."""
+        """Hosted Ollama config should use local Ollama models and hosted Matrix settings."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", profile_name],
+            ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--provider", "ollama"],
         )
         assert result.exit_code == 0
 
@@ -569,17 +580,17 @@ class TestConfigInit:
         assert f"ollama pull {OLLAMA_QWEN}" in output
         assert "Ollama" in output
 
-    @pytest.mark.parametrize("profile_name", ["llama-cpp", "llama_cpp", "public-llama-cpp", "public-llama_cpp"])
-    def test_init_profile_llama_cpp_writes_hosted_openai_compatible_defaults(
+    @pytest.mark.parametrize("provider_name", ["llama-cpp", "llama_cpp"])
+    def test_init_mindroom_chat_llama_cpp_writes_hosted_openai_compatible_defaults(
         self,
         tmp_path: Path,
-        profile_name: str,
+        provider_name: str,
     ) -> None:
-        """llama-cpp profile should use local OpenAI-compatible server defaults and hosted Matrix."""
+        """llama.cpp provider should use local OpenAI-compatible server defaults and hosted Matrix."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", profile_name],
+            ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--provider", provider_name],
         )
         assert result.exit_code == 0
 
@@ -614,39 +625,19 @@ class TestConfigInit:
         assert llama_cpp_server_command(LLAMA_CPP_QWEN) in output
         assert "llama.cpp" in output
 
-    def test_init_profile_codex_alias_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
-        """The concise codex profile alias should use hosted Codex defaults."""
-        target = tmp_path / "config.yaml"
-        result = runner.invoke(
-            app,
-            ["config", "init", "--path", str(target), "--profile", "codex"],
-        )
-        assert result.exit_code == 0
-
-        config = yaml.safe_load(target.read_text())
-        assert "mindroom_user" not in config
-        assert config["models"]["default"]["provider"] == "codex"
-        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["codex"].id
-        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["codex"].context_window
-        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
-
-    @pytest.mark.parametrize("profile", ["openai-codex", "public-openai-codex"])
-    def test_init_rejects_openai_codex_profile_aliases(self, tmp_path: Path, profile: str) -> None:
-        """Config init should avoid redundant OpenAI-Codex profile aliases."""
-        target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--profile", profile])
-        assert result.exit_code == 2
-        assert "Invalid profile" in normalize_console_output(result.output)
-
-    def test_init_help_separates_template_profiles_from_provider_presets(self) -> None:
-        """Config init help should present provider selection through --provider, not profile variants."""
+    def test_init_help_separates_matrix_server_from_provider_presets(self) -> None:
+        """Config init help should present Matrix server and model provider as separate choices."""
         result = runner.invoke(app, ["config", "init", "--help"])
         assert result.exit_code == 0
 
         output = normalize_console_output(result.output)
-        assert "Template shape: full, minimal, or public" in output
-        assert "Default model provider for the selected template" in output
-        assert "--profile public --provider codex" in output
+        assert "--matrix-server" in output
+        assert "self-hosted" in output
+        assert "mindroom.chat" in output
+        assert "Default model provider" in output
+        assert "--profile" not in output
+        assert "--minimal" not in output
+        assert "--template" not in output
         assert "--print" in output
 
     def test_init_print_outputs_config_without_writing_files(self, tmp_path: Path) -> None:
@@ -659,8 +650,8 @@ class TestConfigInit:
                 "init",
                 "--path",
                 str(target),
-                "--profile",
-                "public",
+                "--matrix-server",
+                "mindroom.chat",
                 "--provider",
                 "ollama",
                 "--print",
@@ -703,8 +694,8 @@ class TestConfigInit:
                 "init",
                 "--path",
                 str(target),
-                "--profile",
-                "public",
+                "--matrix-server",
+                "mindroom.chat",
                 "--provider",
                 "codex",
                 "--print",
@@ -717,10 +708,13 @@ class TestConfigInit:
         assert target.read_text(encoding="utf-8") == "existing: true\n"
         assert "Overwrite existing config file?" not in normalize_console_output(result.output)
 
-    def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
-        """Full profile next steps should NOT mention pairing."""
+    def test_init_self_hosted_omits_pairing_step(self, tmp_path: Path) -> None:
+        """Self-hosted Matrix next steps should NOT mention pairing."""
         target = tmp_path / "config.yaml"
-        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--provider", "openai"],
+        )
         assert result.exit_code == 0
         output = normalize_console_output(result.output)
         assert "mindroom connect" not in output
@@ -763,7 +757,7 @@ class TestConfigInit:
         # Answer 'n' to .env overwrite prompt
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--provider", "openai"],
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--provider", "openai"],
             input="n\n",
         )
         assert result.exit_code == 0
@@ -782,7 +776,7 @@ class TestConfigInit:
 
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--provider", "openai"],
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--provider", "openai"],
             input="n\n",
         )
 
@@ -814,7 +808,7 @@ class TestConfigInit:
 
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--provider", "openai"],
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--provider", "openai"],
             input="n\n",
         )
 

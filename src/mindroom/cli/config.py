@@ -59,7 +59,7 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
     help="Override auto-detection and use this config file path.",
 )
 
-_ConfigInitProfile = Literal["full", "minimal", "public"]
+_MatrixServerPreset = Literal["self-hosted", "mindroom.chat"]
 _ProviderPreset = Literal[
     "anthropic",
     "codex",
@@ -75,35 +75,14 @@ _ProviderPreset = Literal[
 _OLLAMA_HOST = OLLAMA_HOST_DEFAULT
 _LLAMA_CPP_BASE_URL = LLAMA_CPP_BASE_URL_DEFAULT
 _LLAMA_CPP_API_KEY = LLAMA_CPP_API_KEY_DEFAULT
-_LOCAL_PROVIDER_ALIASES: dict[str, _ProviderPreset] = {
-    "llama-cpp": "llama_cpp",
-    "llama_cpp": "llama_cpp",
-    "ollama": "ollama",
-}
-_INIT_PROFILE_ALIASES: dict[str, tuple[_ConfigInitProfile, _ProviderPreset | None]] = {
-    "full": ("full", None),
-    "minimal": ("minimal", None),
-    "public": ("public", None),
-    "public-codex": ("public", "codex"),
-    "codex": ("public", "codex"),
-    "public-ollama": ("public", "ollama"),
-    "public-vertexai-anthropic": ("public", "vertexai_claude"),
-    "public-vertexai-claude": ("public", "vertexai_claude"),
-    "vertexai-anthropic": ("public", "vertexai_claude"),
-    "vertexai-claude": ("public", "vertexai_claude"),
-}
-_INIT_PROFILE_ALIASES.update(
-    {alias: ("public", provider_preset) for alias, provider_preset in _LOCAL_PROVIDER_ALIASES.items()},
-)
-_INIT_PROFILE_ALIASES.update(
-    {f"public-{alias}": ("public", provider_preset) for alias, provider_preset in _LOCAL_PROVIDER_ALIASES.items()},
-)
 _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "anthropic": "anthropic",
     "claude": "anthropic",
     "a": "anthropic",
     "codex": "codex",
-    **_LOCAL_PROVIDER_ALIASES,
+    "llama-cpp": "llama_cpp",
+    "llama_cpp": "llama_cpp",
+    "ollama": "ollama",
     "openai": "openai",
     "o": "openai",
     "openai-mini": "openai_mini",
@@ -126,23 +105,13 @@ _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
     ("MATRIX_REGISTRATION_TOKEN", ""),
 )
-_CANONICAL_INIT_PROFILES: tuple[str, ...] = (
-    "full",
-    "minimal",
-    "public",
-    "public-codex",
-    "public-ollama",
-    "llama-cpp",
-    "public-llama-cpp",
-    "public-vertexai-anthropic",
-)
-_PROFILE_HELP = (
-    "Template shape: full, minimal, or public. Provider shortcuts also work, "
-    "for example codex, public-codex, public-ollama, llama-cpp, and public-vertexai-anthropic."
+_MATRIX_SERVER_CHOICES_TEXT = "self-hosted or mindroom.chat"
+_MATRIX_SERVER_HELP = (
+    "Matrix defaults: self-hosted = configure your own homeserver; mindroom.chat = hosted Matrix pairing defaults."
 )
 _PROVIDER_HELP = (
-    "Default model provider for the selected template. Use with --profile public for hosted Matrix, "
-    "for example --profile public --provider codex."
+    "Default model provider. Use with --matrix-server mindroom.chat for hosted Matrix, "
+    "for example --matrix-server mindroom.chat --provider codex."
 )
 _PROVIDER_CHOICES_TEXT = (
     "anthropic, codex, llama_cpp, ollama, openai, openai_mini, openai_nano, openrouter, or vertexai_claude"
@@ -205,7 +174,7 @@ def _default_mind_knowledge_base_path(
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
-    """Create the default Mind workspace files used by the full/public templates."""
+    """Create the default Mind workspace files used by starter configs."""
     from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
 
     ensure_workspace_template(workspace_path, template="mind", force=force)
@@ -213,7 +182,7 @@ def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
 
 def _write_env_file(
     env_path: Path,
-    selected_profile: _ConfigInitProfile,
+    matrix_server: _MatrixServerPreset,
     selected_preset: _ProviderPreset,
     *,
     storage_root: Path,
@@ -221,23 +190,23 @@ def _write_env_file(
 ) -> bool:
     """Create or update .env and return whether the file changed."""
     if not env_path.exists():
-        env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
+        env_path.write_text(_env_template(matrix_server, selected_preset, storage_root), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
         return True
 
     if not replace_existing:
-        # `connect` can create .env before `config init`; public profiles still
+        # `connect` can create .env before `config init`; mindroom.chat still
         # need hosted Matrix defaults, so preserve user-owned values and append
         # only the missing hosted keys.
-        if selected_profile == "public":
+        if matrix_server == "mindroom.chat":
             return _append_missing_env_defaults(
                 env_path,
                 _PUBLIC_HOSTED_ENV_DEFAULTS,
-                title="Hosted Matrix defaults for public profiles",
+                title="Hosted Matrix defaults for mindroom.chat",
             )
         return False
 
-    env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
+    env_path.write_text(_env_template(matrix_server, selected_preset, storage_root), encoding="utf-8")
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
     return True
 
@@ -277,7 +246,7 @@ def _should_replace_env_file(env_path: Path, *, force: bool) -> bool:
     return force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
 
 
-def _config_init_env_hint(selected_profile: _ConfigInitProfile, selected_preset: _ProviderPreset) -> str:
+def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _ProviderPreset) -> str:
     """Return the env setup hint shown after `mindroom config init`."""
     hosted_hints: dict[_ProviderPreset, str] = {
         "codex": "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
@@ -291,7 +260,7 @@ def _config_init_env_hint(selected_profile: _ConfigInitProfile, selected_preset:
         "ollama": "Set your Matrix homeserver, start Ollama, and pull the local models",
         "llama_cpp": "Set your Matrix homeserver and start llama.cpp server with the local model",
     }
-    if selected_profile == "public":
+    if matrix_server == "mindroom.chat":
         return hosted_hints.get(selected_preset, "Set your API keys (Matrix homeserver is prefilled)")
     return standalone_hints.get(selected_preset, "Set your API keys and Matrix homeserver")
 
@@ -300,15 +269,15 @@ def _print_config_init_next_steps(
     env_path: Path,
     *,
     env_changed: bool,
-    selected_profile: _ConfigInitProfile,
+    matrix_server: _MatrixServerPreset,
     selected_preset: _ProviderPreset,
 ) -> None:
-    """Print post-init guidance for the selected profile."""
+    """Print post-init guidance for the selected Matrix server and provider."""
     console.print("\nNext steps:")
     if env_changed:
-        env_hint = _config_init_env_hint(selected_profile, selected_preset)
+        env_hint = _config_init_env_hint(matrix_server, selected_preset)
         console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
-    if selected_profile == "public":
+    if matrix_server == "mindroom.chat":
         console.print(
             "  [cyan]mindroom connect --pair-code XXXX[/cyan]  "
             "Pair with hosted Matrix (get code from chat.mindroom.chat)",
@@ -436,15 +405,10 @@ def config_init(
         "-f",
         help="Overwrite existing config without prompting.",
     ),
-    minimal: bool = typer.Option(
-        False,
-        "--minimal",
-        help="Generate a bare-minimum config instead of a richer example.",
-    ),
-    profile: str = typer.Option(
-        "full",
-        "--profile",
-        help=_PROFILE_HELP,
+    matrix_server: str = typer.Option(
+        "mindroom.chat",
+        "--matrix-server",
+        help=f"{_MATRIX_SERVER_HELP} Choices: {_MATRIX_SERVER_CHOICES_TEXT}.",
     ),
     provider: str | None = typer.Option(
         None,
@@ -470,9 +434,8 @@ def config_init(
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
-    selected_profile, selected_preset = _resolve_config_init_selection(
-        profile,
-        minimal=minimal,
+    selected_matrix_server, selected_preset = _resolve_config_init_selection(
+        matrix_server,
         provider=provider,
         interactive=not print_config,
     )
@@ -484,17 +447,13 @@ def config_init(
         replace_env_file=replace_env_file,
     )
 
-    if selected_profile == "minimal":
-        content = _minimal_template(selected_preset)
-    else:
-        full_profile: Literal["full", "public"] = "public" if selected_profile == "public" else "full"
-        content = _full_template(
-            selected_preset,
-            target.parent,
-            storage_root=storage_root,
-            use_storage_env_placeholder=use_storage_env_placeholder,
-            profile=full_profile,
-        )
+    content = _full_template(
+        selected_preset,
+        target.parent,
+        storage_root=storage_root,
+        use_storage_env_placeholder=use_storage_env_placeholder,
+        matrix_server=selected_matrix_server,
+    )
 
     # `connect` can run before `config init`, when no config exists to patch.
     # In that order, connect persists the owner MXID in .env so init can render
@@ -521,12 +480,11 @@ def config_init(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
-    if selected_profile != "minimal":
-        _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
+    _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
 
     env_changed = _write_env_file(
         env_path,
-        selected_profile,
+        selected_matrix_server,
         selected_preset,
         storage_root=storage_root,
         replace_existing=replace_env_file,
@@ -536,7 +494,7 @@ def config_init(
     _print_config_init_next_steps(
         env_path,
         env_changed=env_changed,
-        selected_profile=selected_profile,
+        matrix_server=selected_matrix_server,
         selected_preset=selected_preset,
     )
 
@@ -734,41 +692,36 @@ def _find_missing_env_keys(
 
 
 def _resolve_config_init_selection(
-    profile: str,
+    matrix_server: str,
     *,
-    minimal: bool,
     provider: str | None,
     interactive: bool = True,
-) -> tuple[_ConfigInitProfile, _ProviderPreset]:
-    """Resolve the requested `config init` profile and provider preset."""
-    profile_value = "minimal" if minimal else profile.strip().lower()
-    normalized_profile = _normalize_init_profile(profile_value)
-    if normalized_profile is None:
-        msg = f"Invalid profile '{profile}'. Expected one of: {', '.join(_CANONICAL_INIT_PROFILES)}"
-        raise typer.BadParameter(msg)
-    selected_profile, profile_preset = normalized_profile
-
+) -> tuple[_MatrixServerPreset, _ProviderPreset]:
+    """Resolve the requested Matrix server and provider preset."""
+    selected_matrix_server = _normalize_matrix_server_preset(matrix_server)
+    if selected_matrix_server is None:
+        console.print(f"[red]Invalid --matrix-server value.[/red] Use: {_MATRIX_SERVER_CHOICES_TEXT}.")
+        raise typer.Exit(1)
     provider_preset = _normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
         console.print(f"[red]Invalid --provider value.[/red] Use: {_PROVIDER_CHOICES_TEXT}.")
         raise typer.Exit(1)
 
-    if selected_profile == "minimal":
-        return selected_profile, provider_preset or "openai"
     if provider_preset is not None:
-        return selected_profile, provider_preset
-    if profile_preset is not None:
-        return selected_profile, profile_preset
-    if selected_profile == "public":
-        return selected_profile, "openai"
-    if not interactive:
-        return selected_profile, "openai"
-    return selected_profile, _prompt_provider_preset()
+        return selected_matrix_server, provider_preset
+    if selected_matrix_server == "mindroom.chat" or not interactive:
+        return selected_matrix_server, "openai"
+    return selected_matrix_server, _prompt_provider_preset()
 
 
-def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _ProviderPreset | None] | None:
-    """Normalize `config init --profile` values and profile aliases."""
-    return _INIT_PROFILE_ALIASES.get(profile.strip().lower())
+def _normalize_matrix_server_preset(matrix_server: str) -> _MatrixServerPreset | None:
+    """Normalize Matrix server presets used by config init."""
+    value = matrix_server.strip().lower()
+    if value == "self-hosted":
+        return "self-hosted"
+    if value == "mindroom.chat":
+        return "mindroom.chat"
+    return None
 
 
 def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
@@ -859,7 +812,7 @@ def _full_template(
     *,
     storage_root: Path,
     use_storage_env_placeholder: bool,
-    profile: Literal["full", "public"] = "full",
+    matrix_server: _MatrixServerPreset,
 ) -> str:
     """Return a provider-aware starter config.
 
@@ -874,7 +827,7 @@ def _full_template(
         use_storage_env_placeholder=use_storage_env_placeholder,
     )
 
-    if profile == "public":
+    if matrix_server == "mindroom.chat":
         mindroom_user_block = ""
     else:
         mindroom_user_block = textwrap.dedent("""\
@@ -998,7 +951,7 @@ defaults:
 
 
 def _env_template(
-    profile: _ConfigInitProfile,
+    matrix_server: _MatrixServerPreset,
     provider_preset: _ProviderPreset,
     storage_root: Path,
 ) -> str:
@@ -1007,14 +960,14 @@ def _env_template(
     Generates a random dashboard API key.
     """
     api_key = secrets.token_urlsafe(32)
-    if profile == "public":
+    if matrix_server == "mindroom.chat":
         matrix_homeserver = "https://mindroom.chat"
         extra_matrix = (
             "# Matrix server_name override (needed when federation hostname differs)\n"
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
             "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
-            "# Required for homeservers that gate bot registration (recommended in public mode)\n"
+            "# Required for homeservers that gate bot registration (recommended for mindroom.chat)\n"
             "# Keep this secret; do not commit real values.\n"
             "MATRIX_REGISTRATION_TOKEN="
         )
@@ -1051,60 +1004,6 @@ MINDROOM_API_KEY={api_key}
 
 # MindRoom port (default 8765)
 # MINDROOM_PORT=8765
-"""
-
-
-def _minimal_template(provider_preset: _ProviderPreset = "openai") -> str:
-    """Return a bare-minimum inline config."""
-    model_block = _model_template_block(provider_preset)
-    return f"""\
-# MindRoom Configuration (minimal)
-
-models:
-  default:
-{model_block}
-
-agents:
-  assistant:
-    display_name: Assistant
-    role: A helpful assistant
-    model: default
-    rooms:
-      - lobby
-    accept_invites: true
-
-router:
-  model: default
-  accept_invites: true
-
-# Set username before first run; once created, it cannot be changed.
-# You can still change display_name later.
-mindroom_user:
-  username: mindroom_user
-  display_name: MindRoomUser
-
-matrix_space:
-  enabled: true
-  name: MindRoom
-
-{_MATRIX_DELIVERY_TEMPLATE_BLOCK}
-
-authorization:
-  default_room_access: false
-  global_users:
-    # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-    - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
-  agent_reply_permissions:
-    "*":
-      # Replace with your Matrix user ID (example: @alice:mindroom.chat).
-      - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
-
-defaults:
-  tools:
-    - scheduler
-  markdown: true
-  compaction:
-    enabled: true
 """
 
 
