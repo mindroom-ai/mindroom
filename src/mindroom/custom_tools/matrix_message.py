@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor type hints at runtime.
 from threading import Lock
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 from agno.tools import Toolkit
 
@@ -14,9 +15,6 @@ from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.message_extras import MessageExtraSection, parse_message_extra_sections
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class MatrixMessageTools(Toolkit):

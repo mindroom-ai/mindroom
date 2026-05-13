@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor type hints at runtime.
 from typing import TYPE_CHECKING, Any, Literal
 
 import nio
@@ -33,7 +34,6 @@ from mindroom.matrix.message_extras import build_message_extras_content
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.message_extras import MessageExtraSection
