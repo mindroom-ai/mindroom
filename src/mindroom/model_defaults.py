@@ -152,8 +152,8 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK_CHAT, 1_048_576)),
             ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 202_752)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 262_144)),
-            ("tencent_hy3", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 64_000)),
-            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 128_000)),
+            ("tencent_hy3", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 262_144)),
+            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 262_144)),
         ),
         "vertexai_claude": (
             ("opus", ModelPreset("vertexai_claude", _ANTHROPIC_OPUS, 1_000_000)),
@@ -175,8 +175,8 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK_CHAT, 1_048_576),
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 202_752),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 262_144),
-        "tencent_hy3": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 64_000),
-        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 128_000),
+        "tencent_hy3": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 262_144),
+        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 262_144),
     },
 )
 

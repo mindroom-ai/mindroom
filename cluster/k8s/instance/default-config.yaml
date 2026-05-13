@@ -430,11 +430,11 @@ models:
   tencent_hy3:
     provider: openrouter
     id: tencent/hy3-preview
-    context_window: 64000
+    context_window: 262144
   nemotron:
     provider: openrouter
     id: nvidia/nemotron-3-super-120b-a12b:free
-    context_window: 128000
+    context_window: 262144
 plugins: []
 room_models:
   research: haiku
