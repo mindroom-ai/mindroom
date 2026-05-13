@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.cancellation import CancelSource
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history import (
@@ -226,7 +225,7 @@ class CancelledVisibleNoteRequest:
     target: MessageTarget
     event_id: str
     existing_event_is_placeholder: bool
-    cancel_source: CancelSource
+    cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
@@ -834,10 +833,7 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """Edit the in-flight visible response into a terminal cancellation note."""
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
-        extra_content = {
-            constants.STREAM_STATUS_KEY: stream_status,
-            constants.RESPONSE_CANCEL_SOURCE_KEY: request.cancel_source,
-        }
+        extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
         edited = await self.edit_text(
             EditTextRequest(

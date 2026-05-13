@@ -1634,120 +1634,6 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
 
 
 @pytest.mark.asyncio
-async def test_coalescing_discard_all_closes_pending_metadata_without_dispatch() -> None:
-    """Entity teardown should discard queued coalescing without dispatching turns."""
-    dispatched: list[CoalescedBatch] = []
-    closed: list[str] = []
-    metadata = PendingDispatchMetadata(
-        kind="test",
-        payload=None,
-        close=lambda: closed.append("metadata"),
-    )
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        dispatched.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 60.0,
-        is_shutting_down=lambda: False,
-    )
-    room = _make_room("!room:example.com")
-    event = _text_event(event_id="$event", sender="@user:example.com", body="hello")
-    pending = PendingEvent(
-        event=event,
-        room=room,
-        source_kind="text",
-        dispatch_metadata=(metadata,),
-    )
-
-    await gate.enqueue(("!room:example.com", "$thread", "@user:example.com"), pending)
-    await gate.discard_all()
-
-    assert dispatched == []
-    assert closed == ["metadata"]
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_coalescing_discard_all_does_not_cancel_inflight_dispatch() -> None:
-    """Entity teardown should not plain-cancel already claimed coalesced dispatch."""
-    dispatch_started = asyncio.Event()
-    allow_dispatch_to_finish = asyncio.Event()
-    closed: list[str] = []
-    metadata = PendingDispatchMetadata(
-        kind="test",
-        payload=None,
-        close=lambda: closed.append("metadata"),
-    )
-
-    async def dispatch_batch(_batch: CoalescedBatch) -> None:
-        dispatch_started.set()
-        await allow_dispatch_to_finish.wait()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    room = _make_room("!room:example.com")
-    event = _text_event(event_id="$event", body="hello")
-    await gate.enqueue(
-        ("!room:example.com", "$thread", "@user:example.com"),
-        PendingEvent(event=event, room=room, source_kind="text", dispatch_metadata=(metadata,)),
-    )
-
-    await asyncio.wait_for(dispatch_started.wait(), timeout=1.0)
-    await gate.discard_all()
-
-    assert closed == []
-    allow_dispatch_to_finish.set()
-    await _wait_for(lambda: _coalescing_gate_is_idle(gate))
-
-
-@pytest.mark.asyncio
-async def test_dispatch_coalesced_batch_drops_after_entity_shutdown_starts() -> None:
-    """A batch already flushed during teardown should close metadata without reaching turn control."""
-    closed: list[str] = []
-    metadata = PendingDispatchMetadata(
-        kind="test",
-        payload=None,
-        close=lambda: closed.append("closed"),
-    )
-
-    bot = object.__new__(AgentBot)
-    bot._entity_shutdown_prepared = True
-    bot.logger = MagicMock()
-    bot._turn_controller = MagicMock()
-    bot._turn_controller.handle_coalesced_batch = AsyncMock()
-    room = _make_room("!room:example.com")
-    event = _text_event(event_id="$event", sender="@user:example.com", body="hello")
-    batch = CoalescedBatch(
-        room=room,
-        primary_event=event,
-        requester_user_id="@user:example.com",
-        pending_events=(),
-        prompt="hello",
-        source_kind="text",
-        dispatch_policy_source_kind=None,
-        hook_source=None,
-        message_received_depth=0,
-        attachment_ids=[],
-        source_event_ids=["$event"],
-        source_event_prompts={"$event": "hello"},
-        media_events=[],
-        dispatch_metadata=(metadata,),
-    )
-
-    await bot._dispatch_coalesced_batch(batch)
-
-    bot._turn_controller.handle_coalesced_batch.assert_not_awaited()
-    assert closed == ["closed"]
-
-
-@pytest.mark.asyncio
 async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
     """Scheduled turns should buffer behind an in-flight dispatch instead of bypassing the gate."""
     bot = _make_bot(tmp_path)
@@ -2967,8 +2853,8 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_discards_pending_debounce_tasks(tmp_path: Path) -> None:
-    """Entity cleanup should discard pending debounce work instead of dispatching new turns."""
+async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
+    """Drain pending debounce tasks when a bot is cleaned up."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
     bot.client = AsyncMock()
     bot._emit_agent_lifecycle_event = AsyncMock()
@@ -2990,7 +2876,7 @@ async def test_cleanup_discards_pending_debounce_tasks(tmp_path: Path) -> None:
 
         await bot.cleanup()
 
-    mock_dispatch.assert_not_awaited()
+    mock_dispatch.assert_awaited_once()
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 

@@ -92,10 +92,8 @@ from .orchestration.plugin_watch import (
 )
 from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
-    ENTITY_TEARDOWN_CANCEL_MSG,
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,
-    SYNC_RESTART_CANCEL_MSG,
     EntityStartResults,
     cancel_logged_task,
     cancel_sync_task,
@@ -1322,14 +1320,11 @@ class _MultiAgentOrchestrator:
         """Cancel, clean up, and unregister entities removed from config."""
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
-            bot = self.agent_bots.get(entity_name)
-            if bot is not None:
-                await bot.prepare_for_entity_shutdown(cancel_msg=ENTITY_TEARDOWN_CANCEL_MSG)
-            await cancel_sync_task(entity_name, self._sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+            await cancel_sync_task(entity_name, self._sync_tasks)
 
             bot = self.agent_bots.pop(entity_name, None)
             if bot is not None:
-                await bot.cleanup(response_cancel_msg=ENTITY_TEARDOWN_CANCEL_MSG)
+                await bot.cleanup()
 
     async def _stop_entities_before_mcp_sync(
         self,
@@ -1786,19 +1781,14 @@ class _MultiAgentOrchestrator:
         await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
 
-        for bot in self.agent_bots.values():
-            await bot.prepare_for_entity_shutdown(cancel_msg=SYNC_RESTART_CANCEL_MSG)
-
-        # Cancel sync tasks after ingress closes so sync cleanup cannot dispatch queued work.
+        # Cancel sync tasks first so shutdown does not race with active sync loops.
         for entity_name in list(self._sync_tasks.keys()):
-            await cancel_sync_task(entity_name, self._sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+            await cancel_sync_task(entity_name, self._sync_tasks)
 
         for bot in self.agent_bots.values():
             bot.running = False
 
-        stop_tasks = [
-            bot.stop(reason="shutdown", response_cancel_msg=SYNC_RESTART_CANCEL_MSG) for bot in self.agent_bots.values()
-        ]
+        stop_tasks = [bot.stop(reason="shutdown") for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         await self._close_runtime_support_services()
         logger.info("All agent bots stopped")

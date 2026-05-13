@@ -20,12 +20,7 @@ from mindroom.coalescing import (
     COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
     CoalescingGate,
 )
-from mindroom.coalescing_batch import (
-    CoalescedBatch,
-    CoalescingKey,
-    PendingEvent,
-    close_coalesced_batch_metadata,
-)
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -221,7 +216,6 @@ class TurnControllerDeps:
     turn_store: TurnStore
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator
-    accepts_response_work: Callable[[], bool]
 
 
 @dataclass
@@ -236,9 +230,6 @@ class TurnController:
             msg = "Matrix client is not ready for turn execution"
             raise RuntimeError(msg)
         return client
-
-    def _accepts_response_work(self) -> bool:
-        return self.deps.accepts_response_work()
 
     def _requester_user_id(
         self,
@@ -1095,9 +1086,6 @@ class TurnController:
         source_event_id: str | None = None,
     ) -> None:
         """Execute one validated interactive selection through the normal response path."""
-        if not self._accepts_response_work():
-            self.deps.logger.info("Dropping interactive selection because response ingress is closed")
-            return
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
@@ -1140,8 +1128,6 @@ class TurnController:
             ),
         )
 
-        if not self._accepts_response_work():
-            return
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 room_id=room.room_id,
@@ -1190,9 +1176,6 @@ class TurnController:
     ) -> None:
         """Run one explicit router relay from the turn controller."""
         assert self.deps.agent_name == ROUTER_AGENT_NAME
-        if not self._accepts_response_work():
-            self.deps.logger.info("Dropping router relay because response ingress is closed")
-            return
 
         permission_sender_id = requester_user_id
         responder_candidates = await self.deps.turn_policy.responder_candidates_for_room(
@@ -1520,8 +1503,6 @@ class TurnController:
                 if action.kind == "team":
                     assert action.form_team is not None
                     assert action.form_team.mode is not None
-                    if not self._accepts_response_work():
-                        return
                     response_event_id = await self.deps.response_runner.generate_team_response_helper(
                         ResponseRequest(
                             room_id=room.room_id,
@@ -1543,8 +1524,6 @@ class TurnController:
                         team_mode=action.form_team.mode.value,
                     )
                 else:
-                    if not self._accepts_response_work():
-                        return
                     response_event_id = await self.deps.response_runner.generate_response(
                         ResponseRequest(
                             room_id=room.room_id,
@@ -1577,13 +1556,6 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        if not self._accepts_response_work():
-            close_coalesced_batch_metadata(batch)
-            self.deps.logger.info(
-                "Dropping coalesced batch because response ingress is closed",
-                source_event_ids=batch.source_event_ids,
-            )
-            return
         reservation = _queued_notice_reservation_from_metadata(batch.dispatch_metadata)
         try:
             handoff = build_dispatch_handoff(batch)
@@ -1655,9 +1627,6 @@ class TurnController:
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one inbound text event."""
-        if not self._accepts_response_work():
-            self.deps.logger.info("Dropping text event because response ingress is closed")
-            return
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_message_inner(room, event)
 
@@ -2008,9 +1977,6 @@ class TurnController:
         event: MatrixMediaEvent,
     ) -> None:
         """Handle one inbound media event."""
-        if not self._accepts_response_work():
-            self.deps.logger.info("Dropping media event because response ingress is closed")
-            return
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_media_message_inner(room, event)
 
@@ -2045,9 +2011,6 @@ class TurnController:
         ):
             return
         if not is_matrix_media_dispatch_event(prechecked_event.event):
-            return
-        if not self._accepts_response_work():
-            self.deps.logger.info("Dropping media dispatch because response ingress is closed")
             return
         await self._enqueue_media_for_dispatch(
             room=room,

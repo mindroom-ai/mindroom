@@ -13,7 +13,6 @@ from nio.api import RelationshipType
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
-    RESPONSE_CANCEL_SOURCE_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -101,7 +100,6 @@ class _MessageState:
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
     stream_status: str | None = None
-    cancel_source: str | None = None
     requester_user_id: str | None = None
     stop_reaction_event_ids: set[str] = field(default_factory=set)
 
@@ -700,8 +698,6 @@ def _merge_resolved_message_state(
     state.latest_content = normalized_latest_content
     state.thread_id = message.thread_id or fallback_thread_id
     state.stream_status = message.stream_status
-    cancel_source = normalized_latest_content.get(RESPONSE_CANCEL_SOURCE_KEY)
-    state.cancel_source = cancel_source if isinstance(cancel_source, str) else None
     state.requester_user_id = requester_user_id
 
 
@@ -1417,19 +1413,10 @@ def _has_resumable_interrupted_note(state: _MessageState) -> bool:
     assert state.latest_body is not None
     if _has_restart_interrupted_note(state.latest_body):
         return True
-    if not _has_generic_interrupted_note(state.latest_body):
-        return False
-    if state.cancel_source == "sync_restart":
-        return state.stream_status in {
-            STREAM_STATUS_ERROR,
-            STREAM_STATUS_INTERRUPTED,
-        }
-    if state.cancel_source is not None:
-        return False
     return state.stream_status in {
         STREAM_STATUS_ERROR,
         STREAM_STATUS_INTERRUPTED,
-    }
+    } and _has_generic_interrupted_note(state.latest_body)
 
 
 def _interrupted_thread_from_terminal_state(
@@ -1464,6 +1451,14 @@ def _is_cleanup_candidate(state: _MessageState) -> bool:
     return state.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
 
 
+def _is_outside_startup_cleanup_window(timestamp_ms: int, *, now_ms: int) -> bool:
+    """Return whether startup cleanup should ignore one event by age."""
+    return _is_recent_timestamp(timestamp_ms, now_ms=now_ms) or _is_older_than_cleanup_window(
+        timestamp_ms,
+        now_ms=now_ms,
+    )
+
+
 def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
     """Return whether a timestamp is still within the startup recency guard."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
@@ -1474,14 +1469,6 @@ def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = Non
     """Return whether a timestamp is older than the restart cleanup lookback window."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return current_time_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
-
-
-def _is_outside_startup_cleanup_window(timestamp_ms: int, *, now_ms: int) -> bool:
-    """Return whether startup cleanup should ignore one event by age."""
-    return _is_recent_timestamp(timestamp_ms, now_ms=now_ms) or _is_older_than_cleanup_window(
-        timestamp_ms,
-        now_ms=now_ms,
-    )
 
 
 def _chunk_reaches_cleanup_lookback_limit(events: list[object], *, now_ms: int) -> bool:

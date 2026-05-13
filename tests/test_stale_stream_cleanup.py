@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, RESPONSE_CANCEL_SOURCE_KEY, ROUTER_AGENT_NAME, STREAM_STATUS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, STREAM_STATUS_KEY
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.stale_stream_cleanup import (
@@ -1463,8 +1463,8 @@ async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tm
 
 
 @pytest.mark.asyncio
-async def test_cleanup_returns_gracefully_restart_cancelled_thread_for_auto_resume(tmp_path: Path) -> None:
-    """Terminal restart-cancelled messages should still seed auto-resume after graceful shutdown."""
+async def test_cleanup_returns_restart_marked_terminal_thread_for_auto_resume(tmp_path: Path) -> None:
+    """Terminal restart-interrupted messages should still seed auto-resume after graceful shutdown."""
     config = _make_config(tmp_path)
     client = _make_client()
     client.rooms = _joined_room_cache()
@@ -1486,11 +1486,7 @@ async def test_cleanup_returns_gracefully_restart_cancelled_thread_for_auto_resu
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
 
-    with patch(
-        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
-    ) as mock_edit:
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
     assert cleaned == 0
     assert interrupted == [
@@ -1503,7 +1499,6 @@ async def test_cleanup_returns_gracefully_restart_cancelled_thread_for_auto_resu
             original_sender_id=USER_ID,
         ),
     ]
-    mock_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1541,102 +1536,6 @@ async def test_cleanup_returns_generic_interrupted_thread_from_graceful_restart(
     assert cleaned == 0
     assert [thread.target_event_id for thread in interrupted] == ["$interrupted"]
     assert interrupted[0].partial_text == "Partial answer"
-
-
-@pytest.mark.asyncio
-async def test_cleanup_skips_entity_teardown_interrupted_thread(tmp_path: Path) -> None:
-    """Config reload or entity removal interruptions are not startup-auto-resumable."""
-    config = _make_config(tmp_path)
-    client = _make_client()
-    client.rooms = _joined_room_cache()
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Question",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$entity-teardown",
-            body="Partial answer\n\n**[Response interrupted]**",
-            timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-            extra_content={
-                STREAM_STATUS_KEY: "error",
-                RESPONSE_CANCEL_SOURCE_KEY: "entity_teardown",
-            },
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert interrupted == []
-
-
-@pytest.mark.asyncio
-async def test_cleanup_resumes_generic_interrupted_thread_with_restart_metadata(tmp_path: Path) -> None:
-    """Generic interrupted notes remain resumable when terminal metadata says sync restart."""
-    config = _make_config(tmp_path)
-    client = _make_client()
-    client.rooms = _joined_room_cache()
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Question",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$restart",
-            body="Partial answer\n\n**[Response interrupted]**",
-            timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-            extra_content={
-                STREAM_STATUS_KEY: "error",
-                RESPONSE_CANCEL_SOURCE_KEY: "sync_restart",
-            },
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert [thread.target_event_id for thread in interrupted] == ["$restart"]
-
-
-@pytest.mark.asyncio
-async def test_cleanup_skips_generic_interrupted_thread_with_interrupted_metadata(tmp_path: Path) -> None:
-    """Explicit non-restart metadata should not use the legacy generic-interrupted fallback."""
-    config = _make_config(tmp_path)
-    client = _make_client()
-    client.rooms = _joined_room_cache()
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Question",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-        ),
-        _make_message_event(
-            event_id="$interrupted",
-            body="Partial answer\n\n**[Response interrupted]**",
-            timestamp_ms=NOW_MS - STALE_AGE_MS,
-            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-            extra_content={
-                STREAM_STATUS_KEY: "error",
-                RESPONSE_CANCEL_SOURCE_KEY: "interrupted",
-            },
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert interrupted == []
 
 
 @pytest.mark.asyncio
@@ -2272,7 +2171,6 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     router_bot = MagicMock()
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.try_start = AsyncMock(return_value=True)
-    router_bot.prepare_for_entity_shutdown = AsyncMock()
     router_bot.stop = AsyncMock()
     router_bot.running = True
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
