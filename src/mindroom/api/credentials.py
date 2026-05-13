@@ -162,13 +162,6 @@ class _OAuthCredentialServices:
         for service in services:
             _reject_oauth_token_service(self.match(service))
 
-    def allows_private_scope_for(self, service: str) -> bool:
-        """Return whether this OAuth config service can target a private scope."""
-        if is_oauth_client_config_service(service):
-            return True
-        match = self.match(service)
-        return match is not None and match.tool_config_service and _dashboard_may_edit_oauth_match(match)
-
     def dashboard_may_show_service(self, service: str) -> bool:
         """Return whether a service may appear in dashboard credential listings."""
         match = self.match(service)
@@ -855,14 +848,16 @@ class _DashboardCredentialAccess:
     ) -> _DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
         oauth_services = _oauth_services_for_request(request)
-        allow_oauth_private_scopes = any(
-            oauth_services.allows_private_scope_for(service) for service in service_names
+        # Token services are rejected below, but they still need target resolution
+        # first so agent-scoped requests run authorization before route-specific 400s.
+        oauth_service_requires_target_resolution = any(
+            oauth_services.match(service) is not None for service in service_names
         ) and _request_may_target_scoped_credentials(request, agent_name)
         target = resolve_request_credentials_target(
             request,
             agent_name=agent_name,
             service_names=service_names,
-            allow_private_scopes=allow_private_scopes or allow_oauth_private_scopes,
+            allow_private_scopes=allow_private_scopes or oauth_service_requires_target_resolution,
         )
         oauth_services.reject_non_editable_services(service_names)
         return cls(target=target, oauth_services=oauth_services)
