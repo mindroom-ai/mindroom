@@ -299,7 +299,7 @@ async def _cleanup_room_stale_streaming_messages(
             _append_interrupted_thread(interrupted_threads, interrupted)
             continue
 
-        if _has_resumable_interrupted_note(state.latest_body):
+        if _has_resumable_interrupted_note(state):
             repaired, interrupted = await _handle_terminal_interrupted_message(
                 client,
                 room_id=room_id,
@@ -1419,9 +1419,15 @@ def _has_generic_interrupted_note(body: str) -> bool:
     return body.rstrip().endswith(_INTERRUPTED_RESPONSE_NOTE)
 
 
-def _has_resumable_interrupted_note(body: str) -> bool:
+def _has_resumable_interrupted_note(state: _MessageState) -> bool:
     """Return whether the visible body represents a restart-resumable interruption."""
-    return _has_restart_interrupted_note(body) or _has_generic_interrupted_note(body)
+    assert state.latest_body is not None
+    if _has_restart_interrupted_note(state.latest_body):
+        return True
+    return state.stream_status in {
+        STREAM_STATUS_ERROR,
+        STREAM_STATUS_INTERRUPTED,
+    } and _has_generic_interrupted_note(state.latest_body)
 
 
 def _interrupted_thread_from_terminal_state(

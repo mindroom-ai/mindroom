@@ -1544,6 +1544,35 @@ async def test_cleanup_returns_generic_interrupted_thread_from_graceful_restart(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_completed_message_ending_with_generic_interrupted_note(tmp_path: Path) -> None:
+    """Completed responses that happen to mention the generic note are not restart-resumable."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$completed",
+            body="Literal text\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "completed"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_skips_restart_interrupted_thread_after_auto_resume_was_queued(tmp_path: Path) -> None:
     """A later startup should not queue another resume for the same interrupted target."""
     config = _make_config(tmp_path)
