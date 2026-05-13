@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RESPONSE_CANCEL_SOURCE_KEY, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
@@ -210,6 +211,49 @@ async def test_cancelled_stream_terminal_edit_persists_cancel_source_metadata(
     assert captured_edits[-1][RESPONSE_CANCEL_SOURCE_KEY] == cancel_source
     new_content = cast("dict[str, object]", captured_edits[-1]["m.new_content"])
     assert new_content[RESPONSE_CANCEL_SOURCE_KEY] == cancel_source
+
+
+@pytest.mark.asyncio
+async def test_cancelled_visible_note_persists_cancel_source_metadata(tmp_path: Path) -> None:
+    """Non-streaming terminal cancellation edits should persist explicit provenance."""
+    config = _config(tmp_path)
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
+
+    outcome = await gateway.deliver_cancelled_visible_note(
+        CancelledVisibleNoteRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            event_id="$visible",
+            existing_event_is_placeholder=True,
+            cancel_source="entity_teardown",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-cancelled-visible",
+        ),
+    )
+
+    gateway.edit_text.assert_awaited_once()
+    edit_request = gateway.edit_text.await_args.args[0]
+    assert edit_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    assert edit_request.extra_content[RESPONSE_CANCEL_SOURCE_KEY] == "entity_teardown"
+    assert outcome.terminal_status == "cancelled"
+    assert outcome.extra_content[RESPONSE_CANCEL_SOURCE_KEY] == "entity_teardown"
 
 
 @pytest.mark.asyncio

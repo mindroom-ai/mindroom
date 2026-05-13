@@ -1424,7 +1424,7 @@ def _has_resumable_interrupted_note(state: _MessageState) -> bool:
             STREAM_STATUS_ERROR,
             STREAM_STATUS_INTERRUPTED,
         }
-    if state.cancel_source in {"entity_teardown", "user_stop"}:
+    if state.cancel_source is not None:
         return False
     return state.stream_status in {
         STREAM_STATUS_ERROR,

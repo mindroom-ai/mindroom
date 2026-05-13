@@ -1190,6 +1190,9 @@ class TurnController:
     ) -> None:
         """Run one explicit router relay from the turn controller."""
         assert self.deps.agent_name == ROUTER_AGENT_NAME
+        if not self._accepts_response_work():
+            self.deps.logger.info("Dropping router relay because response ingress is closed")
+            return
 
         permission_sender_id = requester_user_id
         responder_candidates = await self.deps.turn_policy.responder_candidates_for_room(

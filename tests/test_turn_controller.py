@@ -13,6 +13,7 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -317,6 +318,56 @@ async def test_interactive_selection_drops_before_ack_when_response_ingress_clos
 
     bot._delivery_gateway.send_text.assert_not_awaited()
     generate_response_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_relay_drops_when_response_ingress_closed(tmp_path: Path) -> None:
+    """Router relays should not send outbound work after response ingress closes."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"])}),
+        test_runtime_paths(tmp_path),
+    )
+    router_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@mindroom_router:localhost",
+        display_name="RouterAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=router_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    wrap_extracted_collaborators(bot, "_delivery_gateway", "_turn_policy")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$relay:localhost")
+    bot._turn_policy.responder_candidates_for_room = AsyncMock()
+    replace_turn_controller_deps(
+        bot,
+        delivery_gateway=bot._delivery_gateway,
+        turn_policy=bot._turn_policy,
+        accepts_response_work=lambda: False,
+    )
+    room = MagicMock()
+    room.room_id = "!test:localhost"
+    event = MagicMock(spec=nio.RoomMessageText)
+    event.event_id = "$request:localhost"
+    event.sender = "@user:localhost"
+    event.body = "route this"
+    event.source = {"content": {"body": "route this"}}
+
+    await bot._turn_controller._execute_router_relay(
+        room,
+        event,
+        [],
+        None,
+        requester_user_id="@user:localhost",
+    )
+
+    bot._turn_policy.responder_candidates_for_room.assert_not_awaited()
+    bot._delivery_gateway.send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
