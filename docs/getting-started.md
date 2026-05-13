@@ -34,6 +34,12 @@ uvx mindroom config init --profile public --provider anthropic
 # Use Codex CLI ChatGPT subscription auth
 uvx mindroom config init --profile public-codex
 
+# Use local Ollama
+uvx mindroom config init --profile public-ollama
+
+# Use local llama.cpp through its OpenAI-compatible server
+uvx mindroom config init --profile llama-cpp
+
 # Use Vertex AI Claude (Google Cloud)
 uvx mindroom config init --profile public-vertexai-anthropic
 ```
@@ -41,6 +47,13 @@ uvx mindroom config init --profile public-vertexai-anthropic
 `public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
 The shorter `codex` profile alias is also accepted.
 Run `codex login` before starting MindRoom when using this profile.
+
+`public-ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
+The shorter `ollama` profile alias is also accepted.
+Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
+
+`llama-cpp` and `public-llama-cpp` use a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
+Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
 
 `public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
 Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.

@@ -15,12 +15,23 @@ __all__ = (
     "DEEPSEEK_REASONER",
     "GOOGLE_AVATAR_IMAGE",
     "GOOGLE_AVATAR_PROMPT",
+    "GOOGLE_IMAGEN",
+    "GOOGLE_IMAGEN_FAST",
+    "GOOGLE_IMAGEN_ULTRA",
+    "GOOGLE_VEO",
     "GROQ_TRANSCRIPTION",
     "GROQ_TTS",
+    "LLAMA_CPP_API_KEY_DEFAULT",
+    "LLAMA_CPP_BASE_URL_DEFAULT",
     "LLAMA_CPP_GEMMA",
     "LLAMA_CPP_QWEN",
+    "LOCAL_QWEN_CONTEXT_WINDOW",
+    "LOCAL_QWEN_PRESET_NAME",
+    "MEMORY_OLLAMA_LLM",
     "OLLAMA_GEMMA",
+    "OLLAMA_HOST_DEFAULT",
     "OLLAMA_QWEN",
+    "OPENAI_DALLE",
     "OPENAI_EMBEDDING_DIMENSIONS",
     "OPENAI_EMBEDDING_LARGE",
     "OPENAI_EMBEDDING_SMALL",
@@ -64,6 +75,10 @@ OPENAI_GPT_NANO = "gpt-5.4-nano"
 
 GOOGLE_AVATAR_PROMPT = "gemini-3.1-flash-lite-preview"
 GOOGLE_AVATAR_IMAGE = "gemini-3.1-flash-image-preview"
+GOOGLE_IMAGEN = "imagen-4.0-generate-001"
+GOOGLE_IMAGEN_FAST = "imagen-4.0-fast-generate-001"
+GOOGLE_IMAGEN_ULTRA = "imagen-4.0-ultra-generate-001"
+GOOGLE_VEO = "veo-2.0-generate-001"
 
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-4.7"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
@@ -78,9 +93,15 @@ _OPENROUTER_KIMI = "moonshotai/kimi-k2.6"
 
 OLLAMA_GEMMA = "gemma4"
 OLLAMA_QWEN = "qwen3.6:27b"
+OLLAMA_HOST_DEFAULT = "http://localhost:11434"
 
 LLAMA_CPP_GEMMA = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M"
 LLAMA_CPP_QWEN = "unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL"
+LLAMA_CPP_BASE_URL_DEFAULT = "http://localhost:8080/v1"
+LLAMA_CPP_API_KEY_DEFAULT = "sk-no-key-required"
+LOCAL_QWEN_PRESET_NAME = "qwen3_6_27b"
+LOCAL_QWEN_CONTEXT_WINDOW = 256_000
+MEMORY_OLLAMA_LLM = "llama3.2"
 
 OPENAI_EMBEDDING_SMALL = "text-embedding-3-small"
 OPENAI_EMBEDDING_LARGE = "text-embedding-3-large"
@@ -91,6 +112,7 @@ OPENAI_REALTIME_TRANSCRIPTION = "gpt-realtime-whisper"
 OPENAI_TTS = "gpt-4o-mini-tts"
 OPENAI_REALTIME = "gpt-realtime-2"
 OPENAI_IMAGE = "gpt-image-2"
+OPENAI_DALLE = "dall-e-3"
 
 GROQ_TRANSCRIPTION = "whisper-large-v3"
 GROQ_TTS = "playai-tts"

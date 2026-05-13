@@ -33,6 +33,8 @@ from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_PRESETS,
     LLAMA_CPP_GEMMA,
     LLAMA_CPP_QWEN,
+    LOCAL_QWEN_CONTEXT_WINDOW,
+    LOCAL_QWEN_PRESET_NAME,
     OLLAMA_GEMMA,
     OLLAMA_QWEN,
     llama_cpp_server_command,
@@ -528,12 +530,17 @@ class TestConfigInit:
         assert "mindroom connect --pair-code" in output
         assert "codex login" in output
 
-    def test_init_profile_public_ollama_writes_hosted_ollama_defaults(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("profile_name", ["public-ollama", "ollama"])
+    def test_init_profile_public_ollama_writes_hosted_ollama_defaults(
+        self,
+        tmp_path: Path,
+        profile_name: str,
+    ) -> None:
         """Hosted Ollama profile should use local Ollama models and hosted Matrix settings."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "public-ollama"],
+            ["config", "init", "--path", str(target), "--profile", profile_name],
         )
         assert result.exit_code == 0
 
@@ -543,10 +550,10 @@ class TestConfigInit:
         assert config["models"]["default"]["id"] == OLLAMA_GEMMA
         assert config["models"]["default"]["host"] == "http://localhost:11434"
         assert config["models"]["default"]["context_window"] == 128_000
-        assert config["models"]["qwen3_6_27b"]["provider"] == "ollama"
-        assert config["models"]["qwen3_6_27b"]["id"] == OLLAMA_QWEN
-        assert config["models"]["qwen3_6_27b"]["host"] == "http://localhost:11434"
-        assert config["models"]["qwen3_6_27b"]["context_window"] == 256_000
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "ollama"
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == OLLAMA_QWEN
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["host"] == "http://localhost:11434"
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["context_window"] == LOCAL_QWEN_CONTEXT_WINDOW
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -562,12 +569,17 @@ class TestConfigInit:
         assert f"ollama pull {OLLAMA_QWEN}" in output
         assert "Ollama" in output
 
-    def test_init_profile_llama_cpp_writes_hosted_openai_compatible_defaults(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("profile_name", ["llama-cpp", "llama_cpp", "public-llama-cpp", "public-llama_cpp"])
+    def test_init_profile_llama_cpp_writes_hosted_openai_compatible_defaults(
+        self,
+        tmp_path: Path,
+        profile_name: str,
+    ) -> None:
         """llama-cpp profile should use local OpenAI-compatible server defaults and hosted Matrix."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(
             app,
-            ["config", "init", "--path", str(target), "--profile", "llama-cpp"],
+            ["config", "init", "--path", str(target), "--profile", profile_name],
         )
         assert result.exit_code == 0
 
@@ -580,10 +592,10 @@ class TestConfigInit:
             "api_key": "sk-no-key-required",
             "base_url": "http://localhost:8080/v1",
         }
-        assert config["models"]["qwen3_6_27b"]["provider"] == "openai"
-        assert config["models"]["qwen3_6_27b"]["id"] == LLAMA_CPP_QWEN
-        assert config["models"]["qwen3_6_27b"]["context_window"] == 256_000
-        assert config["models"]["qwen3_6_27b"]["extra_kwargs"] == {
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "openai"
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == LLAMA_CPP_QWEN
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["context_window"] == LOCAL_QWEN_CONTEXT_WINDOW
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["extra_kwargs"] == {
             "api_key": "sk-no-key-required",
             "base_url": "http://localhost:8080/v1",
         }

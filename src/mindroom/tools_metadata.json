@@ -2037,7 +2037,7 @@
       "config_fields": [
         {
           "authored_override": true,
-          "default": "gpt-image-2",
+          "default": "dall-e-3",
           "description": null,
           "label": "Model",
           "name": "model",
@@ -3236,7 +3236,7 @@
         },
         {
           "authored_override": true,
-          "default": "imagen-3.0-generate-002",
+          "default": "imagen-4.0-generate-001",
           "description": null,
           "label": "Image Generation Model",
           "name": "image_generation_model",

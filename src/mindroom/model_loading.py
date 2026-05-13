@@ -20,6 +20,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
@@ -86,7 +87,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         extra_kwargs.setdefault("extended_cache_time", True)
 
     if canonical_provider == "ollama":
-        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
+        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
