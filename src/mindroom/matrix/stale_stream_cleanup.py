@@ -298,13 +298,14 @@ async def _cleanup_room_stale_streaming_messages(
 
             cleaned_count += 1
             prior_edit_succeeded = True
-        elif _has_resumable_interrupted_note(state):
-            repaired, interrupted = await _handle_terminal_interrupted_message(
+        elif _has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state):
+            repaired, interrupted = await _handle_interrupted_message(
                 client,
                 room_id=room_id,
                 target_event_id=target_event_id,
                 state=state,
                 auto_resume_target_event_ids=scanned_state.auto_resume_target_event_ids,
+                can_auto_resume=_has_resumable_interrupted_note(state),
                 bot_user_ids=bot_user_ids,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -324,13 +325,14 @@ async def _cleanup_room_stale_streaming_messages(
     return cleaned_count, interrupted_threads
 
 
-async def _handle_terminal_interrupted_message(
+async def _handle_interrupted_message(
     client: nio.AsyncClient,
     *,
     room_id: str,
     target_event_id: str,
     state: _MessageState,
     auto_resume_target_event_ids: set[str],
+    can_auto_resume: bool,
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
@@ -338,9 +340,9 @@ async def _handle_terminal_interrupted_message(
     agent_name: str,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, InterruptedThread | None]:
-    """Handle an already-terminal interrupted response seen during startup cleanup."""
+    """Handle an interrupted response or restart marker seen during startup cleanup."""
     interrupted = None
-    if target_event_id not in auto_resume_target_event_ids:
+    if can_auto_resume and target_event_id not in auto_resume_target_event_ids:
         interrupted = _interrupted_thread_from_terminal_state(
             room_id=room_id,
             target_event_id=target_event_id,
@@ -1412,7 +1414,7 @@ def _has_resumable_interrupted_note(state: _MessageState) -> bool:
     """Return whether the visible body represents a restart-resumable interruption."""
     assert state.latest_body is not None
     if _has_restart_interrupted_note(state.latest_body):
-        return True
+        return state.stream_status in {None, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}
     return state.stream_status in {
         STREAM_STATUS_ERROR,
         STREAM_STATUS_INTERRUPTED,
