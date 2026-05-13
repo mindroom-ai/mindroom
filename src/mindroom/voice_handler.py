@@ -356,9 +356,22 @@ async def _download_audio(
 def _stt_upload_filename_and_mime_type(mime_type: str | None) -> tuple[str, str]:
     """Return multipart filename and MIME type for an STT upload."""
     normalized_mime_type = (mime_type or "audio/ogg").split(";", 1)[0].strip().lower() or "audio/ogg"
+    if not normalized_mime_type.startswith("audio/"):
+        logger.warning(
+            "Non-audio MIME type declared for STT upload; using OGG fallback",
+            mime_type=normalized_mime_type,
+        )
+        normalized_mime_type = "audio/ogg"
+
     extension = _STT_AUDIO_EXTENSION_BY_MIME_TYPE.get(normalized_mime_type)
     if extension is None:
-        extension = mimetypes.guess_extension(normalized_mime_type) or ".bin"
+        extension = mimetypes.guess_extension(normalized_mime_type)
+        if extension is None:
+            logger.warning(
+                "Unknown audio MIME type for STT upload; using .bin extension",
+                mime_type=normalized_mime_type,
+            )
+            extension = ".bin"
     return f"audio{extension}", normalized_mime_type
 
 

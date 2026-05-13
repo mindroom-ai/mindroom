@@ -122,12 +122,29 @@ class TestVoiceHandler:
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
 
-    def test_stt_upload_metadata_preserves_matrix_audio_mp4(self) -> None:
-        """Matrix m4a voice messages should be uploaded to STT as m4a/audio-mp4."""
-        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("audio/mp4")
+    @pytest.mark.parametrize(
+        ("matrix_mime_type", "expected_filename", "expected_mime_type"),
+        [
+            ("audio/mp4", "audio.m4a", "audio/mp4"),
+            ("audio/m4a", "audio.m4a", "audio/m4a"),
+            ("audio/x-m4a", "audio.m4a", "audio/x-m4a"),
+            ("audio/mp3", "audio.mp3", "audio/mp3"),
+            ("audio/webm", "audio.webm", "audio/webm"),
+            ("audio/ogg; codecs=opus", "audio.ogg", "audio/ogg"),
+            ("  AUDIO/WAV  ", "audio.wav", "audio/wav"),
+        ],
+    )
+    def test_stt_upload_metadata_preserves_matrix_audio_mime_type(
+        self,
+        matrix_mime_type: str,
+        expected_filename: str,
+        expected_mime_type: str,
+    ) -> None:
+        """Matrix audio MIME types should be uploaded to STT with matching metadata."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type(matrix_mime_type)
 
-        assert filename == "audio.m4a"
-        assert mime_type == "audio/mp4"
+        assert filename == expected_filename
+        assert mime_type == expected_mime_type
 
     def test_stt_upload_metadata_defaults_to_ogg(self) -> None:
         """Missing Matrix MIME metadata should keep the legacy OGG upload shape."""
@@ -135,6 +152,20 @@ class TestVoiceHandler:
 
         assert filename == "audio.ogg"
         assert mime_type == "audio/ogg"
+
+    def test_stt_upload_metadata_defaults_to_ogg_for_non_audio_mime_type(self) -> None:
+        """Non-audio Matrix MIME metadata should keep the legacy OGG upload shape."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("text/plain")
+
+        assert filename == "audio.ogg"
+        assert mime_type == "audio/ogg"
+
+    def test_stt_upload_metadata_preserves_unknown_audio_mime_type(self) -> None:
+        """Unknown audio MIME metadata should preserve the audio type with a generic extension."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("audio/unknown")
+
+        assert filename == "audio.bin"
+        assert mime_type == "audio/unknown"
 
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""
