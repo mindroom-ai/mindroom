@@ -37,6 +37,8 @@ from mindroom.model_defaults import (
     LOCAL_QWEN_PRESET_NAME,
     OLLAMA_GEMMA,
     OLLAMA_QWEN,
+    OPENAI_GPT_MINI,
+    OPENAI_GPT_NANO,
     llama_cpp_server_command,
 )
 from mindroom.startup_errors import PermanentStartupError
@@ -637,6 +639,8 @@ class TestConfigInit:
         assert "Default model provider" in output
         assert "llama.cpp" in output
         assert "llama_cpp" not in output
+        assert "openai_mini" not in output
+        assert "openai_nano" not in output
         assert "Use with --matrix-server" not in output
         assert "--profile" not in output
         assert "--minimal" not in output
@@ -664,8 +668,8 @@ class TestConfigInit:
 
         config = yaml.safe_load(result.output)
         assert config["models"]["default"]["provider"] == "ollama"
-        assert config["models"]["default"]["id"] == "gemma4"
-        assert config["models"]["qwen3_6_27b"]["id"] == "qwen3.6:27b"
+        assert config["models"]["default"]["id"] == OLLAMA_GEMMA
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == OLLAMA_QWEN
         assert not target.exists()
         assert not (tmp_path / ".env").exists()
         assert not (tmp_path / "mindroom_data").exists()
@@ -710,6 +714,44 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "codex"
         assert target.read_text(encoding="utf-8") == "existing: true\n"
         assert "Overwrite existing config file?" not in normalize_console_output(result.output)
+
+    def test_init_print_preserves_existing_env_and_storage_without_prompting(self, tmp_path: Path) -> None:
+        """Config init --print should not touch existing .env or storage artifacts."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        storage_path = tmp_path / "mindroom_data"
+        storage_marker = storage_path / "marker.txt"
+        env_path.write_text("EXISTING=value\n", encoding="utf-8")
+        storage_path.mkdir()
+        storage_marker.write_text("keep me\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "init",
+                "--path",
+                str(target),
+                "--matrix-server",
+                "mindroom.chat",
+                "--provider",
+                "ollama",
+                "--print",
+            ],
+            input="n\n",
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(result.output)
+        assert config["models"]["default"]["provider"] == "ollama"
+        assert not target.exists()
+        assert env_path.read_text(encoding="utf-8") == "EXISTING=value\n"
+        assert storage_marker.read_text(encoding="utf-8") == "keep me\n"
+
+        output = normalize_console_output(result.output)
+        assert "Overwrite existing .env file?" not in output
+        assert "Config created" not in output
+        assert "Next steps" not in output
 
     def test_init_self_hosted_omits_pairing_step(self, tmp_path: Path) -> None:
         """Self-hosted Matrix next steps should NOT mention pairing."""
@@ -872,6 +914,15 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openai"
         assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["openai"].id
         assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["openai"].context_window
+        assert "openai_mini" not in config["models"]
+        assert "openai_nano" not in config["models"]
+
+        config_text = target.read_text(encoding="utf-8")
+        assert "# openai_mini:" in config_text
+        assert f"#   id: {OPENAI_GPT_MINI}" in config_text
+        assert "# openai_nano:" in config_text
+        assert f"#   id: {OPENAI_GPT_NANO}" in config_text
+        assert config["matrix_room_access"] == {"mode": "single_user_private"}
 
     def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
         """Config init --provider anthropic prepopulates Anthropic defaults."""

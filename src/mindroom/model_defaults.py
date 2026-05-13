@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "CODEX_GPT",
+    "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
     "DEEPSEEK_REASONER",
     "GOOGLE_AVATAR_IMAGE",
@@ -126,10 +127,31 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "llama_cpp": ModelPreset("openai", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
         "openai": ModelPreset("openai", _OPENAI_GPT, 258_000),
-        "openai_mini": ModelPreset("openai", OPENAI_GPT_MINI, 400_000),
-        "openai_nano": ModelPreset("openai", OPENAI_GPT_NANO, 400_000),
         "openrouter": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "vertexai_claude": ModelPreset("vertexai_claude", _ANTHROPIC_SONNET, 1_000_000),
+    },
+)
+
+CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
+    {
+        "anthropic": (
+            ("opus", ModelPreset("anthropic", _ANTHROPIC_OPUS, 1_000_000)),
+            ("haiku", ModelPreset("anthropic", _ANTHROPIC_HAIKU, 200_000)),
+        ),
+        "openai": (
+            ("openai_mini", ModelPreset("openai", OPENAI_GPT_MINI, 400_000)),
+            ("openai_nano", ModelPreset("openai", OPENAI_GPT_NANO, 400_000)),
+        ),
+        "openrouter": (
+            ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
+            ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 200_000)),
+            ("gemini_flash", ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_000_000)),
+            ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE)),
+        ),
+        "vertexai_claude": (
+            ("opus", ModelPreset("vertexai_claude", _ANTHROPIC_OPUS, 1_000_000)),
+            ("haiku", ModelPreset("vertexai_claude", _ANTHROPIC_HAIKU, 200_000)),
+        ),
     },
 )
 

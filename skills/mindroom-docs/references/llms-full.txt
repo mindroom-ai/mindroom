@@ -16016,7 +16016,8 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openai_mini`, `openai_nano`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)

@@ -19,6 +19,7 @@ from rich.syntax import Syntax
 
 from mindroom import constants
 from mindroom.model_defaults import (
+    CONFIG_INIT_MODEL_ALTERNATIVES,
     CONFIG_INIT_MODEL_PRESETS,
     LLAMA_CPP_API_KEY_DEFAULT,
     LLAMA_CPP_BASE_URL_DEFAULT,
@@ -66,8 +67,6 @@ _ProviderPreset = Literal[
     "llama_cpp",
     "ollama",
     "openai",
-    "openai_mini",
-    "openai_nano",
     "openrouter",
     "vertexai_claude",
 ]
@@ -86,10 +85,6 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "ollama": "ollama",
     "openai": "openai",
     "o": "openai",
-    "openai-mini": "openai_mini",
-    "openai_mini": "openai_mini",
-    "openai-nano": "openai_nano",
-    "openai_nano": "openai_nano",
     "openrouter": "openrouter",
     "or": "openrouter",
     "r": "openrouter",
@@ -111,9 +106,7 @@ _MATRIX_SERVER_HELP = (
     "Matrix defaults: self-hosted = configure your own homeserver; mindroom.chat = hosted Matrix pairing defaults."
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
-_PROVIDER_CHOICES_TEXT = (
-    "anthropic, codex, llama.cpp, ollama, openai, openai_mini, openai_nano, openrouter, or vertexai_claude"
-)
+_PROVIDER_CHOICES_TEXT = "anthropic, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
   ignore_unverified_devices: false"""
@@ -318,6 +311,11 @@ def print_config_search_locations(process_env: Mapping[str, str], *, title: str)
         console.print(line)
 
 
+def _yaml_syntax(content: str, *, line_numbers: bool, word_wrap: bool) -> Syntax:
+    """Return the shared Rich YAML renderer used by config display commands."""
+    return Syntax(content, "yaml", theme="monokai", line_numbers=line_numbers, word_wrap=word_wrap)
+
+
 def _resolve_config_path(
     path: Path | None,
     *,
@@ -462,17 +460,7 @@ def config_init(
         content = replace_owner_placeholders_in_text(content, owner_user_id)
 
     if print_config:
-        code_width = max((len(line) for line in content.splitlines()), default=0)
-        syntax = Syntax(
-            content,
-            "yaml",
-            theme="monokai",
-            line_numbers=False,
-            word_wrap=False,
-            code_width=code_width,
-            background_color="default",
-        )
-        console.print(syntax, soft_wrap=True)
+        console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
         return
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -528,8 +516,7 @@ def config_show(
         return
 
     console.print(f"[bold green]Config file:[/bold green] {config_file}\n")
-    syntax = Syntax(content, "yaml", theme="monokai", line_numbers=True, word_wrap=True)
-    console.print(syntax)
+    console.print(_yaml_syntax(content, line_numbers=True, word_wrap=True))
 
 
 @config_app.command("edit")
@@ -741,8 +728,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/codex/llama.cpp/ollama/openai/openai_mini/openai_nano/"
-            "openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
@@ -804,6 +790,29 @@ def _additional_models_template_block(provider_preset: _ProviderPreset) -> str:
     return ""
 
 
+def _commented_model_options_template_block(provider_preset: _ProviderPreset) -> str:
+    """Render commented model alternatives for the selected provider preset."""
+    alternatives = CONFIG_INIT_MODEL_ALTERNATIVES.get(provider_preset)
+    if not alternatives:
+        return ""
+
+    lines = [
+        "",
+        "  # Other model options for this provider:",
+    ]
+    for name, model_preset in alternatives:
+        lines.extend(
+            [
+                f"  # {name}:",
+                f"  #   provider: {model_preset.provider}",
+                f"  #   id: {model_preset.id}",
+            ],
+        )
+        if model_preset.context_window is not None:
+            lines.append(f"  #   context_window: {model_preset.context_window}")
+    return "\n".join(lines)
+
+
 def _full_template(
     provider_preset: _ProviderPreset,
     config_dir: Path,
@@ -819,6 +828,7 @@ def _full_template(
     """
     model_block = _model_template_block(provider_preset)
     additional_models_block = _additional_models_template_block(provider_preset)
+    commented_model_options_block = _commented_model_options_template_block(provider_preset)
     mind_memory_knowledge_path = _default_mind_knowledge_base_path(
         config_dir,
         storage_root=storage_root,
@@ -844,7 +854,7 @@ def _full_template(
 
 models:
   default:
-{model_block}{additional_models_block}
+{model_block}{additional_models_block}{commented_model_options_block}
 
 agents:
   assistant:
@@ -901,10 +911,6 @@ router:
 {mindroom_user_block}
 matrix_room_access:
   mode: single_user_private
-  multi_user_join_rule: public
-  publish_to_room_directory: false
-  invite_only_rooms: []
-  reconcile_existing_rooms: false
 
 matrix_space:
   enabled: true
