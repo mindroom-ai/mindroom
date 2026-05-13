@@ -58,7 +58,7 @@
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
   imagePullPolicy: {{ $values.mindroom_image_pull_policy | default "Always" }}
-  command: ["/app/run-sandbox-runner.sh"]
+  command: ["tini", "--", "/app/run-sandbox-runner.sh"]
   ports:
   - containerPort: 8766
   env:
