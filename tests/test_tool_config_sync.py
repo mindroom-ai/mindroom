@@ -28,7 +28,9 @@ def test_dalle_default_model_is_accepted_by_agno() -> None:
     """The dashboard default for the DALL-E tool must satisfy Agno's constructor validation."""
     model_field = next(field for field in TOOL_METADATA["dalle"].config_fields or [] if field.name == "model")
 
-    DalleTools(model=str(model_field.default), api_key="sk-test")
+    assert isinstance(model_field.default, str)
+    assert model_field.default
+    DalleTools(model=model_field.default, api_key="sk-test")
 
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))

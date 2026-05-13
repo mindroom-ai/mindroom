@@ -50,6 +50,7 @@ Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
 
 `llama-cpp` and `public-llama-cpp` use a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
 Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
+These local provider profiles run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
 
 `public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
 Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
