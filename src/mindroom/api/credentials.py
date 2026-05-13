@@ -848,14 +848,16 @@ class _DashboardCredentialAccess:
     ) -> _DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
         oauth_services = _oauth_services_for_request(request)
-        allow_oauth_private_scopes = any(
+        # Token services are rejected below, but they still need target resolution
+        # first so agent-scoped requests run authorization before route-specific 400s.
+        oauth_service_requires_target_resolution = any(
             oauth_services.match(service) is not None for service in service_names
         ) and _request_may_target_scoped_credentials(request, agent_name)
         target = resolve_request_credentials_target(
             request,
             agent_name=agent_name,
             service_names=service_names,
-            allow_private_scopes=allow_private_scopes or allow_oauth_private_scopes,
+            allow_private_scopes=allow_private_scopes or oauth_service_requires_target_resolution,
         )
         oauth_services.reject_non_editable_services(service_names)
         return cls(target=target, oauth_services=oauth_services)
