@@ -19,6 +19,7 @@ from mindroom.constants import (
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
+    _SIDECAR_UPLOAD_FALLBACK_INDICATOR,
     _calculate_event_size,
     _create_preview,
     _is_edit_message,
@@ -29,7 +30,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
-_SIDECAR_UPLOAD_FALLBACK_TEXT = "[Message truncated because the attachment upload failed.]"
+_SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
 
 class _UploadClient:
