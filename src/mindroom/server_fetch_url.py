@@ -176,6 +176,14 @@ def _parse_port(parsed_url: SplitResult) -> int | None:
         raise ServerFetchUrlError(reason="invalid_port") from e
 
 
+def _parse_hostname(parsed_url: SplitResult) -> str | None:
+    """Return a parsed URL hostname or raise the shared validation error."""
+    try:
+        return parsed_url.hostname
+    except ValueError as e:
+        raise ServerFetchUrlError(reason="invalid_host") from e
+
+
 def _validated_host_addresses(
     hostname: str,
     *,
@@ -209,12 +217,16 @@ def _validated_host_addresses(
 def _validate_server_fetch_url(url: str, *, allow_private_networks: bool, resolve_hostnames: bool) -> str:
     """Validate a server-fetch URL, optionally resolving hostnames immediately."""
     normalized_url = url.strip()
-    parsed = urlsplit(normalized_url)
+    try:
+        parsed = urlsplit(normalized_url)
+    except ValueError as e:
+        raise ServerFetchUrlError(reason="invalid_host") from e
+
     scheme = parsed.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         _deny("unsupported_scheme")
 
-    parsed_hostname = parsed.hostname
+    parsed_hostname = _parse_hostname(parsed)
     if parsed_hostname is None:
         _deny("missing_host")
 

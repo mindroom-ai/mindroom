@@ -64,6 +64,15 @@ def test_validate_server_fetch_url_rejects_invalid_ports_with_generic_error(url:
     assert exc_info.value.reason == "invalid_port"
 
 
+@pytest.mark.parametrize("url", ["http://[not-ip]/", "http://[::1/"])
+def test_validate_server_fetch_url_rejects_malformed_hosts_with_generic_error(url: str) -> None:
+    """Malformed bracketed hosts should use the server-fetch validation error type."""
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_url(url)
+
+    assert exc_info.value.reason == "invalid_host"
+
+
 @pytest.mark.parametrize(
     "url",
     [

@@ -406,6 +406,45 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
     assert "Reference material" in documents[0].content
 
 
+def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed discovered URL should not discard content that was already collected."""
+    start_url = "https://example.test/docs"
+    bad_url = "https://example.test:99999/bad"
+    requested_urls: list[str] = []
+    html = f"""
+    <html>
+      <body>
+        <nav><a href="{bad_url}">Bad link</a></nav>
+        <main>
+          <h1>Start</h1>
+          <p>Reference material with enough text to keep the starting page.</p>
+        </main>
+      </body>
+    </html>
+    """
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        requested_urls.append(url)
+        assert url == start_url
+        assert timeout == 10
+        assert follow_redirects is False
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, content=html.encode(), request=request)
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
+
+    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = _MindRoomWebsiteReader().read(start_url)
+
+    assert requested_urls == [start_url]
+    assert [document.meta_data["url"] for document in documents] == [start_url]
+    assert "Reference material" in documents[0].content
+
+
 def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same-domain checks should ignore URL ports when crawling."""
     start_url = "https://example.test:8443/docs"
@@ -510,6 +549,12 @@ def test_safe_url_for_log_strips_userinfo_query_and_fragment() -> None:
         _safe_url_for_log("https://user:pass@example.test:8443/docs?token=secret#private")
         == "https://example.test:8443/docs"
     )
+
+
+def test_safe_url_for_log_handles_malformed_urls_without_secrets() -> None:
+    """Website log sanitization should not raise on malformed caller URLs."""
+    assert _safe_url_for_log("https://user:pass@example.test:99999/docs?token=secret") == "https://example.test/docs"
+    assert _safe_url_for_log("http://user:pass@[not-ip]/docs?token=secret") == "http://[not-ip]/docs"
 
 
 def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:

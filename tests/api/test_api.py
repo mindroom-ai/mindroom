@@ -2104,6 +2104,18 @@ def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_
     test_connection.assert_not_awaited()
 
 
+def test_homeassistant_url_validation_maps_malformed_hosts_to_http_error() -> None:
+    """Malformed bracketed Home Assistant hosts should return a controlled 400."""
+    with pytest.raises(HTTPException) as exc_info:
+        homeassistant_integration._validate_homeassistant_instance_url(
+            "http://[not-ip]/",
+            allow_private_url=False,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Home Assistant instance URL is not allowed for server-side fetching."
+
+
 def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup can deliberately allow a self-hosted private URL."""
     config = _config_with_worker_scope("shared")

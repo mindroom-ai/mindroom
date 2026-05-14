@@ -104,17 +104,46 @@ def _best_text_candidate(candidates: list[Tag], *, min_chars: int = 40) -> str |
 
 def _safe_url_for_log(url: str) -> str:
     """Return a URL safe for logs by dropping credentials, query, and fragment data."""
-    parts = urlsplit(url)
-    host = parts.hostname or ""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return _safe_malformed_url_for_log(url)
+
+    try:
+        host = parts.hostname or ""
+    except ValueError:
+        netloc = parts.netloc.rsplit("@", maxsplit=1)[-1]
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _safe_malformed_url_for_log(url: str) -> str:
+    """Best-effort URL log sanitizer for strings the standard parser rejects."""
+    cleaned_url = url.split("#", maxsplit=1)[0].split("?", maxsplit=1)[0]
+    scheme_separator = "://"
+    if scheme_separator not in cleaned_url:
+        return cleaned_url
+
+    scheme, rest = cleaned_url.split(scheme_separator, maxsplit=1)
+    authority, slash, path = rest.partition("/")
+    authority = authority.rsplit("@", maxsplit=1)[-1]
+    return f"{scheme}{scheme_separator}{authority}{slash}{path}"
 
 
 def _normalized_hostname(url: str) -> str:
     """Return the normalized hostname component for crawl domain checks."""
-    return (urlparse(url).hostname or "").rstrip(".").lower()
+    try:
+        return (urlparse(url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return ""
 
 
 def _server_fetch_get(
@@ -152,7 +181,10 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
             href_str = str(link["href"])
             full_url = urljoin(current_url, href_str)
-            parsed_url = urlparse(full_url)
+            try:
+                parsed_url = urlparse(full_url)
+            except ValueError:
+                continue
             if not _url_matches_crawl_host(full_url, crawl_host) or parsed_url.path.endswith(
                 (".pdf", ".jpg", ".png"),
             ):
