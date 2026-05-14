@@ -11673,6 +11673,18 @@
           "required": true,
           "type": "password",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
+          "label": "Allow Private Home Assistant URL",
+          "name": "HOMEASSISTANT_ALLOW_PRIVATE_URL",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "default_execution_target": "primary",
