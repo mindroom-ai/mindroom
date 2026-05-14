@@ -407,6 +407,28 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_skip_memory_persistence_for_failed_run() -> None:
+    """Failed runs should not enqueue memory persistence for incomplete content."""
+    queue_memory_persistence = MagicMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Provider failed",
+        ),
+        ResponseOutcome(run_succeeded=False),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            queue_memory_persistence=queue_memory_persistence,
+        ),
+    )
+
+    queue_memory_persistence.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_post_response_effects_register_interactive_follow_up_for_preserved_stream_failure() -> None:
     """Preserved visible streamed replies should still register interactive follow-up."""
     register_interactive = AsyncMock()
@@ -479,34 +501,6 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
     )
 
     register_interactive.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_post_response_effects_strips_transient_enrichment_when_flagged() -> None:
-    """Transient model/system enrichment cleanup should run after delivery effects."""
-    cleanup = MagicMock()
-    outcome = ResponseOutcome(
-        strip_transient_enrichment_after_run=True,
-        session_id="session-1",
-        session_type=SessionType.AGENT,
-    )
-
-    await apply_post_response_effects(
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="response",
-            delivery_kind="sent",
-        ),
-        outcome,
-        PostResponseEffectsDeps(
-            logger=MagicMock(),
-            strip_transient_enrichment=cleanup,
-        ),
-    )
-
-    cleanup.assert_called_once_with(outcome)
 
 
 @pytest.mark.asyncio
