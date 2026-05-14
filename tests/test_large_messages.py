@@ -17,6 +17,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
     _create_preview,
@@ -261,21 +262,43 @@ async def test_prepare_large_message_upload_failure_falls_back_to_text() -> None
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_missing_content_uri_falls_back_to_text() -> None:
+async def test_prepare_large_message_missing_content_uri_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Upload responses without MXC URIs should not create malformed m.file previews."""
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.matrix.large_messages.logger", mock_logger)
     client = _UploadClient(nio.UploadResponse(""))
     content = _large_text_content("missing uri ")
 
     result = await prepare_large_message(client, "!room:server", content)
 
     _assert_text_sidecar_fallback(result, "missing uri ")
+    mock_logger.warning.assert_any_call(
+        "large_message_sidecar_unavailable_using_text_fallback",
+        room_id="!room:server",
+        original_size_bytes=_calculate_event_size(content),
+        is_edit=False,
+        has_mxc_uri=False,
+        has_file_info=False,
+    )
     assert client.uploaded_data is not None
     assert json.loads(client.uploaded_data.decode("utf-8")) == content
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "file_info",
+    [
+        None,
+        {},
+        {"size": 123},
+        {"mimetype": "application/json"},
+    ],
+)
 async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to_text(
     monkeypatch: pytest.MonkeyPatch,
+    file_info: dict[str, object] | None,
 ) -> None:
     """Sidecar uploads without usable file metadata should use text instead of broken m.file."""
 
@@ -283,8 +306,8 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
         _client: nio.AsyncClient,
         _room_id: str,
         _full_content: dict[str, object],
-    ) -> tuple[str, None]:
-        return "mxc://server/missing-metadata", None
+    ) -> tuple[str, dict[str, object] | None]:
+        return "mxc://server/missing-metadata", file_info
 
     monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", missing_file_metadata)
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
@@ -293,6 +316,39 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
     result = await prepare_large_message(client, "!room:server", content)
 
     _assert_text_sidecar_fallback(result, "missing metadata ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_edit_message_upload_failure_falls_back_to_text() -> None:
+    """Edit fallback should stay textual and fit inside the Matrix hard limit."""
+    client = _UploadClient(RuntimeError("upload failed"))
+    text = "edit fallback " + ("y" * 50000)
+    relates_to = {"rel_type": "m.replace", "event_id": "$abc"}
+    edit_content = {
+        "body": "* " + text,
+        "m.new_content": {"body": text, "msgtype": "m.text"},
+        "m.relates_to": relates_to,
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["msgtype"] == "m.text"
+    assert result["m.relates_to"] == relates_to
+    assert isinstance(result["body"], str)
+    assert result["body"].startswith("* edit fallback ")
+    inner = result["m.new_content"]
+    assert inner["msgtype"] == "m.text"
+    assert inner["m.relates_to"] == relates_to
+    assert inner["body"].startswith("edit fallback ")
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in inner["body"]
+    assert "m.file" not in inner.values()
+    assert "filename" not in inner
+    assert "info" not in inner
+    assert "url" not in inner
+    assert "file" not in inner
+    assert "io.mindroom.long_text" not in inner
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 _EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+_LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
@@ -389,22 +390,33 @@ async def _build_file_content(
     """Upload full original content JSON and build preview ``m.file`` event."""
     mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, full_content)
 
-    attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
-    available = size_limit - attachment_overhead
+    available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
     preview = _create_preview(preview_text, available)
 
     modified_content: dict[str, Any] = {
         "msgtype": "m.file",
         "body": preview,
         "filename": "message-content.json",
-        "info": file_info,
     }
+    if file_info is not None:
+        modified_content["info"] = file_info
 
     return mxc_uri, file_info, modified_content
 
 
 def _sidecar_upload_is_usable(mxc_uri: str | None, file_info: dict[str, Any] | None) -> bool:
-    return bool(mxc_uri) and file_info is not None
+    if not mxc_uri or file_info is None:
+        return False
+
+    size = file_info.get("size")
+    mimetype = file_info.get("mimetype")
+    return (
+        isinstance(size, int)
+        and not isinstance(size, bool)
+        and size >= 0
+        and isinstance(mimetype, str)
+        and mimetype != ""
+    )
 
 
 def _build_text_fallback_content(
@@ -413,7 +425,7 @@ def _build_text_fallback_content(
     size_limit: int,
 ) -> dict[str, Any]:
     """Build a text preview when the full-content sidecar is unavailable."""
-    preview_limit = max(0, size_limit - 5000)
+    preview_limit = max(0, size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES)
     while True:
         preview_content: dict[str, Any] = {
             "msgtype": "m.text",
@@ -528,8 +540,8 @@ async def prepare_large_message(
             room_id=room_id,
             original_size_bytes=current_size,
             is_edit=is_edit,
-            has_mxc_uri=mxc_uri is not None,
-            has_file_info=file_info is not None,
+            has_mxc_uri=bool(mxc_uri),
+            has_file_info=bool(file_info),
         )
         modified_content = _build_text_fallback_content(source_content, preview_text, size_limit)
 
