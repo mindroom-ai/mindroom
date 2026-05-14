@@ -312,6 +312,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
             label="Allow Private Home Assistant URL",
             type="boolean",
             required=False,
+            default=False,
             description="Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
         ),
     ],

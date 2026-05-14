@@ -11676,7 +11676,7 @@
         },
         {
           "authored_override": true,
-          "default": null,
+          "default": false,
           "description": "Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
           "label": "Allow Private Home Assistant URL",
           "name": "HOMEASSISTANT_ALLOW_PRIVATE_URL",
