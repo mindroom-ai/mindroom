@@ -120,6 +120,8 @@ class PostResponseEffectsSupport:
             target.resolved_thread_id,
             interactive_metadata.option_map,
             agent_name,
+            question_text=interactive_metadata.question_text,
+            option_labels=interactive_metadata.option_labels,
         )
         await interactive.add_reaction_buttons(
             self._client(),

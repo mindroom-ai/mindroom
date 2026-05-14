@@ -129,6 +129,8 @@ class MatrixMessageOperations:
             thread_id,
             response.interactive_metadata.option_map,
             context.agent_name,
+            question_text=response.interactive_metadata.question_text,
+            option_labels=response.interactive_metadata.option_labels,
         )
         await add_reaction_buttons(
             context.client,
@@ -690,6 +692,8 @@ class MatrixMessageOperations:
                 thread_id,
                 interactive_response.interactive_metadata.option_map,
                 context.agent_name,
+                question_text=interactive_response.interactive_metadata.question_text,
+                option_labels=interactive_response.interactive_metadata.option_labels,
             )
             await add_reaction_buttons(
                 context.client,

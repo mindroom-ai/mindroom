@@ -451,6 +451,13 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
             "2": "reject",
         },
         ctx.agent_name,
+        question_text="Which option?",
+        option_labels={
+            "✅": "Approve",
+            "1": "Approve",
+            "❌": "Reject",
+            "2": "Reject",
+        },
     )
     mock_add_reactions.assert_awaited_once_with(
         ctx.client,
@@ -1321,6 +1328,13 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
             "2": "reject",
         },
         ctx.agent_name,
+        question_text="Which option?",
+        option_labels={
+            "✅": "Approve",
+            "1": "Approve",
+            "❌": "Reject",
+            "2": "Reject",
+        },
     )
     mock_add_reactions.assert_awaited_once_with(
         ctx.client,
@@ -1497,6 +1511,13 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
             "2": "reject",
         },
         ctx.agent_name,
+        question_text="Which option?",
+        option_labels={
+            "✅": "Approve",
+            "1": "Approve",
+            "❌": "Reject",
+            "2": "Reject",
+        },
     )
     mock_add_reactions.assert_awaited_once_with(
         ctx.client,

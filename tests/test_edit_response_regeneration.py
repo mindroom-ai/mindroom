@@ -3762,7 +3762,9 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         # Setup mocks
         mock_handle_reaction.return_value = interactive.InteractiveSelection(
             question_event_id="$question:example.com",
+            question_text="Choose one",
             selection_key="1️⃣",
+            selected_label="Option 1",
             selected_value="Option 1",
             thread_id="thread_id",
         )
@@ -3858,7 +3860,9 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
     ):
         mock_handle_reaction.return_value = interactive.InteractiveSelection(
             question_event_id="$question:example.com",
+            question_text="Choose one",
             selection_key="1️⃣",
+            selected_label="Option 1",
             selected_value="Option 1",
             thread_id="thread_id",
         )
@@ -3947,7 +3951,9 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
             new_callable=AsyncMock,
             return_value=interactive.InteractiveSelection(
                 question_event_id="$question:example.com",
+                question_text="Choose one",
                 selection_key="1",
+                selected_label="Option 1",
                 selected_value="Option 1",
                 thread_id="$thread:example.com",
             ),

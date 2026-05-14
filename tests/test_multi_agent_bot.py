@@ -4525,7 +4525,9 @@ class TestAgentBot:
                 new=AsyncMock(
                     return_value=interactive.InteractiveSelection(
                         question_event_id="$question",
+                        question_text="Choose one",
                         selection_key="1",
+                        selected_label="Selected",
                         selected_value="Selected",
                         thread_id=None,
                     ),

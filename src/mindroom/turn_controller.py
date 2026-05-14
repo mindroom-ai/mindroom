@@ -1484,7 +1484,7 @@ class TurnController:
 
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
-                prompt=f"The user selected: {selection.selected_value}",
+                prompt=interactive.build_selection_prompt(selection),
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
