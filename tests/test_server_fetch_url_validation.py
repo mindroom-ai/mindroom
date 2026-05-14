@@ -94,6 +94,15 @@ def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enable
         validate_server_fetch_url("http://169.254.169.254/latest/meta-data/", allow_private_networks=True)
 
 
+@pytest.mark.parametrize("url", ["http://169.254.1.1/", "http://[fe80::1]/"])
+def test_validate_server_fetch_url_keeps_link_local_blocked_when_private_is_enabled(url: str) -> None:
+    """The local-network opt-in should not open link-local addresses."""
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_url(url, allow_private_networks=True)
+
+    assert exc_info.value.reason == "blocked_address"
+
+
 def test_validate_server_fetch_url_blocks_metadata_dns_when_private_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -107,3 +116,18 @@ def test_validate_server_fetch_url_blocks_metadata_dns_when_private_is_enabled(
         validate_server_fetch_url("https://metadata-by-dns.example/", allow_private_networks=True)
 
     assert exc_info.value.reason == "metadata_address"
+
+
+def test_validate_server_fetch_url_blocks_link_local_dns_when_private_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local-network opt-in should still reject hostnames resolving to link-local addresses."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("169.254.1.1"),
+    )
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_url("https://link-local-by-dns.example/", allow_private_networks=True)
+
+    assert exc_info.value.reason == "blocked_address"

@@ -95,7 +95,7 @@ def _validate_ip_address(
     if _is_metadata_ip(address):
         _deny("metadata_address")
 
-    if address.is_multicast or address.is_reserved or address.is_unspecified:
+    if address.is_link_local or address.is_multicast or address.is_reserved or address.is_unspecified:
         _deny("blocked_address")
 
     if allow_private_networks:
