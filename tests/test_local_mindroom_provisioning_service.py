@@ -45,6 +45,21 @@ def _patch_matrix_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provisioning, "_matrix_whoami", _fake_matrix_whoami)
 
 
+def _managed_agent_username(entity_name: str, namespace: str) -> str:
+    return f"{provisioning.MANAGED_AGENT_USERNAME_PREFIX}{entity_name}_{namespace}"
+
+
+def _invalid_managed_agent_username(case: str, namespace: str) -> str:
+    if case == "missing_entity_between_prefix_and_namespace":
+        return _managed_agent_username("", namespace)
+    if case == "wrong_namespace_suffix":
+        return f"{_managed_agent_username('code', namespace)}x"
+    if case == "wrong_prefix_for_namespace":
+        return f"other_code_{namespace}"
+    msg = f"Unknown invalid username case: {case}"
+    raise ValueError(msg)
+
+
 def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end happy path: pair -> complete -> register agent -> revoke."""
     _patch_matrix_auth(monkeypatch)
@@ -76,7 +91,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             "/v1/local-mindroom/pair/status",
             headers={
                 "Authorization": "Bearer token-alice",
-                "X-Local-MindRoom-Pair-Session-Id": pair_session_id,
+                provisioning.PAIR_STATUS_SESSION_HEADER: pair_session_id,
             },
         )
         assert pending.status_code == 200
@@ -98,13 +113,13 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         assert isinstance(payload["namespace"], str)
         assert len(payload["namespace"]) == 8
         assert payload["namespace"] == payload["connection"]["namespace"]
-        agent_username = f"mindroom_code_{payload['namespace']}"
+        agent_username = _managed_agent_username("code", payload["namespace"])
 
         connected = client.get(
             "/v1/local-mindroom/pair/status",
             headers={
                 "Authorization": "Bearer token-alice",
-                "X-Local-MindRoom-Pair-Session-Id": pair_session_id,
+                provisioning.PAIR_STATUS_SESSION_HEADER: pair_session_id,
             },
         )
         assert connected.status_code == 200
@@ -138,7 +153,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             "/v1/local-mindroom/register-agent",
             json={
                 "homeserver": "https://mindroom.chat",
-                "username": f"mindroom_other_{payload['namespace']}",
+                "username": _managed_agent_username("other", payload["namespace"]),
                 "password": "agent-pass-123",
                 "display_name": "OtherAgent",
             },
@@ -170,7 +185,7 @@ def test_pair_status_accepts_session_header_without_pair_code_query(
             "/v1/local-mindroom/pair/status",
             headers={
                 "Authorization": "Bearer token-alice",
-                "X-Local-MindRoom-Pair-Session-Id": pair_session_id,
+                provisioning.PAIR_STATUS_SESSION_HEADER: pair_session_id,
             },
         )
 
@@ -203,9 +218,36 @@ def test_pair_status_still_accepts_pair_code_query_for_legacy_clients(
         assert pending.json()["status"] == "pending"
 
 
+def test_pair_status_rejects_missing_session_header_and_pair_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pair status should require either the session header or legacy pair_code."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        result = client.get(
+            "/v1/local-mindroom/pair/status",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+        assert result.status_code == 400
+        assert result.json()["detail"] == "Missing pair session id or pair code"
+
+
+@pytest.mark.parametrize(
+    "invalid_username_case",
+    [
+        "missing_entity_between_prefix_and_namespace",
+        "wrong_namespace_suffix",
+        "wrong_prefix_for_namespace",
+    ],
+)
 def test_register_agent_rejects_username_outside_connection_namespace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    invalid_username_case: str,
 ) -> None:
     """A local client must not register Matrix users outside its assigned namespace."""
     _patch_matrix_auth(monkeypatch)
@@ -238,12 +280,13 @@ def test_register_agent_rejects_username_outside_connection_namespace(
                 "client_pubkey_or_fingerprint": "sha256:abc123",
             },
         ).json()
+        namespace = complete["namespace"]
 
         register = client.post(
             "/v1/local-mindroom/register-agent",
             json={
                 "homeserver": "https://mindroom.chat",
-                "username": "mindroom_code_wrongns",
+                "username": _invalid_managed_agent_username(invalid_username_case, namespace),
                 "password": "agent-pass-123",
                 "display_name": "CodeAgent",
             },
