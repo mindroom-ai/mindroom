@@ -28,6 +28,43 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
+_SIDECAR_UPLOAD_FALLBACK_TEXT = "[Message truncated because the attachment upload failed.]"
+
+
+class _UploadClient:
+    rooms: dict = {}  # noqa: RUF012
+
+    def __init__(self, upload_result: object | BaseException) -> None:
+        self.upload_result = upload_result
+        self.uploaded_data: bytes | None = None
+
+    async def upload(self, **kwargs) -> tuple[object, None]:  # noqa: ANN003
+        if isinstance(self.upload_result, BaseException):
+            raise self.upload_result
+        data_provider = kwargs.get("data_provider")
+        if data_provider:
+            data = data_provider(None, None)
+            self.uploaded_data = data.read()
+        return self.upload_result, None
+
+
+def _large_text_content(prefix: str) -> dict[str, str]:
+    return {"body": prefix + ("x" * 100000), "msgtype": "m.text"}
+
+
+def _assert_text_sidecar_fallback(result: dict[str, object], expected_prefix: str) -> None:
+    assert result["msgtype"] == "m.text"
+    assert isinstance(result["body"], str)
+    assert result["body"].startswith(expected_prefix)
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in result["body"]
+    assert "m.file" not in result.values()
+    assert "filename" not in result
+    assert "info" not in result
+    assert "url" not in result
+    assert "file" not in result
+    assert "io.mindroom.long_text" not in result
+    assert _calculate_event_size(result) <= _NORMAL_MESSAGE_LIMIT
+
 
 def test_calculate_event_size() -> None:
     """Test event size calculation."""
@@ -210,6 +247,68 @@ async def test_prepare_large_message_truncation() -> None:
 
     # Preview should fit in limit
     assert _calculate_event_size(result) <= _NORMAL_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_upload_failure_falls_back_to_text() -> None:
+    """Failed JSON sidecar uploads should not create m.file events without media references."""
+    client = _UploadClient(RuntimeError("upload failed"))
+    content = _large_text_content("upload failure ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "upload failure ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_missing_content_uri_falls_back_to_text() -> None:
+    """Upload responses without MXC URIs should not create malformed m.file previews."""
+    client = _UploadClient(nio.UploadResponse(""))
+    content = _large_text_content("missing uri ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "missing uri ")
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == content
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sidecar uploads without usable file metadata should use text instead of broken m.file."""
+
+    async def missing_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, None]:
+        return "mxc://server/missing-metadata", None
+
+    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", missing_file_metadata)
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    content = _large_text_content("missing metadata ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "missing metadata ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
+    """Successful JSON sidecar uploads should keep the existing m.file preview behavior."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    content = _large_text_content("successful sidecar ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result["msgtype"] == "m.file"
+    assert result["url"] == "mxc://server/sidecar"
+    assert result["info"]["mimetype"] == "application/json"
+    assert result["io.mindroom.long_text"]["version"] == 2
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == content
 
 
 @pytest.mark.asyncio

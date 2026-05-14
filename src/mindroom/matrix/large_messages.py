@@ -255,6 +255,7 @@ def _prefix_by_bytes(text: str, max_bytes: int) -> str:
 
 _CONTINUATION_INDICATOR = "\n\n[Message continues in attached file]"
 _STREAMING_PREVIEW_TRUNCATION_INDICATOR = "\n\n[Streaming preview truncated]"
+_SIDECAR_UPLOAD_FALLBACK_INDICATOR = "\n\n[Message truncated because the attachment upload failed.]"
 
 
 def _create_preview(
@@ -402,6 +403,32 @@ async def _build_file_content(
     return mxc_uri, file_info, modified_content
 
 
+def _sidecar_upload_is_usable(mxc_uri: str | None, file_info: dict[str, Any] | None) -> bool:
+    return bool(mxc_uri) and file_info is not None
+
+
+def _build_text_fallback_content(
+    source_content: dict[str, Any],
+    preview_text: str,
+    size_limit: int,
+) -> dict[str, Any]:
+    """Build a text preview when the full-content sidecar is unavailable."""
+    preview_limit = max(0, size_limit - 5000)
+    while True:
+        preview_content: dict[str, Any] = {
+            "msgtype": "m.text",
+            "body": _create_preview(
+                preview_text,
+                preview_limit,
+                continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,
+            ),
+        }
+        _copy_preview_metadata(source_content, preview_content)
+        if _calculate_event_size(preview_content) <= size_limit or preview_limit == 0:
+            return preview_content
+        preview_limit = max(0, preview_limit // 2)
+
+
 async def _upload_content_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,
@@ -486,14 +513,25 @@ async def prepare_large_message(
         size_limit,
     )
 
-    _copy_preview_metadata(source_content, modified_content)
-    _add_sidecar_metadata(
-        modified_content,
-        room_encrypted=_room_is_encrypted(client, room_id),
-        mxc_uri=mxc_uri,
-        file_info=file_info,
-        original_size=current_size,
-    )
+    if _sidecar_upload_is_usable(mxc_uri, file_info):
+        _copy_preview_metadata(source_content, modified_content)
+        _add_sidecar_metadata(
+            modified_content,
+            room_encrypted=_room_is_encrypted(client, room_id),
+            mxc_uri=mxc_uri,
+            file_info=file_info,
+            original_size=current_size,
+        )
+    else:
+        logger.warning(
+            "large_message_sidecar_unavailable_using_text_fallback",
+            room_id=room_id,
+            original_size_bytes=current_size,
+            is_edit=is_edit,
+            has_mxc_uri=mxc_uri is not None,
+            has_file_info=file_info is not None,
+        )
+        modified_content = _build_text_fallback_content(source_content, preview_text, size_limit)
 
     if "m.relates_to" in content:
         modified_content["m.relates_to"] = content["m.relates_to"]
