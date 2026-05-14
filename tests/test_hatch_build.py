@@ -139,10 +139,7 @@ def test_build_frontend_rejects_git_lfs_pointer_assets(
 
     def fake_run_command(
         cmd: list[str],
-        *,
-        cwd: Path,
-        retries: int = 1,
-        retry_delay_seconds: float = 0.0,
+        **_run_kwargs: object,
     ) -> None:
         if cmd[-2:] == ["--outDir", str(output_dir)]:
             output_dir.mkdir(exist_ok=True)
