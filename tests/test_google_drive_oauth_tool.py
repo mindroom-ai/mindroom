@@ -68,6 +68,7 @@ class _FakeDriveFilesResource:
         self.list_kwargs: dict[str, object] | None = None
         self.get_kwargs: dict[str, object] | None = None
         self.get_media_kwargs: dict[str, object] | None = None
+        self.export_media_kwargs: dict[str, object] | None = None
         self.file_metadata: dict[str, object] = {
             "name": "Shared folder",
             "mimeType": "application/vnd.google-apps.folder",
@@ -89,6 +90,10 @@ class _FakeDriveFilesResource:
 
     def get_media(self, **kwargs: object) -> _FakeDriveRequest:
         self.get_media_kwargs = kwargs
+        return _FakeDriveRequest({})
+
+    def export_media(self, **kwargs: object) -> _FakeDriveRequest:
+        self.export_media_kwargs = kwargs
         return _FakeDriveRequest({})
 
 
@@ -114,6 +119,24 @@ class _FakeMediaIoBaseDownload:
             self._file_handle.write(b"hello")
             self._done = True
         return None, self._done
+
+
+def _google_drive_download_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[GoogleDriveTools, _FakeDriveService]:
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", _FakeMediaIoBaseDownload)
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+        download_file=True,
+        download_dir=tmp_path,
+    )
+    service = _FakeDriveService()
+    tool.service = service
+    return tool, service
 
 
 def _runtime_paths_with_google_drive_client(
@@ -588,28 +611,98 @@ def test_google_drive_download_media_supports_shared_drive_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", _FakeMediaIoBaseDownload)
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
-        download_file=True,
-        download_dir=tmp_path,
-    )
-    service = _FakeDriveService()
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
     service.files_resource.file_metadata = {
         "name": "notes.txt",
         "mimeType": "text/plain",
         "webViewLink": "https://drive.google.com/file/d/example",
     }
-    tool.service = service
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "downloaded"
-    assert Path(result["path"]).read_text() == "hello"
+    assert Path(result["path"]) == tmp_path / "notes.txt"
+    assert (tmp_path / "notes.txt").read_text() == "hello"
     assert service.files_resource.get_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "supportsAllDrives": True,
+    }
+
+
+def test_google_drive_download_rejects_parent_directory_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path / "downloads", monkeypatch)
+    service.files_resource.file_metadata = {
+        "name": "../escape.txt",
+        "mimeType": "text/plain",
+        "webViewLink": "https://drive.google.com/file/d/example",
+    }
+    outside_path = tmp_path / "escape.txt"
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["error"] == "Unsafe Google Drive filename: ../escape.txt"
+    assert not outside_path.exists()
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_download_rejects_absolute_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path / "downloads", monkeypatch)
+    outside_path = tmp_path / "absolute.txt"
+    service.files_resource.file_metadata = {
+        "name": str(outside_path),
+        "mimeType": "text/plain",
+        "webViewLink": "https://drive.google.com/file/d/example",
+    }
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["error"] == f"Unsafe Google Drive filename: {outside_path}"
+    assert not outside_path.exists()
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_download_rejects_windows_separators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path / "downloads", monkeypatch)
+    service.files_resource.file_metadata = {
+        "name": "folder\\notes.txt",
+        "mimeType": "text/plain",
+        "webViewLink": "https://drive.google.com/file/d/example",
+    }
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["error"] == "Unsafe Google Drive filename: folder\\notes.txt"
+    assert not (tmp_path / "downloads" / "folder\\notes.txt").exists()
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_download_adds_export_extension_inside_download_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {
+        "name": "proposal",
+        "mimeType": "application/vnd.google-apps.document",
+        "webViewLink": "https://drive.google.com/document/d/example",
+    }
+    tool._download_bytes = lambda _request: b"docx"
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["status"] == "exported"
+    assert Path(result["path"]) == tmp_path / "proposal.docx"
+    assert (tmp_path / "proposal.docx").read_bytes() == b"docx"
+    assert service.files_resource.export_media_kwargs == {
+        "fileId": "shared-drive-file-id",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }

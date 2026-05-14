@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
@@ -37,6 +38,35 @@ def _max_read_size_finite_error(value: object) -> TypeError | ValueError:
     if isinstance(value, str):
         return ValueError(msg)
     return TypeError(msg)
+
+
+def _unsafe_drive_filename_error(filename: object) -> str | None:
+    if not isinstance(filename, str):
+        return f"Unsafe Google Drive filename: {filename}"
+    if filename.strip() == "" or filename in {".", ".."}:
+        return f"Unsafe Google Drive filename: {filename}"
+    if "\x00" in filename or "/" in filename or "\\" in filename:
+        return f"Unsafe Google Drive filename: {filename}"
+
+    windows_filename = PureWindowsPath(filename)
+    if windows_filename.drive or windows_filename.root:
+        return f"Unsafe Google Drive filename: {filename}"
+    return None
+
+
+def _download_target_path(download_dir: str | Path, filename: str, extension: str) -> Path | None:
+    download_root = Path(download_dir)
+    target_path = download_root / filename
+    if extension and not target_path.suffix:
+        target_path = target_path.with_suffix(extension)
+
+    resolved_root = download_root.resolve()
+    resolved_target = target_path.resolve()
+    try:
+        resolved_target.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return target_path
 
 
 class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
@@ -192,7 +222,10 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             service = cast("Any", self.service)
             metadata = self._get_file_metadata(file_id, "id,name,mimeType")
             mime_type = metadata.get("mimeType", "")
-            path = self.download_dir / metadata.get("name", file_id)
+            filename = metadata.get("name")
+            unsafe_filename_error = _unsafe_drive_filename_error(filename)
+            if unsafe_filename_error:
+                return json.dumps({"error": unsafe_filename_error, "file": metadata})
 
             if export_format:
                 target_mime = export_format
@@ -205,30 +238,30 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 target_mime = None
                 ext = ""
 
-            if not path.suffix and ext:
-                path = path.with_suffix(ext)
+            path = _download_target_path(self.download_dir, cast("str", filename), ext)
+            if path is None:
+                return json.dumps({"error": f"Unsafe Google Drive filename: {filename}", "file": metadata})
             path.parent.mkdir(parents=True, exist_ok=True)
 
             if target_mime:
                 request = service.files().export_media(fileId=file_id, mimeType=target_mime)
                 path.write_bytes(self._download_bytes(request))
-                return json.dumps(
-                    {
-                        "fileId": file_id,
-                        "path": str(path),
-                        "status": "exported",
-                        "exportMimeType": target_mime,
-                        "originalMimeType": mime_type,
-                    },
-                )
-
-            request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-            with path.open("wb") as file_handle:
-                downloader = MediaIoBaseDownload(file_handle, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-            return json.dumps({"fileId": file_id, "path": str(path), "status": "downloaded"})
+                result = {
+                    "fileId": file_id,
+                    "path": str(path),
+                    "status": "exported",
+                    "exportMimeType": target_mime,
+                    "originalMimeType": mime_type,
+                }
+            else:
+                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                with path.open("wb") as file_handle:
+                    downloader = MediaIoBaseDownload(file_handle, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                result = {"fileId": file_id, "path": str(path), "status": "downloaded"}
+            return json.dumps(result)
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
