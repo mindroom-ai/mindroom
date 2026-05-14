@@ -27,7 +27,7 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
 
     # Save test Home Assistant credentials
     test_creds = {
-        "instance_url": "http://homeassistant.local:8123",
+        "instance_url": "http://127.0.0.1:8123",
         "access_token": TEST_PASSWORD,
         "allow_private_url": True,
     }
@@ -108,7 +108,7 @@ class TestHomeAssistantTools:
         credentials_manager.save_credentials(
             "homeassistant",
             {
-                "instance_url": "http://homeassistant.local:8123",
+                "instance_url": "http://127.0.0.1:8123",
                 "access_token": TEST_PASSWORD,
                 "allow_private_url": True,
                 "_source": "ui",
@@ -130,7 +130,7 @@ class TestHomeAssistantTools:
 
         assert isinstance(tool, HomeAssistantTools)
         assert tool._load_config() == {
-            "instance_url": "http://homeassistant.local:8123",
+            "instance_url": "http://127.0.0.1:8123",
             "access_token": TEST_PASSWORD,
             "allow_private_url": True,
             "_source": "ui",
@@ -164,7 +164,7 @@ class TestHomeAssistantTools:
         config = ha_tools_with_mocked_creds._load_config()
 
         assert config is not None
-        assert config["instance_url"] == "http://homeassistant.local:8123"
+        assert config["instance_url"] == "http://127.0.0.1:8123"
         assert config["access_token"] == TEST_PASSWORD
         assert config["allow_private_url"] is True
 
@@ -374,7 +374,7 @@ class TestHomeAssistantTools:
             assert result == {"success": True}
             mock_client.request.assert_called_once_with(
                 method="GET",
-                url="http://homeassistant.local:8123/api/states",
+                url="http://127.0.0.1:8123/api/states",
                 headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
                 json=None,
                 timeout=10.0,
@@ -404,7 +404,7 @@ class TestHomeAssistantTools:
             assert result == {"success": True}
             mock_client.request.assert_called_once_with(
                 method="POST",
-                url="http://homeassistant.local:8123/api/services/light/turn_on",
+                url="http://127.0.0.1:8123/api/services/light/turn_on",
                 headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
                 json=json_data,
                 timeout=10.0,

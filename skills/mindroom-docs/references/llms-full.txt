@@ -4787,6 +4787,9 @@ read_url("https://docs.mindroom.chat")
 #### Notes
 
 - `website` is the simplest default when you just need to read one page.
+- Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
+- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
+- Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 

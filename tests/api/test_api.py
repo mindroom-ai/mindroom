@@ -1700,8 +1700,9 @@ def test_get_tools_shared_scope_homeassistant_ignores_worker_allowlist(test_clie
     manager.save_credentials(
         "homeassistant",
         {
-            "instance_url": "http://homeassistant.local:8123",
+            "instance_url": "http://127.0.0.1:8123",
             "access_token": "ha-token",
+            "allow_private_url": True,
             "_source": "ui",
         },
     )
@@ -1990,7 +1991,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     response = api_key_client.post(
         "/api/homeassistant/connect/oauth?agent_name=general",
         json={
-            "instance_url": "homeassistant.local:8123",
+            "instance_url": "127.0.0.1:8123",
             "client_id": "client-id",
             "allow_private_url": True,
         },
@@ -2000,7 +2001,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     auth_url = response.json()["auth_url"]
     parsed = urlparse(auth_url)
     params = parse_qs(parsed.query)
-    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://homeassistant.local:8123/auth/authorize"
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://127.0.0.1:8123/auth/authorize"
     assert params["state"][0]
     assert params["state"][0] != "general"
     assert "agent_name=general" not in params["redirect_uri"][0]
@@ -2038,7 +2039,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
-                "instance_url": "homeassistant.local:8123",
+                "instance_url": "127.0.0.1:8123",
                 "client_id": "client-id",
                 "allow_private_url": True,
             },
@@ -2053,7 +2054,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
 
     assert callback_response.status_code in {302, 307}
     async_client.__aenter__.return_value.post.assert_called_once_with(
-        "http://homeassistant.local:8123/auth/token",
+        "http://127.0.0.1:8123/auth/token",
         data={
             "grant_type": "authorization_code",
             "code": "test-code",
@@ -2064,7 +2065,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     target.target_manager.save_credentials.assert_called_once_with(
         "homeassistant",
         {
-            "instance_url": "http://homeassistant.local:8123",
+            "instance_url": "http://127.0.0.1:8123",
             "client_id": "client-id",
             "access_token": "ha-access",
             "refresh_token": "ha-refresh",
@@ -2166,7 +2167,7 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
             json={
-                "instance_url": "homeassistant.local:8123",
+                "instance_url": "http://93.184.216.34:8123",
                 "client_id": "client-id",
             },
         )
