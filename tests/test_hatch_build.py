@@ -139,9 +139,8 @@ def test_build_frontend_rejects_git_lfs_pointer_assets(
 
     def fake_run_command(
         cmd: list[str],
-        **run_kwargs: object,
+        **_run_kwargs: object,
     ) -> None:
-        _ = run_kwargs
         if cmd[-2:] == ["--outDir", str(output_dir)]:
             output_dir.mkdir(exist_ok=True)
             (output_dir / "logo.png").write_text(
