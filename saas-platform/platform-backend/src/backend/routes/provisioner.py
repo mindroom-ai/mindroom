@@ -92,9 +92,7 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
         msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
         raise HTTPException(status_code=500, detail=msg)
     digest = hmac.digest(
-        root_secret.encode("utf-8"),
-        f"mindroom.instance-credentials.v1:{instance_id}".encode("utf-8"),
-        hashlib.sha256,
+        root_secret.encode("utf-8"), f"mindroom.instance-credentials.v1:{instance_id}".encode("utf-8"), hashlib.sha256
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
@@ -123,13 +121,7 @@ async def _existing_instance_credentials_encryption_key(instance_id: str, namesp
     """Return the existing credential encryption key from an instance Secret when present."""
     secret_name = f"mindroom-api-keys-{instance_id}"
     code, out, err = await run_kubectl(
-        [
-            "get",
-            "secret",
-            secret_name,
-            "--ignore-not-found",
-            "-o=jsonpath={.data.credentials_encryption_key}",
-        ],
+        ["get", "secret", secret_name, "--ignore-not-found", "-o=jsonpath={.data.credentials_encryption_key}"],
         namespace=namespace,
     )
     if code != 0:
@@ -147,11 +139,7 @@ async def _existing_instance_credentials_encryption_key(instance_id: str, namesp
 
 
 async def _provision_credentials_encryption_key(
-    *,
-    customer_id: str,
-    existing_instance_id: Any,
-    data: dict,
-    namespace: str,
+    *, customer_id: str, existing_instance_id: Any, data: dict, namespace: str
 ) -> str:
     """Return the instance chart credential encryption key value for this provision run."""
     existing_key = (
@@ -268,10 +256,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
     # Existing instances may have plaintext credential files; preserve their current encryption state.
     credentials_encryption_key = await _provision_credentials_encryption_key(
-        customer_id=customer_id,
-        existing_instance_id=existing_instance_id,
-        data=data,
-        namespace=namespace,
+        customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
     )
 
     try:
@@ -364,8 +349,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             ]
 
         credentials_encryption_key_file_path = _append_credentials_encryption_key_helm_args(
-            helm_args,
-            credentials_encryption_key,
+            helm_args, credentials_encryption_key
         )
         try:
             code, stdout, stderr = await run_helm(helm_args)

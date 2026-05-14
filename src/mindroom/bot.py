@@ -95,12 +95,7 @@ from .matrix.room_member_joins import (
     room_member_joins_from_sync_timeline,
 )
 from .media_inputs import MediaInputs
-from .response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-    prepare_memory_and_model_context,
-)
+from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,

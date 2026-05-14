@@ -11,10 +11,7 @@ import nio
 
 from mindroom import interactive
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
-from mindroom.authorization import (
-    get_effective_sender_id_for_reply_permissions,
-    is_authorized_sender,
-)
+from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
@@ -48,10 +45,7 @@ from mindroom.dispatch_handoff import (
     merge_payload_metadata,
     payload_metadata_from_source,
 )
-from mindroom.dispatch_replay_guard import (
-    has_newer_unresponded_cached_thread_event,
-    has_newer_unresponded_in_thread,
-)
+from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
 from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
@@ -80,10 +74,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-)
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,

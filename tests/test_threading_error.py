@@ -7949,13 +7949,11 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root message"),
             _message(event_id="$thread_reply:localhost", body="Thread reply"),
         ]
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_history",
-                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
-            ) as mock_fetch,
-        ):
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_history",
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+        ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -8261,13 +8259,11 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root message"),
             _message(event_id="$reply:localhost", body="Reply"),
         ]
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_history",
-                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
-            ) as mock_history,
-        ):
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_history",
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+        ) as mock_history:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True

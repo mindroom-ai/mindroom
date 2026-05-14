@@ -849,12 +849,10 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     envelope = _envelope(source_event_id="$event", target=target)
 
-    with (
-        patch.object(
-            resolver,
-            "fetch_thread_history",
-            new=AsyncMock(side_effect=AssertionError("room targets have no model thread history to refresh")),
-        ),
+    with patch.object(
+        resolver,
+        "fetch_thread_history",
+        new=AsyncMock(side_effect=AssertionError("room targets have no model thread history to refresh")),
     ):
         request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(

@@ -25,12 +25,7 @@ from mindroom.matrix.client_room_admin import (
     leave_room,
 )
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import (
-    INTERNAL_USER_ACCOUNT_KEY,
-    INTERNAL_USER_AGENT_NAME,
-    AgentMatrixUser,
-    login_agent_user,
-)
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,

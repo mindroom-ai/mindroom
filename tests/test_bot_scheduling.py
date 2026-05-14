@@ -972,9 +972,7 @@ class TestCommandHandling:
                 },
             )
 
-            with (
-                patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-            ):
+            with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
                 await bot._on_message(room, event)
                 await drain_coalescing(bot)
 
@@ -1100,9 +1098,7 @@ class TestCommandHandling:
             },
         )
 
-        with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-        ):
+        with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -1335,9 +1331,7 @@ class TestCommandHandling:
             },
         )
 
-        with (
-            patch("mindroom.bot.interactive") as mock_interactive,
-        ):
+        with patch("mindroom.bot.interactive") as mock_interactive:
             mock_interactive.handle_text_response = AsyncMock(return_value=None)
 
             await bot._on_message(room, event)
@@ -1400,9 +1394,7 @@ class TestCommandHandling:
             },
         )
 
-        with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
-        ):
+        with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 

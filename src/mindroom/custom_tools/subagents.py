@@ -13,10 +13,7 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.authorization import (
-    responder_candidate_entities_for_room,
-    responder_candidate_entities_from_cached_room,
-)
+from mindroom.authorization import responder_candidate_entities_for_room, responder_candidate_entities_from_cached_room
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import send_message_result

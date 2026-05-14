@@ -35,11 +35,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import emit, emit_collect, emit_final_response_transform, emit_transform
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    emit_custom_event,
-    tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,

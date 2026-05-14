@@ -38,11 +38,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
-from mindroom.matrix.rooms import (
-    ensure_all_rooms_exist,
-    ensure_root_space,
-    ensure_user_in_rooms,
-)
+from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
     auto_resume_interrupted_threads,

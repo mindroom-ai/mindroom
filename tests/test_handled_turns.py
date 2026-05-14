@@ -10,11 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.handled_turns import (
-    HandledTurnLedger,
-    HandledTurnRecord,
-    HandledTurnState,
-)
+from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 

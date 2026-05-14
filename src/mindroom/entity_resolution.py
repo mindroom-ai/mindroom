@@ -7,11 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import (
-    MatrixID,
-    managed_account_key,
-    managed_account_user_id,
-)
+from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_key_from_alias_localpart,
