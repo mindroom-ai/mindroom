@@ -126,6 +126,8 @@ def _server_fetch_get(
 ) -> httpx.Response:
     """Fetch a URL through the server-fetch transport when no proxy is configured."""
     if proxy:
+        # With a configured proxy, URL and redirect validation happen before this handoff.
+        # The proxy owns target DNS resolution and egress policy from here.
         return httpx.get(url, timeout=timeout, proxy=proxy, follow_redirects=follow_redirects)
     with httpx.Client(transport=ServerFetchHTTPTransport(), follow_redirects=follow_redirects) as client:
         return client.get(url, timeout=timeout)
