@@ -2945,6 +2945,106 @@ def test_cors_headers(test_client: TestClient) -> None:
     assert response.status_code == 200
 
 
+def _dashboard_cors_test_client(runtime_paths: constants.RuntimePaths) -> TestClient:
+    api_app = FastAPI()
+
+    @api_app.get("/api/health")
+    async def _health_check() -> dict[str, str]:
+        return {"status": "healthy"}
+
+    main._add_dashboard_cors_middleware(api_app, runtime_paths)
+    return TestClient(api_app)
+
+
+def test_cors_rejects_unknown_origin_by_default(tmp_path: Path) -> None:
+    """Default dashboard CORS should not allow arbitrary browser origins."""
+    test_client = _dashboard_cors_test_client(_runtime_paths(tmp_path, process_env={}))
+
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_allows_local_frontend_origin_by_default(tmp_path: Path) -> None:
+    """Default dashboard CORS should keep the local frontend dev server working."""
+    test_client = _dashboard_cors_test_client(_runtime_paths(tmp_path, process_env={}))
+
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
+    """Explicit wildcard CORS must not be combined with credentialed requests."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS": "true"},
+    )
+
+    settings = main._dashboard_cors_settings(runtime_paths)
+    test_client = _dashboard_cors_test_client(runtime_paths)
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert settings.allow_origins == ("*",)
+    assert settings.allow_credentials is False
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert response.headers.get("access-control-allow-credentials") is None
+
+
+def test_cors_allowed_origins_env_replaces_default_origins(tmp_path: Path) -> None:
+    """Configured CORS origins should be explicit and credential-capable."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": ("https://dashboard.example.test, http://localhost:3003"),
+        },
+    )
+    test_client = _dashboard_cors_test_client(runtime_paths)
+
+    allowed_response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    default_origin_response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert allowed_response.status_code == 200
+    assert allowed_response.headers["access-control-allow-origin"] == "https://dashboard.example.test"
+    assert allowed_response.headers["access-control-allow-credentials"] == "true"
+    assert default_origin_response.status_code == 400
+    assert default_origin_response.headers.get("access-control-allow-origin") is None
+
+
 def test_frontend_root_serves_index(
     test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3058,6 +3158,35 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
     next_path_literal = next_path_line.split("=", 1)[1].strip().removesuffix(";")
     assert json.loads(next_path_literal) == next_path
     assert "&amp;execution_scope" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("next_path", "expected"),
+    [
+        (None, "/"),
+        ("", "/"),
+        ("agents", "/"),
+        ("/", "/"),
+        ("/agents", "/agents"),
+        (
+            "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user",
+            "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user",
+        ),
+        ("//example.com", "/"),
+        ("/\\example.com", "/"),
+        ("/%2Fexample.com", "/"),
+        ("/%5Cexample.com", "/"),
+        ("/%5c/example.com", "/"),
+        ("/%255Cexample.com", "/"),
+        ("/agents/%5Cprofile", "/agents/%5Cprofile"),
+    ],
+)
+def test_sanitize_next_path_blocks_protocol_relative_variants(
+    next_path: str | None,
+    expected: str,
+) -> None:
+    """Standalone login redirects must stay on same-origin dashboard paths."""
+    assert auth.sanitize_next_path(next_path) == expected
 
 
 def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(

@@ -8,7 +8,7 @@ import json
 import secrets
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode
 
 import jwt
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -32,6 +32,7 @@ _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
+_REDIRECT_TARGET_DECODE_PASSES = 5
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/homeassistant/callback",
@@ -630,9 +631,22 @@ async def request_has_frontend_access(request: Request) -> bool:
 
 def sanitize_next_path(next_path: str | None) -> str:
     """Normalize redirect targets to an absolute in-app path."""
-    if not next_path or not next_path.startswith("/") or next_path.startswith("//"):
+    if not next_path or not next_path.startswith("/") or _is_protocol_relative_redirect(next_path):
         return "/"
     return next_path
+
+
+def _is_protocol_relative_redirect(next_path: str) -> bool:
+    """Return whether a browser may normalize one target to a protocol-relative URL."""
+    candidate = next_path
+    for _ in range(_REDIRECT_TARGET_DECODE_PASSES):
+        if candidate.replace("\\", "/").startswith("//"):
+            return True
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return candidate.replace("\\", "/").startswith("//")
 
 
 def _request_path_with_query(request: Request) -> str:
