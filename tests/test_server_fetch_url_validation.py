@@ -55,6 +55,15 @@ def test_validate_server_fetch_url_rejects_unsupported_or_invalid_urls(url: str)
         validate_server_fetch_url(url)
 
 
+@pytest.mark.parametrize("url", ["https://example.com:notaport/", "http://example.com:99999/"])
+def test_validate_server_fetch_url_rejects_invalid_ports_with_generic_error(url: str) -> None:
+    """Malformed ports should use the server-fetch validation error type."""
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_url(url)
+
+    assert exc_info.value.reason == "invalid_port"
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -92,6 +101,14 @@ def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enable
     """The local-network opt-in should not open cloud metadata endpoints."""
     with pytest.raises(ServerFetchUrlError):
         validate_server_fetch_url("http://169.254.169.254/latest/meta-data/", allow_private_networks=True)
+
+
+def test_validate_server_fetch_url_keeps_ipv4_mapped_metadata_blocked_when_private_is_enabled() -> None:
+    """The local-network opt-in should not open IPv4-mapped cloud metadata endpoints."""
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_url("http://[::ffff:100.100.100.200]/", allow_private_networks=True)
+
+    assert exc_info.value.reason == "metadata_address"
 
 
 @pytest.mark.parametrize("url", ["http://169.254.1.1/", "http://[fe80::1]/"])

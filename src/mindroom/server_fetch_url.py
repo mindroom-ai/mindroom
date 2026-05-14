@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from typing import NoReturn
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
+
+import httpcore
+import httpx
+from httpcore._backends.anyio import AnyIOBackend
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterable
+    from typing import NoReturn
+    from urllib.parse import SplitResult
+
+    from httpcore._backends.base import SOCKET_OPTION
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _GENERIC_DENY_MESSAGE = "URL is not allowed for server-side fetching"
@@ -86,17 +97,42 @@ def _is_metadata_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> b
     return address in _METADATA_IP_ADDRESSES
 
 
+def _embedded_ipv4_addresses(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address, ...]:
+    """Return IPv4 addresses embedded in IPv6 transition forms."""
+    if not isinstance(address, ipaddress.IPv6Address):
+        return ()
+
+    addresses: list[ipaddress.IPv4Address] = []
+    if address.ipv4_mapped is not None:
+        addresses.append(address.ipv4_mapped)
+    if address.sixtofour is not None:
+        addresses.append(address.sixtofour)
+    if address.teredo is not None:
+        server_address, client_address = address.teredo
+        addresses.extend((server_address, client_address))
+    return tuple(addresses)
+
+
 def _validate_ip_address(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
     *,
     allow_private_networks: bool,
 ) -> None:
     """Reject addresses that are unsafe for the selected fetch policy."""
-    if _is_metadata_ip(address):
-        _deny("metadata_address")
+    checked_addresses = (address, *_embedded_ipv4_addresses(address))
+    for checked_address in checked_addresses:
+        if _is_metadata_ip(checked_address):
+            _deny("metadata_address")
 
-    if address.is_link_local or address.is_multicast or address.is_reserved or address.is_unspecified:
-        _deny("blocked_address")
+        if (
+            checked_address.is_link_local
+            or checked_address.is_multicast
+            or checked_address.is_reserved
+            or checked_address.is_unspecified
+        ):
+            _deny("blocked_address")
 
     if allow_private_networks:
         return
@@ -138,6 +174,45 @@ def _resolve_host_addresses(
     return addresses
 
 
+def _parse_port(parsed_url: SplitResult) -> int | None:
+    """Return a parsed URL port or raise the shared validation error."""
+    try:
+        return parsed_url.port
+    except ValueError as e:
+        raise ServerFetchUrlError(reason="invalid_port") from e
+
+
+def _validated_host_addresses(
+    hostname: str,
+    *,
+    port: int | None,
+    scheme: str,
+    allow_private_networks: bool,
+    resolve_allowed_local_hostnames: bool,
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Validate a host and return the addresses that are safe to dial."""
+    host = _normalize_hostname(hostname)
+    direct_address = _ip_address_from_host(host)
+    if direct_address is not None:
+        _validate_ip_address(direct_address, allow_private_networks=allow_private_networks)
+        return [direct_address]
+
+    ascii_host = _hostname_as_ascii(host)
+    if _is_metadata_hostname(ascii_host):
+        _deny("metadata_hostname")
+
+    if _is_local_hostname(ascii_host):
+        if not allow_private_networks:
+            _deny("private_hostname")
+        if not resolve_allowed_local_hostnames:
+            return []
+
+    addresses = _resolve_host_addresses(ascii_host, port=port, scheme=scheme)
+    for address in addresses:
+        _validate_ip_address(address, allow_private_networks=allow_private_networks)
+    return addresses
+
+
 def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False) -> str:
     """Validate that a URL is safe for a server-side HTTP(S) request."""
     normalized_url = url.strip()
@@ -150,24 +225,13 @@ def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False)
     if parsed_hostname is None:
         _deny("missing_host")
 
-    host = _normalize_hostname(parsed_hostname)
-    direct_address = _ip_address_from_host(host)
-    if direct_address is not None:
-        _validate_ip_address(direct_address, allow_private_networks=allow_private_networks)
-        return normalized_url
-
-    ascii_host = _hostname_as_ascii(host)
-    if _is_metadata_hostname(ascii_host):
-        _deny("metadata_hostname")
-
-    if _is_local_hostname(ascii_host):
-        if allow_private_networks:
-            return normalized_url
-        _deny("private_hostname")
-
-    for address in _resolve_host_addresses(ascii_host, port=parsed.port, scheme=scheme):
-        _validate_ip_address(address, allow_private_networks=allow_private_networks)
-
+    _validated_host_addresses(
+        parsed_hostname,
+        port=_parse_port(parsed),
+        scheme=scheme,
+        allow_private_networks=allow_private_networks,
+        resolve_allowed_local_hostnames=False,
+    )
     return normalized_url
 
 
@@ -181,3 +245,163 @@ def validate_server_fetch_redirect_url(
     if not location:
         _deny("missing_redirect_location")
     return validate_server_fetch_url(urljoin(current_url, location), allow_private_networks=allow_private_networks)
+
+
+def _validated_connect_addresses(
+    host: str,
+    *,
+    port: int,
+    allow_private_networks: bool,
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve and validate the addresses used for an actual TCP connection."""
+    return _validated_host_addresses(
+        host,
+        port=port,
+        scheme="http",
+        allow_private_networks=allow_private_networks,
+        resolve_allowed_local_hostnames=True,
+    )
+
+
+class _ServerFetchSyncNetworkBackend(httpcore.NetworkBackend):
+    """httpcore network backend that validates the address it dials."""
+
+    def __init__(self, *, allow_private_networks: bool) -> None:
+        self._allow_private_networks = allow_private_networks
+        self._backend: httpcore.NetworkBackend = httpcore.SyncBackend()
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return _connect_validated_sync(
+            _validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            lambda address: self._backend.connect_tcp(
+                address.compressed,
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=socket_options,
+            ),
+        )
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return self._backend.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        self._backend.sleep(seconds)
+
+
+class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
+    """httpcore async network backend that validates the address it dials."""
+
+    def __init__(self, *, allow_private_networks: bool) -> None:
+        self._allow_private_networks = allow_private_networks
+        self._backend: httpcore.AsyncNetworkBackend = AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,  # noqa: ASYNC109 - Signature must match httpcore.
+        local_address: str | None = None,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await _connect_validated_async(
+            _validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            lambda address: self._backend.connect_tcp(
+                address.compressed,
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=socket_options,
+            ),
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,  # noqa: ASYNC109 - Signature must match httpcore.
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._backend.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+def _connect_validated_sync(
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    connect: Callable[[ipaddress.IPv4Address | ipaddress.IPv6Address], httpcore.NetworkStream],
+) -> httpcore.NetworkStream:
+    last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
+    for address in addresses:
+        try:
+            return connect(address)
+        except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
+            last_error = e
+    if last_error is not None:
+        raise last_error
+    _deny("dns_resolution_failed")
+
+
+async def _connect_validated_async(
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    connect: Callable[[ipaddress.IPv4Address | ipaddress.IPv6Address], Awaitable[httpcore.AsyncNetworkStream]],
+) -> httpcore.AsyncNetworkStream:
+    last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
+    for address in addresses:
+        try:
+            return await connect(address)
+        except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
+            last_error = e
+    if last_error is not None:
+        raise last_error
+    _deny("dns_resolution_failed")
+
+
+class ServerFetchHTTPTransport(httpx.HTTPTransport):
+    """HTTPX transport that validates server-fetch URLs and dialed addresses."""
+
+    def __init__(self, *, allow_private_networks: bool = False) -> None:
+        self._allow_private_networks = allow_private_networks
+        self._pool: httpcore.ConnectionPool = httpcore.ConnectionPool(
+            network_backend=_ServerFetchSyncNetworkBackend(allow_private_networks=allow_private_networks),
+        )
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Validate each request before HTTPX sends it."""
+        validate_server_fetch_url(str(request.url), allow_private_networks=self._allow_private_networks)
+        return super().handle_request(request)
+
+    def close(self) -> None:
+        """Close the underlying connection pool."""
+        self._pool.close()
+
+
+class ServerFetchAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    """Async HTTPX transport that validates server-fetch URLs and dialed addresses."""
+
+    def __init__(self, *, allow_private_networks: bool = False) -> None:
+        self._allow_private_networks = allow_private_networks
+        self._pool: httpcore.AsyncConnectionPool = httpcore.AsyncConnectionPool(
+            network_backend=_ServerFetchAsyncNetworkBackend(allow_private_networks=allow_private_networks),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """Validate each async request before HTTPX sends it."""
+        validate_server_fetch_url(str(request.url), allow_private_networks=self._allow_private_networks)
+        return await super().handle_async_request(request)
+
+    async def aclose(self) -> None:
+        """Close the underlying async connection pool."""
+        await self._pool.aclose()

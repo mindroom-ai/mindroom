@@ -16,6 +16,7 @@ from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
 from mindroom.server_fetch_url import (
+    ServerFetchHTTPTransport,
     ServerFetchUrlError,
     validate_server_fetch_redirect_url,
     validate_server_fetch_url,
@@ -116,6 +117,20 @@ def _normalized_hostname(url: str) -> str:
     return (urlparse(url).hostname or "").rstrip(".").lower()
 
 
+def _server_fetch_get(
+    url: str,
+    *,
+    timeout: int,
+    follow_redirects: bool,
+    proxy: str | None = None,
+) -> httpx.Response:
+    """Fetch a URL through the server-fetch transport when no proxy is configured."""
+    if proxy:
+        return httpx.get(url, timeout=timeout, proxy=proxy, follow_redirects=follow_redirects)
+    with httpx.Client(transport=ServerFetchHTTPTransport(), follow_redirects=follow_redirects) as client:
+        return client.get(url, timeout=timeout)
+
+
 def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
     """Return whether a URL belongs to the crawl's exact starting host."""
     host = _normalized_hostname(url)
@@ -175,9 +190,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
         request_url = validate_server_fetch_url(current_url)
         for _redirect_count in range(_MAX_REDIRECTS + 1):
             response = (
-                httpx.get(request_url, timeout=self.timeout, proxy=self.proxy, follow_redirects=False)
+                _server_fetch_get(request_url, timeout=self.timeout, proxy=self.proxy, follow_redirects=False)
                 if self.proxy
-                else httpx.get(request_url, timeout=self.timeout, follow_redirects=False)
+                else _server_fetch_get(request_url, timeout=self.timeout, follow_redirects=False)
             )
             if not response.is_redirect:
                 return response, request_url
@@ -200,7 +215,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
         try:
             log_debug(f"Crawling: {safe_current_url}")
             response, fetched_url = self._get_validated_response(current_url)
-            if not _url_matches_crawl_host(fetched_url, crawl_host):
+            if current_url != starting_url and not _url_matches_crawl_host(fetched_url, crawl_host):
                 log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(fetched_url)}")
                 return 0
             response.raise_for_status()
@@ -213,7 +228,8 @@ class _MindRoomWebsiteReader(WebsiteReader):
             )
         except ServerFetchUrlError:
             log_warning(f"Rejected server-side fetch URL while crawling {_safe_url_for_log(current_url)}")
-            raise
+            if current_url == starting_url and not crawler_result:
+                raise
         except httpx.HTTPStatusError as e:
             self._log_http_status_error(safe_current_url=safe_current_url, error=e)
             if current_url == starting_url and not crawler_result and not (300 <= e.response.status_code < 400):

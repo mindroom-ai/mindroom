@@ -30,7 +30,7 @@ from mindroom.api.credentials import (
 )
 from mindroom.api.integrations import get_dashboard_url
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
-from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 
@@ -99,17 +99,29 @@ def _validate_homeassistant_instance_url(instance_url: str, *, allow_private_url
     try:
         return validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
     except ServerFetchUrlError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=homeassistant_url_error_detail(e, allow_private_url=allow_private_url),
-        ) from e
+        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
+
+
+def _homeassistant_url_http_error(error: ServerFetchUrlError, *, allow_private_url: bool) -> HTTPException:
+    """Build the API error returned for rejected Home Assistant URLs."""
+    return HTTPException(
+        status_code=400,
+        detail=homeassistant_url_error_detail(error, allow_private_url=allow_private_url),
+    )
+
+
+def _homeassistant_http_client(*, allow_private_url: bool) -> httpx.AsyncClient:
+    """Return an async HTTP client that validates the address it connects to."""
+    return httpx.AsyncClient(
+        transport=ServerFetchAsyncHTTPTransport(allow_private_networks=allow_private_url),
+    )
 
 
 async def _test_connection(instance_url: str, token: str, *, allow_private_url: bool = False) -> dict[str, Any]:
     """Test connection to Home Assistant."""
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
-    async with httpx.AsyncClient() as client:
-        try:
+    try:
+        fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
+        async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
             # Test API connection
             response = await client.get(
                 urljoin(fetch_url, "/api/"),
@@ -152,16 +164,18 @@ async def _test_connection(instance_url: str, token: str, *, allow_private_url: 
                 "entities_count": len(entities),
             }
 
-        except httpx.TimeoutException as e:
-            raise HTTPException(
-                status_code=504,
-                detail="Connection timeout - check if the URL is correct and accessible",
-            ) from e
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Connection error: {e!s}",
-            ) from e
+    except ServerFetchUrlError as e:
+        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
+    except httpx.TimeoutException as e:
+        raise HTTPException(
+            status_code=504,
+            detail="Connection timeout - check if the URL is correct and accessible",
+        ) from e
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Connection error: {e!s}",
+        ) from e
 
 
 @router.get("/status")
@@ -349,7 +363,7 @@ async def callback(request: Request) -> RedirectResponse:
 
     try:
         # Exchange code for access token
-        async with httpx.AsyncClient() as client:
+        async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
             token_response = await client.post(
                 urljoin(fetch_url, "/auth/token"),
                 data={
@@ -383,6 +397,8 @@ async def callback(request: Request) -> RedirectResponse:
 
             return RedirectResponse(url=f"{get_dashboard_url(request)}/?homeassistant=connected")
 
+    except ServerFetchUrlError as e:
+        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to exchange code: {e!s}") from e
 
@@ -419,10 +435,11 @@ async def get_entities(
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
     instance_url = _normalize_instance_url(instance_url)
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
+    allow_private_url = _private_url_allowed(config)
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
             response = await client.get(
                 urljoin(fetch_url, "/api/states"),
                 headers={"Authorization": f"Bearer {token}"},
@@ -452,6 +469,8 @@ async def get_entities(
                 for e in entities
             ]
 
+    except ServerFetchUrlError as e:
+        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to get entities: {e!s}") from e
 
@@ -477,7 +496,8 @@ async def call_service(
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
     instance_url = _normalize_instance_url(instance_url)
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
+    allow_private_url = _private_url_allowed(config)
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
 
     # Build service data
     service_data = data or {}
@@ -485,7 +505,7 @@ async def call_service(
         service_data["entity_id"] = entity_id
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
             response = await client.post(
                 urljoin(fetch_url, f"/api/services/{domain}/{service}"),
                 headers={"Authorization": f"Bearer {token}"},
@@ -501,5 +521,7 @@ async def call_service(
 
             return {"success": True, "message": f"Service {domain}.{service} called successfully"}
 
+    except ServerFetchUrlError as e:
+        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Failed to call service: {e!s}") from e

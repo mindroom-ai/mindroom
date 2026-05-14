@@ -1,6 +1,9 @@
 """Tests for the custom Home Assistant tools."""
 
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -262,6 +265,64 @@ class TestHomeAssistantTools:
             json=None,
             timeout=10.0,
         )
+
+    @pytest.mark.asyncio
+    async def test_api_request_rejects_dns_rebind_at_connect_time(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The async Home Assistant client should validate the address it actually connects to."""
+
+        class RebindHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = b'{"success": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *_args: object) -> None:  # noqa: A002, ARG002
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), RebindHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": f"http://rebind.test:{server.server_port}",
+                "access_token": TEST_PASSWORD,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+        dns_calls = 0
+
+        def fake_getaddrinfo(host: str | bytes, port: int, *_args: object, **_kwargs: object) -> list[object]:
+            nonlocal dns_calls
+            if host in ("rebind.test", b"rebind.test"):
+                dns_calls += 1
+                ip_address = "93.184.216.34" if dns_calls == 1 else "127.0.0.1"
+                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, port))]
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
+
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
+
+        try:
+            result = await ha_tools._api_request("GET", "/api/states")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert result == {
+            "error": homeassistant_url_error_detail(
+                ServerFetchUrlError(reason="private_address"),
+                allow_private_url=False,
+            ),
+        }
+        assert dns_calls >= 2
 
     @pytest.mark.asyncio
     async def test_api_request_uses_validated_instance_url(self, tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
-from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     unsupported_shared_only_integration_message,
@@ -97,7 +97,11 @@ class HomeAssistantTools(Toolkit):
                 instance_url,
                 allow_private_url=config.get("allow_private_url") is True,
             )
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(
+                transport=ServerFetchAsyncHTTPTransport(
+                    allow_private_networks=config.get("allow_private_url") is True,
+                ),
+            ) as client:
                 response = await client.request(
                     method=method,
                     url=urljoin(fetch_url, endpoint),
