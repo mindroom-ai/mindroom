@@ -92,14 +92,15 @@ class HomeAssistantTools(Toolkit):
         if not instance_url or not token:
             return {"error": "Missing Home Assistant credentials"}
 
+        allow_private_url = config.get("allow_private_url") is True
         try:
             fetch_url = validate_homeassistant_instance_url(
                 instance_url,
-                allow_private_url=config.get("allow_private_url") is True,
+                allow_private_url=allow_private_url,
             )
             async with httpx.AsyncClient(
                 transport=ServerFetchAsyncHTTPTransport(
-                    allow_private_networks=config.get("allow_private_url") is True,
+                    allow_private_networks=allow_private_url,
                 ),
             ) as client:
                 response = await client.request(
@@ -119,7 +120,7 @@ class HomeAssistantTools(Toolkit):
 
         except ServerFetchUrlError as e:
             return {
-                "error": homeassistant_url_error_detail(e, allow_private_url=config.get("allow_private_url") is True),
+                "error": homeassistant_url_error_detail(e, allow_private_url=allow_private_url),
             }
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
             return {"error": "Connection timeout - check if Home Assistant is accessible"}

@@ -284,7 +284,7 @@ def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.M
         nonlocal dns_calls
         if host in ("rebind.test", b"rebind.test"):
             dns_calls += 1
-            ip_address = "93.184.216.34" if dns_calls <= 2 else "127.0.0.1"
+            ip_address = "93.184.216.34" if dns_calls == 1 else "127.0.0.1"
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, port))]
         return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
 
@@ -303,7 +303,7 @@ def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.M
         server.server_close()
 
     assert exc_info.value.reason == "private_address"
-    assert dns_calls >= 3
+    assert dns_calls >= 2
 
 
 def test_website_reader_does_not_record_cross_host_redirect_content(

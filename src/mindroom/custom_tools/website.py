@@ -188,11 +188,13 @@ class _MindRoomWebsiteReader(WebsiteReader):
     def _get_validated_response(self, current_url: str) -> tuple[httpx.Response, str]:
         """Fetch a URL while validating every redirect hop before following it."""
         request_url = validate_server_fetch_url(current_url)
+        fetch_kwargs = {"proxy": self.proxy} if self.proxy else {}
         for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = (
-                _server_fetch_get(request_url, timeout=self.timeout, proxy=self.proxy, follow_redirects=False)
-                if self.proxy
-                else _server_fetch_get(request_url, timeout=self.timeout, follow_redirects=False)
+            response = _server_fetch_get(
+                request_url,
+                timeout=self.timeout,
+                follow_redirects=False,
+                **fetch_kwargs,
             )
             if not response.is_redirect:
                 return response, request_url

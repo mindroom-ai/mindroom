@@ -42,6 +42,7 @@ _METADATA_IP_ADDRESSES = frozenset(
         ipaddress.ip_address("fd00:ec2::254"),
     },
 )
+_IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 class ServerFetchUrlError(ValueError):
@@ -74,7 +75,7 @@ def _hostname_as_ascii(host: str) -> str:
         raise ServerFetchUrlError(reason="invalid_host") from e
 
 
-def _ip_address_from_host(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+def _ip_address_from_host(host: str) -> _IPAddress | None:
     """Return an IP address when the host is a direct address literal."""
     try:
         return ipaddress.ip_address(host)
@@ -92,14 +93,12 @@ def _is_metadata_hostname(host: str) -> bool:
     return host in _METADATA_HOSTNAMES or any(host.endswith(suffix) for suffix in _METADATA_HOSTNAME_SUFFIXES)
 
 
-def _is_metadata_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _is_metadata_ip(address: _IPAddress) -> bool:
     """Return whether an address is a known cloud/container metadata endpoint."""
     return address in _METADATA_IP_ADDRESSES
 
 
-def _embedded_ipv4_addresses(
-    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> tuple[ipaddress.IPv4Address, ...]:
+def _embedded_ipv4_addresses(address: _IPAddress) -> tuple[ipaddress.IPv4Address, ...]:
     """Return IPv4 addresses embedded in IPv6 transition forms."""
     if not isinstance(address, ipaddress.IPv6Address):
         return ()
@@ -116,7 +115,7 @@ def _embedded_ipv4_addresses(
 
 
 def _validate_ip_address(
-    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    address: _IPAddress,
     *,
     allow_private_networks: bool,
 ) -> None:
@@ -141,12 +140,7 @@ def _validate_ip_address(
         _deny("private_address")
 
 
-def _resolve_host_addresses(
-    host: str,
-    *,
-    port: int | None,
-    scheme: str,
-) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def _resolve_host_addresses(host: str, *, port: int | None, scheme: str) -> list[_IPAddress]:
     """Resolve a hostname to IP addresses for public-fetch validation."""
     service_port = port or (443 if scheme == "https" else 80)
     try:
@@ -159,7 +153,7 @@ def _resolve_host_addresses(
     except socket.gaierror as e:
         raise ServerFetchUrlError(reason="dns_resolution_failed") from e
 
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    addresses: list[_IPAddress] = []
     for result in results:
         sockaddr = result[4]
         if not sockaddr:
@@ -188,9 +182,9 @@ def _validated_host_addresses(
     port: int | None,
     scheme: str,
     allow_private_networks: bool,
-    resolve_allowed_local_hostnames: bool,
-) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
-    """Validate a host and return the addresses that are safe to dial."""
+    resolve_hostnames: bool,
+) -> list[_IPAddress]:
+    """Validate a host and optionally return addresses that are safe to dial."""
     host = _normalize_hostname(hostname)
     direct_address = _ip_address_from_host(host)
     if direct_address is not None:
@@ -201,11 +195,10 @@ def _validated_host_addresses(
     if _is_metadata_hostname(ascii_host):
         _deny("metadata_hostname")
 
-    if _is_local_hostname(ascii_host):
-        if not allow_private_networks:
-            _deny("private_hostname")
-        if not resolve_allowed_local_hostnames:
-            return []
+    if _is_local_hostname(ascii_host) and not allow_private_networks:
+        _deny("private_hostname")
+    if not resolve_hostnames:
+        return []
 
     addresses = _resolve_host_addresses(ascii_host, port=port, scheme=scheme)
     for address in addresses:
@@ -213,8 +206,8 @@ def _validated_host_addresses(
     return addresses
 
 
-def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False) -> str:
-    """Validate that a URL is safe for a server-side HTTP(S) request."""
+def _validate_server_fetch_url(url: str, *, allow_private_networks: bool, resolve_hostnames: bool) -> str:
+    """Validate a server-fetch URL, optionally resolving hostnames immediately."""
     normalized_url = url.strip()
     parsed = urlsplit(normalized_url)
     scheme = parsed.scheme.lower()
@@ -230,9 +223,18 @@ def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False)
         port=_parse_port(parsed),
         scheme=scheme,
         allow_private_networks=allow_private_networks,
-        resolve_allowed_local_hostnames=False,
+        resolve_hostnames=resolve_hostnames,
     )
     return normalized_url
+
+
+def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False) -> str:
+    """Validate that a URL is safe for a server-side HTTP(S) request."""
+    return _validate_server_fetch_url(
+        url,
+        allow_private_networks=allow_private_networks,
+        resolve_hostnames=True,
+    )
 
 
 def validate_server_fetch_redirect_url(
@@ -252,14 +254,14 @@ def _validated_connect_addresses(
     *,
     port: int,
     allow_private_networks: bool,
-) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+) -> list[_IPAddress]:
     """Resolve and validate the addresses used for an actual TCP connection."""
     return _validated_host_addresses(
         host,
         port=port,
         scheme="http",
         allow_private_networks=allow_private_networks,
-        resolve_allowed_local_hostnames=True,
+        resolve_hostnames=True,
     )
 
 
@@ -340,8 +342,8 @@ class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 def _connect_validated_sync(
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
-    connect: Callable[[ipaddress.IPv4Address | ipaddress.IPv6Address], httpcore.NetworkStream],
+    addresses: list[_IPAddress],
+    connect: Callable[[_IPAddress], httpcore.NetworkStream],
 ) -> httpcore.NetworkStream:
     last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
     for address in addresses:
@@ -355,8 +357,8 @@ def _connect_validated_sync(
 
 
 async def _connect_validated_async(
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
-    connect: Callable[[ipaddress.IPv4Address | ipaddress.IPv6Address], Awaitable[httpcore.AsyncNetworkStream]],
+    addresses: list[_IPAddress],
+    connect: Callable[[_IPAddress], Awaitable[httpcore.AsyncNetworkStream]],
 ) -> httpcore.AsyncNetworkStream:
     last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
     for address in addresses:
@@ -380,7 +382,11 @@ class ServerFetchHTTPTransport(httpx.HTTPTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         """Validate each request before HTTPX sends it."""
-        validate_server_fetch_url(str(request.url), allow_private_networks=self._allow_private_networks)
+        _validate_server_fetch_url(
+            str(request.url),
+            allow_private_networks=self._allow_private_networks,
+            resolve_hostnames=False,
+        )
         return super().handle_request(request)
 
     def close(self) -> None:
@@ -399,7 +405,11 @@ class ServerFetchAsyncHTTPTransport(httpx.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Validate each async request before HTTPX sends it."""
-        validate_server_fetch_url(str(request.url), allow_private_networks=self._allow_private_networks)
+        _validate_server_fetch_url(
+            str(request.url),
+            allow_private_networks=self._allow_private_networks,
+            resolve_hostnames=False,
+        )
         return await super().handle_async_request(request)
 
     async def aclose(self) -> None:
