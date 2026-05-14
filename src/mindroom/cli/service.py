@@ -10,8 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 if TYPE_CHECKING:
-    from mindroom.services.config import ServiceActionResult
-    from mindroom.services.config import ServiceManager
+    from mindroom.services.config import ServiceActionResult, ServiceManager
 
 _console = Console()
 _err_console = Console(stderr=True)
