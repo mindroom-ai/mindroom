@@ -404,10 +404,7 @@ async def _build_file_content(
     return mxc_uri, file_info, modified_content
 
 
-def _sidecar_upload_is_usable(mxc_uri: str | None, file_info: dict[str, Any] | None) -> bool:
-    if not mxc_uri or file_info is None:
-        return False
-
+def _sidecar_upload_has_common_metadata(file_info: dict[str, Any]) -> bool:
     size = file_info.get("size")
     mimetype = file_info.get("mimetype")
     return (
@@ -417,6 +414,39 @@ def _sidecar_upload_is_usable(mxc_uri: str | None, file_info: dict[str, Any] | N
         and isinstance(mimetype, str)
         and mimetype != ""
     )
+
+
+def _sidecar_upload_has_encrypted_metadata(mxc_uri: str, file_info: dict[str, Any]) -> bool:
+    file_url = file_info.get("url")
+    key = file_info.get("key")
+    iv = file_info.get("iv")
+    hashes = file_info.get("hashes")
+    sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
+    version = file_info.get("v")
+    return (
+        file_url == mxc_uri
+        and isinstance(key, dict)
+        and isinstance(iv, str)
+        and iv != ""
+        and isinstance(sha256, str)
+        and sha256 != ""
+        and version == "v2"
+    )
+
+
+def _sidecar_upload_is_usable(
+    mxc_uri: str | None,
+    file_info: dict[str, Any] | None,
+    *,
+    room_encrypted: bool,
+) -> bool:
+    if not mxc_uri or file_info is None:
+        return False
+
+    if not _sidecar_upload_has_common_metadata(file_info):
+        return False
+
+    return not room_encrypted or _sidecar_upload_has_encrypted_metadata(mxc_uri, file_info)
 
 
 def _build_text_fallback_content(
@@ -480,6 +510,7 @@ async def prepare_large_message(
     if current_size <= size_limit:
         return content
 
+    room_encrypted = _room_is_encrypted(client, room_id)
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
     if is_edit and _is_nonterminal_stream_content(source_content):
@@ -489,11 +520,22 @@ async def prepare_large_message(
             original_size_bytes=current_size,
         )
         mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
+        if not _sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+            logger.warning(
+                "large_message_sidecar_unavailable_using_inline_preview",
+                room_id=room_id,
+                original_size_bytes=current_size,
+                is_edit=True,
+                has_mxc_uri=bool(mxc_uri),
+                has_file_info=bool(file_info),
+            )
+            mxc_uri = None
+            file_info = None
         modified_content = _build_nonterminal_streaming_edit_preview(
             content,
             source_content,
             preview_text,
-            room_encrypted=_room_is_encrypted(client, room_id),
+            room_encrypted=room_encrypted,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
@@ -525,11 +567,11 @@ async def prepare_large_message(
         size_limit,
     )
 
-    if _sidecar_upload_is_usable(mxc_uri, file_info):
+    if _sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
-            room_encrypted=_room_is_encrypted(client, room_id),
+            room_encrypted=room_encrypted,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,

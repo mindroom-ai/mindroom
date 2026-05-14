@@ -319,6 +319,122 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
 
 
 @pytest.mark.asyncio
+async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted sidecars need encrypted file metadata, not just size and mimetype."""
+
+    async def incomplete_encrypted_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        return "mxc://server/incomplete-encrypted-metadata", {
+            "size": 123,
+            "mimetype": "application/json",
+        }
+
+    room = MagicMock()
+    room.encrypted = True
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    client.rooms = {"!room:server": room}
+    monkeypatch.setattr(
+        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        incomplete_encrypted_file_metadata,
+    )
+    content = _large_text_content("encrypted missing metadata ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "encrypted missing metadata ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted sidecars with complete file metadata should keep the m.file preview."""
+    mxc_uri = "mxc://server/encrypted-sidecar"
+    file_info = {
+        "url": mxc_uri,
+        "key": {"kty": "oct", "k": "secret"},
+        "iv": "iv-value",
+        "hashes": {"sha256": "sha256-value"},
+        "v": "v2",
+        "size": 123,
+        "mimetype": "application/json",
+    }
+
+    async def encrypted_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        return mxc_uri, file_info
+
+    room = MagicMock()
+    room.encrypted = True
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    client.rooms = {"!room:server": room}
+    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", encrypted_file_metadata)
+    content = _large_text_content("encrypted sidecar ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result["msgtype"] == "m.file"
+    assert result["file"] == file_info
+    assert "url" not in result
+    assert result["io.mindroom.long_text"]["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming edit previews should not advertise unusable encrypted sidecars."""
+
+    async def incomplete_encrypted_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        return "mxc://server/incomplete-streaming-sidecar", {
+            "size": 123,
+            "mimetype": "application/json",
+        }
+
+    room = MagicMock()
+    room.encrypted = True
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    client.rooms = {"!room:server": room}
+    monkeypatch.setattr(
+        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        incomplete_encrypted_file_metadata,
+    )
+    text = "streaming encrypted fallback " + ("z" * 60000)
+    edit_content = {
+        "body": "* " + text,
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    inner = result["m.new_content"]
+    assert inner["msgtype"] == "m.text"
+    assert "file" not in inner
+    assert "url" not in inner
+    assert "io.mindroom.long_text" not in inner
+    assert "[Streaming preview truncated]" in inner["body"]
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
 async def test_prepare_edit_message_upload_failure_falls_back_to_text() -> None:
     """Edit fallback should stay textual and fit inside the Matrix hard limit."""
     client = _UploadClient(RuntimeError("upload failed"))
