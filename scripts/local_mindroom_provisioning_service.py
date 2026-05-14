@@ -33,7 +33,7 @@ from urllib.parse import quote
 
 import httpx
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -52,6 +52,8 @@ RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
 RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAMESPACE_LENGTH = 8
+MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
+PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
 @dataclass(slots=True)
@@ -115,6 +117,7 @@ class PairStartResponse(BaseModel):
     """Response for starting pairing."""
 
     pair_code: str
+    pair_session_id: str
     expires_at: datetime
     poll_interval_seconds: int
 
@@ -448,6 +451,30 @@ def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> Pai
     return state.pair_sessions.get(session_id)
 
 
+def _find_pair_status_session_unlocked(
+    state: ProvisioningState,
+    *,
+    pair_session_id: str | None,
+    pair_code: str | None,
+) -> PairSession | None:
+    session_id = pair_session_id.strip() if pair_session_id else ""
+    if session_id:
+        return state.pair_sessions.get(session_id)
+    if pair_code and pair_code.strip():
+        return _find_pair_session_unlocked(state, pair_code)
+    raise HTTPException(status_code=400, detail="Missing pair session id")
+
+
+def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> bool:
+    """Return whether username matches mindroom_<entity>_<namespace>."""
+    suffix = f"_{namespace}"
+    return (
+        username.startswith(MANAGED_AGENT_USERNAME_PREFIX)
+        and username.endswith(suffix)
+        and len(username) > len(MANAGED_AGENT_USERNAME_PREFIX) + len(suffix)
+    )
+
+
 def _expire_if_needed(session: PairSession, now: datetime) -> None:
     if session.status == "pending" and session.expires_at <= now:
         session.status = "expired"
@@ -662,6 +689,7 @@ async def start_pair(
 
     return PairStartResponse(
         pair_code=pair_code,
+        pair_session_id=session_id,
         expires_at=expires_at,
         poll_interval_seconds=config.pair_poll_interval_seconds,
     )
@@ -669,17 +697,25 @@ async def start_pair(
 
 @router.get("/v1/local-mindroom/pair/status", response_model=PairStatusResponse)
 async def pair_status(
-    pair_code: str,
     user_id: Annotated[str, Depends(_verify_browser_user)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+    pair_code: Annotated[str | None, Query()] = None,
+    x_local_mindroom_pair_session_id: Annotated[
+        str | None,
+        Header(alias=PAIR_STATUS_SESSION_HEADER),
+    ] = None,
 ) -> PairStatusResponse:
     """Poll the status of a previously issued pair code."""
     now = _now_utc()
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:status:{user_id}", limit=60, window_seconds=60)
-        session = _find_pair_session_unlocked(state, pair_code)
+        session = _find_pair_status_session_unlocked(
+            state,
+            pair_session_id=x_local_mindroom_pair_session_id,
+            pair_code=pair_code,
+        )
         if not session or session.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Pair code not found")
+            raise HTTPException(status_code=404, detail="Pair session not found")
 
         _expire_if_needed(session, now)
         if session.status == "connected" and session.connection_id:
@@ -797,6 +833,11 @@ async def register_agent(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
+        if not _is_managed_agent_username_for_namespace(payload.username, connection.namespace):
+            raise HTTPException(
+                status_code=403,
+                detail="Requested username is outside this local connection namespace",
+            )
         connection.last_seen_at = now
         _persist_state_unlocked(state, config.state_path)
 
@@ -822,7 +863,7 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
         allow_origins=service_config.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-Matrix-Access-Token"],
+        allow_headers=["Authorization", "Content-Type", "X-Matrix-Access-Token", PAIR_STATUS_SESSION_HEADER],
     )
     app.include_router(router)
     return app

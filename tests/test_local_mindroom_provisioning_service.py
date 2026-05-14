@@ -68,12 +68,16 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             headers={"Authorization": "Bearer token-alice"},
         )
         assert start.status_code == 200
-        pair_code = start.json()["pair_code"]
+        start_payload = start.json()
+        pair_code = start_payload["pair_code"]
+        pair_session_id = start_payload["pair_session_id"]
 
         pending = client.get(
             "/v1/local-mindroom/pair/status",
-            params={"pair_code": pair_code},
-            headers={"Authorization": "Bearer token-alice"},
+            headers={
+                "Authorization": "Bearer token-alice",
+                "X-Local-MindRoom-Pair-Session-Id": pair_session_id,
+            },
         )
         assert pending.status_code == 200
         assert pending.json()["status"] == "pending"
@@ -94,11 +98,14 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         assert isinstance(payload["namespace"], str)
         assert len(payload["namespace"]) == 8
         assert payload["namespace"] == payload["connection"]["namespace"]
+        agent_username = f"mindroom_code_{payload['namespace']}"
 
         connected = client.get(
             "/v1/local-mindroom/pair/status",
-            params={"pair_code": pair_code},
-            headers={"Authorization": "Bearer token-alice"},
+            headers={
+                "Authorization": "Bearer token-alice",
+                "X-Local-MindRoom-Pair-Session-Id": pair_session_id,
+            },
         )
         assert connected.status_code == 200
         assert connected.json()["status"] == "connected"
@@ -107,7 +114,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             "/v1/local-mindroom/register-agent",
             json={
                 "homeserver": "https://mindroom.chat",
-                "username": "mindroom_code",
+                "username": agent_username,
                 "password": "agent-pass-123",
                 "display_name": "CodeAgent",
             },
@@ -118,7 +125,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         )
         assert register.status_code == 200
         assert register.json()["status"] == "created"
-        assert register.json()["user_id"] == "@mindroom_code:mindroom.chat"
+        assert register.json()["user_id"] == f"@{agent_username}:mindroom.chat"
 
         revoke = client.delete(
             f"/v1/local-mindroom/connections/{client_id}",
@@ -131,7 +138,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             "/v1/local-mindroom/register-agent",
             json={
                 "homeserver": "https://mindroom.chat",
-                "username": "mindroom_other",
+                "username": f"mindroom_other_{payload['namespace']}",
                 "password": "agent-pass-123",
                 "display_name": "OtherAgent",
             },
@@ -141,6 +148,113 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             },
         )
         assert register_after_revoke.status_code == 403
+
+
+def test_pair_status_accepts_session_header_without_pair_code_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pair status polling should not require putting the pair code in the URL."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        start = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert start.status_code == 200
+        pair_session_id = start.json()["pair_session_id"]
+
+        pending = client.get(
+            "/v1/local-mindroom/pair/status",
+            headers={
+                "Authorization": "Bearer token-alice",
+                "X-Local-MindRoom-Pair-Session-Id": pair_session_id,
+            },
+        )
+
+        assert pending.status_code == 200
+        assert pending.json()["status"] == "pending"
+
+
+def test_pair_status_still_accepts_pair_code_query_for_legacy_clients(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy clients may keep polling with pair_code while they migrate."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        start = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert start.status_code == 200
+
+        pending = client.get(
+            "/v1/local-mindroom/pair/status",
+            params={"pair_code": start.json()["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+        assert pending.status_code == 200
+        assert pending.json()["status"] == "pending"
+
+
+def test_register_agent_rejects_username_outside_connection_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local client must not register Matrix users outside its assigned namespace."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    register_calls: list[str] = []
+
+    async def _fake_register(
+        config: provisioning.ServiceConfig,
+        payload: provisioning.RegisterAgentRequest,
+    ) -> provisioning.RegisterAgentResponse:
+        del config
+        register_calls.append(payload.username)
+        return provisioning.RegisterAgentResponse(
+            status="created",
+            user_id=f"@{payload.username}:mindroom.chat",
+        )
+
+    monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
+
+    with TestClient(app) as client:
+        pair_code = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        ).json()["pair_code"]
+        complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={
+                "pair_code": pair_code,
+                "client_name": "alice-macbook",
+                "client_pubkey_or_fingerprint": "sha256:abc123",
+            },
+        ).json()
+
+        register = client.post(
+            "/v1/local-mindroom/register-agent",
+            json={
+                "homeserver": "https://mindroom.chat",
+                "username": "mindroom_code_wrongns",
+                "password": "agent-pass-123",
+                "display_name": "CodeAgent",
+            },
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+
+        assert register.status_code == 403
+        assert register_calls == []
 
 
 def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
