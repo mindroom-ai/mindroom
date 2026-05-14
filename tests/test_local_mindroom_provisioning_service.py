@@ -193,11 +193,11 @@ def test_pair_status_accepts_session_header_without_pair_code_query(
         assert pending.json()["status"] == "pending"
 
 
-def test_pair_status_still_accepts_pair_code_query_for_legacy_clients(
+def test_pair_status_rejects_pair_code_query_without_session_header(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy clients may keep polling with pair_code while they migrate."""
+    """Pair status polling should not accept the short pair code in the URL."""
     _patch_matrix_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
@@ -214,15 +214,15 @@ def test_pair_status_still_accepts_pair_code_query_for_legacy_clients(
             headers={"Authorization": "Bearer token-alice"},
         )
 
-        assert pending.status_code == 200
-        assert pending.json()["status"] == "pending"
+        assert pending.status_code == 400
+        assert pending.json()["detail"] == "Missing pair session id"
 
 
-def test_pair_status_rejects_missing_session_header_and_pair_code(
+def test_pair_status_rejects_missing_session_header(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pair status should require either the session header or legacy pair_code."""
+    """Pair status should require the opaque session header."""
     _patch_matrix_auth(monkeypatch)
     app = provisioning.create_app(_service_config(tmp_path / "state.json"))
 
@@ -233,7 +233,7 @@ def test_pair_status_rejects_missing_session_header_and_pair_code(
         )
 
         assert result.status_code == 400
-        assert result.json()["detail"] == "Missing pair session id or pair code"
+        assert result.json()["detail"] == "Missing pair session id"
 
 
 @pytest.mark.parametrize(

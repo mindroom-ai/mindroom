@@ -33,7 +33,7 @@ from urllib.parse import quote
 
 import httpx
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -451,21 +451,6 @@ def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> Pai
     return state.pair_sessions.get(session_id)
 
 
-def _find_pair_status_session_unlocked(
-    state: ProvisioningState,
-    *,
-    pair_session_id: str | None,
-    pair_code: str | None,
-) -> PairSession | None:
-    """Resolve pair status by session header, or legacy pair code when no header is sent."""
-    session_id = pair_session_id.strip() if pair_session_id else ""
-    if session_id:
-        return state.pair_sessions.get(session_id)
-    if pair_code and pair_code.strip():
-        return _find_pair_session_unlocked(state, pair_code)
-    raise HTTPException(status_code=400, detail="Missing pair session id or pair code")
-
-
 def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> bool:
     """Return whether username matches mindroom_<entity>_<namespace>."""
     suffix = f"_{namespace}"
@@ -700,21 +685,19 @@ async def start_pair(
 async def pair_status(
     user_id: Annotated[str, Depends(_verify_browser_user)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
-    pair_code: Annotated[str | None, Query()] = None,
     x_local_mindroom_pair_session_id: Annotated[
         str | None,
         Header(alias=PAIR_STATUS_SESSION_HEADER),
     ] = None,
 ) -> PairStatusResponse:
-    """Poll a pairing session by session ID header or legacy pair code."""
+    """Poll a pairing session by opaque session ID header."""
     now = _now_utc()
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:status:{user_id}", limit=60, window_seconds=60)
-        session = _find_pair_status_session_unlocked(
-            state,
-            pair_session_id=x_local_mindroom_pair_session_id,
-            pair_code=pair_code,
-        )
+        session_id = x_local_mindroom_pair_session_id.strip() if x_local_mindroom_pair_session_id else ""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Missing pair session id")
+        session = state.pair_sessions.get(session_id)
         if not session or session.user_id != user_id:
             raise HTTPException(status_code=404, detail="Pair session not found")
 
