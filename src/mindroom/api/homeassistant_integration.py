@@ -29,19 +29,14 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.api.integrations import get_dashboard_url
-from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
+from mindroom.server_fetch_url import ServerFetchUrlError
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
 _SCOPES: list[str] = []
-_PRIVATE_URL_OPT_IN_DETAIL = (
-    "Private Home Assistant URLs require explicit opt-in. "
-    "Enable private URL access only for trusted self-hosted instances."
-)
-_INVALID_URL_DETAIL = "Home Assistant instance URL is not allowed for server-side fetching."
-_PRIVATE_URL_REASONS = frozenset({"private_address", "private_hostname"})
 
 
 class HomeAssistantStatus(BaseModel):
@@ -99,32 +94,25 @@ def _private_url_allowed(config: dict[str, Any]) -> bool:
     return config.get("allow_private_url") is True
 
 
-def _homeassistant_url_error_detail(error: ServerFetchUrlError, *, allow_private_url: bool) -> str:
-    """Return a user-facing Home Assistant URL validation error."""
-    if not allow_private_url and error.reason in _PRIVATE_URL_REASONS:
-        return _PRIVATE_URL_OPT_IN_DETAIL
-    return _INVALID_URL_DETAIL
-
-
 def _validate_homeassistant_instance_url(instance_url: str, *, allow_private_url: bool) -> str:
     """Validate a Home Assistant instance URL before server-side fetches."""
     try:
-        return validate_server_fetch_url(instance_url, allow_private_networks=allow_private_url)
+        return validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
     except ServerFetchUrlError as e:
         raise HTTPException(
             status_code=400,
-            detail=_homeassistant_url_error_detail(e, allow_private_url=allow_private_url),
+            detail=homeassistant_url_error_detail(e, allow_private_url=allow_private_url),
         ) from e
 
 
 async def _test_connection(instance_url: str, token: str, *, allow_private_url: bool = False) -> dict[str, Any]:
     """Test connection to Home Assistant."""
-    _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
     async with httpx.AsyncClient() as client:
         try:
             # Test API connection
             response = await client.get(
-                urljoin(instance_url, "/api/"),
+                urljoin(fetch_url, "/api/"),
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
@@ -141,7 +129,7 @@ async def _test_connection(instance_url: str, token: str, *, allow_private_url: 
 
             # Get config for more details
             config_response = await client.get(
-                urljoin(instance_url, "/api/config"),
+                urljoin(fetch_url, "/api/config"),
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
@@ -150,7 +138,7 @@ async def _test_connection(instance_url: str, token: str, *, allow_private_url: 
 
             # Get states to count entities
             states_response = await client.get(
-                urljoin(instance_url, "/api/states"),
+                urljoin(fetch_url, "/api/states"),
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
@@ -250,7 +238,7 @@ async def connect_oauth(
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
     redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
     state = issue_pending_oauth_state(
         request,
@@ -271,7 +259,7 @@ async def connect_oauth(
     }
 
     # Build query string
-    auth_url = f"{instance_url}/auth/authorize?{urlencode(auth_params)}"
+    auth_url = f"{fetch_url}/auth/authorize?{urlencode(auth_params)}"
 
     return HomeAssistantAuthUrl(auth_url=auth_url)
 
@@ -357,13 +345,13 @@ async def callback(request: Request) -> RedirectResponse:
     if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")
     instance_url = _normalize_instance_url(instance_url)
-    _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
 
     try:
         # Exchange code for access token
         async with httpx.AsyncClient() as client:
             token_response = await client.post(
-                urljoin(instance_url, "/auth/token"),
+                urljoin(fetch_url, "/auth/token"),
                 data={
                     "grant_type": "authorization_code",
                     "code": code,
@@ -431,12 +419,12 @@ async def get_entities(
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
     instance_url = _normalize_instance_url(instance_url)
-    _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                urljoin(instance_url, "/api/states"),
+                urljoin(fetch_url, "/api/states"),
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
@@ -489,7 +477,7 @@ async def call_service(
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
     instance_url = _normalize_instance_url(instance_url)
-    _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
+    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
 
     # Build service data
     service_data = data or {}
@@ -499,7 +487,7 @@ async def call_service(
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                urljoin(instance_url, f"/api/services/{domain}/{service}"),
+                urljoin(fetch_url, f"/api/services/{domain}/{service}"),
                 headers={"Authorization": f"Bearer {token}"},
                 json=service_data,
                 timeout=10.0,

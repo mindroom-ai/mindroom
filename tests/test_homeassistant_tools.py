@@ -10,6 +10,8 @@ from httpx import Response
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
+from mindroom.homeassistant_url_validation import homeassistant_url_error_detail
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.conftest import TEST_PASSWORD
@@ -221,7 +223,10 @@ class TestHomeAssistantTools:
             result = await ha_tools._api_request("GET", "/api/states")
 
         assert result == {
-            "error": "Home Assistant URL is not allowed. Enable private URL access only for trusted self-hosted instances.",
+            "error": homeassistant_url_error_detail(
+                ServerFetchUrlError(reason="private_address"),
+                allow_private_url=False,
+            ),
         }
 
     @pytest.mark.asyncio
@@ -232,6 +237,40 @@ class TestHomeAssistantTools:
             "homeassistant",
             {
                 "instance_url": "http://127.0.0.1:8123",
+                "access_token": TEST_PASSWORD,
+                "allow_private_url": True,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock(spec=Response)
+            mock_response.status_code = 200
+            mock_response.text = '{"success": true}'
+            mock_response.json.return_value = {"success": True}
+            mock_client.request.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await ha_tools._api_request("GET", "/api/states")
+
+        assert result == {"success": True}
+        mock_client.request.assert_called_once_with(
+            method="GET",
+            url="http://127.0.0.1:8123/api/states",
+            headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
+            json=None,
+            timeout=10.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_api_request_uses_validated_instance_url(self, tmp_path: Path) -> None:
+        """The tool should request the normalized URL returned by server-side fetch validation."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": " http://127.0.0.1:8123 ",
                 "access_token": TEST_PASSWORD,
                 "allow_private_url": True,
             },

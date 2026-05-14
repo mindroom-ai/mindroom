@@ -12,7 +12,8 @@ import httpx
 from agno.tools import Toolkit
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
-from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     unsupported_shared_only_integration_message,
@@ -92,14 +93,14 @@ class HomeAssistantTools(Toolkit):
             return {"error": "Missing Home Assistant credentials"}
 
         try:
-            validate_server_fetch_url(
+            fetch_url = validate_homeassistant_instance_url(
                 instance_url,
-                allow_private_networks=config.get("allow_private_url") is True,
+                allow_private_url=config.get("allow_private_url") is True,
             )
             async with httpx.AsyncClient() as client:
                 response = await client.request(
                     method=method,
-                    url=urljoin(instance_url, endpoint),
+                    url=urljoin(fetch_url, endpoint),
                     headers={"Authorization": f"Bearer {token}"},
                     json=json_data,
                     timeout=10.0,
@@ -112,12 +113,9 @@ class HomeAssistantTools(Toolkit):
 
                 return response.json() if response.text else {"success": True}
 
-        except ServerFetchUrlError:
+        except ServerFetchUrlError as e:
             return {
-                "error": (
-                    "Home Assistant URL is not allowed. "
-                    "Enable private URL access only for trusted self-hosted instances."
-                ),
+                "error": homeassistant_url_error_detail(e, allow_private_url=config.get("allow_private_url") is True),
             }
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
             return {"error": "Connection timeout - check if Home Assistant is accessible"}

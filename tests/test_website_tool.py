@@ -11,7 +11,13 @@ import httpx
 import pytest
 from bs4 import BeautifulSoup
 
-from mindroom.custom_tools.website import WebsiteTools, _MindRoomWebsiteReader, _safe_url_for_log
+from mindroom.custom_tools.website import (
+    _MAX_REDIRECTS,
+    _TOO_MANY_REDIRECTS,
+    WebsiteTools,
+    _MindRoomWebsiteReader,
+    _safe_url_for_log,
+)
 from mindroom.tools.website import website_tools
 
 
@@ -160,6 +166,55 @@ def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyP
         _MindRoomWebsiteReader().read(start_url)
 
     assert requested_urls == [start_url]
+
+
+def test_website_reader_follows_allowed_redirect_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allowed redirect chains should be followed to their final response."""
+    start_url = "https://example.com/redirect"
+    intermediate_url = "https://example.com/intermediate"
+    final_url = "https://example.com/final"
+    requested_urls: list[str] = []
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        requested_urls.append(url)
+        assert timeout == 10
+        assert follow_redirects is False
+        request = httpx.Request("GET", url)
+        if url == start_url:
+            return httpx.Response(302, headers={"Location": intermediate_url}, request=request)
+        if url == intermediate_url:
+            return httpx.Response(301, headers={"Location": "/final"}, request=request)
+        assert url == final_url
+        return httpx.Response(200, text="ok", request=request)
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+
+    response, fetched_url = _MindRoomWebsiteReader()._get_validated_response(start_url)
+
+    assert requested_urls == [start_url, intermediate_url, final_url]
+    assert response.status_code == 200
+    assert response.text == "ok"
+    assert fetched_url == final_url
+
+
+def test_website_reader_respects_max_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect loops should stop at the website reader redirect limit."""
+    start_url = "https://example.com/redirect"
+    requested_urls: list[str] = []
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        requested_urls.append(url)
+        assert timeout == 10
+        assert follow_redirects is False
+        request = httpx.Request("GET", url)
+        return httpx.Response(302, headers={"Location": start_url}, request=request)
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+
+    with pytest.raises(httpx.TooManyRedirects, match=_TOO_MANY_REDIRECTS):
+        _MindRoomWebsiteReader()._get_validated_response(start_url)
+
+    assert len(requested_urls) == _MAX_REDIRECTS + 1
 
 
 def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.MonkeyPatch) -> None:
