@@ -408,7 +408,7 @@ async def _transcribe_audio(
         files = {"file": (filename, audio_data, upload_mime_type)}
         form_data = {"model": config.voice.stt.model}
 
-        async with httpx.AsyncClient(verify=False) as http_client:  # noqa: S501
+        async with httpx.AsyncClient() as http_client:
             response = await http_client.post(url, headers=headers, files=files, data=form_data)
             if response.status_code != 200:
                 logger.error(

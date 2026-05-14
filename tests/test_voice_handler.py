@@ -167,6 +167,77 @@ class TestVoiceHandler:
         assert filename == "audio.bin"
         assert mime_type == "audio/unknown"
 
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_uses_configured_stt_host_and_api_key_with_tls_verification(self) -> None:
+        """STT requests should keep TLS verification enabled while honoring configured credentials."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(
+                        api_key="configured-api-key",
+                        host="https://stt.example.test",
+                        model="whisper-1",
+                    ),
+                ),
+            ),
+        )
+        client_init_kwargs: list[dict[str, object]] = []
+        post_calls: list[dict[str, object]] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, str]:
+                return {"text": " transcribed text "}
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs: object) -> None:
+                client_init_kwargs.append(kwargs)
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> FakeResponse:
+                post_calls.append(
+                    {
+                        "url": url,
+                        "headers": headers,
+                        "files": files,
+                        "data": data,
+                    },
+                )
+                return FakeResponse()
+
+        with patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+                mime_type="audio/ogg",
+            )
+
+        assert transcription == "transcribed text"
+        assert client_init_kwargs == [{}]
+        assert post_calls == [
+            {
+                "url": "https://stt.example.test/v1/audio/transcriptions",
+                "headers": {"Authorization": "Bearer configured-api-key"},
+                "files": {"file": ("audio.ogg", b"audio-bytes", "audio/ogg")},
+                "data": {"model": "whisper-1"},
+            },
+        ]
+
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""
         config = _runtime_bound_config(
