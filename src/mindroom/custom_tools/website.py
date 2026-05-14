@@ -15,6 +15,12 @@ from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
+from mindroom.server_fetch_url import (
+    ServerFetchUrlError,
+    validate_server_fetch_redirect_url,
+    validate_server_fetch_url,
+)
+
 _PREFERRED_CONTENT_SELECTORS = (
     "main",
     "article",
@@ -47,6 +53,8 @@ _UNWANTED_SELECTORS = (
 _LOW_VALUE_NAME_PATTERN = re.compile(r"(?:^|[-_])(nav|navbar|menu|search|modal|header|footer|sidebar)(?:$|[-_])")
 _FAILED_CRAWL_CONTENT = "Failed to extract any content"
 _FAILED_STARTING_URL = "Failed to crawl starting URL"
+_TOO_MANY_REDIRECTS = "Too many redirects while crawling website"
+_MAX_REDIRECTS = 10
 
 
 def _normalize_text(text: str) -> str:
@@ -162,6 +170,62 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
         log_warning(f"HTTP status error while crawling {safe_current_url}: {error.response.status_code}")
 
+    def _get_validated_response(self, current_url: str) -> tuple[httpx.Response, str]:
+        """Fetch a URL while validating every redirect hop before following it."""
+        request_url = validate_server_fetch_url(current_url)
+        for _redirect_count in range(_MAX_REDIRECTS + 1):
+            response = (
+                httpx.get(request_url, timeout=self.timeout, proxy=self.proxy, follow_redirects=False)
+                if self.proxy
+                else httpx.get(request_url, timeout=self.timeout, follow_redirects=False)
+            )
+            if not response.is_redirect:
+                return response, request_url
+            request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))
+
+        request = httpx.Request("GET", current_url)
+        raise httpx.TooManyRedirects(_TOO_MANY_REDIRECTS, request=request)
+
+    def _record_current_url(
+        self,
+        *,
+        current_url: str,
+        current_depth: int,
+        starting_url: str,
+        crawler_result: dict[str, str],
+        crawl_host: str,
+    ) -> int:
+        """Fetch one crawl URL and return the number of content pages recorded."""
+        safe_current_url = _safe_url_for_log(current_url)
+        try:
+            log_debug(f"Crawling: {safe_current_url}")
+            response, fetched_url = self._get_validated_response(current_url)
+            response.raise_for_status()
+            return self._record_response_content(
+                response,
+                current_url=fetched_url,
+                current_depth=current_depth,
+                crawl_host=crawl_host,
+                crawler_result=crawler_result,
+            )
+        except ServerFetchUrlError:
+            log_warning(f"Rejected server-side fetch URL while crawling {_safe_url_for_log(current_url)}")
+            raise
+        except httpx.HTTPStatusError as e:
+            self._log_http_status_error(safe_current_url=safe_current_url, error=e)
+            if current_url == starting_url and not crawler_result and not (300 <= e.response.status_code < 400):
+                raise
+        except httpx.RequestError as e:
+            log_warning(f"Request error while crawling {safe_current_url}: {e.__class__.__name__}")
+            if current_url == starting_url and not crawler_result:
+                raise
+        except Exception as e:
+            log_warning(f"Failed to crawl {safe_current_url}: {e.__class__.__name__}")
+            if current_url == starting_url and not crawler_result:
+                raise httpx.RequestError(_FAILED_STARTING_URL, request=None) from e
+
+        return 0
+
     def _documents_from_crawl(
         self,
         crawler_result: dict[str, str],
@@ -204,17 +268,18 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
     def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
+        starting_url = validate_server_fetch_url(url)
         num_links = 0
         crawler_result: dict[str, str] = {}
-        crawl_host = _normalized_hostname(url)
+        crawl_host = _normalized_hostname(starting_url)
 
         self._visited = set()
-        self._urls_to_crawl = [(url, starting_depth)]
+        self._urls_to_crawl = [(starting_url, starting_depth)]
         while self._urls_to_crawl:
             current_url, current_depth = self._urls_to_crawl.pop(0)
             if self._should_skip_crawl_url(
                 current_url=current_url,
-                starting_url=url,
+                starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
                 crawl_host=crawl_host,
@@ -223,35 +288,13 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
             self._visited.add(current_url)
             self.delay()
-            safe_current_url = _safe_url_for_log(current_url)
-
-            try:
-                log_debug(f"Crawling: {safe_current_url}")
-                response = (
-                    httpx.get(current_url, timeout=self.timeout, proxy=self.proxy, follow_redirects=True)
-                    if self.proxy
-                    else httpx.get(current_url, timeout=self.timeout, follow_redirects=True)
-                )
-                response.raise_for_status()
-                num_links += self._record_response_content(
-                    response,
-                    current_url=current_url,
-                    current_depth=current_depth,
-                    crawl_host=crawl_host,
-                    crawler_result=crawler_result,
-                )
-            except httpx.HTTPStatusError as e:
-                self._log_http_status_error(safe_current_url=safe_current_url, error=e)
-                if current_url == url and not crawler_result and not (300 <= e.response.status_code < 400):
-                    raise
-            except httpx.RequestError as e:
-                log_warning(f"Request error while crawling {safe_current_url}: {e.__class__.__name__}")
-                if current_url == url and not crawler_result:
-                    raise
-            except Exception as e:
-                log_warning(f"Failed to crawl {safe_current_url}: {e.__class__.__name__}")
-                if current_url == url and not crawler_result:
-                    raise httpx.RequestError(_FAILED_STARTING_URL, request=None) from e
+            num_links += self._record_current_url(
+                current_url=current_url,
+                current_depth=current_depth,
+                starting_url=starting_url,
+                crawler_result=crawler_result,
+                crawl_host=crawl_host,
+            )
 
         if not crawler_result:
             raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)

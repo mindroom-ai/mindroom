@@ -24,6 +24,7 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
     test_creds = {
         "instance_url": "http://homeassistant.local:8123",
         "access_token": TEST_PASSWORD,
+        "allow_private_url": True,
     }
     manager.save_credentials("homeassistant", test_creds)
     return manager
@@ -104,6 +105,7 @@ class TestHomeAssistantTools:
             {
                 "instance_url": "http://homeassistant.local:8123",
                 "access_token": TEST_PASSWORD,
+                "allow_private_url": True,
                 "_source": "ui",
             },
         )
@@ -125,6 +127,7 @@ class TestHomeAssistantTools:
         assert tool._load_config() == {
             "instance_url": "http://homeassistant.local:8123",
             "access_token": TEST_PASSWORD,
+            "allow_private_url": True,
             "_source": "ui",
         }
 
@@ -158,6 +161,7 @@ class TestHomeAssistantTools:
         assert config is not None
         assert config["instance_url"] == "http://homeassistant.local:8123"
         assert config["access_token"] == TEST_PASSWORD
+        assert config["allow_private_url"] is True
 
         # A second lookup should return the same values.
         config2 = ha_tools_with_mocked_creds._load_config()
@@ -197,6 +201,62 @@ class TestHomeAssistantTools:
         result = await ha_tools._api_request("GET", "/api/states")
 
         assert result == {"error": "Missing Home Assistant credentials"}
+
+    @pytest.mark.asyncio
+    async def test_api_request_rejects_private_url_without_explicit_opt_in(self, tmp_path: Path) -> None:
+        """Stored Home Assistant URLs should not fetch internal targets unless explicitly allowed."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://127.0.0.1:8123",
+                "access_token": TEST_PASSWORD,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client_class.side_effect = AssertionError("private URL should be rejected before request")
+
+            result = await ha_tools._api_request("GET", "/api/states")
+
+        assert result == {
+            "error": "Home Assistant URL is not allowed. Enable private URL access only for trusted self-hosted instances.",
+        }
+
+    @pytest.mark.asyncio
+    async def test_api_request_allows_private_url_with_explicit_opt_in(self, tmp_path: Path) -> None:
+        """Self-hosted Home Assistant instances can opt into private URL access deliberately."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://127.0.0.1:8123",
+                "access_token": TEST_PASSWORD,
+                "allow_private_url": True,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock(spec=Response)
+            mock_response.status_code = 200
+            mock_response.text = '{"success": true}'
+            mock_response.json.return_value = {"success": True}
+            mock_client.request.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await ha_tools._api_request("GET", "/api/states")
+
+        assert result == {"success": True}
+        mock_client.request.assert_called_once_with(
+            method="GET",
+            url="http://127.0.0.1:8123/api/states",
+            headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
+            json=None,
+            timeout=10.0,
+        )
 
     @pytest.mark.asyncio
     async def test_api_request_success(self, ha_tools_with_mocked_creds: HomeAssistantTools) -> None:
@@ -266,7 +326,7 @@ class TestHomeAssistantTools:
 
             result = await ha_tools_with_mocked_creds._api_request("GET", "/api/invalid")
 
-            assert result == {"error": "API error: Not found"}
+            assert result == {"error": "Home Assistant API returned status 404"}
 
     @pytest.mark.asyncio
     async def test_api_request_network_error(

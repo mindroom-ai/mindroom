@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import json
+import socket
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import httpx
+import pytest
 from bs4 import BeautifulSoup
 
 from mindroom.custom_tools.website import WebsiteTools, _MindRoomWebsiteReader, _safe_url_for_log
 from mindroom.tools.website import website_tools
 
-if TYPE_CHECKING:
-    import pytest
+
+@pytest.fixture(autouse=True)
+def _public_dns_for_website_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep website reader tests focused on crawler behavior instead of real DNS."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
+        ],
+    )
 
 
 def test_website_reader_prefers_content_body_over_search_modal() -> None:
@@ -71,7 +80,7 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
 
     def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
         assert timeout == 10
-        assert follow_redirects is True
+        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
@@ -91,6 +100,68 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
     assert "Detailed reference material" in content_by_url[docs_url]
 
 
+def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent-callable website reads should not fetch private network URLs."""
+    requested_urls: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+        requested_urls.append(url)
+        msg = "private URL should be rejected before an HTTP request is made"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+
+    with pytest.raises(ValueError, match="URL is not allowed"):
+        _MindRoomWebsiteReader().read("http://127.0.0.1:8000/private")
+
+    assert requested_urls == []
+
+
+def test_website_reader_rejects_unsupported_schemes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent-callable website reads should only allow HTTP(S) URLs."""
+    requested_urls: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+        requested_urls.append(url)
+        msg = "unsupported URL schemes should be rejected before a request is made"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+
+    with pytest.raises(ValueError, match="URL is not allowed"):
+        _MindRoomWebsiteReader().read("file:///etc/passwd")
+
+    assert requested_urls == []
+
+
+def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirects to private network URLs should be blocked before following the hop."""
+    start_url = "https://example.com/redirect"
+    requested_urls: list[str] = []
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        requested_urls.append(url)
+        assert timeout == 10
+        assert follow_redirects is False
+        request = httpx.Request("GET", url)
+        if url == start_url:
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"}, request=request)
+        msg = "private redirect target should be rejected before fetching"
+        raise AssertionError(msg)
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    with pytest.raises(ValueError, match="URL is not allowed"):
+        _MindRoomWebsiteReader().read(start_url)
+
+    assert requested_urls == [start_url]
+
+
 def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same-domain checks should ignore URL ports when crawling."""
     start_url = "https://example.test:8443/docs"
@@ -108,7 +179,7 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
     def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
         assert url == start_url
         assert timeout == 10
-        assert follow_redirects is True
+        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 
@@ -170,7 +241,7 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
     def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
         requested_urls.append(url)
         assert timeout == 10
-        assert follow_redirects is True
+        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=pages[url].encode(), request=request)
 
@@ -223,7 +294,7 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
         assert url == full_url
         assert timeout == 10
-        assert follow_redirects is True
+        assert follow_redirects is False
         request = httpx.Request("GET", url)
         return httpx.Response(200, content=html.encode(), request=request)
 

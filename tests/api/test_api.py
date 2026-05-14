@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Annotated, Any, NoReturn, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from mindroom import constants, frontend_assets
-from mindroom.api import auth, config_lifecycle, frontend, main
+from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
@@ -1992,6 +1992,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
         json={
             "instance_url": "homeassistant.local:8123",
             "client_id": "client-id",
+            "allow_private_url": True,
         },
     )
 
@@ -2039,6 +2040,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
             json={
                 "instance_url": "homeassistant.local:8123",
                 "client_id": "client-id",
+                "allow_private_url": True,
             },
         )
         assert connect_response.status_code == 200
@@ -2067,9 +2069,87 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
             "access_token": "ha-access",
             "refresh_token": "ha-refresh",
             "expires_in": 3600,
+            "allow_private_url": True,
             "_source": "ui",
         },
     )
+
+
+def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
+    """Home Assistant token setup should not probe private URLs unless the user opts in."""
+    config = _config_with_worker_scope("shared")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+
+    with patch(
+        "mindroom.api.homeassistant_integration._test_connection",
+        new_callable=AsyncMock,
+    ) as test_connection:
+        response = api_key_client.post(
+            "/api/homeassistant/connect/token?agent_name=general",
+            json={
+                "instance_url": "http://127.0.0.1:8123",
+                "long_lived_token": "ha-token",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "Private Home Assistant URLs require explicit opt-in" in response.json()["detail"]
+    test_connection.assert_not_awaited()
+
+
+def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_client: TestClient) -> None:
+    """Home Assistant token setup can deliberately allow a self-hosted private URL."""
+    config = _config_with_worker_scope("shared")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+
+    with patch(
+        "mindroom.api.homeassistant_integration._test_connection",
+        new_callable=AsyncMock,
+        return_value={"message": "API running"},
+    ) as test_connection:
+        response = api_key_client.post(
+            "/api/homeassistant/connect/token?agent_name=general",
+            json={
+                "instance_url": "http://127.0.0.1:8123",
+                "long_lived_token": "ha-token",
+                "allow_private_url": True,
+            },
+        )
+
+    assert response.status_code == 200
+    test_connection.assert_awaited_once_with("http://127.0.0.1:8123", "ha-token", allow_private_url=True)
+
+
+@pytest.mark.asyncio
+async def test_homeassistant_connection_failure_does_not_return_response_body() -> None:
+    """Failed Home Assistant probes should not expose response bodies in API errors."""
+    provider_body = "provider response body contents"
+    async_client = MagicMock()
+    api_response = MagicMock()
+    api_response.status_code = 500
+    api_response.text = provider_body
+    async_client.__aenter__.return_value.get.return_value = api_response
+
+    with (
+        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await homeassistant_integration._test_connection("http://93.184.216.34:8123", "ha-token")
+
+    assert exc_info.value.status_code == 500
+    assert provider_body not in str(exc_info.value.detail)
 
 
 def test_homeassistant_connect_rejects_draft_execution_scope_override(

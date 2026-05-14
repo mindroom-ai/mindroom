@@ -29,12 +29,19 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.api.integrations import get_dashboard_url
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
 _SCOPES: list[str] = []
+_PRIVATE_URL_OPT_IN_DETAIL = (
+    "Private Home Assistant URLs require explicit opt-in. "
+    "Enable private URL access only for trusted self-hosted instances."
+)
+_INVALID_URL_DETAIL = "Home Assistant instance URL is not allowed for server-side fetching."
+_PRIVATE_URL_REASONS = frozenset({"private_address", "private_hostname"})
 
 
 class HomeAssistantStatus(BaseModel):
@@ -61,6 +68,7 @@ class HomeAssistantConfig(BaseModel):
     instance_url: str
     client_id: str | None = None
     long_lived_token: str | None = None
+    allow_private_url: bool = False
 
 
 def _normalize_instance_url(instance_url: str) -> str:
@@ -86,8 +94,32 @@ def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> No
     target.target_manager.save_credentials("homeassistant", config_to_save)
 
 
-async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
+def _private_url_allowed(config: dict[str, Any]) -> bool:
+    """Return whether stored Home Assistant credentials explicitly allow private URLs."""
+    return config.get("allow_private_url") is True
+
+
+def _homeassistant_url_error_detail(error: ServerFetchUrlError, *, allow_private_url: bool) -> str:
+    """Return a user-facing Home Assistant URL validation error."""
+    if not allow_private_url and error.reason in _PRIVATE_URL_REASONS:
+        return _PRIVATE_URL_OPT_IN_DETAIL
+    return _INVALID_URL_DETAIL
+
+
+def _validate_homeassistant_instance_url(instance_url: str, *, allow_private_url: bool) -> str:
+    """Validate a Home Assistant instance URL before server-side fetches."""
+    try:
+        return validate_server_fetch_url(instance_url, allow_private_networks=allow_private_url)
+    except ServerFetchUrlError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=_homeassistant_url_error_detail(e, allow_private_url=allow_private_url),
+        ) from e
+
+
+async def _test_connection(instance_url: str, token: str, *, allow_private_url: bool = False) -> dict[str, Any]:
     """Test connection to Home Assistant."""
+    _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
     async with httpx.AsyncClient() as client:
         try:
             # Test API connection
@@ -102,7 +134,7 @@ async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to connect to Home Assistant: {response.text}",
+                    detail=f"Failed to connect to Home Assistant: HTTP {response.status_code}",
                 )
 
             api_info = response.json()
@@ -169,7 +201,7 @@ async def get_status(request: Request, agent_name: str | None = None) -> HomeAss
             )
 
         instance_url = _normalize_instance_url(instance_url)
-        info = await _test_connection(instance_url, token)
+        info = await _test_connection(instance_url, token, allow_private_url=_private_url_allowed(config))
 
         return HomeAssistantStatus(
             connected=True,
@@ -218,6 +250,7 @@ async def connect_oauth(
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
+    _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
     redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
     state = issue_pending_oauth_state(
         request,
@@ -226,6 +259,7 @@ async def connect_oauth(
         payload={
             "instance_url": instance_url,
             "client_id": config.client_id,
+            "allow_private_url": "true" if config.allow_private_url else "false",
         },
     )
 
@@ -268,10 +302,11 @@ async def connect_token(
         agent_name=agent_name,
         service_names=("homeassistant",),
     )
+    _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
 
     # Test the connection
     try:
-        await _test_connection(instance_url, config.long_lived_token)
+        await _test_connection(instance_url, config.long_lived_token, allow_private_url=config.allow_private_url)
     except HTTPException:
         raise
     except Exception as e:
@@ -285,6 +320,7 @@ async def connect_token(
         {
             "instance_url": instance_url,
             "long_lived_token": config.long_lived_token,
+            "allow_private_url": config.allow_private_url,
         },
     )
 
@@ -316,10 +352,12 @@ async def callback(request: Request) -> RedirectResponse:
 
     instance_url = (pending.payload or {}).get("instance_url")
     client_id = (pending.payload or {}).get("client_id")
+    allow_private_url = (pending.payload or {}).get("allow_private_url") == "true"
 
     if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")
     instance_url = _normalize_instance_url(instance_url)
+    _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
 
     try:
         # Exchange code for access token
@@ -337,7 +375,7 @@ async def callback(request: Request) -> RedirectResponse:
             if token_response.status_code != 200:
                 raise HTTPException(
                     status_code=token_response.status_code,
-                    detail=f"Failed to get access token: {token_response.text}",
+                    detail=f"Failed to get access token: HTTP {token_response.status_code}",
                 )
 
             token_data = token_response.json()
@@ -351,6 +389,7 @@ async def callback(request: Request) -> RedirectResponse:
                     "access_token": token_data.get("access_token"),
                     "refresh_token": token_data.get("refresh_token"),
                     "expires_in": token_data.get("expires_in"),
+                    "allow_private_url": allow_private_url,
                 },
             )
 
@@ -392,6 +431,7 @@ async def get_entities(
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
     instance_url = _normalize_instance_url(instance_url)
+    _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
 
     try:
         async with httpx.AsyncClient() as client:
@@ -404,7 +444,7 @@ async def get_entities(
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to get entities: {response.text}",
+                    detail=f"Failed to get entities: HTTP {response.status_code}",
                 )
 
             entities = response.json()
@@ -449,6 +489,7 @@ async def call_service(
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
     instance_url = _normalize_instance_url(instance_url)
+    _validate_homeassistant_instance_url(instance_url, allow_private_url=_private_url_allowed(config))
 
     # Build service data
     service_data = data or {}
@@ -467,7 +508,7 @@ async def call_service(
             if response.status_code not in (200, 201):
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to call service: {response.text}",
+                    detail=f"Failed to call service: HTTP {response.status_code}",
                 )
 
             return {"success": True, "message": f"Service {domain}.{service} called successfully"}

@@ -307,6 +307,13 @@ def _openclaw_compat_tools() -> type[Toolkit]:
             placeholder="Bearer token",
             description="Long-lived access token from Home Assistant",
         ),
+        ConfigField(
+            name="HOMEASSISTANT_ALLOW_PRIVATE_URL",
+            label="Allow Private Home Assistant URL",
+            type="boolean",
+            required=False,
+            description="Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
+        ),
     ],
     docs_url="https://www.home-assistant.io/integrations/",
     function_names=(

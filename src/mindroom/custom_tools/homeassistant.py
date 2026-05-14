@@ -12,6 +12,7 @@ import httpx
 from agno.tools import Toolkit
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     unsupported_shared_only_integration_message,
@@ -91,6 +92,10 @@ class HomeAssistantTools(Toolkit):
             return {"error": "Missing Home Assistant credentials"}
 
         try:
+            validate_server_fetch_url(
+                instance_url,
+                allow_private_networks=config.get("allow_private_url") is True,
+            )
             async with httpx.AsyncClient() as client:
                 response = await client.request(
                     method=method,
@@ -103,10 +108,17 @@ class HomeAssistantTools(Toolkit):
                 if response.status_code == 401:
                     return {"error": "Invalid authentication token. Please reconnect Home Assistant."}
                 if response.status_code not in (200, 201):
-                    return {"error": f"API error: {response.text}"}
+                    return {"error": f"Home Assistant API returned status {response.status_code}"}
 
                 return response.json() if response.text else {"success": True}
 
+        except ServerFetchUrlError:
+            return {
+                "error": (
+                    "Home Assistant URL is not allowed. "
+                    "Enable private URL access only for trusted self-hosted instances."
+                ),
+            }
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
             return {"error": "Connection timeout - check if Home Assistant is accessible"}
         except httpx.RequestError as e:
