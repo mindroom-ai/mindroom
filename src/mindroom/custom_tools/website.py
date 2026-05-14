@@ -200,6 +200,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
         try:
             log_debug(f"Crawling: {safe_current_url}")
             response, fetched_url = self._get_validated_response(current_url)
+            if not _url_matches_crawl_host(fetched_url, crawl_host):
+                log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(fetched_url)}")
+                return 0
             response.raise_for_status()
             return self._record_response_content(
                 response,

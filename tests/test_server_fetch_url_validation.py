@@ -92,3 +92,18 @@ def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enable
     """The local-network opt-in should not open cloud metadata endpoints."""
     with pytest.raises(ServerFetchUrlError):
         validate_server_fetch_url("http://169.254.169.254/latest/meta-data/", allow_private_networks=True)
+
+
+def test_validate_server_fetch_url_blocks_metadata_dns_when_private_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local-network opt-in should still reject hostnames resolving to metadata endpoints."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("169.254.169.254"),
+    )
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        validate_server_fetch_url("https://metadata-by-dns.example/", allow_private_networks=True)
+
+    assert exc_info.value.reason == "metadata_address"

@@ -217,6 +217,63 @@ def test_website_reader_respects_max_redirects(monkeypatch: pytest.MonkeyPatch) 
     assert len(requested_urls) == _MAX_REDIRECTS + 1
 
 
+def test_website_reader_does_not_record_cross_host_redirect_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-host crawl links that redirect to another host should not be recorded."""
+    start_url = "https://example.com/"
+    redirect_url = "https://example.com/redirect"
+    offsite_url = "https://other.example/final"
+    requested_urls: list[str] = []
+    pages = {
+        start_url: """
+        <html>
+          <body>
+            <nav><a href="/redirect">Redirect</a></nav>
+            <main>
+              <h1>Start</h1>
+              <p>Reference material with enough text to keep the starting page.</p>
+            </main>
+          </body>
+        </html>
+        """,
+        offsite_url: """
+        <html>
+          <body>
+            <main>
+              <h1>Offsite</h1>
+              <p>Cross-host redirected material should not be recorded.</p>
+            </main>
+          </body>
+        </html>
+        """,
+    }
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        requested_urls.append(url)
+        assert timeout == 10
+        assert follow_redirects is False
+        request = httpx.Request("GET", url)
+        if url == redirect_url:
+            return httpx.Response(302, headers={"Location": offsite_url}, request=request)
+        return httpx.Response(200, content=pages[url].encode(), request=request)
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = _MindRoomWebsiteReader().read(start_url)
+    content_by_url = {document.meta_data["url"]: document.content for document in documents}
+
+    assert requested_urls == [start_url, redirect_url, offsite_url]
+    assert list(content_by_url) == [start_url]
+    assert "Reference material" in content_by_url[start_url]
+    assert offsite_url not in content_by_url
+
+
 def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same-domain checks should ignore URL ports when crawling."""
     start_url = "https://example.test:8443/docs"

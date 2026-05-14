@@ -160,14 +160,13 @@ def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False)
     if _is_metadata_hostname(ascii_host):
         _deny("metadata_hostname")
 
-    if allow_private_networks:
-        return normalized_url
-
     if _is_local_hostname(ascii_host):
+        if allow_private_networks:
+            return normalized_url
         _deny("private_hostname")
 
     for address in _resolve_host_addresses(ascii_host, port=parsed.port, scheme=scheme):
-        _validate_ip_address(address, allow_private_networks=False)
+        _validate_ip_address(address, allow_private_networks=allow_private_networks)
 
     return normalized_url
 
