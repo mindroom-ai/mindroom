@@ -42,9 +42,7 @@ if TYPE_CHECKING:
 _PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
 _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
 _WORKER_CONFIG_STATE_DIRNAME = ".mindroom-worker-config-state"
-PROJECTED_ASSETS_DIRNAME = _PROJECTED_ASSETS_DIRNAME
 PROJECTED_CONFIGS_DIRNAME = _PROJECTED_CONFIGS_DIRNAME
-WORKER_CONFIG_STATE_DIRNAME = _WORKER_CONFIG_STATE_DIRNAME
 _PROJECTION_READY_FILENAME = ".projection-ready"
 _SENSITIVE_CONFIG_KEYS = frozenset(
     {
@@ -72,37 +70,17 @@ def _projected_config_value(relative_path: PurePosixPath) -> str:
     return f"./{relative_path.as_posix()}"
 
 
-def projected_config_value(relative_path: PurePosixPath) -> str:
-    """Return a config-relative projected asset reference."""
-    return _projected_config_value(relative_path)
-
-
 def _safe_projection_name(raw_value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_value).strip(".-")
     return normalized or "item"
-
-
-def safe_projection_name(raw_value: str) -> str:
-    """Return one filesystem-safe projection name."""
-    return _safe_projection_name(raw_value)
 
 
 def _projection_display_name(host_path: Path, *, fallback: str) -> str:
     return _safe_projection_name(host_path.name or fallback)
 
 
-def projection_display_name(host_path: Path, *, fallback: str) -> str:
-    """Return a stable display name for a projected path."""
-    return _projection_display_name(host_path, fallback=fallback)
-
-
 def _projection_hash(raw_value: str, *, length: int = 8) -> str:
     return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:length]
-
-
-def projection_hash(raw_value: str, *, length: int = 8) -> str:
-    """Return a short stable projection hash."""
-    return _projection_hash(raw_value, length=length)
 
 
 def _projection_path_with_suffix(relative_path: PurePosixPath, *, suffix: str) -> PurePosixPath:
@@ -111,11 +89,6 @@ def _projection_path_with_suffix(relative_path: PurePosixPath, *, suffix: str) -
     else:
         name = f"{relative_path.name}-{suffix}"
     return relative_path.with_name(name)
-
-
-def projection_path_with_suffix(relative_path: PurePosixPath, *, suffix: str) -> PurePosixPath:
-    """Return a projection path with one hash suffix inserted."""
-    return _projection_path_with_suffix(relative_path, suffix=suffix)
 
 
 def _ordered_unique_nonempty_strings(values: Iterable[object]) -> tuple[str, ...]:
@@ -137,11 +110,6 @@ def _plugin_uses_filesystem_path(plugin_path: str, *, runtime_paths: RuntimePath
         return True
     unresolved = Path(plugin_path).expanduser()
     return unresolved.is_absolute() or plugin_path.startswith((".", "~")) or "/" in plugin_path or "\\" in plugin_path
-
-
-def plugin_uses_filesystem_path(plugin_path: str, *, runtime_paths: RuntimePaths) -> bool:
-    """Return whether an authored plugin path points at the local filesystem."""
-    return _plugin_uses_filesystem_path(plugin_path, runtime_paths=runtime_paths)
 
 
 def _normalized_config_key(raw_key: str) -> str:
@@ -302,10 +270,6 @@ class _DockerProjectedConfig:
     projected_yaml: str
     assets: tuple[_DockerProjectedConfigAsset, ...]
     ready: bool
-
-
-DockerProjectedConfigAsset = _DockerProjectedConfigAsset
-DockerProjectedConfig = _DockerProjectedConfig
 
 
 class DockerProjectionManager:

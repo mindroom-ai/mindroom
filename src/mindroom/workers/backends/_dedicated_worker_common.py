@@ -6,9 +6,7 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
-
-import yaml
+from typing import TYPE_CHECKING
 
 from mindroom.constants import (
     RuntimePaths,
@@ -29,21 +27,19 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.agent_policy import ResolvedAgentPolicy
-    from mindroom.workers.models import WorkerHandle, WorkerStatus
+    from mindroom.workers.models import WorkerStatus
 
 __all__ = [
     "DedicatedWorkerLifecycleState",
     "ScopedVisibleStateRoot",
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
-    "dedicated_worker_lifecycle_from_handle",
     "initial_dedicated_worker_lifecycle_state",
     "mark_dedicated_worker_failed",
     "mark_dedicated_worker_idle",
     "mark_dedicated_worker_ready",
     "plan_scoped_visible_state_roots",
     "prepare_dedicated_worker_ensure_lifecycle",
-    "resolved_agent_policies_from_runtime_config",
     "stable_signature_json",
     "touch_dedicated_worker_lifecycle",
     "validate_dedicated_worker_extra_env",
@@ -115,25 +111,6 @@ def initial_dedicated_worker_lifecycle_state(*, now: float) -> DedicatedWorkerLi
     )
 
 
-def dedicated_worker_lifecycle_from_handle(
-    handle: WorkerHandle | None,
-    *,
-    now: float,
-) -> DedicatedWorkerLifecycleState:
-    """Extract lifecycle fields from an existing worker handle or synthesize a new state."""
-    if handle is None:
-        return initial_dedicated_worker_lifecycle_state(now=now)
-    return DedicatedWorkerLifecycleState(
-        created_at=handle.created_at,
-        last_used_at=handle.last_used_at,
-        status=handle.status,
-        last_started_at=handle.last_started_at,
-        startup_count=handle.startup_count,
-        failure_count=handle.failure_count,
-        failure_reason=handle.failure_reason,
-    )
-
-
 def prepare_dedicated_worker_ensure_lifecycle(
     state: DedicatedWorkerLifecycleState,
     *,
@@ -194,49 +171,6 @@ def mark_dedicated_worker_idle(
         msg = "now is required when update_last_used is true."
         raise ValueError(msg)
     return replace(state, last_used_at=now, status="idle", failure_reason=None)
-
-
-def resolved_agent_policies_from_runtime_config(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
-    """Load current agent policies from the authored runtime config when available."""
-    resolved_config_path = runtime_paths.config_path.expanduser().resolve()
-    if not resolved_config_path.is_file():
-        return {}
-    try:
-        loaded = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8")) or {}
-    except OSError as exc:
-        msg = f"Failed to read runtime config for dedicated worker policy validation: {exc}"
-        raise WorkerBackendError(msg) from exc
-    except yaml.YAMLError as exc:
-        msg = f"Failed to parse runtime config for dedicated worker policy validation: {exc}"
-        raise WorkerBackendError(msg) from exc
-    if not isinstance(loaded, dict):
-        return {}
-
-    raw_agents = loaded.get("agents")
-    if not isinstance(raw_agents, dict):
-        return {}
-    agent_mappings = {
-        agent_name: cast("dict[str, object]", raw_agent)
-        for agent_name, raw_agent in raw_agents.items()
-        if isinstance(agent_name, str) and isinstance(raw_agent, dict)
-    }
-    if not agent_mappings:
-        return {}
-
-    default_worker_scope = None
-    raw_defaults = loaded.get("defaults")
-    if isinstance(raw_defaults, dict):
-        raw_worker_scope = raw_defaults.get("worker_scope")
-        if isinstance(raw_worker_scope, str) and raw_worker_scope in {"shared", "user", "user_agent"}:
-            default_worker_scope = raw_worker_scope
-
-    from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index  # noqa: PLC0415
-
-    seeds = build_agent_policy_seeds(
-        agent_mappings,
-        default_worker_scope=default_worker_scope,
-    )
-    return resolve_agent_policy_index(seeds).policies
 
 
 def validate_private_user_agent_visibility(

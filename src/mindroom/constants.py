@@ -623,6 +623,11 @@ def _isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     )
 
 
+def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Return one runtime view filtered for isolated worker execution."""
+    return _isolated_runtime_paths(runtime_paths)
+
+
 def shell_execution_runtime_env_values(
     runtime_paths: RuntimePaths,
     *,

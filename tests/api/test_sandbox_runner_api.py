@@ -340,6 +340,36 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == "from-env"
 
 
+def test_startup_runtime_accepts_runtime_paths_json_without_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker workers should boot from the runtime payload passed by run-sandbox-runner.sh."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+        },
+    )
+    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", raising=False)
+    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+
+    assert startup_runtime.config_path == payload_runtime.config_path
+    assert startup_runtime.storage_root == payload_runtime.storage_root
+    assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+
+
 def test_startup_runner_token_is_removed_from_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Startup auth token loading should not leave runner auth in process env."""
     wiped_entries: list[tuple[int, int]] = []

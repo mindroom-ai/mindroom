@@ -82,6 +82,7 @@ logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
+_STARTUP_RUNTIME_PATHS_JSON_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -100,11 +101,24 @@ def _startup_manifest_from_env() -> dict[str, object]:
     return payload
 
 
+def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, object]:
+    """Read startup runtime payload from the manifest path or Docker runtime JSON."""
+    if os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip():
+        return constants.deserialize_startup_manifest(_startup_manifest_from_env())
+
+    raw_runtime_paths = os.environ.get(_STARTUP_RUNTIME_PATHS_JSON_ENV, "").strip()
+    if not raw_runtime_paths:
+        msg = (
+            f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} or {_STARTUP_RUNTIME_PATHS_JSON_ENV} "
+            "must be set for sandbox runner startup."
+        )
+        raise RuntimeError(msg)
+    return constants.deserialize_runtime_paths(json.loads(raw_runtime_paths)), {}
+
+
 def _startup_runtime_paths_from_env() -> RuntimePaths:
-    """Read the committed sandbox-runner runtime payload from the startup manifest."""
-    startup_runtime_paths, _tool_validation_snapshot = constants.deserialize_startup_manifest(
-        _startup_manifest_from_env(),
-    )
+    """Read the committed sandbox-runner runtime payload from startup env."""
+    startup_runtime_paths, _tool_validation_snapshot = _startup_runtime_payload_from_env()
     credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
     process_env = dict(startup_runtime_paths.process_env)
     if credentials_encryption_key is not None:
