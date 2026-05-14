@@ -41,8 +41,10 @@ def _max_read_size_finite_error(value: object) -> TypeError | ValueError:
 
 
 def _unsafe_drive_filename_error(filename: object) -> str | None:
+    if filename is None:
+        return "Google Drive file metadata is missing a filename"
     if not isinstance(filename, str):
-        return f"Unsafe Google Drive filename: {filename}"
+        return f"Google Drive file metadata filename must be a string: {filename!r}"
     if filename.strip() == "" or filename in {".", ".."}:
         return f"Unsafe Google Drive filename: {filename}"
     if "\x00" in filename or "/" in filename or "\\" in filename:
@@ -240,7 +242,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
 
             path = _download_target_path(self.download_dir, cast("str", filename), ext)
             if path is None:
-                return json.dumps({"error": f"Unsafe Google Drive filename: {filename}", "file": metadata})
+                return json.dumps(
+                    {"error": "Google Drive download target escapes the download directory", "file": metadata},
+                )
             path.parent.mkdir(parents=True, exist_ok=True)
 
             if target_mime:

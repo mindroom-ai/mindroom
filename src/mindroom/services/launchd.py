@@ -10,10 +10,10 @@ import subprocess
 from pathlib import Path
 
 from mindroom.services.config import (
-    SERVICE_NOT_INSTALLED_MESSAGE,
     InstallResult,
     ServiceActionResult,
     ServiceManager,
+    SERVICE_NOT_INSTALLED_MESSAGE,
     ServiceStatus,
     UninstallResult,
     build_service_command,

@@ -206,7 +206,7 @@ def test_resolve_service_environment_requires_existing_config(
 
 @patch("mindroom.services.systemd.subprocess.run")
 def test_systemd_lifecycle_actions_use_systemctl(mock_run: MagicMock, tmp_path: Path) -> None:
-    """Systemd lifecycle actions preserve the unit and call systemctl."""
+    """systemd lifecycle actions preserve the unit and call systemctl."""
     unit_path = tmp_path / "mindroom.service"
     unit_path.touch()
     mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -238,7 +238,7 @@ def test_systemd_lifecycle_action_requires_installed_unit(tmp_path: Path) -> Non
 
 @patch("mindroom.services.systemd.subprocess.run")
 def test_systemd_lifecycle_actions_propagate_systemctl_errors(mock_run: MagicMock, tmp_path: Path) -> None:
-    """Systemd lifecycle actions surface non-zero systemctl results."""
+    """systemd lifecycle actions surface non-zero systemctl results."""
     unit_path = tmp_path / "mindroom.service"
     unit_path.touch()
     mock_run.return_value = MagicMock(returncode=1, stderr="unit failed")
@@ -263,7 +263,7 @@ def test_launchd_lifecycle_actions_use_launchctl(
     mock_getuid: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Launchd lifecycle actions load and unload the existing plist."""
+    """launchd lifecycle actions load and unload the existing plist."""
     plist_path = tmp_path / "chat.mindroom.local.plist"
     plist_path.touch()
     mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -350,7 +350,7 @@ def test_launchd_lifecycle_actions_propagate_launchctl_errors(
     mock_getuid: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Launchd lifecycle actions surface non-zero launchctl results."""
+    """launchd lifecycle actions surface non-zero launchctl results."""
     plist_path = tmp_path / "chat.mindroom.local.plist"
     plist_path.touch()
     status = ServiceStatus(installed=True, running=False)
@@ -374,7 +374,7 @@ def test_launchd_stop_service_propagates_launchctl_errors(
     mock_getuid: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Launchd stop surfaces bootout failures."""
+    """launchd stop surfaces bootout failures."""
     plist_path = tmp_path / "chat.mindroom.local.plist"
     plist_path.touch()
     status = ServiceStatus(installed=True, running=True, pid=123)
@@ -398,7 +398,7 @@ def test_launchd_restart_service_propagates_bootstrap_errors(
     mock_getuid: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Launchd restart ignores bootout failures but surfaces bootstrap failures."""
+    """launchd restart ignores bootout failures but surfaces bootstrap failures."""
     plist_path = tmp_path / "chat.mindroom.local.plist"
     plist_path.touch()
     status = ServiceStatus(installed=True, running=True, pid=123)
