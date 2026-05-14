@@ -2989,6 +2989,16 @@ def test_cors_allows_local_frontend_origin_by_default(tmp_path: Path) -> None:
     assert response.headers["access-control-allow-credentials"] == "true"
 
 
+def test_cors_exposes_config_generation_header_for_credentialed_origins(tmp_path: Path) -> None:
+    """Credentialed dashboard CORS should expose headers the frontend reads."""
+    test_client = _dashboard_cors_test_client(_runtime_paths(tmp_path, process_env={}))
+
+    response = test_client.get("/api/health", headers={"Origin": "http://localhost:5173"})
+
+    assert response.status_code == 200
+    assert response.headers["access-control-expose-headers"] == config_lifecycle.CONFIG_GENERATION_HEADER
+
+
 def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
     """Explicit wildcard CORS must not be combined with credentialed requests."""
     runtime_paths = _runtime_paths(
@@ -3011,6 +3021,28 @@ def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "*"
     assert response.headers.get("access-control-allow-credentials") is None
+
+
+def test_cors_empty_allowed_origins_env_uses_default_origins(tmp_path: Path) -> None:
+    """Blank configured CORS origins should keep safe local development defaults."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": ""},
+    )
+    settings = main._dashboard_cors_settings(runtime_paths)
+    test_client = _dashboard_cors_test_client(runtime_paths)
+
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert "http://localhost:5173" in settings.allow_origins
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 def test_cors_allowed_origins_env_replaces_default_origins(tmp_path: Path) -> None:
@@ -3041,6 +3073,36 @@ def test_cors_allowed_origins_env_replaces_default_origins(tmp_path: Path) -> No
     assert allowed_response.status_code == 200
     assert allowed_response.headers["access-control-allow-origin"] == "https://dashboard.example.test"
     assert allowed_response.headers["access-control-allow-credentials"] == "true"
+    assert default_origin_response.status_code == 400
+    assert default_origin_response.headers.get("access-control-allow-origin") is None
+
+
+def test_exported_app_cors_uses_reinitialized_runtime(tmp_path: Path) -> None:
+    """The exported API app should derive CORS from its current runtime paths."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "https://dashboard.example.test"},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+
+    with TestClient(main.app) as test_client:
+        allowed_response = test_client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://dashboard.example.test",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        default_origin_response = test_client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert allowed_response.status_code == 200
+    assert allowed_response.headers["access-control-allow-origin"] == "https://dashboard.example.test"
     assert default_origin_response.status_code == 400
     assert default_origin_response.headers.get("access-control-allow-origin") is None
 
@@ -3178,6 +3240,7 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
         ("/%5Cexample.com", "/"),
         ("/%5c/example.com", "/"),
         ("/%255Cexample.com", "/"),
+        ("/%252Fexample.com", "/"),
         ("/agents/%5Cprofile", "/agents/%5Cprofile"),
     ],
 )

@@ -51,11 +51,15 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from starlette.types import ASGIApp, Receive, Scope, Send
+
     from mindroom.config.main import Config
+
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 _DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
 _DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DASHBOARD_CORS_EXPOSE_HEADERS = (config_lifecycle.CONFIG_GENERATION_HEADER,)
 _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
     "http://localhost:3003",
     "http://localhost:5173",
@@ -70,6 +74,47 @@ class _DashboardCorsSettings:
 
     allow_origins: tuple[str, ...]
     allow_credentials: bool
+
+
+class _RuntimeDashboardCorsMiddleware:
+    """Apply dashboard CORS settings from the app's current runtime context."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        api_app: FastAPI,
+        fallback_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        self.app = app
+        self.api_app = api_app
+        self.fallback_runtime_paths = fallback_runtime_paths
+        self._middleware_by_settings: dict[_DashboardCorsSettings, CORSMiddleware] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        middleware = self._middleware_for_current_runtime()
+        await middleware(scope, receive, send)
+
+    def _middleware_for_current_runtime(self) -> CORSMiddleware:
+        settings = _dashboard_cors_settings(self._current_runtime_paths())
+        middleware = self._middleware_by_settings.get(settings)
+        if middleware is None:
+            middleware = CORSMiddleware(
+                self.app,
+                allow_origins=list(settings.allow_origins),
+                allow_credentials=settings.allow_credentials,
+                allow_methods=["*"],
+                allow_headers=["*"],
+                expose_headers=list(_DASHBOARD_CORS_EXPOSE_HEADERS),
+            )
+            self._middleware_by_settings[settings] = middleware
+        return middleware
+
+    def _current_runtime_paths(self) -> constants.RuntimePaths:
+        try:
+            return _app_runtime_paths(self.api_app)
+        except TypeError:
+            return self.fallback_runtime_paths
 
 
 class DraftAgentPolicyDefaultsRequest(BaseModel):
@@ -403,19 +448,16 @@ def _parse_dashboard_cors_allowed_origins(configured_origins: str | None) -> tup
     """Parse a comma-separated dashboard CORS origin list."""
     if configured_origins is None:
         return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
-    return tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
 
 
 def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Add dashboard CORS middleware without wildcard credential defaults."""
-    cors_settings = _dashboard_cors_settings(runtime_paths)
     api_app.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(cors_settings.allow_origins),
-        allow_credentials=cors_settings.allow_credentials,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
+        _RuntimeDashboardCorsMiddleware,
+        api_app=api_app,
+        fallback_runtime_paths=runtime_paths,
     )
 
 
