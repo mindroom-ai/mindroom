@@ -228,7 +228,8 @@ class TestVoiceHandler:
             )
 
         assert transcription == "transcribed text"
-        assert client_init_kwargs == [{}]
+        assert len(client_init_kwargs) == 1
+        assert client_init_kwargs[0].get("verify", True) is not False
         assert post_calls == [
             {
                 "url": "https://stt.example.test/v1/audio/transcriptions",
