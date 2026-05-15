@@ -1098,8 +1098,12 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rewrite_uses_full_summary_input_budget_without_per_call_cap(tmp_path: Path) -> None:
-    """Regression for ISSUE-216: large healthy chunks must not be capped at 32K tokens."""
+async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(tmp_path: Path) -> None:
+    """Regression for ISSUE-216: rewrite must forward the full summary_input_budget.
+
+    Locks the contract that one healthy pass folds every selected run in one summary
+    call sized at the full resolved budget, with no hidden per-call cap by any name.
+    """
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1120,9 +1124,15 @@ async def test_rewrite_uses_full_summary_input_budget_without_per_call_cap(tmp_p
         summary_inputs.append(summary_input)
         return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
 
-    with patch(
-        "mindroom.history.compaction._generate_compaction_summary",
-        new=AsyncMock(side_effect=fake_summary),
+    with (
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=fake_summary),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            wraps=_build_summary_input,
+        ) as build_summary_input_spy,
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
             storage=storage,
@@ -1150,8 +1160,11 @@ async def test_rewrite_uses_full_summary_input_budget_without_per_call_cap(tmp_p
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 1
-    assert estimate_text_tokens(summary_inputs[0]) > 32_000
-    assert rewrite_result.compacted_run_count >= 5
+    assert build_summary_input_spy.call_count == 1
+    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 70_000
+    assert "run-1 user" in summary_inputs[0]
+    assert "run-5 user" in summary_inputs[0]
+    assert rewrite_result.compacted_run_count == 5
 
 
 @pytest.mark.asyncio

@@ -427,7 +427,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     all_compacted_run_ids: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
-    per_call_summary_input_budget = summary_input_budget
 
     while True:
         working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
@@ -474,7 +473,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             previous_summary=_current_summary_text(working_session),
             compacted_runs=compactable_runs,
             history_settings=history_settings,
-            max_input_tokens=per_call_summary_input_budget,
+            max_input_tokens=summary_input_budget,
         )
         if not included_runs:
             logger.warning(
@@ -482,7 +481,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                 session_id=session_id,
                 scope=scope.key,
                 candidate_runs=len(compactable_runs),
-                summary_input_budget=per_call_summary_input_budget,
+                summary_input_budget=summary_input_budget,
             )
             if total_compacted_run_count == 0:
                 return None
@@ -494,7 +493,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             compactable_runs=compactable_runs,
             initial_summary_input=summary_input,
             initial_included_runs=included_runs,
-            summary_input_budget=per_call_summary_input_budget,
+            summary_input_budget=summary_input_budget,
             session_id=session_id,
             scope=scope,
             history_settings=history_settings,
