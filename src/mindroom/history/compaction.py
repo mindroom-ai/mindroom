@@ -257,7 +257,6 @@ async def compact_scope_history(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
     summary_input_budget: int,
-    compaction_context_window: int | None,
     summary_model: Model,
     summary_model_name: str,
     active_context_window: int | None,
@@ -320,7 +319,6 @@ async def compact_scope_history(
         history_settings=history_settings,
         available_history_budget=available_history_budget,
         summary_input_budget=summary_input_budget,
-        compaction_context_window=compaction_context_window,
         before_tokens=before_tokens,
         runs_before=before_run_count,
         threshold_tokens=threshold_tokens,
@@ -414,7 +412,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
     summary_input_budget: int,
-    compaction_context_window: int | None,
     before_tokens: int,
     runs_before: int,
     threshold_tokens: int | None,
@@ -430,10 +427,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     all_compacted_run_ids: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
-    per_call_summary_input_budget = _effective_summary_input_budget_tokens(
-        summary_input_budget,
-        compaction_context_window,
-    )
+    per_call_summary_input_budget = summary_input_budget
 
     while True:
         working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
@@ -960,14 +954,6 @@ def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) 
     if context_window is None or context_window <= 0:
         return tokens
     return min(tokens, context_window // 2)
-
-
-def _effective_summary_input_budget_tokens(summary_input_budget: int, compaction_context_window: int | None) -> int:
-    """Return the conservative per-call summary input budget."""
-    if compaction_context_window is None or compaction_context_window <= 0:
-        return summary_input_budget
-    per_call_cap = max(2_000, min(compaction_context_window // 4, 32_000))
-    return min(summary_input_budget, per_call_cap)
 
 
 def resolve_compaction_runtime_settings(
