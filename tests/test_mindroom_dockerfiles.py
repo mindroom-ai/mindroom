@@ -12,6 +12,7 @@ _MINDROOM_DOCKERFILES = (
 )
 _RUNTIME_DEPLOYMENT_TEMPLATE = _REPO_ROOT / "cluster/k8s/runtime/templates/deployment.yaml"
 _INSTANCE_HELPERS_TEMPLATE = _REPO_ROOT / "cluster/k8s/instance/templates/_helpers.tpl"
+_PLATFORM_BACKEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-backend"
 
 
 def _apt_install_packages(dockerfile_text: str) -> set[str]:
@@ -46,3 +47,12 @@ def test_kubernetes_command_overrides_run_under_tini() -> None:
     _assert_command_starts_with_tini(runtime_template, "/app/.venv/bin/mindroom")
     _assert_command_starts_with_tini(runtime_template, "/app/run-sandbox-runner.sh")
     _assert_command_starts_with_tini(instance_helpers, "/app/run-sandbox-runner.sh")
+
+
+def test_platform_backend_kubectl_matches_target_architecture() -> None:
+    """The SaaS provisioner image must work on both amd64 and arm64 clusters."""
+    text = _PLATFORM_BACKEND_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "ARG TARGETARCH" in text
+    assert "linux/${TARGETARCH}/kubectl" in text
+    assert "linux/amd64/kubectl" not in text
