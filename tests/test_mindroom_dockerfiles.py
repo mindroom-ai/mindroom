@@ -14,6 +14,7 @@ _RUNTIME_DEPLOYMENT_TEMPLATE = _REPO_ROOT / "cluster/k8s/runtime/templates/deplo
 _INSTANCE_HELPERS_TEMPLATE = _REPO_ROOT / "cluster/k8s/instance/templates/_helpers.tpl"
 _PLATFORM_BACKEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-backend"
 _PLATFORM_FRONTEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-frontend"
+_SANDBOX_RUNNER_SCRIPT = _REPO_ROOT / "run-sandbox-runner.sh"
 
 
 def _apt_install_packages(dockerfile_text: str) -> set[str]:
@@ -48,6 +49,13 @@ def test_kubernetes_command_overrides_run_under_tini() -> None:
     _assert_command_starts_with_tini(runtime_template, "/app/.venv/bin/mindroom")
     _assert_command_starts_with_tini(runtime_template, "/app/run-sandbox-runner.sh")
     _assert_command_starts_with_tini(instance_helpers, "/app/run-sandbox-runner.sh")
+
+
+def test_sandbox_runner_script_imports_existing_public_runtime_serializer() -> None:
+    """The sandbox sidecar startup script should import the actual constants helper."""
+    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "from mindroom.constants import resolve_primary_runtime_paths, _serialize_public_runtime_paths" in text
 
 
 def test_platform_backend_kubectl_matches_target_architecture() -> None:
