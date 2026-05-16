@@ -13,6 +13,7 @@ _MINDROOM_DOCKERFILES = (
 _RUNTIME_DEPLOYMENT_TEMPLATE = _REPO_ROOT / "cluster/k8s/runtime/templates/deployment.yaml"
 _INSTANCE_HELPERS_TEMPLATE = _REPO_ROOT / "cluster/k8s/instance/templates/_helpers.tpl"
 _PLATFORM_BACKEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-backend"
+_PLATFORM_FRONTEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-frontend"
 
 
 def _apt_install_packages(dockerfile_text: str) -> set[str]:
@@ -56,3 +57,10 @@ def test_platform_backend_kubectl_matches_target_architecture() -> None:
     assert "ARG TARGETARCH" in text
     assert "linux/${TARGETARCH}/kubectl" in text
     assert "linux/amd64/kubectl" not in text
+
+
+def test_platform_frontend_skips_puppeteer_browser_download() -> None:
+    """Production frontend builds should not download the dev screenshot browser."""
+    text = _PLATFORM_FRONTEND_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "PUPPETEER_SKIP_DOWNLOAD=true" in text
