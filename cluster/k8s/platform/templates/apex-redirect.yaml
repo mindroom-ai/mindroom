@@ -36,4 +36,4 @@ spec:
   - hosts:
     - {{ .Values.domain }}
     - www.{{ .Values.domain }}
-    secretName: platform-tls-cert
+    secretName: platform-root-tls-cert
