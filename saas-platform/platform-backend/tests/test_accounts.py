@@ -169,6 +169,31 @@ class TestAccountsEndpoints:
         assert data["account_id"] == "acc_test_123"
         assert data["subscription"]["tier"] == "free"
 
+    def test_setup_account_adds_storage_limit_when_database_row_omits_it(
+        self, mock_supabase: MagicMock, mock_verify_user: Mock
+    ):
+        """Test account setup returns pricing storage limits when Supabase omits the field."""
+        from main import app  # noqa: PLC0415
+
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+        new_subscription = {
+            "id": "sub_new_123",
+            "account_id": "acc_test_123",
+            "tier": "free",
+            "status": "active",
+            "max_agents": 1,
+            "max_messages_per_day": 100,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
+
+        with TestClient(app, raise_server_exceptions=False) as non_raising_client:
+            response = non_raising_client.post("/my/account/setup")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["subscription"]["max_storage_gb"] == 1
+
     def test_setup_account_existing_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test setting up account when user already has subscription."""
         # Setup - existing subscription

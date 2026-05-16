@@ -5,6 +5,7 @@ from typing import Annotated, Any
 
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import AccountSetupResponse, AccountWithRelationsOut, AdminStatusOut
+from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 router = APIRouter()
@@ -53,19 +54,23 @@ async def setup_account(request: Request, user: Annotated[dict, Depends(verify_u
     if sub_result.data:
         return {"message": "Account already setup", "account_id": account_id}
 
+    limits = get_plan_limits_from_metadata("free")
     subscription_data = {
         "account_id": account_id,
         "tier": "free",
         "status": "active",
-        "max_agents": 1,
-        "max_messages_per_day": 100,
+        "max_agents": limits["max_agents"],
+        "max_messages_per_day": limits["max_messages_per_day"],
         "created_at": datetime.now(UTC).isoformat(),
     }
 
     sub_result = sb.table("subscriptions").insert(subscription_data).execute()
+    subscription = sub_result.data[0] if sub_result.data else None
+    if subscription is not None:
+        subscription["max_storage_gb"] = limits["max_storage_gb"]
 
     return {
         "message": "Free tier account created",
         "account_id": account_id,
-        "subscription": sub_result.data[0] if sub_result.data else None,
+        "subscription": subscription,
     }
