@@ -392,6 +392,21 @@ def test_platform_chart_exposes_instance_image_pull_secret_names() -> None:
     assert config["data"]["INSTANCE_IMAGE_PULL_SECRET_NAMES"] == "ghcr-pull,backup-pull"  # noqa: S105
 
 
+def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None:
+    """Platform services should be deployable without forcing identical image tags."""
+    docs = _render_chart(
+        Path("cluster/k8s/platform"),
+        "frontendImageTag=frontend-tag",
+        "backendImageTag=backend-tag",
+        release_name="mindroom-platform",
+    )
+    frontend = _resource(docs, "Deployment", "platform-frontend")
+    backend = _resource(docs, "Deployment", "platform-backend")
+
+    assert _container(frontend, "app")["image"] == "ghcr.io/mindroom-ai/platform-frontend:frontend-tag"
+    assert _container(backend, "app")["image"] == "ghcr.io/mindroom-ai/platform-backend:backend-tag"
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()

@@ -113,7 +113,7 @@ spec:
       {{- end }}
       containers:
       - name: app
-        image: {{ .Values.registry }}/platform-frontend:{{ .Values.imageTag }}
+        image: {{ .Values.registry }}/platform-frontend:{{ .Values.frontendImageTag | default .Values.imageTag }}
         imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
         ports:
         - containerPort: 3000
@@ -183,7 +183,7 @@ spec:
       {{- end }}
       containers:
       - name: app
-        image: {{ .Values.registry }}/platform-backend:{{ .Values.imageTag }}
+        image: {{ .Values.registry }}/platform-backend:{{ .Values.backendImageTag | default .Values.imageTag }}
         imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
         ports:
         - containerPort: 8000
