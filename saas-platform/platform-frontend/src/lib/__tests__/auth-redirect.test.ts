@@ -16,4 +16,8 @@ describe('post-auth redirects', () => {
   it('rejects protocol-relative URLs', () => {
     expect(sanitizePostAuthRedirect('//evil.example/phish', 'mindroom.chat')).toBe('/dashboard')
   })
+
+  it('rejects backslash protocol-relative URL variants', () => {
+    expect(sanitizePostAuthRedirect('/\\evil.example/phish', 'mindroom.chat')).toBe('/dashboard')
+  })
 })

@@ -6,12 +6,16 @@ function isAllowedPlatformHost(hostname: string, platformDomain: string): boolea
   return Boolean(domain && (host === domain || host.endsWith(`.${domain}`)))
 }
 
+function isProtocolRelativeRedirect(target: string): boolean {
+  return target.replaceAll('\\', '/').startsWith('//')
+}
+
 /** Restrict post-auth redirects to local paths or HTTPS URLs on the platform domain. */
 export function sanitizePostAuthRedirect(
   target: string | null | undefined,
   platformDomain = ''
 ): string {
-  if (!target || target.startsWith('//')) {
+  if (!target || isProtocolRelativeRedirect(target)) {
     return DEFAULT_REDIRECT
   }
 
