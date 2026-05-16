@@ -18,6 +18,10 @@ stripe:
 cleanupScheduler:
   enabled: "true"
 
+# The apex mindroom.chat is the Matrix server name and must stay on hetzner-matrix.
+apexRedirect:
+  enabled: false
+
 monitoring:
   enabled: true
   releaseLabel: monitoring

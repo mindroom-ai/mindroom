@@ -65,6 +65,10 @@ ingress:
   # Keep disabled for local kind; enable in hardened clusters if allowed.
   enableConfigurationSnippet: false
 
+# The apex mindroom.chat is the Matrix server name and must stay on hetzner-matrix.
+apexRedirect:
+  enabled: false
+
 monitoring:
   enabled: true
   releaseLabel: monitoring
