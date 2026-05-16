@@ -4489,6 +4489,7 @@ def _set_platform_auth(
     *,
     valid_tokens: set[str],
     platform_login_url: str = "https://platform.example.com/login",
+    public_url: str | None = None,
     account_id: str | None = None,
     user_id: str = "user-123",
 ) -> None:
@@ -4519,6 +4520,7 @@ def _set_platform_auth(
             supabase_anon_key="anon-key",
             account_id=account_id,
             mindroom_api_key=None,
+            public_url=public_url,
         ),
         supabase_auth=_FakeClient(),
     )
@@ -4557,6 +4559,64 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     response = test_client.get("/agents", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+
+
+def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted redirects must use the public dashboard URL, not ingress-internal HTTP."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens=set(),
+        platform_login_url="https://app.example.com/auth/login",
+        public_url="https://tenant42.example.test",
+    )
+
+    response = test_client.get("/agents", follow_redirects=False)
+    assert response.status_code == 307
+
+    location = response.headers["location"]
+    parsed = urlparse(location)
+    redirect_to = parse_qs(parsed.query)["redirect_to"][0]
+    assert redirect_to == "https://tenant42.example.test/agents"
+
+
+def test_platform_runtime_disables_generated_api_docs(tmp_path: Path) -> None:
+    """Hosted instances should not expose generated FastAPI docs on public hosts."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login",
+        },
+    )
+
+    assert main._api_docs_kwargs(runtime_paths) == {
+        "docs_url": None,
+        "redoc_url": None,
+        "openapi_url": None,
+    }
+
+
+def test_platform_runtime_restricts_cors_origins(tmp_path: Path) -> None:
+    """Hosted instances should not allow credentialed CORS from every origin."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_PUBLIC_URL": "https://tenant42.example.test",
+            "MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.test/auth/login",
+        },
+    )
+
+    assert main._api_cors_origins(runtime_paths) == [
+        "https://tenant42.example.test",
+        "https://app.example.test",
+    ]
 
 
 def test_platform_frontend_redirects_to_login_when_cookie_invalid(
