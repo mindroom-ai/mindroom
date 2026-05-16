@@ -35,6 +35,21 @@ describe('HeroParticleBackground', () => {
     expect(canvas).toHaveAttribute('data-particle-color', '#dda290')
   })
 
+  it('can fill the auth screen with the MindRoom particle field', () => {
+    render(<HeroParticleBackground variant="auth" />)
+
+    const background = screen.getByTestId('landing-particle-background')
+    const canvas = screen.getByTestId('particle-canvas')
+
+    expect(background).toHaveAttribute('data-variant', 'auth')
+    expect(background).toHaveClass('fixed')
+    expect(background).toHaveClass('inset-0')
+    expect(background).toHaveClass('bg-[#0f0d2e]')
+    expect(background).not.toHaveClass('top-80')
+    expect(background).not.toHaveClass('lg:w-[70%]')
+    expect(canvas).toHaveClass('opacity-90')
+  })
+
   it.each([
     { hardwareConcurrency: 4, devicePixelRatio: 1, width: 1440, height: 900, coarsePointer: false, expected: '9000' },
     { hardwareConcurrency: 8, devicePixelRatio: 1, width: 1440, height: 900, coarsePointer: false, expected: '20000' },

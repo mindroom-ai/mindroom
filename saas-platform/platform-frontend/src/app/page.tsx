@@ -45,11 +45,7 @@ const navLinks = [
   { href: '#pricing', label: 'Pricing' },
 ]
 
-const heroStats = [
-  { label: 'Rooms', value: 'Matrix-first' },
-  { label: 'Agents', value: 'Tool-aware' },
-  { label: 'Deploy', value: 'Hosted or OSS' },
-]
+const heroFacts = ['Matrix-first rooms', 'Tool-aware agents', 'Hosted or OSS']
 
 const workflow: IconItem[] = [
   {
@@ -137,6 +133,11 @@ const plans: PricePlan[] = [
     href: '/dashboard',
   },
 ]
+
+const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16'
+const secondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white/70 px-5 py-3 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10'
+const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/18 bg-white/10 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/16'
+const darkSecondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/14 bg-transparent px-5 py-3 text-sm font-semibold text-white/82 transition-colors hover:bg-white/8 hover:text-white'
 
 function SectionHeading({
   eyebrow,
@@ -245,18 +246,23 @@ function ProductPreview() {
   )
 }
 
-function IconGrid({ items }: { items: IconItem[] }) {
+function FeatureRows({ items }: { items: IconItem[] }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    <div className="grid border-y border-gray-200 dark:border-gray-800 lg:grid-cols-2">
       {items.map((item) => {
         const Icon = item.icon
         return (
-          <article key={item.title} className="rounded-lg border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-            <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-md bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-white">
+          <article
+            key={item.title}
+            className="flex gap-4 border-b border-gray-200 py-6 last:border-b-0 dark:border-gray-800 lg:odd:pr-8 lg:even:border-l lg:even:pl-8 lg:[&:nth-last-child(2)]:border-b-0"
+          >
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-gray-100 text-gray-900 dark:bg-white/8 dark:text-white">
               <Icon className="h-5 w-5" />
             </div>
-            <h3 className="text-base font-semibold text-gray-950 dark:text-white">{item.title}</h3>
-            <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
+            <div>
+              <h3 className="text-base font-semibold text-gray-950 dark:text-white">{item.title}</h3>
+              <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
+            </div>
           </article>
         )
       })}
@@ -282,10 +288,10 @@ export default function LandingPage() {
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
             <DarkModeToggle />
-            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-gray-900 dark:hover:text-white sm:inline-flex">
+            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white sm:inline-flex">
               Sign in
             </Link>
-            <Link href="/auth/signup" className="inline-flex items-center gap-2 rounded-md bg-gray-950 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">
+            <Link href="/auth/signup" className="inline-flex items-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16 sm:px-4">
               Start free
               <ArrowRight className="h-4 w-4" />
             </Link>
@@ -313,20 +319,20 @@ export default function LandingPage() {
               Give each agent a role, memory, tools, and a shared Matrix room where people can see the work, the trace, and the decisions.
             </p>
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">
-              <Link href="/auth/signup" className="inline-flex items-center justify-center gap-2 rounded-md bg-gray-950 px-5 py-3 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200">
+              <Link href="/auth/signup" className={primaryCtaClass}>
                 Create hosted workspace
                 <ArrowRight className="h-4 w-4" />
               </Link>
-              <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-5 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900">
+              <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className={secondaryCtaClass}>
                 <Github className="h-4 w-4" />
                 View source
               </a>
             </div>
-            <div className="mt-8 grid grid-cols-3 gap-3">
-              {heroStats.map((stat) => (
-                <div key={stat.label} className="rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-900">
-                  <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{stat.label}</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-950 dark:text-white">{stat.value}</div>
+            <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium text-gray-500 dark:text-gray-400">
+              {heroFacts.map((fact, index) => (
+                <div key={fact} className="flex items-center gap-4">
+                  {index > 0 && <span className="hidden h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-700 sm:block" />}
+                  <span>{fact}</span>
                 </div>
               ))}
             </div>
@@ -344,19 +350,22 @@ export default function LandingPage() {
             title="Rooms become durable workspaces."
             body="MindRoom is not another isolated chat window. It keeps agents, people, decisions, and tool output in the same conversational surface."
           />
-          <div className="mt-10 grid gap-4 md:grid-cols-3">
+          <div className="mt-12 border-y border-gray-200 dark:border-gray-800">
             {workflow.map((item, index) => {
               const Icon = item.icon
               return (
-                <article key={item.title} className="rounded-lg border border-gray-200 p-6 dark:border-gray-800">
-                  <div className="mb-5 flex items-center justify-between">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-md bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
+                <article
+                  key={item.title}
+                  className="grid gap-4 border-b border-gray-200 py-7 last:border-b-0 dark:border-gray-800 md:grid-cols-[72px_minmax(0,0.8fr)_minmax(0,1.2fr)] md:items-start"
+                >
+                  <div className="text-sm font-semibold text-gray-400">0{index + 1}</div>
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
                       <Icon className="h-5 w-5" />
-                    </div>
-                    <span className="text-sm font-semibold text-gray-400">0{index + 1}</span>
+                    </span>
+                    <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{item.title}</h3>
                   </div>
-                  <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{item.title}</h3>
-                  <p className="mt-3 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
+                  <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
                 </article>
               )
             })}
@@ -372,7 +381,7 @@ export default function LandingPage() {
             body="Run a simple assistant, a specialist code agent, or a team of agents that coordinate across Matrix rooms and bridged networks."
           />
           <div className="mt-10">
-            <IconGrid items={platform} />
+            <FeatureRows items={platform} />
           </div>
         </div>
       </section>
@@ -384,11 +393,11 @@ export default function LandingPage() {
             title="Less magic, more operational control."
             body="Hosted MindRoom instances are designed around explicit room access, visible tool traces, isolated credentials, and deployable infrastructure you can inspect."
           />
-          <div className="grid gap-4">
+          <div className="border-y border-gray-200 dark:border-gray-800">
             {security.map((item) => {
               const Icon = item.icon
               return (
-                <article key={item.title} className="rounded-lg border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+                <article key={item.title} className="border-b border-gray-200 py-6 last:border-b-0 dark:border-gray-800">
                   <div className="flex gap-4">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
                       <Icon className="h-5 w-5" />
@@ -430,28 +439,28 @@ export default function LandingPage() {
               title="Start small, then add rooms and agents."
               body="Use the hosted platform for quick setup or run the open-source stack yourself when you need full control."
             />
-            <Link href="/dashboard" className="inline-flex items-center gap-2 self-start rounded-md border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-900 lg:self-end">
+            <Link href="/dashboard" className="inline-flex items-center gap-2 self-start rounded-md border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8 lg:self-end">
               Open dashboard
               <ArrowRight className="h-4 w-4" />
             </Link>
           </div>
-          <div className="mt-10 grid gap-4 lg:grid-cols-3">
+          <div className="mt-10 overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
             {plans.map((plan) => (
               <article
                 key={plan.name}
-                className={`rounded-lg border p-6 ${
-                  plan.highlighted
-                    ? 'border-orange-300 bg-orange-50 dark:border-orange-500/40 dark:bg-orange-500/10'
-                    : 'border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950'
+                className={`grid gap-5 border-b border-gray-200 p-5 last:border-b-0 dark:border-gray-800 lg:grid-cols-[0.7fr_0.9fr_1.2fr_auto] lg:items-center ${
+                  plan.highlighted ? 'bg-orange-50/70 dark:bg-orange-500/10' : ''
                 }`}
               >
-                <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
-                <div className="mt-4 flex items-baseline gap-2">
-                  <span className="text-4xl font-semibold text-gray-950 dark:text-white">{plan.price}</span>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
+                  <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{plan.description}</p>
+                </div>
+                <div className="flex items-baseline gap-2 lg:justify-center">
+                  <span className="text-3xl font-semibold text-gray-950 dark:text-white">{plan.price}</span>
                   {plan.price !== '$0' && <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>}
                 </div>
-                <p className="mt-3 text-sm leading-6 text-gray-600 dark:text-gray-300">{plan.description}</p>
-                <ul className="mt-6 space-y-3">
+                <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
                   {plan.features.map((feature) => (
                     <li key={feature} className="flex gap-2 text-sm text-gray-700 dark:text-gray-300">
                       <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
@@ -461,10 +470,10 @@ export default function LandingPage() {
                 </ul>
                 <Link
                   href={plan.href}
-                  className={`mt-7 inline-flex w-full items-center justify-center rounded-md px-4 py-2.5 text-sm font-semibold ${
+                  className={`inline-flex items-center justify-center rounded-md px-4 py-2.5 text-sm font-semibold transition-colors ${
                     plan.highlighted
-                      ? 'bg-gray-950 text-white hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200'
-                      : 'border border-gray-300 text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-900'
+                      ? 'border border-gray-950/10 bg-gray-950 text-white hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16'
+                      : 'border border-gray-300 text-gray-800 hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8'
                   }`}
                 >
                   {plan.cta}
@@ -475,20 +484,20 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="border-y border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
+      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
-            <h2 className="text-3xl font-semibold text-gray-950 dark:text-white">Bring agents into the room.</h2>
-            <p className="mt-3 max-w-2xl text-base leading-7 text-gray-600 dark:text-gray-300">
+            <h2 className="text-3xl font-semibold text-white">Bring agents into the room.</h2>
+            <p className="mt-3 max-w-2xl text-base leading-7 text-gray-300">
               Create a hosted workspace, or inspect the repo and run MindRoom on your own infrastructure.
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row">
-            <Link href="/auth/signup" className="inline-flex items-center justify-center gap-2 rounded-md bg-gray-950 px-5 py-3 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200">
+            <Link href="/auth/signup" className={darkPrimaryCtaClass}>
               Start free
               <ArrowRight className="h-4 w-4" />
             </Link>
-            <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-5 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900">
+            <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className={darkSecondaryCtaClass}>
               <Code2 className="h-4 w-4" />
               Read the code
             </a>

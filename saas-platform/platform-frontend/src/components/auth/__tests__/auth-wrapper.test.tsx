@@ -178,30 +178,29 @@ describe('AuthWrapper', () => {
     })
   })
 
-  describe('Dark Mode Integration', () => {
-    it('should apply dark mode styles when enabled', () => {
+  describe('Glass Auth Styling', () => {
+    it('should use glass-friendly input colors when dark mode is enabled', () => {
       ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
 
       const { Auth } = require('@supabase/auth-ui-react')
       render(<AuthWrapper />)
 
-      // Check that Auth component receives dark mode colors
       const authCall = Auth.mock.calls[0][0]
-      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('#1f2937')
-      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('#374151')
-      expect(authCall.appearance.variables.default.colors.inputText).toBe('#f3f4f6')
+      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('rgba(8, 10, 22, 0.46)')
+      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('rgba(255, 255, 255, 0.18)')
+      expect(authCall.appearance.variables.default.colors.inputText).toBe('#f8f5ff')
     })
 
-    it('should apply light mode styles when disabled', () => {
+    it('should keep the same glass input colors when dark mode is disabled', () => {
       ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
 
       const { Auth } = require('@supabase/auth-ui-react')
       render(<AuthWrapper />)
 
       const authCall = Auth.mock.calls[0][0]
-      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('white')
-      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('#e5e7eb')
-      expect(authCall.appearance.variables.default.colors.inputText).toBe('#1f2937')
+      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('rgba(8, 10, 22, 0.46)')
+      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('rgba(255, 255, 255, 0.18)')
+      expect(authCall.appearance.variables.default.colors.inputText).toBe('#f8f5ff')
     })
   })
 
@@ -300,8 +299,10 @@ describe('AuthWrapper', () => {
 
       const authCall = Auth.mock.calls[0][0]
       expect(authCall.appearance.className.button).toContain('font-semibold')
-      expect(authCall.appearance.className.input).toContain('focus:ring-orange-500')
-      expect(authCall.appearance.className.anchor).toContain('text-orange-600')
+      expect(authCall.appearance.className.button).toContain('bg-white/12')
+      expect(authCall.appearance.className.button).not.toContain('scale')
+      expect(authCall.appearance.className.input).toContain('bg-black/25')
+      expect(authCall.appearance.className.anchor).toContain('text-[#f4b47e]')
     })
 
     it('should set brand colors', () => {
@@ -309,8 +310,8 @@ describe('AuthWrapper', () => {
       render(<AuthWrapper />)
 
       const authCall = Auth.mock.calls[0][0]
-      expect(authCall.appearance.variables.default.colors.brand).toBe('#f97316')
-      expect(authCall.appearance.variables.default.colors.brandAccent).toBe('#ea580c')
+      expect(authCall.appearance.variables.default.colors.brand).toBe('#f4b47e')
+      expect(authCall.appearance.variables.default.colors.brandAccent).toBe('#ffd6b0')
     })
   })
 
