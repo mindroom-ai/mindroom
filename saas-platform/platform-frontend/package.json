@@ -13,6 +13,7 @@
     "screenshot": "nix-shell --run 'node take_screenshot.js' 2>/dev/null || node take_screenshot.js"
   },
   "dependencies": {
+    "@basnijholt/particular-drift": "0.1.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-tabs": "^1.1.13",

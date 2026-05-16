@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
+import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import {
   ArrowRight,
@@ -268,8 +269,8 @@ export default function LandingPage() {
     <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
       <nav className="sticky top-0 z-50 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-          <Link href="/" className="flex items-center gap-3" aria-label="MindRoom home">
-            <MindRoomLogo className="text-orange-600 dark:text-orange-400" size={32} />
+          <Link href="/" className="group flex items-center gap-3" aria-label="MindRoom home">
+            <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
             <span className="text-lg font-semibold">MindRoom</span>
           </Link>
           <div className="hidden items-center gap-7 lg:flex">
@@ -292,15 +293,19 @@ export default function LandingPage() {
         </div>
       </nav>
 
-      <section className="border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950">
-        <div className="mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 sm:py-12 lg:grid-cols-[0.85fr_1.15fr] lg:items-center lg:px-8 lg:py-16">
+      <section className="relative overflow-hidden border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950">
+        <HeroParticleBackground />
+        <div className="relative z-10 mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 sm:py-12 lg:grid-cols-[0.85fr_1.15fr] lg:items-center lg:px-8 lg:py-16">
           <div>
             <p className="inline-flex rounded-md border border-orange-200 bg-orange-50 px-3 py-1 text-sm font-medium text-orange-700 dark:border-orange-500/25 dark:bg-orange-500/10 dark:text-orange-300">
               Matrix-native AI workrooms
             </p>
-            <h1 className="mt-5 text-5xl font-semibold text-gray-950 dark:text-white sm:text-6xl">
-              MindRoom
-            </h1>
+            <div className="mt-5 flex flex-wrap items-center gap-4">
+              <MindRoomLogo className="h-14 w-14 sm:h-16 sm:w-16" size={64} />
+              <h1 className="text-5xl font-semibold text-gray-950 dark:text-white sm:text-6xl">
+                MindRoom
+              </h1>
+            </div>
             <p className="mt-4 text-xl font-medium leading-8 text-gray-900 dark:text-gray-100">
               AI agents that live in rooms, not another inbox.
             </p>
@@ -326,7 +331,9 @@ export default function LandingPage() {
               ))}
             </div>
           </div>
-          <ProductPreview />
+          <div className="relative">
+            <ProductPreview />
+          </div>
         </div>
       </section>
 
@@ -492,7 +499,7 @@ export default function LandingPage() {
       <footer className="py-10">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 text-sm text-gray-500 dark:text-gray-400 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
           <div className="flex items-center gap-3">
-            <MindRoomLogo className="text-gray-500 dark:text-gray-400" size={24} />
+            <MindRoomLogo className="opacity-75" size={24} />
             <span>MindRoom</span>
           </div>
           <div className="flex flex-wrap gap-4">
