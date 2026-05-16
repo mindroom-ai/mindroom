@@ -118,7 +118,7 @@ function ConfiguredAuthWrapper({
 }
 
 export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) {
-  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(() => readRuntimeConfig())
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null)
 
   useEffect(() => {
     setRuntimeConfig(readRuntimeConfig())
