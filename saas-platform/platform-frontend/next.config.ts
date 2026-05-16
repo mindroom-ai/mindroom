@@ -1,5 +1,7 @@
 import type { NextConfig } from "next";
 
+// Next.js and Supabase Auth UI emit inline bootstrap assets in this build.
+// Move script/style directives to nonces once per-request CSP middleware exists.
 const securityHeaders = [
   {
     key: 'Content-Security-Policy',
@@ -36,10 +38,6 @@ const securityHeaders = [
   {
     key: 'X-Frame-Options',
     value: 'DENY',
-  },
-  {
-    key: 'X-XSS-Protection',
-    value: '1; mode=block',
   },
   {
     key: 'Strict-Transport-Security',

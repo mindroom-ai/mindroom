@@ -6,6 +6,7 @@ function isAllowedPlatformHost(hostname: string, platformDomain: string): boolea
   return Boolean(domain && (host === domain || host.endsWith(`.${domain}`)))
 }
 
+/** Restrict post-auth redirects to local paths or HTTPS URLs on the platform domain. */
 export function sanitizePostAuthRedirect(
   target: string | null | undefined,
   platformDomain = ''

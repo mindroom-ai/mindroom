@@ -122,7 +122,7 @@ def _append_image_pull_secret_helm_args(helm_args: list[str], secret_names: str)
     """Forward configured imagePullSecrets to the instance chart."""
     names = [name.strip() for name in secret_names.split(",") if name.strip()]
     for index, name in enumerate(names):
-        helm_args += ["--set", f"imagePullSecrets[{index}].name={name}"]
+        helm_args += ["--set-string", f"imagePullSecrets[{index}].name={name}"]
 
 
 async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:

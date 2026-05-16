@@ -172,11 +172,15 @@ def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None
     """Private registry credentials should be available before pulling instance images."""
     docs = _render_chart(
         Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
         "imagePullSecrets[0].name=ghcr-pull",
     )
     deployment = _resource(docs, "Deployment", "mindroom-demo")
+    worker_manager_account = _resource(docs, "ServiceAccount", "mindroom-worker-manager-demo")
 
     assert deployment["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
+    assert worker_manager_account["imagePullSecrets"] == [{"name": "ghcr-pull"}]
 
 
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:

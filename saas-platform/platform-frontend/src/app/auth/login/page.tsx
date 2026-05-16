@@ -7,6 +7,7 @@ import { X } from 'lucide-react'
 import { sanitizePostAuthRedirect } from '@/lib/auth/redirect'
 
 export default async function LoginPage({ searchParams }: { searchParams: { redirect_to?: string } }) {
+  // Use the request host only as a fallback for local or misconfigured deployments.
   const hdrs = await headers()
   const host = hdrs.get('host') || ''
   const { platformDomain } = getServerRuntimeConfig({ requireSupabase: false })

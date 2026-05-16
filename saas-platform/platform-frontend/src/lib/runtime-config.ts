@@ -62,6 +62,7 @@ export function getBrowserRuntimeConfig(): RuntimeConfig {
   return config
 }
 
+/** Return whether browser-safe Supabase credentials are present in runtime config. */
 export function isSupabaseConfigured(config: RuntimeConfig): boolean {
   return Boolean(config.supabaseUrl && config.supabaseAnonKey)
 }

@@ -1,6 +1,7 @@
 """Real integration tests for provisioner that actually test functionality."""
 
 import base64
+import importlib
 import os
 import stat
 from pathlib import Path
@@ -130,14 +131,15 @@ class TestProvisionerCommandValidation:
 
     def test_instance_credentials_encryption_key_is_stable_and_instance_scoped(self):
         """Provisioner-derived credential keys should be stable without sharing one key across instances."""
+        provisioner_module = importlib.import_module("backend.routes.provisioner")
         with patch.multiple(
-            "backend.routes.provisioner",
+            provisioner_module,
             INSTANCE_CREDENTIALS_ENCRYPTION_SECRET="root-secret",
             PROVISIONER_API_KEY="fallback-secret",
         ):
-            first = provisioner._instance_credentials_encryption_key("123")
-            second = provisioner._instance_credentials_encryption_key("123")
-            other = provisioner._instance_credentials_encryption_key("456")
+            first = provisioner_module._instance_credentials_encryption_key("123")
+            second = provisioner_module._instance_credentials_encryption_key("123")
+            other = provisioner_module._instance_credentials_encryption_key("456")
 
         assert first == second
         assert first != other
@@ -202,17 +204,22 @@ class TestProvisionerCommandValidation:
 
         helm_args = captured_helm_args[0]
         set_args = {}
+        set_string_args = {}
         for i, arg in enumerate(helm_args):
             if arg == "--set":
                 key, value = helm_args[i + 1].split("=", 1)
                 set_args[key] = value
+            if arg == "--set-string":
+                key, value = helm_args[i + 1].split("=", 1)
+                set_string_args[key] = value
 
         assert set_args["baseDomain"] == "local"
         assert set_args["storageClassName"] == "standard"
         assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"
-        assert set_args["imagePullSecrets[0].name"] == "ghcr-pull"
-        assert set_args["imagePullSecrets[1].name"] == "secondary-pull"
+        assert "imagePullSecrets[0].name" not in set_args
+        assert set_string_args["imagePullSecrets[0].name"] == "ghcr-pull"
+        assert set_string_args["imagePullSecrets[1].name"] == "secondary-pull"
         assert set_args["synapse_image"] == "matrixdotorg/synapse:latest"
         assert set_args["synapse_image_pull_policy"] == "IfNotPresent"
         assert set_args["trustedUpstreamAuth.enabled"] == "true"

@@ -187,6 +187,18 @@ def _service_allowed_hosts(*, environment: str) -> list[str]:
     return list(base_hosts | hosts_with_ports)
 
 
+def _host_name_from_header(host_header: str) -> str:
+    """Return a lower-case host name without an optional Host-header port."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        bracket_end = host.find("]")
+        if bracket_end != -1:
+            return host[1:bracket_end]
+    if host.count(":") == 1:
+        return host.rsplit(":", maxsplit=1)[0]
+    return host
+
+
 # Add remaining middleware BEFORE routers (but after custom middleware functions)
 # Remember: Last added = First to run
 
@@ -198,6 +210,7 @@ app.add_middleware(SlowAPIMiddleware)
 allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver", "localhost", "127.0.0.1"]
 
 service_allowed_hosts = _service_allowed_hosts(environment=ENVIRONMENT)
+metrics_allowed_hosts = frozenset(_host_name_from_header(host) for host in service_allowed_hosts)
 allowed_hosts += service_allowed_hosts
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
@@ -208,9 +221,8 @@ async def restrict_public_metrics(
 ) -> StarletteResponse:
     """Keep Prometheus samples on service hosts instead of public ingress hosts."""
     if ENVIRONMENT == "production" and request.url.path == "/metrics":
-        host = request.headers.get("host", "").strip().lower()
-        metrics_hosts = {allowed.lower() for allowed in service_allowed_hosts}
-        if host not in metrics_hosts:
+        host = _host_name_from_header(request.headers.get("host", ""))
+        if host not in metrics_allowed_hosts:
             return JSONResponse({"detail": "Not found"}, status_code=404)
     return await call_next(request)
 

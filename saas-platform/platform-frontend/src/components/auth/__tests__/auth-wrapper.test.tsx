@@ -106,6 +106,18 @@ describe('AuthWrapper', () => {
       expect(createClient).not.toHaveBeenCalled()
     })
 
+    it('should render an unavailable state when runtime config is missing', async () => {
+      window.__MINDROOM_CONFIG__ = undefined
+
+      render(<AuthWrapper />)
+
+      await waitFor(() => {
+        expect(screen.getByText('Sign in is not available yet.')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('auth-ui')).not.toBeInTheDocument()
+      expect(createClient).not.toHaveBeenCalled()
+    })
+
     it('should hydrate without changing the initial auth markup', async () => {
       const container = document.createElement('div')
       document.body.appendChild(container)

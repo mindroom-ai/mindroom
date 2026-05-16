@@ -22,6 +22,15 @@ def test_metrics_endpoint_exposes_registered_metrics_to_internal_scrapes() -> No
     assert "mindroom_admin_verifications_total" in body
 
 
+def test_metrics_endpoint_accepts_internal_service_host_with_runtime_port() -> None:
+    """Host header port changes must not block in-cluster service scrapes."""
+
+    with TestClient(app) as client:
+        response = client.get("/metrics", headers={"host": "platform-backend:9090"})
+
+    assert response.status_code == 200
+
+
 def test_metrics_endpoint_rejects_public_host() -> None:
     """Public ingress hosts must not expose Prometheus samples."""
 

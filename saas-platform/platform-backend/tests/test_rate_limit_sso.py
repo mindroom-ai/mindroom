@@ -47,3 +47,20 @@ def test_rate_limit_key_prefers_forwarded_client_ip() -> None:
     )()
 
     assert rate_limit_key(request) == "203.0.113.10"
+
+
+def test_rate_limit_key_prefers_real_ip_from_trusted_ingress() -> None:
+    """Trusted ingress rewrites X-Real-IP, while X-Forwarded-For can be client-supplied."""
+    request = type(
+        "Request",
+        (),
+        {
+            "headers": {
+                "x-forwarded-for": "198.51.100.50, 10.42.0.7",
+                "x-real-ip": "203.0.113.10",
+            },
+            "client": type("Client", (), {"host": "10.42.0.7"})(),
+        },
+    )()
+
+    assert rate_limit_key(request) == "203.0.113.10"

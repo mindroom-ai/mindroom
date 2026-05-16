@@ -63,6 +63,9 @@ def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None
     text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
 
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in text
+    assert 'startup_manifest_path="$(' in text
+    assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="${startup_manifest_path}"' in text
+    assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="$(' not in text
     assert "MINDROOM_RUNTIME_PATHS_JSON" not in text
 
 
@@ -70,7 +73,7 @@ def test_platform_backend_kubectl_matches_target_architecture() -> None:
     """The SaaS provisioner image must work on both amd64 and arm64 clusters."""
     text = _PLATFORM_BACKEND_DOCKERFILE.read_text(encoding="utf-8")
 
-    assert "ARG TARGETARCH" in text
+    assert "ARG TARGETARCH=amd64" in text
     assert "linux/${TARGETARCH}/kubectl" in text
     assert "linux/amd64/kubectl" not in text
 

@@ -77,7 +77,12 @@ try {
     replace: jest.fn(),
     assign: jest.fn(),
   }
-} catch {}
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/location|non-configurable|read only|Cannot delete|Cannot assign/i.test(message)) {
+    throw error
+  }
+}
 
 // Inject runtime config expected by browser helpers
 window.__MINDROOM_CONFIG__ = getServerRuntimeConfig()

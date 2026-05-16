@@ -117,14 +117,15 @@ function ConfiguredAuthWrapper({
   )
 }
 
+/** Render hosted auth once browser runtime config resolves. */
 export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) {
-  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null)
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null | undefined>(undefined)
 
   useEffect(() => {
     setRuntimeConfig(readRuntimeConfig())
   }, [])
 
-  if (!runtimeConfig) {
+  if (runtimeConfig === undefined) {
     return (
       <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-300">
         Loading authentication...
@@ -132,7 +133,7 @@ export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) 
     )
   }
 
-  if (!isSupabaseConfigured(runtimeConfig)) {
+  if (runtimeConfig === null || !isSupabaseConfigured(runtimeConfig)) {
     return <UnavailableAuth view={view} />
   }
 

@@ -11,10 +11,17 @@ describe('Next security headers', () => {
 
     expect(globalRule?.headers).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          key: 'Content-Security-Policy',
+          value: expect.stringContaining("frame-ancestors 'none'"),
+        }),
         expect.objectContaining({ key: 'X-Frame-Options', value: 'DENY' }),
         expect.objectContaining({ key: 'X-Content-Type-Options', value: 'nosniff' }),
         expect.objectContaining({ key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' }),
       ])
+    )
+    expect(globalRule?.headers).toEqual(
+      expect.not.arrayContaining([expect.objectContaining({ key: 'X-XSS-Protection' })])
     )
   })
 })

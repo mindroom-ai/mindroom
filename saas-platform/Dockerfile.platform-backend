@@ -3,7 +3,7 @@ FROM ghcr.io/astral-sh/uv:latest AS uv
 
 # Tools stage with kubectl and helm for provisioning
 FROM public.ecr.aws/docker/library/python:3.13-slim AS tools
-ARG TARGETARCH
+ARG TARGETARCH=amd64
 # Install provisioning tools (kubectl and helm)
 RUN apt-get update && apt-get install -y curl \
     && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${TARGETARCH}/kubectl" \

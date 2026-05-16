@@ -23,15 +23,15 @@ _auth_cache = TTLCache(maxsize=100, ttl=300)
 
 def client_ip_from_request(request: Request) -> str:
     """Return the end-user IP for auth monitoring and rate limiting."""
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+
     forwarded_for = request.headers.get("x-forwarded-for", "")
     if forwarded_for:
         first_ip = forwarded_for.split(",", maxsplit=1)[0].strip()
         if first_ip:
             return first_ip
-
-    real_ip = request.headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip
 
     return get_remote_address(request)
 

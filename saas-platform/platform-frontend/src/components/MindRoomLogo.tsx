@@ -3,6 +3,7 @@ interface MindRoomLogoProps {
   size?: number
 }
 
+/** Render the MindRoom currentColor logo at a fixed square size. */
 export function MindRoomLogo({ className = '', size = 32 }: MindRoomLogoProps) {
   return (
     <svg
