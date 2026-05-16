@@ -3,16 +3,15 @@ set -euo pipefail
 
 cd /app/workspace 2>/dev/null || true
 
-if [[ -z "${MINDROOM_RUNTIME_PATHS_JSON:-}" ]]; then
-  export MINDROOM_RUNTIME_PATHS_JSON="$(
+if [[ -z "${MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH:-}" ]]; then
+  export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="$(
     /app/.venv/bin/python - <<'PY'
-import json
 import os
 
-from mindroom.constants import resolve_primary_runtime_paths, _serialize_public_runtime_paths
+from mindroom.constants import resolve_primary_runtime_paths, write_startup_manifest
 
 runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
-print(json.dumps(_serialize_public_runtime_paths(runtime_paths), separators=(",", ":"), sort_keys=True))
+print(write_startup_manifest(runtime_paths.storage_root, runtime_paths, public_runtime=True))
 PY
   )"
 fi

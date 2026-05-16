@@ -55,7 +55,15 @@ def test_sandbox_runner_script_imports_existing_public_runtime_serializer() -> N
     """The sandbox sidecar startup script should import the actual constants helper."""
     text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
 
-    assert "from mindroom.constants import resolve_primary_runtime_paths, _serialize_public_runtime_paths" in text
+    assert "from mindroom.constants import resolve_primary_runtime_paths, write_startup_manifest" in text
+
+
+def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None:
+    """The sandbox sidecar app boots from a startup manifest path, not raw runtime JSON."""
+    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in text
+    assert "MINDROOM_RUNTIME_PATHS_JSON" not in text
 
 
 def test_platform_backend_kubectl_matches_target_architecture() -> None:
