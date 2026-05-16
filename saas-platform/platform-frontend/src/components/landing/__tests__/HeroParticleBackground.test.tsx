@@ -26,7 +26,10 @@ describe('HeroParticleBackground', () => {
 
     expect(background).toHaveAttribute('aria-hidden', 'true')
     expect(background).toHaveClass('absolute')
-    expect(background).toHaveClass('lg:block')
+    expect(background).toHaveClass('block')
+    expect(background).toHaveClass('top-80')
+    expect(background).toHaveClass('lg:w-[70%]')
+    expect(background).not.toHaveClass('hidden')
     expect(canvas).toHaveAttribute('data-image-url', '/res/branding/mindroom.svg')
     expect(canvas).toHaveAttribute('data-particle-color', '#dda290')
   })

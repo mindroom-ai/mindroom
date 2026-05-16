@@ -54,15 +54,15 @@ export function HeroParticleBackground() {
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none absolute inset-y-0 right-0 z-0 hidden w-[70%] overflow-hidden bg-gradient-to-l from-[#0f0d2e] via-[#0f0d2e]/95 to-transparent [mask-image:linear-gradient(to_left,black_62%,transparent_100%)] [-webkit-mask-image:linear-gradient(to_left,black_62%,transparent_100%)] lg:block motion-reduce:hidden"
+      className="pointer-events-none absolute inset-x-0 bottom-0 top-80 z-0 block overflow-hidden bg-gradient-to-b from-transparent via-[#0f0d2e]/55 to-[#0f0d2e] [mask-image:linear-gradient(to_bottom,transparent_0%,black_26%,black_100%)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0%,black_26%,black_100%)] lg:inset-y-0 lg:left-auto lg:w-[70%] lg:bg-gradient-to-l lg:from-[#0f0d2e] lg:via-[#0f0d2e]/95 lg:to-transparent lg:[mask-image:linear-gradient(to_left,black_62%,transparent_100%)] lg:[-webkit-mask-image:linear-gradient(to_left,black_62%,transparent_100%)] motion-reduce:hidden"
       data-testid="landing-particle-background"
     >
       <ParticularDriftCanvas
-        className="relative h-full w-full opacity-80"
+        className="relative h-full w-full opacity-[0.58] lg:opacity-80"
         imageUrl={MINDROOM_LOGO_SRC}
         options={options}
       />
-      <div className="absolute inset-0 bg-gradient-to-r from-gray-50 via-transparent to-transparent dark:from-gray-950" />
+      <div className="absolute inset-0 bg-gradient-to-b from-gray-50 via-gray-50/55 to-transparent dark:from-gray-950 dark:via-gray-950/55 lg:bg-gradient-to-r lg:via-transparent" />
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_45%,rgba(221,162,144,0.16),transparent_48%)]" />
     </div>
   )
