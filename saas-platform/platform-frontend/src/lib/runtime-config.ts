@@ -62,6 +62,10 @@ export function getBrowserRuntimeConfig(): RuntimeConfig {
   return config
 }
 
+export function isSupabaseConfigured(config: RuntimeConfig): boolean {
+  return Boolean(config.supabaseUrl && config.supabaseAnonKey)
+}
+
 export function getRuntimeConfig(): RuntimeConfig {
   if (typeof window !== 'undefined') {
     return getBrowserRuntimeConfig()

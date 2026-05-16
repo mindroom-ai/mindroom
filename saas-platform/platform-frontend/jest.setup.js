@@ -59,22 +59,25 @@ console.error = (...args) => {
   originalConsoleError.call(console, ...args)
 }
 
-// JSDOM location is read-only, so we delete and replace it
-delete window.location
-window.location = {
-  origin: 'http://localhost:3000',
-  href: 'http://localhost:3000',
-  pathname: '/',
-  search: '',
-  hash: '',
-  protocol: 'http:',
-  hostname: 'localhost',
-  host: 'localhost:3000',
-  port: '3000',
-  reload: jest.fn(),
-  replace: jest.fn(),
-  assign: jest.fn(),
-}
+// JSDOM location is non-configurable in newer versions.
+// The configured test URL already provides the expected localhost origin.
+try {
+  delete window.location
+  window.location = {
+    origin: 'http://localhost:3000',
+    href: 'http://localhost:3000',
+    pathname: '/',
+    search: '',
+    hash: '',
+    protocol: 'http:',
+    hostname: 'localhost',
+    host: 'localhost:3000',
+    port: '3000',
+    reload: jest.fn(),
+    replace: jest.fn(),
+    assign: jest.fn(),
+  }
+} catch {}
 
 // Inject runtime config expected by browser helpers
 window.__MINDROOM_CONFIG__ = getServerRuntimeConfig()

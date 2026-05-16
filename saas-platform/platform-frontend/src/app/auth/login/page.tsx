@@ -9,7 +9,7 @@ export default async function LoginPage({ searchParams }: { searchParams: { redi
   const nextTarget = searchParams?.redirect_to || '/dashboard'
   const hdrs = await headers()
   const host = hdrs.get('host') || ''
-  const { platformDomain } = getServerRuntimeConfig()
+  const { platformDomain } = getServerRuntimeConfig({ requireSupabase: false })
   const base = platformDomain
     ? `https://app.${platformDomain}`
     : (host ? `https://${host}` : '')

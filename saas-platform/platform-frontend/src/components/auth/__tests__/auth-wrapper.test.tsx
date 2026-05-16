@@ -33,9 +33,11 @@ describe('AuthWrapper', () => {
   let mockSupabaseClient: any
   let mockRouter: any
   let mockAuthSubscription: any
+  let originalRuntimeConfig: any
 
   beforeEach(() => {
     jest.clearAllMocks()
+    originalRuntimeConfig = window.__MINDROOM_CONFIG__
 
     // Setup mock router
     mockRouter = {
@@ -65,6 +67,10 @@ describe('AuthWrapper', () => {
     ;(createClient as jest.Mock).mockReturnValue(mockSupabaseClient)
   })
 
+  afterEach(() => {
+    window.__MINDROOM_CONFIG__ = originalRuntimeConfig
+  })
+
   describe('Basic Rendering', () => {
     it('should render Auth component with default props', () => {
       render(<AuthWrapper />)
@@ -80,6 +86,21 @@ describe('AuthWrapper', () => {
       render(<AuthWrapper view="sign_up" />)
 
       expect(screen.getByText('View: sign_up')).toBeInTheDocument()
+    })
+
+    it('should render an unavailable state when Supabase is not configured', () => {
+      window.__MINDROOM_CONFIG__ = {
+        apiUrl: 'https://api.mindroom.chat',
+        supabaseUrl: '',
+        supabaseAnonKey: '',
+        platformDomain: 'mindroom.chat',
+      }
+
+      render(<AuthWrapper view="sign_up" />)
+
+      expect(screen.getByText('Account signup is not available yet.')).toBeInTheDocument()
+      expect(screen.queryByTestId('auth-ui')).not.toBeInTheDocument()
+      expect(createClient).not.toHaveBeenCalled()
     })
 
     it('should set correct redirect URL with origin', async () => {

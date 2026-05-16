@@ -3,6 +3,11 @@
 import { Auth } from '@supabase/auth-ui-react'
 import { ThemeSupa } from '@supabase/auth-ui-shared'
 import { createClient } from '@/lib/supabase/client'
+import {
+  getBrowserRuntimeConfig,
+  isSupabaseConfigured,
+  type RuntimeConfig,
+} from '@/lib/runtime-config'
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useDarkMode } from '@/hooks/useDarkMode'
@@ -12,7 +17,36 @@ interface AuthWrapperProps {
   redirectTo?: string
 }
 
-export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) {
+function readRuntimeConfig(): RuntimeConfig | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    return getBrowserRuntimeConfig()
+  } catch {
+    return null
+  }
+}
+
+function UnavailableAuth({ view }: Pick<AuthWrapperProps, 'view'>) {
+  const label = view === 'sign_up' ? 'Account signup' : 'Sign in'
+
+  return (
+    <div className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-900 dark:border-orange-900/40 dark:bg-orange-950/30 dark:text-orange-100">
+      <p className="font-medium">{label} is not available yet.</p>
+      <p className="mt-1 text-orange-800 dark:text-orange-200">
+        The hosted account backend is not configured for this deployment.
+      </p>
+    </div>
+  )
+}
+
+function ConfiguredAuthWrapper({
+  view = 'sign_in',
+  redirectTo,
+  runtimeConfig,
+}: AuthWrapperProps & { runtimeConfig: RuntimeConfig }) {
   const [origin, setOrigin] = useState('')
   const { isDarkMode } = useDarkMode()
   const router = useRouter()
@@ -21,7 +55,7 @@ export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) 
     setOrigin(window.location.origin)
   }, [])
 
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(runtimeConfig), [runtimeConfig])
 
   const computedRedirect = useMemo(() => {
     if (redirectTo && redirectTo.startsWith('http')) return redirectTo
@@ -81,4 +115,26 @@ export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) 
       onlyThirdPartyProviders={false}
     />
   )
+}
+
+export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) {
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(() => readRuntimeConfig())
+
+  useEffect(() => {
+    setRuntimeConfig(readRuntimeConfig())
+  }, [])
+
+  if (!runtimeConfig) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-300">
+        Loading authentication...
+      </div>
+    )
+  }
+
+  if (!isSupabaseConfigured(runtimeConfig)) {
+    return <UnavailableAuth view={view} />
+  }
+
+  return <ConfiguredAuthWrapper view={view} redirectTo={redirectTo} runtimeConfig={runtimeConfig} />
 }
