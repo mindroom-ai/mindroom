@@ -21,18 +21,21 @@ def _override_verify_user() -> dict[str, str]:
 def test_sso_cookie_rate_limit() -> None:
     """31st request within a minute should return 429."""
     app.dependency_overrides[verify_user] = _override_verify_user
-    client = TestClient(app)
-    headers = {"authorization": "Bearer test-token"}
+    try:
+        client = TestClient(app)
+        headers = {"authorization": "Bearer test-token"}
 
-    # This endpoint is hit during OAuth completion and dashboard mount.
-    # Keep the limit high enough for retries while still bounding abuse.
-    statuses = []
-    for _ in range(31):
-        r = client.post("/my/sso-cookie", headers=headers, data="ok")
-        statuses.append(r.status_code)
+        # This endpoint is hit during OAuth completion and dashboard mount.
+        # Keep the limit high enough for retries while still bounding abuse.
+        statuses = []
+        for _ in range(31):
+            r = client.post("/my/sso-cookie", headers=headers, data="ok")
+            statuses.append(r.status_code)
 
-    assert statuses[:30] == [200] * 30
-    assert statuses[30] == 429
+        assert statuses[:30] == [200] * 30
+        assert statuses[30] == 429
+    finally:
+        app.dependency_overrides.pop(verify_user, None)
 
 
 def test_rate_limit_key_prefers_forwarded_client_ip() -> None:
