@@ -14,7 +14,7 @@ function resolveLandingParticleCount() {
     return BALANCED_PARTICLE_COUNT
   }
 
-  const coarsePointer = window.matchMedia?.('(hover: none), (pointer: coarse)').matches ?? false
+  const coarsePointer = window.matchMedia?.('(hover: none), (pointer: coarse)')?.matches ?? false
   const hardwareConcurrency = window.navigator.hardwareConcurrency ?? 4
   const devicePixelRatio = window.devicePixelRatio || 1
   const effectivePixelArea = window.innerWidth * window.innerHeight * devicePixelRatio ** 2
