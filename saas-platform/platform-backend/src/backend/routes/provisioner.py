@@ -17,6 +17,7 @@ from backend.config import (
     GOOGLE_API_KEY,
     INSTANCE_BASE_DOMAIN,
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
+    INSTANCE_IMAGE_PULL_SECRET_NAMES,
     INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
@@ -115,6 +116,13 @@ def _append_credentials_encryption_key_helm_args(helm_args: list[str], key: str)
     secret_file_path = _write_helm_secret_value_file(key)
     helm_args += ["--set-file", f"credentials_encryption_key={secret_file_path}"]
     return secret_file_path
+
+
+def _append_image_pull_secret_helm_args(helm_args: list[str], secret_names: str) -> None:
+    """Forward configured imagePullSecrets to the instance chart."""
+    names = [name.strip() for name in secret_names.split(",") if name.strip()]
+    for index, name in enumerate(names):
+        helm_args += ["--set", f"imagePullSecrets[{index}].name={name}"]
 
 
 async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
@@ -300,6 +308,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
             helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
+        _append_image_pull_secret_helm_args(helm_args, INSTANCE_IMAGE_PULL_SECRET_NAMES)
         if INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS:
             helm_args += [
                 "--set",

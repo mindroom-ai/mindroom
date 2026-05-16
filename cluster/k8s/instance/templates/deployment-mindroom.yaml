@@ -64,6 +64,10 @@ spec:
       {{- if eq $workerBackend "kubernetes" }}
       serviceAccountName: {{ $workerManagerServiceAccountName }}
       {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
       - name: wait-for-synapse
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}

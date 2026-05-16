@@ -171,6 +171,7 @@ class TestProvisionerCommandValidation:
                 INSTANCE_STORAGE_CLASS_NAME="standard",
                 INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
                 INSTANCE_MINDROOM_IMAGE_PULL_POLICY="IfNotPresent",
+                INSTANCE_IMAGE_PULL_SECRET_NAMES="ghcr-pull, secondary-pull",
                 INSTANCE_SYNAPSE_IMAGE="matrixdotorg/synapse:latest",
                 INSTANCE_SYNAPSE_IMAGE_PULL_POLICY="IfNotPresent",
                 INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
@@ -210,6 +211,8 @@ class TestProvisionerCommandValidation:
         assert set_args["storageClassName"] == "standard"
         assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"
+        assert set_args["imagePullSecrets[0].name"] == "ghcr-pull"
+        assert set_args["imagePullSecrets[1].name"] == "secondary-pull"
         assert set_args["synapse_image"] == "matrixdotorg/synapse:latest"
         assert set_args["synapse_image_pull_policy"] == "IfNotPresent"
         assert set_args["trustedUpstreamAuth.enabled"] == "true"

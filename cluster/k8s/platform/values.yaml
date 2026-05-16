@@ -33,6 +33,7 @@ provisioner:
   instanceStorageClassName: ""
   instanceMindroomImage: ""
   instanceMindroomImagePullPolicy: ""
+  instanceImagePullSecretNames: []
   instanceSynapseImage: ""
   instanceSynapseImagePullPolicy: ""
   trustedUpstreamAuth:

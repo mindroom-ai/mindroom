@@ -134,13 +134,13 @@ def test_instance_chart_network_policy_limits_public_ports_to_ingress_and_instan
                         "matchLabels": {
                             "app.kubernetes.io/component": "controller",
                             "app.kubernetes.io/name": "ingress-nginx",
-                        }
+                        },
                     },
                 },
                 {"podSelector": {"matchLabels": {"customer": "demo"}}},
             ],
             "ports": [{"port": 8765}, {"port": 8008}],
-        }
+        },
     ]
 
 
@@ -166,6 +166,17 @@ def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_PUBLIC_URL"] == "https://tenant42.example.test"
+
+
+def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
+    """Private registry credentials should be available before pulling instance images."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "imagePullSecrets[0].name=ghcr-pull",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+
+    assert deployment["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
 
 
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
@@ -366,6 +377,19 @@ def test_platform_chart_wires_instance_credentials_encryption_secret() -> None:
     assert env_values["INSTANCE_CREDENTIALS_ENCRYPTION_SECRET_FILE"] == (
         "/etc/secrets/instance_credentials_encryption_secret"  # noqa: S105
     )
+
+
+def test_platform_chart_exposes_instance_image_pull_secret_names() -> None:
+    """Provisioner config should forward registry pull secret names to instance Helm releases."""
+    docs = _render_chart(
+        Path("cluster/k8s/platform"),
+        "provisioner.instanceImagePullSecretNames[0]=ghcr-pull",
+        "provisioner.instanceImagePullSecretNames[1]=backup-pull",
+        release_name="mindroom-platform",
+    )
+    config = _resource(docs, "ConfigMap", "platform-config")
+
+    assert config["data"]["INSTANCE_IMAGE_PULL_SECRET_NAMES"] == "ghcr-pull,backup-pull"  # noqa: S105
 
 
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
