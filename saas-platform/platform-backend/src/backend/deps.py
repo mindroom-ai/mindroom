@@ -21,8 +21,28 @@ if TYPE_CHECKING:
 # TTL cache for auth verification (5 minutes, max 100 entries)
 _auth_cache = TTLCache(maxsize=100, ttl=300)
 
+def client_ip_from_request(request: Request) -> str:
+    """Return the end-user IP for auth monitoring and rate limiting."""
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        first_ip = forwarded_for.split(",", maxsplit=1)[0].strip()
+        if first_ip:
+            return first_ip
+
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+
+    return get_remote_address(request)
+
+
+def rate_limit_key(request: Request) -> str:
+    """Key rate limits by the client IP reported by the trusted ingress."""
+    return client_ip_from_request(request)
+
+
 # Global rate limiter for the FastAPI app and routes
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=rate_limit_key)
 
 
 def ensure_supabase() -> Client:
@@ -67,7 +87,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
     Ensures the `accounts` row exists, creating it if necessary.
     """
     # Get client IP for monitoring
-    client_ip = request.client.host if request else "unknown"
+    client_ip = client_ip_from_request(request) if request is not None else "unknown"
 
     # Check if IP is blocked
     if auth_monitor.is_blocked(client_ip):
