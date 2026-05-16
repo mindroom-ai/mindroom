@@ -106,6 +106,10 @@ spec:
         app: platform-frontend
         environment: {{ .Values.environment }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-frontend:{{ .Values.imageTag }}
@@ -172,6 +176,10 @@ spec:
         environment: {{ .Values.environment }}
     spec:
       serviceAccountName: platform-backend
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: app
         image: {{ .Values.registry }}/platform-backend:{{ .Values.imageTag }}
