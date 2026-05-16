@@ -6,6 +6,7 @@ import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -431,12 +432,51 @@ def bind_orchestrator_knowledge_refresh_scheduler(
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
+def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
+    """Return generated-docs routes for this runtime."""
+    docs_enabled = runtime_paths.env_flag(
+        "MINDROOM_ENABLE_API_DOCS",
+        default=not bool(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+    )
+    if not docs_enabled:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
+def _origin_from_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlsplit(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                _origin_from_url(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                _origin_from_url(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
 def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _DashboardCorsSettings:
     """Return dashboard CORS settings for one runtime context."""
     if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
         return _DashboardCorsSettings(allow_origins=("*",), allow_credentials=False)
 
     configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_api_cors_origins(runtime_paths))
+        if hosted_origins:
+            return _DashboardCorsSettings(allow_origins=hosted_origins, allow_credentials=True)
+
     origins = _parse_dashboard_cors_allowed_origins(configured_origins)
     return _DashboardCorsSettings(
         allow_origins=origins,
@@ -462,7 +502,7 @@ def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.Ru
 
 
 _runtime_paths = constants.resolve_primary_runtime_paths()
-app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
+app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan, **_api_docs_kwargs(_runtime_paths))
 initialize_api_app(app, _runtime_paths)
 _add_dashboard_cors_middleware(app, _runtime_paths)
 

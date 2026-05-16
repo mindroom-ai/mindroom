@@ -87,7 +87,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 # FastAPI app
-app = FastAPI(title="MindRoom Backend", lifespan=lifespan)
+production_docs_disabled = ENVIRONMENT == "production"
+app = FastAPI(
+    title="MindRoom Backend",
+    lifespan=lifespan,
+    docs_url=None if production_docs_disabled else "/docs",
+    redoc_url=None if production_docs_disabled else "/redoc",
+    openapi_url=None if production_docs_disabled else "/openapi.json",
+)
 
 instrument_app(app)
 
@@ -190,8 +197,22 @@ app.add_middleware(SlowAPIMiddleware)
 # Always allow loopback hosts so direct container health probes work in every environment.
 allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver", "localhost", "127.0.0.1"]
 
-allowed_hosts += _service_allowed_hosts(environment=ENVIRONMENT)
+service_allowed_hosts = _service_allowed_hosts(environment=ENVIRONMENT)
+allowed_hosts += service_allowed_hosts
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+
+@app.middleware("http")
+async def restrict_public_metrics(
+    request: Request, call_next: Callable[[Request], Awaitable[StarletteResponse]]
+) -> StarletteResponse:
+    """Keep Prometheus samples on service hosts instead of public ingress hosts."""
+    if ENVIRONMENT == "production" and request.url.path == "/metrics":
+        host = request.headers.get("host", "").strip().lower()
+        metrics_hosts = {allowed.lower() for allowed in service_allowed_hosts}
+        if host not in metrics_hosts:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+    return await call_next(request)
 
 # 5. Compute CORS origins: exclude localhost in production
 cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]

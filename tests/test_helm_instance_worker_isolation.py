@@ -115,6 +115,35 @@ def test_instance_chart_worker_network_policy_allows_runner_ingress_only_from_co
     assert worker_rule["from"] == [{"podSelector": {"matchLabels": {"app": "mindroom", "customer": "demo"}}}]
 
 
+def test_instance_chart_network_policy_limits_public_ports_to_ingress_and_instance_pods() -> None:
+    """Instance service ports should not be reachable from unrelated namespace pods."""
+    docs = _render_instance_chart()
+    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    service_rules = [
+        rule
+        for rule in policy["spec"]["ingress"]
+        if {port.get("port") for port in rule.get("ports", [])} == {8765, 8008}
+    ]
+
+    assert service_rules == [
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/component": "controller",
+                            "app.kubernetes.io/name": "ingress-nginx",
+                        }
+                    },
+                },
+                {"podSelector": {"matchLabels": {"customer": "demo"}}},
+            ],
+            "ports": [{"port": 8765}, {"port": 8008}],
+        }
+    ]
+
+
 def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
     """The control plane should configure generated worker pod specs with service links disabled."""
     docs = _render_instance_chart()
