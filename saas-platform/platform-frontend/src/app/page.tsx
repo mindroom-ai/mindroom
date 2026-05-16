@@ -45,6 +45,8 @@ const navLinks = [
   { href: '#pricing', label: 'Pricing' },
 ]
 
+const docsUrl = 'https://docs.mindroom.chat/'
+
 const heroFacts = ['Matrix-first rooms', 'Tool-aware agents', 'Hosted or OSS']
 
 const workflow: IconItem[] = [
@@ -285,6 +287,9 @@ export default function LandingPage() {
                 {link.label}
               </Link>
             ))}
+            <a href={docsUrl} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
+              Docs
+            </a>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
             <DarkModeToggle />
@@ -514,6 +519,7 @@ export default function LandingPage() {
           <div className="flex flex-wrap gap-4">
             <Link href="/privacy" className="hover:text-gray-950 dark:hover:text-white">Privacy</Link>
             <Link href="/terms" className="hover:text-gray-950 dark:hover:text-white">Terms</Link>
+            <a href={docsUrl} className="hover:text-gray-950 dark:hover:text-white">Docs</a>
             <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className="hover:text-gray-950 dark:hover:text-white">GitHub</a>
             <Link href="/auth/login" className="hover:text-gray-950 dark:hover:text-white">Sign in</Link>
           </div>
