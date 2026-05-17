@@ -18,7 +18,7 @@
 {{- if $instanceSecrets.hash -}}
 {{- $instanceSecrets.hash -}}
 {{- else -}}
-{{- printf "%s|%s|%s|%s|%s|%s|%s|%s|%s" (.openai_key | default "") (.anthropic_key | default "") (.openrouter_key | default "") (.google_key | default "") (.deepseek_key | default "") (.supabaseServiceKey | default "") (.sandbox_proxy_token | default "") (.credentials_encryption_key | default "") (.matrixOidc.clientSecret | default "") | sha256sum -}}
+{{- printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.openai_key | default "") (.anthropic_key | default "") (.openrouter_key | default "") (.google_key | default "") (.deepseek_key | default "") (.supabaseServiceKey | default "") (.sandbox_proxy_token | default "") (.credentials_encryption_key | default "") (.matrixOidc.clientSecret | default "") (.matrixRegistrationSharedSecret | default .matrix_admin_password | default "") | sha256sum -}}
 {{- end -}}
 {{- end }}
 

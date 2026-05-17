@@ -35,13 +35,12 @@ data:
     enable_registration: false
     enable_registration_without_verification: false
     password_config:
-      enabled: false
+      enabled: true
 {{- else }}
     enable_registration: true
     enable_registration_without_verification: true
 {{- end }}
-    # If not provided, fallback to a strong random value
-    registration_shared_secret: "{{ .Values.matrix_admin_password | default (randAlphaNum 32) }}"
+    registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret
 {{- if eq (toString .Values.matrixOidc.enabled) "true" }}
 
     oidc_providers:

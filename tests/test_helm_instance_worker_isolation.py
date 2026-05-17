@@ -119,6 +119,7 @@ def _instance_secret_hash(**overrides: str) -> str:
         "sandbox_proxy_token": "",
         "credentials_encryption_key": "",
         "matrix_oidc_client_secret": "",
+        "matrix_registration_shared_secret": "",
     }
     secret_data.update(overrides)
     ordered_values = [
@@ -131,6 +132,7 @@ def _instance_secret_hash(**overrides: str) -> str:
         secret_data["sandbox_proxy_token"],
         secret_data["credentials_encryption_key"],
         secret_data["matrix_oidc_client_secret"],
+        secret_data["matrix_registration_shared_secret"],
     ]
     return hashlib.sha256("|".join(ordered_values).encode("utf-8")).hexdigest()
 
@@ -335,18 +337,29 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
         "matrixOidc.issuer=https://api.mindroom.chat/matrix-oidc",
         "matrixOidc.clientId=mindroom-synapse",
         "matrixOidc.clientSecret=must-not-render-oidc",
+        "matrixRegistrationSharedSecret=must-not-render-registration",
     )
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
     synapse = _resource(docs, "Deployment", "synapse-demo")
+    synapse_config = _resource(docs, "ConfigMap", "synapse-config-demo")["data"]["homeserver.yaml"]
     rendered = json.dumps(docs)
+    mindroom_container = _container(mindroom, "mindroom")
+    mindroom_env = {env["name"]: env.get("value") for env in mindroom_container["env"]}
 
     assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "tenant-runtime-secrets" for doc in docs)
     assert "must-not-render" not in rendered
     assert "must-not-render-oidc" not in rendered
+    assert "must-not-render-registration" not in rendered
     assert mindroom["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert synapse["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert mindroom["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
     assert synapse["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
+    assert mindroom_env["MATRIX_REGISTRATION_SHARED_SECRET_FILE"] == (
+        "/etc/secrets/matrix_registration_shared_secret"  # noqa: S105
+    )
+    assert "registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret" in synapse_config
+    assert "registration_shared_secret:" not in synapse_config
+    assert "password_config:\n      enabled: true" in synapse_config
 
 
 def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> None:
@@ -359,6 +372,7 @@ def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> No
     deployment = _resource(docs, "Deployment", "mindroom-1")
 
     assert secret["metadata"]["name"] == "mindroom-api-keys-1"
+    assert secret["stringData"]["matrix_registration_shared_secret"]
     assert deployment["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "mindroom-api-keys-1"
 
 

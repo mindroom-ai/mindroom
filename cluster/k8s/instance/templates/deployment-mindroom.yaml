@@ -145,6 +145,8 @@ spec:
           value: "http://synapse-{{ .Values.customer }}:8008"
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: MATRIX_REGISTRATION_SHARED_SECRET_FILE
+          value: "/etc/secrets/matrix_registration_shared_secret"
         - name: MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS
           value: {{ .Values.matrixHomeserverStartupTimeoutSeconds | quote }}
         - name: SUPABASE_URL

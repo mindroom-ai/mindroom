@@ -71,6 +71,7 @@ openrouter_key: ""
 deepseek_key: ""
 sandbox_proxy_token: ""
 credentials_encryption_key: ""
+matrixRegistrationSharedSecret: ""
 
 # Supabase (shared auth)
 supabaseUrl: ""

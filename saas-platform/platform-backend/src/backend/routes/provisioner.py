@@ -126,12 +126,24 @@ def _require_provisioner_auth(authorization: str | None) -> None:
 
 def _instance_credentials_encryption_key(instance_id: str) -> str:
     """Derive a stable per-instance credential encryption key."""
+    return _stable_instance_secret("instance-credentials", instance_id)
+
+
+def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
+    """Derive a stable per-instance Synapse registration shared secret."""
+    return _stable_instance_secret("matrix-registration", instance_id)
+
+
+def _stable_instance_secret(purpose: str, instance_id: str) -> str:
+    """Derive one stable per-instance secret from the platform root secret."""
     root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
     if not root_secret:
         msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
         raise HTTPException(status_code=500, detail=msg)
     digest = hmac.digest(
-        root_secret.encode("utf-8"), f"mindroom.instance-credentials.v1:{instance_id}".encode("utf-8"), hashlib.sha256
+        root_secret.encode("utf-8"),
+        f"mindroom.{purpose}.v1:{instance_id}".encode("utf-8"),
+        hashlib.sha256,
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
@@ -371,6 +383,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         "sandbox_proxy_token": sandbox_proxy_token,
         "credentials_encryption_key": credentials_encryption_key,
         "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
+        "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
     }
 
     try:

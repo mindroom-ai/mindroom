@@ -136,15 +136,17 @@ class TestProvisionerCommandValidation:
         assert "openai_key" not in set_args
         assert "sandbox_proxy_token" not in set_args
         assert "credentials_encryption_key" not in set_args
+        assert "matrix_registration_shared_secret" not in set_args
         assert set_file_args == {}
 
         secret_data = captured_secret_manifests[0]["stringData"]
         assert secret_data["sandbox_proxy_token"]
         assert secret_data["credentials_encryption_key"]
+        assert secret_data["matrix_registration_shared_secret"]
         assert operations == ["helm", "secret"]
 
-    def test_instance_credentials_encryption_key_is_stable_and_instance_scoped(self):
-        """Provisioner-derived credential keys should be stable without sharing one key across instances."""
+    def test_instance_secrets_are_stable_and_instance_scoped(self):
+        """Provisioner-derived instance secrets should be stable without being shared across tenants."""
         provisioner_module = importlib.import_module("backend.routes.provisioner")
         with patch.multiple(
             provisioner_module,
@@ -154,10 +156,13 @@ class TestProvisionerCommandValidation:
             first = provisioner_module._instance_credentials_encryption_key("123")
             second = provisioner_module._instance_credentials_encryption_key("123")
             other = provisioner_module._instance_credentials_encryption_key("456")
+            registration_secret = provisioner_module._instance_matrix_registration_shared_secret("123")
 
         assert first == second
         assert first != other
+        assert first != registration_secret
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
+        assert len(base64.urlsafe_b64decode(f"{registration_secret}=")) == 32
 
     @pytest.mark.asyncio
     async def test_instance_secret_apply_uses_private_manifest_file(self):
@@ -287,6 +292,7 @@ class TestProvisionerCommandValidation:
         assert "matrix-client-secret" not in " ".join(helm_args)
         assert set_file_args == {}
         assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == "matrix-client-secret"
+        assert captured_secret_manifests[0]["stringData"]["matrix_registration_shared_secret"]
 
     @pytest.mark.asyncio
     async def test_reprovision_preserves_existing_pvc_storage_class(self):
