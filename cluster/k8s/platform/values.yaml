@@ -91,6 +91,8 @@ ingress:
   # NGINX blocks configuration-snippet by default in many setups (incl. kind example)
   # Keep disabled for local kind; enable in hardened clusters if allowed.
   enableConfigurationSnippet: false
+  proxyReadTimeout: "300"
+  proxySendTimeout: "300"
 
 # The apex mindroom.chat is the Matrix server name and must stay on hetzner-matrix.
 apexRedirect:
