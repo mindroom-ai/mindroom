@@ -374,7 +374,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     }
 
     try:
-        instance_secret_hash = await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+        instance_secret_hash = _instance_secret_hash(instance_secret_data)
         # Use upgrade --install to handle both new and re-provisioning cases
         helm_args = [
             "upgrade",
@@ -384,6 +384,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             "--namespace",
             namespace,
             "--create-namespace",
+            "--history-max",
+            "2",
             "--set",
             f"customer={customer_id}",
             "--set",
@@ -469,6 +471,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             msg = f"Helm install failed: {stderr}"
             raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         logger.info("Helm install output: %s", stdout)
+        # Older releases managed this Secret in Helm. Apply it after Helm so
+        # Helm's resource pruning cannot delete the externally managed Secret.
+        await _apply_instance_secret(customer_id, namespace, instance_secret_data)
     except HTTPException:
         raise
     except Exception as e:

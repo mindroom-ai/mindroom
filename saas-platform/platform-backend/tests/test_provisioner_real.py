@@ -73,14 +73,17 @@ class TestProvisionerCommandValidation:
 
         captured_helm_args = []
         captured_secret_manifests = []
+        operations = []
 
         async def capture_helm_command(args):
             captured_helm_args.append(args)
+            operations.append("helm")
             return (0, "Success", "")
 
         async def capture_kubectl_command(args, namespace=None):
             if args[:2] == ["apply", "-f"]:
                 captured_secret_manifests.append(json.loads(Path(args[2]).read_text(encoding="utf-8")))
+                operations.append("secret")
             return (0, "Success", "")
 
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
@@ -128,6 +131,7 @@ class TestProvisionerCommandValidation:
         assert set_args["instanceSecrets.create"] == "false"
         assert set_args["instanceSecrets.name"] == "mindroom-api-keys-123"
         assert "instanceSecrets.hash" in set_string_args
+        assert helm_args[helm_args.index("--history-max") + 1] == "2"
         assert "openrouter_key" not in set_args
         assert "openai_key" not in set_args
         assert "sandbox_proxy_token" not in set_args
@@ -137,6 +141,7 @@ class TestProvisionerCommandValidation:
         secret_data = captured_secret_manifests[0]["stringData"]
         assert secret_data["sandbox_proxy_token"]
         assert secret_data["credentials_encryption_key"]
+        assert operations == ["helm", "secret"]
 
     def test_instance_credentials_encryption_key_is_stable_and_instance_scoped(self):
         """Provisioner-derived credential keys should be stable without sharing one key across instances."""
