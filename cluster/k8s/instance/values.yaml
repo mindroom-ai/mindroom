@@ -6,6 +6,30 @@ storageAccessMode: ReadWriteOnce  # MindRoom storage access mode. Set ReadWriteM
 synapseStorageAccessMode: ReadWriteOnce
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
 
+mindroomResources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"
+
+synapseResources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"
+
+sandboxRunnerResources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
+
 # Docker images
 mindroom_image: ghcr.io/mindroom-ai/mindroom:latest
 mindroom_image_pull_policy: Always

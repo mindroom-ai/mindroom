@@ -213,12 +213,7 @@ spec:
           mountPath: /etc/secrets
           readOnly: true
         resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "2Gi"
-            cpu: "1000m"
+          {{- toYaml .Values.mindroomResources | nindent 10 }}
         # Startup only needs the API process to bind the socket; readiness waits for full bootstrap.
         startupProbe:
           httpGet:

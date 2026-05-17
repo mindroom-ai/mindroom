@@ -502,7 +502,14 @@ def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.Ru
 
 
 _runtime_paths = constants.resolve_primary_runtime_paths()
-app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan, **_api_docs_kwargs(_runtime_paths))
+_api_docs = _api_docs_kwargs(_runtime_paths)
+app = FastAPI(
+    title="MindRoom Dashboard API",
+    lifespan=_lifespan,
+    docs_url=_api_docs["docs_url"],
+    redoc_url=_api_docs["redoc_url"],
+    openapi_url=_api_docs["openapi_url"],
+)
 initialize_api_app(app, _runtime_paths)
 _add_dashboard_cors_middleware(app, _runtime_paths)
 

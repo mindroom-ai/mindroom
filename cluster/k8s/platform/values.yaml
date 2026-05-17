@@ -13,6 +13,33 @@ imagePullSecrets: []
 # Replicas
 replicas: 1
 
+resources:
+  frontend:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  backend:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+autoscaling:
+  enabled: false
+  frontend:
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  backend:
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 65
+
 cleanupScheduler:
   enabled: "false"
 

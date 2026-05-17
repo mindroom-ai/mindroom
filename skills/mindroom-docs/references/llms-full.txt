@@ -15273,6 +15273,27 @@ MindRoom uses three Helm charts:
 - kubectl and helm installed
 - NGINX Ingress Controller
 - cert-manager (for TLS certificates)
+- Hetzner Cloud Controller Manager and Hetzner CSI Driver when using `hcloud-volumes`
+
+## Hetzner Scaling Baseline
+
+Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
+This keeps the current bill low while making later worker nodes possible.
+Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
+The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
+Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
+
+Production platform values should make the storage class explicit:
+
+```yaml
+provisioner:
+  instanceStorageClassName: hcloud-volumes
+
+autoscaling:
+  enabled: false
+```
+
+Enable `autoscaling.enabled` only after the cluster has metrics-server and enough nodes or headroom to schedule the extra replicas.
 
 ## Instance Deployment
 
@@ -15455,6 +15476,8 @@ Dedicated workers need access to the same PVC as the primary runtime.
 Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
 If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 The chart enforces this constraint during template rendering.
+For the hosted SaaS instance chart, keep the default `static_runner` backend on single-node clusters.
+Switching hosted instances to dedicated Kubernetes workers on a multi-node cluster requires either a real `ReadWriteMany` storage class or explicit node pinning.
 
 ### RBAC And Network Policy
 
@@ -15511,7 +15534,7 @@ Platform ingress hosts:
 
 - `app.{domain}` - Platform frontend
 - `api.{domain}` - Platform backend API
-- `webhooks.{domain}/stripe` - Stripe webhooks
+- `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
 ## Local Development with Kind
 
@@ -15591,6 +15614,10 @@ Each customer instance gets:
 - Dedicated ingress routes
 
 Platform services run in `mindroom-{environment}` namespace.
+The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
+The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
+Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
+The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.
 
 # CLI Reference
 

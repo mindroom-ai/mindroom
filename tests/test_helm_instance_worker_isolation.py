@@ -411,6 +411,83 @@ def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None
     assert _container(backend, "app")["image"] == "ghcr.io/mindroom-ai/platform-backend:backend-tag"
 
 
+def test_instance_chart_renders_configurable_control_plane_resources() -> None:
+    """Tenant MindRoom and Synapse resources should be configurable per release."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "mindroomResources.requests.cpu=300m",
+        "mindroomResources.requests.memory=768Mi",
+        "mindroomResources.limits.cpu=1500m",
+        "mindroomResources.limits.memory=3Gi",
+        "synapseResources.requests.cpu=350m",
+        "synapseResources.requests.memory=1Gi",
+        "synapseResources.limits.memory=4Gi",
+        set_string_args=("synapseResources.limits.cpu=2",),
+    )
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+
+    assert _container(mindroom, "mindroom")["resources"] == {
+        "requests": {"cpu": "300m", "memory": "768Mi"},
+        "limits": {"cpu": "1500m", "memory": "3Gi"},
+    }
+    assert _container(synapse, "synapse")["resources"] == {
+        "requests": {"cpu": "350m", "memory": "1Gi"},
+        "limits": {"cpu": "2", "memory": "4Gi"},
+    }
+
+
+def test_platform_chart_renders_default_resources_for_stateless_services() -> None:
+    """Platform pods need requests and limits so scheduling and HPA decisions are meaningful."""
+    docs = _render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform")
+    frontend = _resource(docs, "Deployment", "platform-frontend")
+    backend = _resource(docs, "Deployment", "platform-backend")
+
+    assert _container(frontend, "app")["resources"] == {
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"cpu": "500m", "memory": "512Mi"},
+    }
+    assert _container(backend, "app")["resources"] == {
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "1000m", "memory": "1Gi"},
+    }
+
+
+def test_platform_chart_can_render_hpa_for_stateless_services() -> None:
+    """Horizontal autoscaling should be opt-in for platform frontend and backend."""
+    docs = _render_chart(
+        Path("cluster/k8s/platform"),
+        "autoscaling.enabled=true",
+        "autoscaling.frontend.minReplicas=1",
+        "autoscaling.frontend.maxReplicas=3",
+        "autoscaling.frontend.targetCPUUtilizationPercentage=70",
+        "autoscaling.backend.minReplicas=1",
+        "autoscaling.backend.maxReplicas=4",
+        "autoscaling.backend.targetCPUUtilizationPercentage=65",
+        release_name="mindroom-platform",
+    )
+    frontend_hpa = _resource(docs, "HorizontalPodAutoscaler", "platform-frontend")
+    backend_hpa = _resource(docs, "HorizontalPodAutoscaler", "platform-backend")
+
+    assert frontend_hpa["spec"]["scaleTargetRef"] == {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "name": "platform-frontend",
+    }
+    assert frontend_hpa["spec"]["minReplicas"] == 1
+    assert frontend_hpa["spec"]["maxReplicas"] == 3
+    assert frontend_hpa["spec"]["metrics"][0]["resource"]["target"]["averageUtilization"] == 70
+
+    assert backend_hpa["spec"]["scaleTargetRef"] == {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "name": "platform-backend",
+    }
+    assert backend_hpa["spec"]["minReplicas"] == 1
+    assert backend_hpa["spec"]["maxReplicas"] == 4
+    assert backend_hpa["spec"]["metrics"][0]["resource"]["target"]["averageUtilization"] == 65
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()

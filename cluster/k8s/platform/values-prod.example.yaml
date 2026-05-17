@@ -18,6 +18,38 @@ stripe:
 cleanupScheduler:
   enabled: "true"
 
+provisioner:
+  # Hetzner Cloud Volumes keep tenant PVCs movable across K3s nodes.
+  instanceStorageClassName: hcloud-volumes
+
+resources:
+  frontend:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  backend:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+autoscaling:
+  # Keep false on a single-node cluster; enable after metrics-server is installed and tested.
+  enabled: false
+  frontend:
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  backend:
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 65
+
 # The apex mindroom.chat is the Matrix server name and must stay on hetzner-matrix.
 apexRedirect:
   enabled: false

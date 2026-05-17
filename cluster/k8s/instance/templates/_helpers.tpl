@@ -92,12 +92,7 @@
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "1Gi"
-      cpu: "500m"
+    {{- toYaml $values.sandboxRunnerResources | nindent 4 }}
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:

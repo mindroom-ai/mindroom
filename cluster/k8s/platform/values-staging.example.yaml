@@ -18,6 +18,13 @@ stripe:
 cleanupScheduler:
   enabled: "true"
 
+provisioner:
+  # Use the cloud volume class when staging runs on Hetzner.
+  instanceStorageClassName: hcloud-volumes
+
+autoscaling:
+  enabled: false
+
 monitoring:
   enabled: true
   releaseLabel: monitoring
