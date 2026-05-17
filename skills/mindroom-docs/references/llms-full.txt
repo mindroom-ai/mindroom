@@ -15508,6 +15508,9 @@ env:
     value: "/etc/secrets/openrouter_key"
 ```
 
+For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
+The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+
 ## Ingress
 
 Each instance gets three hosts:

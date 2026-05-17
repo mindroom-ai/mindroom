@@ -5,6 +5,7 @@ import binascii
 import contextlib
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import tempfile
@@ -135,27 +136,7 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _write_helm_secret_value_file(value: str) -> str:
-    """Write one Helm --set-file secret value to a private temporary file."""
-    fd, path = tempfile.mkstemp(prefix="mindroom-credentials-encryption-key-", text=True)
-    try:
-        os.write(fd, value.encode("utf-8"))
-    finally:
-        os.close(fd)
-    return path
-
-
-def _append_credentials_encryption_key_helm_args(helm_args: list[str], key: str) -> str | None:
-    """Append credential encryption key Helm args without putting key material in argv."""
-    if not key:
-        helm_args += ["--set", "credentials_encryption_key="]
-        return None
-    secret_file_path = _write_helm_secret_value_file(key)
-    helm_args += ["--set-file", f"credentials_encryption_key={secret_file_path}"]
-    return secret_file_path
-
-
-def _append_matrix_oidc_helm_args(helm_args: list[str]) -> str | None:
+def _append_matrix_oidc_helm_args(helm_args: list[str]) -> None:
     """Forward hosted Matrix OIDC settings to the instance chart."""
     if INSTANCE_MATRIX_OIDC_ENABLED:
         helm_args += ["--set", f"matrixOidc.enabled={INSTANCE_MATRIX_OIDC_ENABLED}"]
@@ -163,12 +144,6 @@ def _append_matrix_oidc_helm_args(helm_args: list[str]) -> str | None:
         helm_args += ["--set", f"matrixOidc.issuer={INSTANCE_MATRIX_OIDC_ISSUER}"]
     if INSTANCE_MATRIX_OIDC_CLIENT_ID:
         helm_args += ["--set", f"matrixOidc.clientId={INSTANCE_MATRIX_OIDC_CLIENT_ID}"]
-    if not INSTANCE_MATRIX_OIDC_CLIENT_SECRET:
-        return None
-
-    secret_file_path = _write_helm_secret_value_file(INSTANCE_MATRIX_OIDC_CLIENT_SECRET)
-    helm_args += ["--set-file", f"matrixOidc.clientSecret={secret_file_path}"]
-    return secret_file_path
 
 
 def _append_image_pull_secret_helm_args(helm_args: list[str], secret_names: str) -> None:
@@ -178,9 +153,44 @@ def _append_image_pull_secret_helm_args(helm_args: list[str], secret_names: str)
         helm_args += ["--set-string", f"imagePullSecrets[{index}].name={name}"]
 
 
+def _instance_secret_name(instance_id: str) -> str:
+    """Return the externally managed Secret name for an instance."""
+    return f"mindroom-api-keys-{instance_id}"
+
+
+def _instance_secret_hash(secret_data: dict[str, str]) -> str:
+    """Return a deterministic rollout hash for instance secret contents."""
+    encoded = json.dumps(secret_data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: dict[str, str]) -> str:
+    """Apply instance secrets outside Helm so release values stay non-sensitive."""
+    secret_name = _instance_secret_name(instance_id)
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": secret_name, "namespace": namespace},
+        "type": "Opaque",
+        "stringData": secret_data,
+    }
+    fd, path = tempfile.mkstemp(prefix=f"{secret_name}-", suffix=".json", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        code, out, err = await run_kubectl(["apply", "-f", path], namespace=namespace)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    if code != 0:
+        msg = f"Failed to apply instance Secret {secret_name}: {err or out}"
+        raise RuntimeError(msg)
+    return _instance_secret_hash(secret_data)
+
+
 async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
     """Return the existing credential encryption key from an instance Secret when present."""
-    secret_name = f"mindroom-api-keys-{instance_id}"
+    secret_name = _instance_secret_name(instance_id)
     code, out, err = await run_kubectl(
         ["get", "secret", secret_name, "--ignore-not-found", "-o=jsonpath={.data.credentials_encryption_key}"],
         namespace=namespace,
@@ -319,8 +329,20 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     credentials_encryption_key = await _provision_credentials_encryption_key(
         customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
     )
+    instance_secret_data = {
+        "openai_key": OPENAI_API_KEY or "",
+        "anthropic_key": ANTHROPIC_API_KEY or "",
+        "openrouter_key": OPENROUTER_API_KEY or "",
+        "google_key": GOOGLE_API_KEY or "",
+        "deepseek_key": DEEPSEEK_API_KEY or "",
+        "supabase_service_key": SUPABASE_SERVICE_KEY or "",
+        "sandbox_proxy_token": sandbox_proxy_token,
+        "credentials_encryption_key": credentials_encryption_key,
+        "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
+    }
 
     try:
+        instance_secret_hash = await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         # Use upgrade --install to handle both new and re-provisioning cases
         helm_args = [
             "upgrade",
@@ -341,19 +363,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             "--set",
             f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
             "--set",
-            f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
+            "instanceSecrets.create=false",
             "--set",
-            f"openai_key={OPENAI_API_KEY}",
-            "--set",
-            f"anthropic_key={ANTHROPIC_API_KEY}",
-            "--set",
-            f"google_key={GOOGLE_API_KEY}",
-            "--set",
-            f"openrouter_key={OPENROUTER_API_KEY}",
-            "--set",
-            f"deepseek_key={DEEPSEEK_API_KEY}",
-            "--set",
-            f"sandbox_proxy_token={sandbox_proxy_token}",
+            f"instanceSecrets.name={_instance_secret_name(customer_id)}",
+            "--set-string",
+            f"instanceSecrets.hash={instance_secret_hash}",
         ]
         if INSTANCE_STORAGE_CLASS_NAME:
             helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
@@ -410,19 +424,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"trustedUpstreamAuth.jwtMatrixUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM}",
             ]
 
-        matrix_oidc_client_secret_file_path = _append_matrix_oidc_helm_args(helm_args)
-        credentials_encryption_key_file_path = _append_credentials_encryption_key_helm_args(
-            helm_args, credentials_encryption_key
-        )
-        try:
-            code, stdout, stderr = await run_helm(helm_args)
-        finally:
-            if matrix_oidc_client_secret_file_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(matrix_oidc_client_secret_file_path)
-            if credentials_encryption_key_file_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(credentials_encryption_key_file_path)
+        _append_matrix_oidc_helm_args(helm_args)
+        code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             # Mark as error in DB
             try:

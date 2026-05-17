@@ -1,7 +1,6 @@
 """Comprehensive HTTP API tests for provisioner endpoints."""
 
 import base64
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
@@ -26,6 +25,29 @@ def _helm_set_file_args(helm_args: list[str]) -> dict[str, str]:
             key, path = helm_args[i + 1].split("=", 1)
             set_file_args[key] = path
     return set_file_args
+
+
+def _helm_set_string_args(helm_args: list[str]) -> dict[str, str]:
+    """Return Helm --set-string key/value pairs from a captured command."""
+    set_string_args = {}
+    for i, arg in enumerate(helm_args):
+        if arg == "--set-string":
+            key, value = helm_args[i + 1].split("=", 1)
+            set_string_args[key] = value
+    return set_string_args
+
+
+def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
+    """Assert Helm only receives the external instance Secret reference."""
+    set_args = _helm_set_args(helm_args)
+    set_file_args = _helm_set_file_args(helm_args)
+    set_string_args = _helm_set_string_args(helm_args)
+
+    assert set_args["instanceSecrets.create"] == "false"
+    assert set_args["instanceSecrets.name"].startswith("mindroom-api-keys-")
+    assert "instanceSecrets.hash" in set_string_args
+    assert "credentials_encryption_key" not in set_args
+    assert "credentials_encryption_key" not in set_file_args
 
 
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
@@ -208,9 +230,8 @@ class TestProvisionerEndpoints:
         assert data["success"] is True
         assert data["customer_id"] == "456"
         helm_args = mock_helm.call_args.args[0]
-        set_args = _helm_set_args(helm_args)
-        assert set_args["credentials_encryption_key"] == ""
-        assert "credentials_encryption_key" not in _helm_set_file_args(helm_args)
+        _assert_helm_uses_external_instance_secret(helm_args)
+        assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
 
     def test_provision_re_provision_existing_preserves_credentials_encryption(
         self,
@@ -239,13 +260,10 @@ class TestProvisionerEndpoints:
 
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
-        set_args = _helm_set_args(helm_args)
         expected_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
-        assert "credentials_encryption_key" not in set_args
-        set_file_args = _helm_set_file_args(helm_args)
-        assert "credentials_encryption_key" in set_file_args
         assert expected_key not in " ".join(helm_args)
-        assert not Path(set_file_args["credentials_encryption_key"]).exists()
+        _assert_helm_uses_external_instance_secret(helm_args)
+        assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
 
     def test_provision_re_provision_existing_opt_in_preserves_existing_credentials_encryption_key(
         self,
@@ -275,13 +293,10 @@ class TestProvisionerEndpoints:
 
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
-        set_args = _helm_set_args(helm_args)
         expected_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
-        assert "credentials_encryption_key" not in set_args
-        set_file_args = _helm_set_file_args(helm_args)
-        assert "credentials_encryption_key" in set_file_args
         assert expected_key not in " ".join(helm_args)
-        assert not Path(set_file_args["credentials_encryption_key"]).exists()
+        _assert_helm_uses_external_instance_secret(helm_args)
+        assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
 
     def test_provision_re_provision_existing_can_opt_into_credentials_encryption(
         self,
@@ -311,11 +326,8 @@ class TestProvisionerEndpoints:
 
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
-        set_args = _helm_set_args(helm_args)
-        assert "credentials_encryption_key" not in set_args
-        set_file_args = _helm_set_file_args(helm_args)
-        assert "credentials_encryption_key" in set_file_args
-        assert not Path(set_file_args["credentials_encryption_key"]).exists()
+        _assert_helm_uses_external_instance_secret(helm_args)
+        assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
 
     def test_provision_re_provision_existing_fails_when_existing_key_lookup_fails(
         self,

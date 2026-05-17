@@ -58,7 +58,12 @@ kubernetesWorkerIdleTimeoutSeconds: 1800
 kubernetesWorkerEnableServiceLinks: false
 
 # API keys and secrets (referenced via Secret in deployment)
-# Provide values here or inject via a separate Secret overwrite.
+# Production provisioner deploys create this Secret outside Helm so secret values
+# do not land in Helm release history.
+instanceSecrets:
+  create: true
+  name: ""
+  hash: ""
 openai_key: ""
 anthropic_key: ""
 google_key: ""

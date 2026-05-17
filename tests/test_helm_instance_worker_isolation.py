@@ -108,6 +108,33 @@ def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {env["name"]: env for env in container["env"]}
 
 
+def _instance_secret_hash(**overrides: str) -> str:
+    secret_data = {
+        "openai_key": "",
+        "anthropic_key": "",
+        "openrouter_key": "",
+        "google_key": "",
+        "deepseek_key": "",
+        "supabase_service_key": "",
+        "sandbox_proxy_token": "",
+        "credentials_encryption_key": "",
+        "matrix_oidc_client_secret": "",
+    }
+    secret_data.update(overrides)
+    ordered_values = [
+        secret_data["openai_key"],
+        secret_data["anthropic_key"],
+        secret_data["openrouter_key"],
+        secret_data["google_key"],
+        secret_data["deepseek_key"],
+        secret_data["supabase_service_key"],
+        secret_data["sandbox_proxy_token"],
+        secret_data["credentials_encryption_key"],
+        secret_data["matrix_oidc_client_secret"],
+    ]
+    return hashlib.sha256("|".join(ordered_values).encode("utf-8")).hexdigest()
+
+
 def test_instance_chart_worker_network_policy_allows_runner_ingress_only_from_control_plane() -> None:
     """Worker runner ingress should not allow every pod carrying the instance label."""
     docs = _render_instance_chart()
@@ -232,11 +259,8 @@ def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_sec
 
     assert api_keys_secret["stringData"]["credentials_encryption_key"] == credentials_encryption_key
     assert credentials_encryption_key not in json.dumps(deployment)
-    assert (
-        annotations["mindroom.ai/credentials-encryption-key-hash"]
-        == hashlib.sha256(
-            credentials_encryption_key.encode("utf-8"),
-        ).hexdigest()
+    assert annotations["mindroom.ai/instance-secret-hash"] == _instance_secret_hash(
+        credentials_encryption_key=credentials_encryption_key,
     )
     assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
         "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
@@ -258,16 +282,26 @@ def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_sec
     }
 
 
-def test_instance_chart_omits_credentials_encryption_env_when_key_is_unset() -> None:
-    """Instance runtime containers should not mount an empty credential encryption key."""
+def test_instance_chart_wires_credentials_encryption_env_when_key_is_unset() -> None:
+    """Instance runtime containers should consistently read the key from the shared Secret."""
     docs = _render_chart(Path("cluster/k8s/instance"))
     deployment = _resource(docs, "Deployment", "mindroom-demo")
     mindroom_container = _container(deployment, "mindroom")
     runner_container = _container(deployment, "sandbox-runner")
+    annotations = deployment["spec"]["template"]["metadata"]["annotations"]
 
-    assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(mindroom_container)
-    assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(runner_container)
-    assert "annotations" not in deployment["spec"]["template"]["metadata"]
+    expected_env = {
+        "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": "mindroom-api-keys-demo",
+                "key": "credentials_encryption_key",
+            },
+        },
+    }
+    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
+    assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
+    assert annotations["mindroom.ai/instance-secret-hash"] == _instance_secret_hash()
 
 
 def test_instance_chart_credentials_encryption_key_rotation_changes_pod_template() -> None:
@@ -284,11 +318,48 @@ def test_instance_chart_credentials_encryption_key_rotation_changes_pod_template
     second_deployment = _resource(second_docs, "Deployment", "mindroom-demo")
 
     assert (
-        first_deployment["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/credentials-encryption-key-hash"]
-        != second_deployment["spec"]["template"]["metadata"]["annotations"][
-            "mindroom.ai/credentials-encryption-key-hash"
-        ]
+        first_deployment["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"]
+        != second_deployment["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"]
     )
+
+
+def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
+    """Production instance deploys should keep secret material out of Helm manifests."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "instanceSecrets.create=false",
+        "instanceSecrets.name=tenant-runtime-secrets",
+        "instanceSecrets.hash=abc123",
+        "credentials_encryption_key=must-not-render",
+        "matrixOidc.enabled=true",
+        "matrixOidc.issuer=https://api.mindroom.chat/matrix-oidc",
+        "matrixOidc.clientId=mindroom-synapse",
+        "matrixOidc.clientSecret=must-not-render-oidc",
+    )
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+    rendered = json.dumps(docs)
+
+    assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "tenant-runtime-secrets" for doc in docs)
+    assert "must-not-render" not in rendered
+    assert "must-not-render-oidc" not in rendered
+    assert mindroom["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
+    assert synapse["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
+    assert mindroom["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
+    assert synapse["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
+
+
+def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> None:
+    """CI and production instance IDs are numeric and must still render valid Secret names."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=1",
+    )
+    secret = _resource(docs, "Secret", "mindroom-api-keys-1")
+    deployment = _resource(docs, "Deployment", "mindroom-1")
+
+    assert secret["metadata"]["name"] == "mindroom-api-keys-1"
+    assert deployment["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "mindroom-api-keys-1"
 
 
 def test_instance_chart_rejects_email_template_without_email_header() -> None:
