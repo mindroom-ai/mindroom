@@ -43,6 +43,10 @@ autoscaling:
 cleanupScheduler:
   enabled: "true"
 
+platformSecrets:
+  create: true
+  name: platform-secrets
+
 # These should be overridden in values-staging.yaml and values-prod.yaml
 supabase:
   url: ""

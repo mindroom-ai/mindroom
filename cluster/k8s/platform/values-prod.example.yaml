@@ -18,6 +18,12 @@ stripe:
 cleanupScheduler:
   enabled: "true"
 
+platformSecrets:
+  # Production should pre-create this Secret outside Helm so API keys and
+  # private keys are not stored in Helm release values.
+  create: false
+  name: platform-secrets
+
 provisioner:
   # Hetzner Cloud Volumes keep tenant PVCs movable across K3s nodes.
   instanceStorageClassName: hcloud-volumes

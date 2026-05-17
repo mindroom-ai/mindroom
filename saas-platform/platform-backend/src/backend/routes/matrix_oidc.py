@@ -130,9 +130,7 @@ def _load_owned_instance(instance_id: str, account_id: str) -> dict[str, Any]:
 
 def _assert_instance_subscription_allows_login(instance: dict[str, Any]) -> None:
     sb = ensure_supabase()
-    result = (
-        sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
-    )
+    result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Subscription not found")
     assert_instance_entitlement(result.data[0], "sign in to")
