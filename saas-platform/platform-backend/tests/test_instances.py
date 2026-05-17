@@ -181,7 +181,7 @@ class TestInstancesEndpoints:
     ):
         """Test provisioning a new instance for user."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter", "status": "active"}
 
         # Setup mock chains for different queries
         subscription_mock = MagicMock()
@@ -228,7 +228,7 @@ class TestInstancesEndpoints:
     ):
         """Test provisioning when instance already exists."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter", "status": "active"}
         existing_instance = {
             "id": 1,
             "instance_id": "456",
@@ -288,7 +288,7 @@ class TestInstancesEndpoints:
     ):
         """Test reprovisioning a deprovisioned instance."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "professional"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "professional", "status": "active"}
         deprovisioned_instance = {
             "id": 1,
             "instance_id": "789",
@@ -354,6 +354,43 @@ class TestInstancesEndpoints:
         assert response.status_code == 404
         assert response.json()["detail"] == "No subscription found"
 
+    def test_provision_user_instance_rejects_free_subscription(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_verify_user: Mock,
+        mock_provision_instance: Mock,
+        mock_provisioner_api_key,
+    ):
+        """Test free accounts cannot provision hosted infrastructure."""
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "free", "status": "active"}
+
+        subscription_mock = MagicMock()
+        subscription_mock.select.return_value = subscription_mock
+        subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.execute.return_value = Mock(data=[subscription])
+
+        instance_mock = MagicMock()
+        instance_mock.select.return_value = instance_mock
+        instance_mock.eq.return_value = instance_mock
+        instance_mock.limit.return_value = instance_mock
+        instance_mock.execute.return_value = Mock(data=[])
+
+        def table_side_effect(table_name):
+            if table_name == "subscriptions":
+                return subscription_mock
+            if table_name == "instances":
+                return instance_mock
+            return MagicMock()
+
+        mock_supabase.table = Mock(side_effect=table_side_effect)
+
+        response = client.post("/my/instances/provision")
+
+        assert response.status_code == 402
+        assert "Upgrade" in response.json()["detail"]
+        mock_provision_instance.assert_not_called()
+
     def test_start_user_instance_success(
         self,
         client: TestClient,
@@ -363,8 +400,26 @@ class TestInstancesEndpoints:
         mock_provisioner_api_key,
     ):
         """Test starting user's instance successfully."""
-        # Setup
-        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[{"id": 1}])
+        instance_mock = MagicMock()
+        instance_mock.select.return_value = instance_mock
+        instance_mock.eq.return_value = instance_mock
+        instance_mock.limit.return_value = instance_mock
+        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
+
+        subscription_mock = MagicMock()
+        subscription_mock.select.return_value = subscription_mock
+        subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
+        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "starter", "status": "active"}])
+
+        def table_side_effect(table_name):
+            if table_name == "instances":
+                return instance_mock
+            if table_name == "subscriptions":
+                return subscription_mock
+            return MagicMock()
+
+        mock_supabase.table = Mock(side_effect=table_side_effect)
 
         # Make request
         response = client.post("/my/instances/123/start")
@@ -377,6 +432,50 @@ class TestInstancesEndpoints:
 
         # Verify start_instance_provisioner was called
         mock_start_instance.assert_called_once_with(ANY, 123, "Bearer test-api-key")
+
+    def test_start_user_instance_rejects_expired_trial(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_verify_user: Mock,
+        mock_start_instance: Mock,
+        mock_provisioner_api_key,
+    ):
+        """Test expired trials cannot start hosted infrastructure."""
+        expired_trial = {
+            "id": "sub_123",
+            "account_id": "acc_test_123",
+            "tier": "starter",
+            "status": "trialing",
+            "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        }
+
+        instance_mock = MagicMock()
+        instance_mock.select.return_value = instance_mock
+        instance_mock.eq.return_value = instance_mock
+        instance_mock.limit.return_value = instance_mock
+        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
+
+        subscription_mock = MagicMock()
+        subscription_mock.select.return_value = subscription_mock
+        subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
+        subscription_mock.execute.return_value = Mock(data=[expired_trial])
+
+        def table_side_effect(table_name):
+            if table_name == "instances":
+                return instance_mock
+            if table_name == "subscriptions":
+                return subscription_mock
+            return MagicMock()
+
+        mock_supabase.table = Mock(side_effect=table_side_effect)
+
+        response = client.post("/my/instances/123/start")
+
+        assert response.status_code == 402
+        assert "trial" in response.json()["detail"].lower()
+        mock_start_instance.assert_not_called()
 
     def test_start_user_instance_not_owned(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test starting instance not owned by user."""
@@ -423,8 +522,26 @@ class TestInstancesEndpoints:
         mock_provisioner_api_key,
     ):
         """Test restarting user's instance successfully."""
-        # Setup
-        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[{"id": 1}])
+        instance_mock = MagicMock()
+        instance_mock.select.return_value = instance_mock
+        instance_mock.eq.return_value = instance_mock
+        instance_mock.limit.return_value = instance_mock
+        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
+
+        subscription_mock = MagicMock()
+        subscription_mock.select.return_value = subscription_mock
+        subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.limit.return_value = subscription_mock
+        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "starter", "status": "active"}])
+
+        def table_side_effect(table_name):
+            if table_name == "instances":
+                return instance_mock
+            if table_name == "subscriptions":
+                return subscription_mock
+            return MagicMock()
+
+        mock_supabase.table = Mock(side_effect=table_side_effect)
 
         # Make request
         response = client.post("/my/instances/456/restart")
@@ -518,7 +635,7 @@ class TestInstancesEndpoints:
     ):
         """Test provisioning when instance is already provisioning."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter", "status": "active"}
         provisioning_instance = {
             "id": 1,
             "instance_id": "456",

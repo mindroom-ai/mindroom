@@ -2,11 +2,29 @@ import { ExternalLink, CheckCircle, AlertCircle, Loader2, XCircle, Rocket, Copy 
 import Link from 'next/link'
 import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
+import type { Subscription } from '@/hooks/useSubscription'
 import { provisionInstance } from '@/lib/api'
+import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
 
-export function InstanceCard({ instance }: { instance: Instance | null }) {
+const INFRASTRUCTURE_TIERS = new Set(['starter', 'professional', 'enterprise'])
+
+function subscriptionCanRunInfrastructure(subscription: Subscription | null | undefined) {
+  if (subscription === undefined) return true
+  if (!subscription || !INFRASTRUCTURE_TIERS.has(subscription.tier)) return false
+  if (subscription.status === 'active') return true
+  if (subscription.status !== 'trialing' || !subscription.trial_ends_at) return false
+  return new Date(subscription.trial_ends_at).getTime() > Date.now()
+}
+
+export function InstanceCard({
+  instance,
+  subscription,
+}: {
+  instance: Instance | null
+  subscription?: Subscription | null
+}) {
   const [isProvisioning, setIsProvisioning] = useState(false)
   const copyToClipboard = async (text: string) => {
     try {
@@ -78,28 +96,46 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
 
   // No instance yet - show provision card
   if (!instance) {
+    const canProvision = subscriptionCanRunInfrastructure(subscription)
+
     return (
       <Card>
         <CardHeader>MindRoom Instance</CardHeader>
         <div className="text-center py-8">
           <Rocket className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400 mb-6">
-            No instance provisioned yet. Click below to create your MindRoom instance.
-          </p>
-          <button
-            onClick={handleProvision}
-            disabled={isProvisioning}
-            className="px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            {isProvisioning ? (
-              <>
-                <Loader2 className="inline-block w-5 h-5 mr-2 animate-spin" />
-                Provisioning...
-              </>
-            ) : (
-              'Provision Instance'
-            )}
-          </button>
+          {canProvision ? (
+            <>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                No instance provisioned yet. Click below to create your MindRoom instance.
+              </p>
+              <button
+                onClick={handleProvision}
+                disabled={isProvisioning}
+                className="px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                {isProvisioning ? (
+                  <>
+                    <Loader2 className="inline-block w-5 h-5 mr-2 animate-spin" />
+                    Provisioning...
+                  </>
+                ) : (
+                  'Provision Instance'
+                )}
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Hosted instances require an active trial or paid plan.
+              </p>
+              <Link
+                href="/dashboard/billing/upgrade"
+                className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
+              >
+                Start Trial
+              </Link>
+            </>
+          )}
         </div>
       </Card>
     )
@@ -156,6 +192,9 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const frontendHost = getHostname(instance.frontend_url)
   const backendHost = getHostname(instance.backend_url)
   const matrixHost = getHostname(instance.matrix_server_url)
+  const cinnyLoginUrl = instance.matrix_server_url
+    ? buildCinnyLoginUrl(instance.matrix_server_url)
+    : null
   const lastSynced = instance.kubernetes_synced_at
     ? formatRelativeTime(instance.kubernetes_synced_at)
     : null
@@ -269,7 +308,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
             <span className="text-gray-600 dark:text-gray-400">Matrix Server</span>
             <div className="flex items-center gap-2">
               <Link
-                href={instance.matrix_server_url}
+                href={cinnyLoginUrl || instance.matrix_server_url}
                 target="_blank"
                 className="flex items-center gap-1 text-purple-600 hover:text-purple-700 dark:text-purple-400 dark:hover:text-purple-300 font-medium"
               >

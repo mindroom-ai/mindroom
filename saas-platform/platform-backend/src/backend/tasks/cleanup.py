@@ -7,8 +7,11 @@ from datetime import UTC, datetime, timedelta
 import logging
 
 from backend.deps import ensure_supabase
+from backend.entitlements import is_expired_trial, is_subscription_service_active
+from backend.k8s import instance_deployment_ref, run_kubectl
 
 logger = logging.getLogger(__name__)
+RUNNING_INSTANCE_STATUSES = ["running", "provisioning", "restarting"]
 
 
 def cleanup_soft_deleted_accounts(grace_period_days: int = 7) -> dict:
@@ -93,6 +96,66 @@ def cleanup_old_usage_metrics(retention_days: int = 365) -> dict:
     }
 
 
+async def cleanup_unentitled_instances() -> dict:
+    """
+    Stop hosted instances whose subscription no longer allows infrastructure.
+    Expired trials are marked paused so they do not get processed repeatedly.
+    """
+    sb = ensure_supabase()
+    now = datetime.now(UTC)
+    now_iso = now.isoformat()
+    sub_result = sb.table("subscriptions").select("id,tier,status,trial_ends_at").execute()
+
+    instances_stopped = 0
+    subscriptions_paused = 0
+    errors = 0
+
+    for subscription in sub_result.data or []:
+        if is_subscription_service_active(subscription, now=now):
+            continue
+
+        instance_result = (
+            sb.table("instances")
+            .select("instance_id,status")
+            .eq("subscription_id", subscription["id"])
+            .in_("status", RUNNING_INSTANCE_STATUSES)
+            .execute()
+        )
+
+        for instance in instance_result.data or []:
+            instance_id = instance["instance_id"]
+            code, out, err = await run_kubectl(
+                ["scale", instance_deployment_ref(instance_id), "--replicas=0"], namespace="mindroom-instances"
+            )
+            if code == 0:
+                sb.table("instances").update({"status": "stopped", "updated_at": now_iso}).eq(
+                    "instance_id", instance_id
+                ).execute()
+                instances_stopped += 1
+                logger.info("Stopped instance %s because subscription %s is inactive", instance_id, subscription["id"])
+            else:
+                errors += 1
+                logger.warning(
+                    "Failed to stop instance %s for inactive subscription %s: %s",
+                    instance_id,
+                    subscription["id"],
+                    err.strip() if err else out.strip(),
+                )
+
+        if is_expired_trial(subscription, now=now):
+            sb.table("subscriptions").update({"status": "paused", "updated_at": now_iso}).eq(
+                "id", subscription["id"]
+            ).execute()
+            subscriptions_paused += 1
+
+    return {
+        "instances_stopped": instances_stopped,
+        "subscriptions_paused": subscriptions_paused,
+        "errors": errors,
+        "timestamp": now_iso,
+    }
+
+
 def run_all_cleanup_tasks() -> dict:
     """
     Run all cleanup tasks.
@@ -107,7 +170,9 @@ def run_all_cleanup_tasks() -> dict:
 
 if __name__ == "__main__":
     # Can be run directly for testing
+    import asyncio
     import json
 
     results = run_all_cleanup_tasks()
+    results["subscription_lifecycle"] = asyncio.run(cleanup_unentitled_instances())
     print(json.dumps(results, indent=2))
