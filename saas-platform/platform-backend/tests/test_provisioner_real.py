@@ -2,8 +2,8 @@
 
 import base64
 import importlib
+import json
 import os
-import stat
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -72,36 +72,47 @@ class TestProvisionerCommandValidation:
         from backend.routes.provisioner import provision_instance
 
         captured_helm_args = []
+        captured_secret_manifests = []
 
         async def capture_helm_command(args):
             captured_helm_args.append(args)
             return (0, "Success", "")
 
+        async def capture_kubectl_command(args, namespace=None):
+            if args[:2] == ["apply", "-f"]:
+                captured_secret_manifests.append(json.loads(Path(args[2]).read_text(encoding="utf-8")))
+            return (0, "Success", "")
+
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
             with patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command):
-                with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                    # Minimal mocking - just database
-                    mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+                with patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command):
+                    with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+                        # Minimal mocking - just database
+                        mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
-                    # Run actual provisioning
-                    await provision_instance(
-                        None,  # request
-                        {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "professional"},
-                        "Bearer test-key",  # authorization
-                        None,  # background_tasks
-                    )
+                        # Run actual provisioning
+                        await provision_instance(
+                            None,  # request
+                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "professional"},
+                            "Bearer test-key",  # authorization
+                            None,  # background_tasks
+                        )
 
         # Validate the ACTUAL helm command structure
         helm_args = captured_helm_args[0]
 
         # Critical: Verify --set arguments are correct
         set_args = {}
+        set_string_args = {}
         set_file_args = {}
         for i, arg in enumerate(helm_args):
             if arg == "--set":
                 key_value = helm_args[i + 1]
                 key, value = key_value.split("=", 1)
                 set_args[key] = value
+            if arg == "--set-string":
+                key, value = helm_args[i + 1].split("=", 1)
+                set_string_args[key] = value
             if arg == "--set-file":
                 key, value = helm_args[i + 1].split("=", 1)
                 set_file_args[key] = value
@@ -114,20 +125,18 @@ class TestProvisionerCommandValidation:
         assert set_args["baseDomain"] == "test.mindroom.chat"
         assert "supabaseUrl" in set_args
 
-        # Critical: Check we're not mixing up API keys
-        assert "openrouter_key" in set_args or "openrouter" in str(set_args)
-        assert "openai_key" in set_args or "openai" in str(set_args)
-        assert "sandbox_proxy_token" in set_args
-        assert set_args["sandbox_proxy_token"] != ""
+        assert set_args["instanceSecrets.create"] == "false"
+        assert set_args["instanceSecrets.name"] == "mindroom-api-keys-123"
+        assert "instanceSecrets.hash" in set_string_args
+        assert "openrouter_key" not in set_args
+        assert "openai_key" not in set_args
+        assert "sandbox_proxy_token" not in set_args
         assert "credentials_encryption_key" not in set_args
-        assert "credentials_encryption_key" in set_file_args
-        assert not Path(set_file_args["credentials_encryption_key"]).exists()
+        assert set_file_args == {}
 
-        # Verify we're not passing wrong values
-        # Skip check if both are empty (not set in env during tests)
-        if "openrouter_key" in set_args and "openai_key" in set_args:
-            if set_args["openrouter_key"] and set_args["openai_key"]:
-                assert set_args["openrouter_key"] != set_args["openai_key"]
+        secret_data = captured_secret_manifests[0]["stringData"]
+        assert secret_data["sandbox_proxy_token"]
+        assert secret_data["credentials_encryption_key"]
 
     def test_instance_credentials_encryption_key_is_stable_and_instance_scoped(self):
         """Provisioner-derived credential keys should be stable without sharing one key across instances."""
@@ -145,14 +154,27 @@ class TestProvisionerCommandValidation:
         assert first != other
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
 
-    def test_credentials_encryption_key_helm_set_file_is_private(self):
-        """Provisioner should hand Helm secret values through private files, not argv."""
-        path = Path(provisioner._write_helm_secret_value_file("secret-key-value"))
-        try:
-            assert path.read_text(encoding="utf-8") == "secret-key-value"
-            assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        finally:
-            path.unlink(missing_ok=True)
+    @pytest.mark.asyncio
+    async def test_instance_secret_apply_uses_private_manifest_file(self):
+        """Provisioner should apply Secret manifests from a private temporary file."""
+        captured = {}
+
+        async def capture_kubectl_command(args, namespace=None):
+            path = Path(args[2])
+            captured["mode"] = path.stat().st_mode & 0o777
+            captured["manifest"] = json.loads(path.read_text(encoding="utf-8"))
+            return (0, "Success", "")
+
+        with patch.object(provisioner, "run_kubectl", side_effect=capture_kubectl_command):
+            await provisioner._apply_instance_secret(
+                "123",
+                "mindroom-instances",
+                {"credentials_encryption_key": "secret-key-value"},
+            )
+
+        assert captured["mode"] == 0o600
+        assert captured["manifest"]["metadata"]["name"] == "mindroom-api-keys-123"
+        assert captured["manifest"]["stringData"]["credentials_encryption_key"] == "secret-key-value"
 
     @pytest.mark.asyncio
     async def test_helm_install_command_honors_instance_overrides(self):
@@ -160,14 +182,15 @@ class TestProvisionerCommandValidation:
         from backend.routes.provisioner import provision_instance
 
         captured_helm_args = []
-        captured_set_file_values = {}
+        captured_secret_manifests = []
 
         async def capture_helm_command(args):
             captured_helm_args.append(args)
-            for i, arg in enumerate(args):
-                if arg == "--set-file":
-                    key, value = args[i + 1].split("=", 1)
-                    captured_set_file_values[key] = Path(value).read_text(encoding="utf-8")
+            return (0, "Success", "")
+
+        async def capture_kubectl_command(args, namespace=None):
+            if args[:2] == ["apply", "-f"]:
+                captured_secret_manifests.append(json.loads(Path(args[2]).read_text(encoding="utf-8")))
             return (0, "Success", "")
 
         with (
@@ -200,6 +223,7 @@ class TestProvisionerCommandValidation:
                 INSTANCE_MATRIX_OIDC_CLIENT_SECRET="matrix-client-secret",
             ),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
+            patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
             mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
@@ -251,9 +275,12 @@ class TestProvisionerCommandValidation:
         assert set_args["matrixOidc.enabled"] == "true"
         assert set_args["matrixOidc.issuer"] == "https://api.mindroom.chat/matrix-oidc"
         assert set_args["matrixOidc.clientId"] == "mindroom-synapse"
+        assert set_args["instanceSecrets.create"] == "false"
+        assert set_args["instanceSecrets.name"] == "mindroom-api-keys-123"
+        assert "instanceSecrets.hash" in set_string_args
         assert "matrix-client-secret" not in " ".join(helm_args)
-        assert captured_set_file_values["matrixOidc.clientSecret"] == "matrix-client-secret"
-        assert not Path(set_file_args["matrixOidc.clientSecret"]).exists()
+        assert set_file_args == {}
+        assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == "matrix-client-secret"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):
@@ -611,7 +638,10 @@ class TestProvisionerRealScenarios:
                     "Error: failed to create resource: exceeded quota: compute-resources, requested: requests.cpu=2, used: requests.cpu=8, limited: requests.cpu=10",
                 )
 
-                with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+                with (
+                    patch("backend.routes.provisioner.run_kubectl", return_value=(0, "Success", "")),
+                    patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
+                ):
                     mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
                     with pytest.raises(Exception) as exc_info:
