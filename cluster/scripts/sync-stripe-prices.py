@@ -84,7 +84,7 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
     prices = stripe.Price.list(product=product_id, limit=100)
     for price in prices.data:
         metadata = price.metadata or {}
-        if metadata.get("plan") == plan_key and metadata.get("billing_cycle") == billing_cycle:
+        if metadata.get("tier") == plan_key and metadata.get("billing_cycle") == billing_cycle:
             print(f"  Found existing price for {plan_key} ({billing_cycle}): {price.id}")
             return price.id
 
@@ -101,7 +101,7 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
         },
         "nickname": f"{plan_data['name']} ({billing_cycle.capitalize()})",
         "metadata": {
-            "plan": plan_key,
+            "tier": plan_key,
             "billing_cycle": billing_cycle,
             "platform": "mindroom",
         },

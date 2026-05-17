@@ -58,7 +58,7 @@ class TestWebhookEndpoints:
                     {
                         "price": {
                             "id": f"price_{tier}_{billing_cycle}",
-                            "metadata": {"plan": tier, "billing_cycle": billing_cycle},
+                            "metadata": {"tier": tier, "billing_cycle": billing_cycle},
                         },
                         "quantity": quantity,
                     }
@@ -521,13 +521,13 @@ class TestWebhookEndpoints:
         assert result["received"] is True
         assert "error" in result or "Unable to determine tier" in str(result)
 
-    def test_price_metadata_requires_plan(
+    def test_price_metadata_requires_tier(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
-        """Stripe price metadata must use the current plan field."""
+        """Stripe price metadata must use the current tier field."""
         subscription_data = self._create_subscription_data()
         subscription_data["items"]["data"][0]["price"]["metadata"] = {
-            "tier": "starter",
+            "plan": "starter",
             "billing_cycle": "monthly",
         }
         event = self._create_stripe_event("customer.subscription.created", subscription_data)
