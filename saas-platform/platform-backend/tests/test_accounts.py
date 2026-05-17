@@ -29,6 +29,7 @@ class TestAccountsEndpoints:
     @pytest.fixture
     def mock_verify_user(self):
         """Mock user verification."""
+
         def override_verify_user():
             return {"account_id": "acc_test_123", "email": "test@example.com"}
 
@@ -83,6 +84,7 @@ class TestAccountsEndpoints:
 
     def test_get_current_account_unauthorized(self, client: TestClient):
         """Test getting account without authentication."""
+
         def override_verify_user():
             raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -148,7 +150,6 @@ class TestAccountsEndpoints:
             "status": "active",
             "max_agents": 1,
             "max_messages_per_day": 100,
-            "max_storage_gb": 10,
             "created_at": datetime.now(UTC).isoformat(),
         }
         mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
@@ -215,7 +216,6 @@ class TestAccountsEndpoints:
                     "status": "active",
                     "max_agents": 1,
                     "max_messages_per_day": 100,
-                    "max_storage_gb": 10,
                 }
             ]
         )

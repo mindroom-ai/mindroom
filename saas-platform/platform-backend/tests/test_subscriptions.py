@@ -57,7 +57,6 @@ class TestSubscriptionsEndpoints:
             "current_period_end": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
             "max_agents": 10,
             "max_messages_per_day": 1000,
-            "max_storage_gb": 100,
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -304,7 +303,6 @@ class TestSubscriptionsEndpoints:
             "stripe_subscription_id": "stripe_sub_123",
             "max_agents": 10,
             "max_messages_per_day": 1000,
-            "max_storage_gb": 100,
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }

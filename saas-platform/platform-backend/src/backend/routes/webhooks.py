@@ -26,14 +26,9 @@ def _get_tier_from_price(price: dict) -> str:
     """Extract tier from price metadata.
 
     Our sync-stripe-prices.py script sets metadata.plan with the tier name.
-    Also supports metadata.tier for backward compatibility.
     """
-    if metadata := price.get("metadata", {}):
-        # Try 'plan' first (new format), then 'tier' (old format)
-        if plan := metadata.get("plan"):
-            return plan
-        if tier := metadata.get("tier"):
-            return tier
+    if (metadata := price.get("metadata", {})) and (plan := metadata.get("plan")):
+        return plan
 
     msg = (
         f"Unable to determine tier from price. "
@@ -341,7 +336,6 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
     return True, account_id
 
 
-@router.post("/stripe", response_model=WebhookResponse, include_in_schema=False)
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
 @limiter.limit("20/minute")
 async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915

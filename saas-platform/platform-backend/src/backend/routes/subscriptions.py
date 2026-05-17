@@ -49,12 +49,10 @@ async def get_user_subscription(request: Request, user: Annotated[dict, Depends(
         logger.error(f"Failed to create subscription for account {account_id}")
         raise HTTPException(status_code=500, detail="Failed to create subscription")
 
-    # Add max_storage_gb from pricing config if not in database
     subscription = result.data[0]
-    if "max_storage_gb" not in subscription or subscription["max_storage_gb"] is None:
-        tier = subscription.get("tier", "free")
-        limits = get_plan_limits_from_metadata(tier)
-        subscription["max_storage_gb"] = limits["max_storage_gb"]
+    tier = subscription.get("tier", "free")
+    limits = get_plan_limits_from_metadata(tier)
+    subscription["max_storage_gb"] = limits["max_storage_gb"]
 
     return subscription
 
@@ -65,9 +63,6 @@ async def cancel_subscription(
     req: Request, request: CancelSubscriptionRequest, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Cancel subscription."""
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-
     sb = ensure_supabase()
     account_id = user["account_id"]
 
@@ -85,6 +80,8 @@ async def cancel_subscription(
         raise HTTPException(status_code=400, detail="No active subscription found")
 
     stripe_sub_id = subscription["stripe_subscription_id"]
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
 
     try:
         if request.cancel_at_period_end:
@@ -111,9 +108,6 @@ async def cancel_subscription(
 @limiter.limit("5/minute")  # Sensitive operation
 async def reactivate_subscription(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Reactivate a cancelled subscription (if still in billing period)."""
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-
     sb = ensure_supabase()
     account_id = user["account_id"]
 
@@ -131,6 +125,8 @@ async def reactivate_subscription(request: Request, user: Annotated[dict, Depend
         raise HTTPException(status_code=400, detail="No Stripe subscription found")
 
     stripe_sub_id = subscription["stripe_subscription_id"]
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
 
     try:
         # Reactivate by removing the cancel_at_period_end flag

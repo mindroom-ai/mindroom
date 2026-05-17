@@ -226,6 +226,7 @@ async def restrict_public_metrics(
             return JSONResponse({"detail": "Not found"}, status_code=404)
     return await call_next(request)
 
+
 # 5. Compute CORS origins: exclude localhost in production
 cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]
 

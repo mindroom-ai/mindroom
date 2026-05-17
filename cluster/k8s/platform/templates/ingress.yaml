@@ -58,13 +58,6 @@ spec:
             name: platform-backend
             port:
               number: 8000
-      - path: /stripe
-        pathType: Prefix
-        backend:
-          service:
-            name: platform-backend
-            port:
-              number: 8000
 
   tls:
   - hosts:

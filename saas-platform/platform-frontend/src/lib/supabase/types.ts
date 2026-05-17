@@ -1,4 +1,8 @@
 // Database types for Supabase
+type PlanTier = 'free' | 'starter' | 'professional' | 'enterprise'
+type AccountStatus = 'active' | 'suspended' | 'deleted' | 'pending_verification'
+type SubscriptionStatus = 'trialing' | 'active' | 'cancelled' | 'past_due' | 'paused'
+
 export type Database = {
   public: {
     Tables: {
@@ -6,21 +10,57 @@ export type Database = {
         Row: {
           id: string
           email: string
+          full_name: string | null
+          company_name: string | null
+          stripe_customer_id: string | null
+          tier: PlanTier
           is_admin: boolean
+          status: AccountStatus
+          deleted_at: string | null
+          deletion_reason: string | null
+          deletion_requested_by: string | null
+          deletion_requested_at: string | null
+          consent_marketing: boolean
+          consent_analytics: boolean
+          consent_updated_at: string | null
           created_at: string
           updated_at: string
         }
         Insert: {
           id?: string
           email: string
+          full_name?: string | null
+          company_name?: string | null
+          stripe_customer_id?: string | null
+          tier?: PlanTier
           is_admin?: boolean
+          status?: AccountStatus
+          deleted_at?: string | null
+          deletion_reason?: string | null
+          deletion_requested_by?: string | null
+          deletion_requested_at?: string | null
+          consent_marketing?: boolean
+          consent_analytics?: boolean
+          consent_updated_at?: string | null
           created_at?: string
           updated_at?: string
         }
         Update: {
           id?: string
           email?: string
+          full_name?: string | null
+          company_name?: string | null
+          stripe_customer_id?: string | null
+          tier?: PlanTier
           is_admin?: boolean
+          status?: AccountStatus
+          deleted_at?: string | null
+          deletion_reason?: string | null
+          deletion_requested_by?: string | null
+          deletion_requested_at?: string | null
+          consent_marketing?: boolean
+          consent_analytics?: boolean
+          consent_updated_at?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -29,42 +69,51 @@ export type Database = {
         Row: {
           id: string
           account_id: string
-          tier: 'free' | 'starter' | 'professional' | 'enterprise'
-          status: 'active' | 'cancelled' | 'past_due'
+          subscription_id: string | null
           stripe_subscription_id: string | null
-          stripe_customer_id: string | null
+          stripe_price_id: string | null
+          tier: PlanTier
+          status: SubscriptionStatus
+          trial_ends_at: string | null
+          current_period_start: string | null
           current_period_end: string | null
+          cancelled_at: string | null
           max_agents: number
           max_messages_per_day: number
-          max_storage_gb: number
           created_at: string
           updated_at: string
         }
         Insert: {
           id?: string
           account_id: string
-          tier?: 'free' | 'starter' | 'professional' | 'enterprise'
-          status?: 'active' | 'cancelled' | 'past_due'
+          subscription_id?: string | null
           stripe_subscription_id?: string | null
-          stripe_customer_id?: string | null
+          stripe_price_id?: string | null
+          tier?: PlanTier
+          status?: SubscriptionStatus
+          trial_ends_at?: string | null
+          current_period_start?: string | null
           current_period_end?: string | null
+          cancelled_at?: string | null
           max_agents?: number
           max_messages_per_day?: number
-          max_storage_gb?: number
           created_at?: string
           updated_at?: string
         }
         Update: {
           id?: string
           account_id?: string
-          tier?: 'free' | 'starter' | 'professional' | 'enterprise'
-          status?: 'active' | 'cancelled' | 'past_due'
+          subscription_id?: string | null
           stripe_subscription_id?: string | null
-          stripe_customer_id?: string | null
+          stripe_price_id?: string | null
+          tier?: PlanTier
+          status?: SubscriptionStatus
+          trial_ends_at?: string | null
+          current_period_start?: string | null
           current_period_end?: string | null
+          cancelled_at?: string | null
           max_agents?: number
           max_messages_per_day?: number
-          max_storage_gb?: number
           created_at?: string
           updated_at?: string
         }

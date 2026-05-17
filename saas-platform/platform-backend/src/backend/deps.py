@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 # TTL cache for auth verification (5 minutes, max 100 entries)
 _auth_cache = TTLCache(maxsize=100, ttl=300)
 
+
 def client_ip_from_request(request: Request) -> str:
     """Return the end-user IP for auth monitoring and rate limiting."""
     real_ip = request.headers.get("x-real-ip", "").strip()
