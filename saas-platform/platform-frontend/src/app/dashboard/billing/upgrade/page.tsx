@@ -366,7 +366,7 @@ export default function UpgradePage() {
       <div className="mt-8 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
         <h4 className="font-semibold text-blue-900 dark:text-blue-300 mb-2">Good to know</h4>
         <ul className="text-sm text-blue-800 dark:text-blue-400 space-y-1">
-          <li>• All plans include a 14-day free trial</li>
+          <li>• Hosted plans include a 3-day free trial</li>
           <li>• Cancel or change your plan anytime</li>
           <li>• {billingCycle === 'yearly' ? `Save ${discountPercentage}% with annual billing` : `Switch to yearly billing and save ${discountPercentage}%`}</li>
           <li>• Upgrades are prorated to your billing cycle</li>

@@ -12,10 +12,23 @@ const INFRASTRUCTURE_TIERS = new Set(['starter', 'professional', 'enterprise'])
 
 function subscriptionCanRunInfrastructure(subscription: Subscription | null | undefined) {
   if (subscription === undefined) return true
+  if (typeof subscription?.can_run_instances === 'boolean') return subscription.can_run_instances
   if (!subscription || !INFRASTRUCTURE_TIERS.has(subscription.tier)) return false
   if (subscription.status === 'active') return true
   if (subscription.status !== 'trialing' || !subscription.trial_ends_at) return false
   return new Date(subscription.trial_ends_at).getTime() > Date.now()
+}
+
+function subscriptionAccessMessage(subscription: Subscription | null | undefined) {
+  if (!subscription) return null
+  if (subscription.status === 'trialing' && subscription.trial_days_remaining !== null) {
+    const days = subscription.trial_days_remaining
+    return `Trial: ${days} ${days === 1 ? 'day' : 'days'} remaining`
+  }
+  if (subscription.status === 'paused' && subscription.trial_days_remaining === 0) {
+    return 'Trial expired. Add billing to start or restore your hosted instance.'
+  }
+  return null
 }
 
 export function InstanceCard({
@@ -97,12 +110,16 @@ export function InstanceCard({
   // No instance yet - show provision card
   if (!instance) {
     const canProvision = subscriptionCanRunInfrastructure(subscription)
+    const accessMessage = subscriptionAccessMessage(subscription)
 
     return (
       <Card>
         <CardHeader>MindRoom Instance</CardHeader>
         <div className="text-center py-8">
           <Rocket className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+          {accessMessage && (
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">{accessMessage}</p>
+          )}
           {canProvision ? (
             <>
               <p className="text-gray-600 dark:text-gray-400 mb-6">

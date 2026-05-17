@@ -387,6 +387,22 @@ def test_platform_chart_wires_instance_credentials_encryption_secret() -> None:
     )
 
 
+def test_platform_chart_can_use_existing_secret_for_sensitive_values() -> None:
+    """Production deploys should keep secret material out of Helm release values."""
+    docs = _render_chart(
+        Path("cluster/k8s/platform"),
+        "platformSecrets.create=false",
+        "platformSecrets.name=mindroom-platform-secrets",
+        "matrixOidc.enabled=true",
+        release_name="mindroom-platform",
+    )
+    deployment = _resource(docs, "Deployment", "platform-backend")
+    volume = deployment["spec"]["template"]["spec"]["volumes"][0]
+
+    assert not any(doc["kind"] == "Secret" and doc["metadata"]["name"] == "platform-secrets" for doc in docs)
+    assert volume["secret"]["secretName"] == "mindroom-platform-secrets"
+
+
 def test_platform_chart_exposes_instance_image_pull_secret_names() -> None:
     """Provisioner config should forward registry pull secret names to instance Helm releases."""
     docs = _render_chart(

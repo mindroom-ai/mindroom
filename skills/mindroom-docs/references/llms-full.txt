@@ -15529,6 +15529,8 @@ helm upgrade --install platform ./cluster/k8s/platform \
 ```
 
 The namespace must match `mindroom-{environment}` where `environment` is set in values.
+For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
+The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
 Platform ingress hosts:
 

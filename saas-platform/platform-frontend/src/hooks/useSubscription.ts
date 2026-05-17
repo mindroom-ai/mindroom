@@ -20,6 +20,8 @@ export interface Subscription {
   max_agents: number
   max_messages_per_day: number
   max_storage_gb: number
+  can_run_instances: boolean
+  trial_days_remaining: number | null
   created_at: string
   updated_at: string
 }

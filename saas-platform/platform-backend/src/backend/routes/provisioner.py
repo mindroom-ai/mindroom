@@ -19,6 +19,10 @@ from backend.config import (
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
     INSTANCE_IMAGE_PULL_SECRET_NAMES,
     INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
+    INSTANCE_MATRIX_OIDC_CLIENT_ID,
+    INSTANCE_MATRIX_OIDC_CLIENT_SECRET,
+    INSTANCE_MATRIX_OIDC_ENABLED,
+    INSTANCE_MATRIX_OIDC_ISSUER,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
     INSTANCE_SYNAPSE_IMAGE,
@@ -148,6 +152,22 @@ def _append_credentials_encryption_key_helm_args(helm_args: list[str], key: str)
         return None
     secret_file_path = _write_helm_secret_value_file(key)
     helm_args += ["--set-file", f"credentials_encryption_key={secret_file_path}"]
+    return secret_file_path
+
+
+def _append_matrix_oidc_helm_args(helm_args: list[str]) -> str | None:
+    """Forward hosted Matrix OIDC settings to the instance chart."""
+    if INSTANCE_MATRIX_OIDC_ENABLED:
+        helm_args += ["--set", f"matrixOidc.enabled={INSTANCE_MATRIX_OIDC_ENABLED}"]
+    if INSTANCE_MATRIX_OIDC_ISSUER:
+        helm_args += ["--set", f"matrixOidc.issuer={INSTANCE_MATRIX_OIDC_ISSUER}"]
+    if INSTANCE_MATRIX_OIDC_CLIENT_ID:
+        helm_args += ["--set", f"matrixOidc.clientId={INSTANCE_MATRIX_OIDC_CLIENT_ID}"]
+    if not INSTANCE_MATRIX_OIDC_CLIENT_SECRET:
+        return None
+
+    secret_file_path = _write_helm_secret_value_file(INSTANCE_MATRIX_OIDC_CLIENT_SECRET)
+    helm_args += ["--set-file", f"matrixOidc.clientSecret={secret_file_path}"]
     return secret_file_path
 
 
@@ -390,12 +410,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"trustedUpstreamAuth.jwtMatrixUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM}",
             ]
 
+        matrix_oidc_client_secret_file_path = _append_matrix_oidc_helm_args(helm_args)
         credentials_encryption_key_file_path = _append_credentials_encryption_key_helm_args(
             helm_args, credentials_encryption_key
         )
         try:
             code, stdout, stderr = await run_helm(helm_args)
         finally:
+            if matrix_oidc_client_secret_file_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(matrix_oidc_client_secret_file_path)
             if credentials_encryption_key_file_path is not None:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(credentials_encryption_key_file_path)

@@ -160,9 +160,14 @@ class TestProvisionerCommandValidation:
         from backend.routes.provisioner import provision_instance
 
         captured_helm_args = []
+        captured_set_file_values = {}
 
         async def capture_helm_command(args):
             captured_helm_args.append(args)
+            for i, arg in enumerate(args):
+                if arg == "--set-file":
+                    key, value = args[i + 1].split("=", 1)
+                    captured_set_file_values[key] = Path(value).read_text(encoding="utf-8")
             return (0, "Success", "")
 
         with (
@@ -189,6 +194,10 @@ class TestProvisionerCommandValidation:
                 INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM="email",
                 INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM="sub",
                 INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM="matrix_user_id",
+                INSTANCE_MATRIX_OIDC_ENABLED="true",
+                INSTANCE_MATRIX_OIDC_ISSUER="https://api.mindroom.chat/matrix-oidc",
+                INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",
+                INSTANCE_MATRIX_OIDC_CLIENT_SECRET="matrix-client-secret",
             ),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
@@ -205,6 +214,7 @@ class TestProvisionerCommandValidation:
         helm_args = captured_helm_args[0]
         set_args = {}
         set_string_args = {}
+        set_file_args = {}
         for i, arg in enumerate(helm_args):
             if arg == "--set":
                 key, value = helm_args[i + 1].split("=", 1)
@@ -212,6 +222,9 @@ class TestProvisionerCommandValidation:
             if arg == "--set-string":
                 key, value = helm_args[i + 1].split("=", 1)
                 set_string_args[key] = value
+            if arg == "--set-file":
+                key, value = helm_args[i + 1].split("=", 1)
+                set_file_args[key] = value
 
         assert set_args["baseDomain"] == "local"
         assert set_args["storageClassName"] == "standard"
@@ -235,6 +248,12 @@ class TestProvisionerCommandValidation:
         assert set_args["trustedUpstreamAuth.jwtEmailClaim"] == "email"
         assert set_args["trustedUpstreamAuth.jwtUserIdClaim"] == "sub"
         assert set_args["trustedUpstreamAuth.jwtMatrixUserIdClaim"] == "matrix_user_id"
+        assert set_args["matrixOidc.enabled"] == "true"
+        assert set_args["matrixOidc.issuer"] == "https://api.mindroom.chat/matrix-oidc"
+        assert set_args["matrixOidc.clientId"] == "mindroom-synapse"
+        assert "matrix-client-secret" not in " ".join(helm_args)
+        assert captured_set_file_values["matrixOidc.clientSecret"] == "matrix-client-secret"
+        assert not Path(set_file_args["matrixOidc.clientSecret"]).exists()
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):

@@ -50,7 +50,7 @@ class TestPricingConfig:
 
         # Check trial configuration
         assert model.trial.enabled is True
-        assert model.trial.days == 14
+        assert model.trial.days == 3
         assert "starter" in model.trial.applicable_plans
         assert "professional" in model.trial.applicable_plans
 
@@ -195,7 +195,7 @@ class TestPricingHelperFunctions:
 
     def test_get_trial_days(self) -> None:
         """Test getting trial days."""
-        assert get_trial_days() == 14
+        assert get_trial_days() == 3
 
     def test_is_trial_enabled_for_plan(self) -> None:
         """Test checking if trial is enabled for plans."""

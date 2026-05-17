@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from math import ceil
 from typing import Any
 
+from backend.pricing import get_plan_limits_from_metadata
 from fastapi import HTTPException
 
 PAID_TIERS = frozenset({"starter", "professional", "enterprise"})
@@ -53,6 +55,34 @@ def is_expired_trial(subscription: dict[str, Any], *, now: datetime | None = Non
 
     reference_time = (now or datetime.now(UTC)).astimezone(UTC)
     return trial_ends_at <= reference_time
+
+
+def trial_days_remaining(subscription: dict[str, Any], *, now: datetime | None = None) -> int | None:
+    """Return rounded-up trial days remaining, or None when there is no trial clock."""
+    if str(subscription.get("status") or "") not in {"trialing", "paused"}:
+        return None
+
+    trial_ends_at = _parse_timestamp(subscription.get("trial_ends_at"))
+    if trial_ends_at is None:
+        return None
+
+    reference_time = (now or datetime.now(UTC)).astimezone(UTC)
+    seconds_remaining = (trial_ends_at - reference_time).total_seconds()
+    if seconds_remaining <= 0:
+        return 0
+    return ceil(seconds_remaining / 86_400)
+
+
+def decorate_subscription_for_response(
+    subscription: dict[str, Any], *, plan_limits: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """Add computed fields required by subscription API response models."""
+    tier = str(subscription.get("tier") or "free")
+    limits = plan_limits or get_plan_limits_from_metadata(tier)
+    subscription["max_storage_gb"] = limits["max_storage_gb"]
+    subscription["can_run_instances"] = is_subscription_service_active(subscription)
+    subscription["trial_days_remaining"] = trial_days_remaining(subscription)
+    return subscription
 
 
 def _entitlement_failure_detail(subscription: dict[str, Any], action: str) -> str:

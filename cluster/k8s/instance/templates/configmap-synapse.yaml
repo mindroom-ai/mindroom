@@ -10,6 +10,7 @@ data:
   homeserver.yaml: |
     # Synapse configuration for {{ .Values.customer }}
     server_name: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+    public_baseurl: "https://{{ .Values.customer }}.matrix.{{ .Values.baseDomain }}/"
     pid_file: /data/homeserver.pid
 
     listeners:
@@ -30,10 +31,37 @@ data:
     uploads_path: /data/uploads
 
     # Registration and authentication
+{{- if eq (toString .Values.matrixOidc.enabled) "true" }}
+    enable_registration: false
+    enable_registration_without_verification: false
+    password_config:
+      enabled: false
+{{- else }}
     enable_registration: true
     enable_registration_without_verification: true
+{{- end }}
     # If not provided, fallback to a strong random value
     registration_shared_secret: "{{ .Values.matrix_admin_password | default (randAlphaNum 32) }}"
+{{- if eq (toString .Values.matrixOidc.enabled) "true" }}
+
+    oidc_providers:
+      - idp_id: mindroom
+        idp_name: "MindRoom"
+        discover: true
+        issuer: "{{ required "matrixOidc.issuer is required when matrixOidc.enabled=true" .Values.matrixOidc.issuer }}"
+        client_id: "{{ required "matrixOidc.clientId is required when matrixOidc.enabled=true" .Values.matrixOidc.clientId }}"
+        client_secret_path: /etc/mindroom-secrets/matrix_oidc_client_secret
+        scopes: ["openid", "profile", "email"]
+        user_profile_method: "userinfo_endpoint"
+        allow_existing_users: true
+        enable_registration: true
+        user_mapping_provider:
+          config:
+            subject_template: "{{ "{{ user.sub }}" }}"
+            localpart_template: "{{ "{{ user.email|lower|localpart_from_email }}" }}"
+            display_name_template: "{{ "{{ user.name }}" }}"
+            email_template: "{{ "{{ user.email }}" }}"
+{{- end }}
 
     # Disable reporting stats
     report_stats: false

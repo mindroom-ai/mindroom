@@ -43,6 +43,9 @@ spec:
         - name: synapse-config
           mountPath: /data/log.config
           subPath: log.config
+        - name: mindroom-secrets
+          mountPath: /etc/mindroom-secrets
+          readOnly: true
         resources:
           {{- toYaml (.Values.synapseResources | default (dict)) | nindent 10 }}
         readinessProbe:
@@ -75,3 +78,6 @@ spec:
       - name: synapse-config
         configMap:
           name: synapse-config-{{ .Values.customer }}
+      - name: mindroom-secrets
+        secret:
+          secretName: mindroom-api-keys-{{ .Values.customer }}

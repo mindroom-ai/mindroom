@@ -43,6 +43,10 @@ autoscaling:
 cleanupScheduler:
   enabled: "true"
 
+platformSecrets:
+  create: true
+  name: platform-secrets
+
 # These should be overridden in values-staging.yaml and values-prod.yaml
 supabase:
   url: ""
@@ -79,6 +83,14 @@ provisioner:
     jwtEmailClaim: "email"
     jwtUserIdClaim: ""
     jwtMatrixUserIdClaim: ""
+
+matrixOidc:
+  enabled: "false"
+  issuer: ""
+  clientId: "mindroom-synapse"
+  clientSecret: ""
+  privateKey: ""
+  keyId: "mindroom-platform"
 
 # Optional AI API keys
 apiKeys:

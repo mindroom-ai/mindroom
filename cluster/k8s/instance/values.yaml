@@ -36,6 +36,12 @@ mindroom_image_pull_policy: Always
 synapse_image: matrixdotorg/synapse:latest
 synapse_image_pull_policy: Always
 imagePullSecrets: []
+
+matrixOidc:
+  enabled: "false"
+  issuer: ""
+  clientId: "mindroom-synapse"
+  clientSecret: ""
 authorizationGlobalUsers: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
 workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods

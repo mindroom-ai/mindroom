@@ -25,6 +25,7 @@ from backend.routes import (
     gdpr,
     health,
     instances,
+    matrix_oidc,
     pricing,
     provisioner,
     sso,
@@ -248,6 +249,7 @@ app.include_router(accounts.router)
 app.include_router(subscriptions.router)
 app.include_router(usage.router)
 app.include_router(instances.router)
+app.include_router(matrix_oidc.router)
 app.include_router(provisioner.router)
 app.include_router(admin.router)
 app.include_router(pricing.router)
