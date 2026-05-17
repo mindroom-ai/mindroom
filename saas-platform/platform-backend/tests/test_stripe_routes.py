@@ -225,30 +225,5 @@ class TestStripeRoutesEndpoints:
 
     def test_unauthorized_access(self, client: TestClient):
         """Test accessing endpoints without authentication."""
-        from main import app  # noqa: PLC0415
-        from backend.deps import verify_user_optional
-
-        # Mock pricing functions, user dependency, and Stripe
-        with (
-            patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"),
-            patch("backend.routes.stripe_routes.is_trial_enabled_for_plan", return_value=False),
-            patch("backend.routes.stripe_routes.stripe") as mock_stripe,
-        ):
-            # Mock the checkout session creation
-            mock_checkout_session = Mock()
-            mock_checkout_session.url = "https://checkout.stripe.com/pay/cs_test_123"
-            mock_stripe.checkout.Session.create.return_value = mock_checkout_session
-
-            def override_verify_user_optional():
-                return None  # Return None to simulate no user
-
-            app.dependency_overrides[verify_user_optional] = override_verify_user_optional
-            try:
-                # When there's no authenticated user, checkout should still work
-                # as stripe_routes allows optional user for checkout
-                response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
-                # The route actually allows unauthenticated access
-                assert response.status_code == 200
-                assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"
-            finally:
-                app.dependency_overrides.clear()
+        response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
+        assert response.status_code == 401

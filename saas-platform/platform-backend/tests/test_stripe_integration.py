@@ -89,6 +89,23 @@ class TestCheckoutEndpoint:
         return TestClient(app)
 
     @pytest.fixture(autouse=True)
+    def mock_auth_and_db(self):
+        """Authenticate checkout requests and provide a linked Stripe customer."""
+        from main import app  # noqa: PLC0415
+        from backend.deps import verify_user
+
+        def override_verify_user():
+            return {"account_id": "acc_test_123", "email": "test@example.com"}
+
+        app.dependency_overrides[verify_user] = override_verify_user
+        with patch("backend.routes.stripe_routes.ensure_supabase") as mock:
+            sb = Mock()
+            sb.table().select().eq().single().execute.return_value = Mock(data={"stripe_customer_id": "cus_test_123"})
+            mock.return_value = sb
+            yield sb
+        app.dependency_overrides.clear()
+
+    @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
         if HAS_STRIPE_CREDENTIALS:
