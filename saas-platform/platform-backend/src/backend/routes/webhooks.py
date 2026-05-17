@@ -25,10 +25,10 @@ def _maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
 def _get_tier_from_price(price: dict) -> str:
     """Extract tier from price metadata.
 
-    Our sync-stripe-prices.py script sets metadata.plan with the tier name.
+    Our sync-stripe-prices.py script sets metadata.tier with the tier name.
     """
-    if (metadata := price.get("metadata", {})) and (plan := metadata.get("plan")):
-        return plan
+    if (metadata := price.get("metadata", {})) and (tier := metadata.get("tier")):
+        return tier
 
     msg = (
         f"Unable to determine tier from price. "
