@@ -15,6 +15,7 @@ _INLINE_MEDIA_UNSUPPORTED_PATTERN = re.compile(
     r"(?:"
     r"(?:audio|image|video|file|document) input is not supported"
     r"|support input (?:audio|image|video|file|document)"
+    r"|at most 0 (?:audio|image|video|file|document)\(s\) may be provided"
     r")",
 )
 

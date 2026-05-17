@@ -5744,6 +5744,7 @@ class TestUserIdPassthrough:
             ),
             ("Error code: 500 - audio input is not supported", True),
             ("Error code: 404 - No endpoints found that support input audio", True),
+            ("[openclaw] Error: At most 0 audio(s) may be provided in one prompt.", True),
             ("invalid_request_error: max_tokens must be <= 4096", False),
             ("Rate limit exceeded", False),
         ],
