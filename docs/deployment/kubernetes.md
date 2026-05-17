@@ -258,7 +258,7 @@ Platform ingress hosts:
 
 - `app.{domain}` - Platform frontend
 - `api.{domain}` - Platform backend API
-- `webhooks.{domain}/stripe` - Stripe webhooks
+- `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
 ## Local Development with Kind
 
