@@ -1,6 +1,6 @@
 {{- define "mindroom.instanceSecretName" -}}
 {{- $instanceSecrets := .instanceSecrets | default (dict) -}}
-{{- $instanceSecrets.name | default (printf "mindroom-api-keys-%s" .customer) -}}
+{{- $instanceSecrets.name | default (printf "mindroom-api-keys-%s" (toString .customer)) -}}
 {{- end }}
 
 {{- define "mindroom.instanceSecretsCreate" -}}

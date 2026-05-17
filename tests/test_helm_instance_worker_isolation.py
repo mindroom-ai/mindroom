@@ -349,6 +349,19 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     assert synapse["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
 
 
+def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> None:
+    """CI and production instance IDs are numeric and must still render valid Secret names."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=1",
+    )
+    secret = _resource(docs, "Secret", "mindroom-api-keys-1")
+    deployment = _resource(docs, "Deployment", "mindroom-1")
+
+    assert secret["metadata"]["name"] == "mindroom-api-keys-1"
+    assert deployment["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "mindroom-api-keys-1"
+
+
 def test_instance_chart_rejects_email_template_without_email_header() -> None:
     """Email-to-Matrix derivation requires the trusted email header name."""
     completed = _run_helm_template(
