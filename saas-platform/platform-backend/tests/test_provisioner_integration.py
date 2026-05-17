@@ -293,7 +293,12 @@ class TestProvisionerIntegration:
             mock_db.table().update.side_effect = update_side_effect
 
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
-                mock_kubectl.return_value = (0, "Success", "")
+                async def kubectl_side_effect(args, **kwargs):
+                    if args[:2] == ["get", "secret"]:
+                        return (0, "", "")
+                    return (0, "Success", "")
+
+                mock_kubectl.side_effect = kubectl_side_effect
 
                 with patch("backend.routes.provisioner.run_helm") as mock_helm:
                     mock_helm.return_value = (0, "Release upgraded", "")

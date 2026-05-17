@@ -186,7 +186,7 @@ class TestAccountsEndpoints:
         data = response.json()
         assert data["subscription"]["max_storage_gb"] == 1
         inserted_subscription = mock_supabase.table().insert.call_args.args[0]
-        assert inserted_subscription["max_storage_gb"] == 1
+        assert "max_storage_gb" not in inserted_subscription
 
     def test_setup_account_existing_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test setting up account when user already has subscription."""

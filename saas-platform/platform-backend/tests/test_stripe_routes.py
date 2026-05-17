@@ -28,6 +28,7 @@ class TestStripeRoutesEndpoints:
     def mock_stripe(self):
         """Mock Stripe client."""
         with patch("backend.routes.stripe_routes.stripe") as mock:
+            mock.api_key = "sk_test_mock"
             yield mock
 
     @pytest.fixture
@@ -91,7 +92,7 @@ class TestStripeRoutesEndpoints:
         assert data["url"] == "https://billing.stripe.com/session/test_123"
 
     def test_create_customer_portal_no_customer(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test creating portal session when no Stripe customer exists."""
         # Setup
@@ -208,7 +209,9 @@ class TestStripeRoutesEndpoints:
             assert response.status_code == 500
             assert "Failed to create checkout" in response.json()["detail"]
 
-    def test_portal_account_not_found(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
+    def test_portal_account_not_found(
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
+    ):
         """Test portal when account not found."""
         # Setup
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)

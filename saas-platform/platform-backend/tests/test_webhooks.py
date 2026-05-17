@@ -94,6 +94,12 @@ class TestWebhookEndpoints:
         assert response.status_code == 400
         assert response.json()["detail"] == "Missing signature"
 
+    def test_legacy_webhook_path_missing_signature(self, client: TestClient):
+        """Test the legacy Stripe webhook path used by existing Stripe endpoints."""
+        response = client.post("/stripe", json={})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Missing signature"
+
     def test_webhook_invalid_signature(self, client: TestClient, mock_stripe_signature: Mock):
         """Test webhook with invalid signature."""
         mock_stripe_signature.side_effect = stripe.error.SignatureVerificationError("Invalid signature", None)

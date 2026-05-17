@@ -341,6 +341,7 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
     return True, account_id
 
 
+@router.post("/stripe", response_model=WebhookResponse, include_in_schema=False)
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
 @limiter.limit("20/minute")
 async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
