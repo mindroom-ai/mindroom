@@ -88,6 +88,11 @@ def _hook_display_name(callback: HookCallback) -> str:
     return cast("Any", callback).__name__
 
 
+def _raise_if_host_control_exception(exc: BaseException) -> None:
+    if not isinstance(exc, (Exception, SystemExit)):
+        raise exc
+
+
 def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     """Remove plugin tool registrations for plugins no longer present in config."""
     active_tool_modules = [
@@ -143,10 +148,10 @@ def load_plugins(
                 plugin_snapshot = capture_tool_registry_snapshot()
                 try:
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
-                except BaseException as exc:
+                except (Exception, SystemExit) as exc:
                     restore_tool_registry_snapshot(plugin_snapshot)
                     if not skip_broken_plugins:
-                        if not isinstance(exc, Exception):
+                        if isinstance(exc, SystemExit):
                             msg = f"Plugin materialization failed for {plugin_base.root}: {exc}"
                             raise _PluginValidationError(msg) from exc
                         raise
@@ -458,6 +463,7 @@ def load_plugin_module(
             else:
                 plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
         plugin_imports._restore_plugin_package_chain(previous_packages)
+        _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise _PluginValidationError(msg) from exc

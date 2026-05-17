@@ -200,7 +200,7 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
             result = await hook.callback(context)
     except asyncio.CancelledError:
         raise
-    except BaseException:
+    except (Exception, SystemExit):
         duration_ms = elapsed_ms_since(started_at, ndigits=2)
         context.logger.exception(
             "Hook execution failed",

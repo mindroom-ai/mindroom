@@ -102,9 +102,9 @@ def _load_plugin_oauth_providers(
             callback = _module_oauth_provider_callback(module)
             registered = callback(plugin_entry.settings, runtime_paths)
             providers.extend(_coerce_oauth_providers(registered))
-        except BaseException as exc:
+        except (Exception, SystemExit) as exc:
             if not skip_broken_plugins:
-                if not isinstance(exc, Exception):
+                if isinstance(exc, SystemExit):
                     msg = f"Plugin OAuth provider registration failed for {plugin_base.root}: {exc}"
                     raise plugin_imports.PluginValidationError(msg) from exc
                 raise

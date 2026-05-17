@@ -264,6 +264,23 @@ async def test_emit_observer_isolates_system_exit_from_plugin_hook(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_emit_observer_propagates_keyboard_interrupt_from_plugin_hook(tmp_path: Path) -> None:
+    """Operator interrupts from hooks should still terminate execution."""
+
+    @hook(EVENT_MESSAGE_RECEIVED, priority=10)
+    async def interrupting_hook(ctx: MessageReceivedContext) -> None:
+        del ctx
+        message = "stop"
+        raise KeyboardInterrupt(message)
+
+    registry = HookRegistry.from_plugins([_plugin("observer-plugin", [interrupting_hook])])
+    context = _message_received_context(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        await emit(registry, EVENT_MESSAGE_RECEIVED, context)
+
+
+@pytest.mark.asyncio
 async def test_emit_collect_merges_in_hook_order_and_isolates_per_hook_state(tmp_path: Path) -> None:
     """Collectors should run concurrently but merge results in registry order."""
 

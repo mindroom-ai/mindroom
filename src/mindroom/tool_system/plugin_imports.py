@@ -176,7 +176,7 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         spec = util.find_spec(module_name)
     except ModuleNotFoundError:
         return None
-    except BaseException as exc:
+    except (Exception, SystemExit) as exc:
         msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
         raise PluginValidationError(msg) from exc
     if spec is None:
