@@ -143,9 +143,12 @@ def load_plugins(
                 plugin_snapshot = capture_tool_registry_snapshot()
                 try:
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
-                except Exception as exc:
+                except BaseException as exc:
                     restore_tool_registry_snapshot(plugin_snapshot)
                     if not skip_broken_plugins:
+                        if not isinstance(exc, Exception):
+                            msg = f"Plugin materialization failed for {plugin_base.root}: {exc}"
+                            raise _PluginValidationError(msg) from exc
                         raise
                     plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
                     continue
@@ -159,7 +162,7 @@ def load_plugins(
 
             if set_skill_roots:
                 set_plugin_skill_roots(skill_roots)
-        except Exception:
+        except BaseException:
             restore_tool_registry_snapshot(snapshot)
             raise
 
@@ -439,7 +442,7 @@ def load_plugin_module(
                 _exec_plugin_source(module_path, module)
         else:
             _exec_plugin_source(module_path, module)
-    except Exception as exc:
+    except BaseException as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
                 module_path,

@@ -238,6 +238,32 @@ async def test_emit_observer_continues_after_failure_and_propagates_suppression(
 
 
 @pytest.mark.asyncio
+async def test_emit_observer_isolates_system_exit_from_plugin_hook(tmp_path: Path) -> None:
+    """Plugin hooks should not be able to terminate the host process."""
+    seen: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED, priority=10)
+    async def exiting_hook(ctx: MessageReceivedContext) -> None:
+        del ctx
+        seen.append("exiting")
+        message = "plugin exit"
+        raise SystemExit(message)
+
+    @hook(EVENT_MESSAGE_RECEIVED, priority=20)
+    async def suppressing_hook(ctx: MessageReceivedContext) -> None:
+        seen.append("suppressing")
+        ctx.suppress = True
+
+    registry = HookRegistry.from_plugins([_plugin("observer-plugin", [exiting_hook, suppressing_hook])])
+    context = _message_received_context(tmp_path)
+
+    await emit(registry, EVENT_MESSAGE_RECEIVED, context)
+
+    assert seen == ["exiting", "suppressing"]
+    assert context.suppress is True
+
+
+@pytest.mark.asyncio
 async def test_emit_collect_merges_in_hook_order_and_isolates_per_hook_state(tmp_path: Path) -> None:
     """Collectors should run concurrently but merge results in registry order."""
 
