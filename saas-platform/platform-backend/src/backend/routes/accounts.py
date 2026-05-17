@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.deps import ensure_supabase, limiter, verify_user
+from backend.entitlements import decorate_subscription_for_response
 from backend.models import AccountSetupResponse, AccountWithRelationsOut, AdminStatusOut
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -67,7 +68,7 @@ async def setup_account(request: Request, user: Annotated[dict, Depends(verify_u
     sub_result = sb.table("subscriptions").insert(subscription_data).execute()
     subscription = sub_result.data[0] if sub_result.data else None
     if subscription is not None:
-        subscription["max_storage_gb"] = limits["max_storage_gb"]
+        decorate_subscription_for_response(subscription, plan_limits=limits)
 
     return {
         "message": "Free tier account created",

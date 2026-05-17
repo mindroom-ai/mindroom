@@ -53,8 +53,19 @@ describe('InstanceCard', () => {
     max_agents: 1,
     max_messages_per_day: 100,
     max_storage_gb: 1,
+    can_run_instances: false,
+    trial_days_remaining: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+  }
+  const trialSubscription = {
+    ...freeSubscription,
+    id: 'sub-trial',
+    tier: 'starter' as const,
+    status: 'trialing' as const,
+    trial_ends_at: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+    can_run_instances: true,
+    trial_days_remaining: 2,
   }
 
   beforeEach(() => {
@@ -154,6 +165,30 @@ describe('InstanceCard', () => {
         'href',
         '/dashboard/billing/upgrade'
       )
+    })
+
+    it('should show trial time remaining for trial users who can provision', () => {
+      render(<InstanceCard instance={null} subscription={trialSubscription} />)
+
+      expect(screen.getByText(/Trial: 2 days remaining/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Provision Instance/i })).toBeInTheDocument()
+    })
+
+    it('should show expired trial copy when the API marks infrastructure unavailable', () => {
+      render(
+        <InstanceCard
+          instance={null}
+          subscription={{
+            ...trialSubscription,
+            status: 'paused',
+            can_run_instances: false,
+            trial_days_remaining: 0,
+          }}
+        />
+      )
+
+      expect(screen.getByText(/Trial expired/i)).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /Provision Instance/i })).not.toBeInTheDocument()
     })
   })
 

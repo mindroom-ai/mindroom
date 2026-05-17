@@ -80,6 +80,14 @@ provisioner:
     jwtUserIdClaim: ""
     jwtMatrixUserIdClaim: ""
 
+matrixOidc:
+  enabled: "false"
+  issuer: ""
+  clientId: "mindroom-synapse"
+  clientSecret: ""
+  privateKey: ""
+  keyId: "mindroom-platform"
+
 # Optional AI API keys
 apiKeys:
   openai: ""

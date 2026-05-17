@@ -17,6 +17,8 @@ metadata:
 {{ $autoscalingEnabledValue := lower (toString ($autoscaling.enabled | default false)) }}
 {{ $autoscalingEnabled := has $autoscalingEnabledValue (list "1" "true" "yes" "on") }}
 {{ $trustedUpstreamAuth := $prov.trustedUpstreamAuth | default (dict) }}
+{{ $matrixOidc := .Values.matrixOidc | default (dict) }}
+{{ $matrixOidcIssuer := $matrixOidc.issuer | default (printf "https://api.%s/matrix-oidc" .Values.domain) }}
 {{ $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) }}
 {{ $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") }}
 {{ $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) }}
@@ -38,6 +40,14 @@ metadata:
 {{ end }}
 {{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtIssuer | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.jwtIssuer is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ end }}
+{{ $matrixOidcEnabledValue := lower (toString ($matrixOidc.enabled | default false)) }}
+{{ $matrixOidcEnabled := has $matrixOidcEnabledValue (list "1" "true" "yes" "on") }}
+{{ if and $matrixOidcEnabled (not ($matrixOidc.clientSecret | default "")) }}
+{{ fail "matrixOidc.clientSecret is required when matrixOidc.enabled=true" }}
+{{ end }}
+{{ if and $matrixOidcEnabled (not ($matrixOidc.privateKey | default "")) }}
+{{ fail "matrixOidc.privateKey is required when matrixOidc.enabled=true" }}
 {{ end }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
@@ -63,6 +73,13 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM: {{ $trustedUpstreamAuth.jwtEmailClaim | default "email" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: {{ $trustedUpstreamAuth.jwtUserIdClaim | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: {{ $trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | quote }}
+  MATRIX_OIDC_ENABLED: {{ $matrixOidc.enabled | default "false" | quote }}
+  MATRIX_OIDC_ISSUER: {{ $matrixOidcIssuer | quote }}
+  MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-synapse" | quote }}
+  MATRIX_OIDC_KEY_ID: {{ $matrixOidc.keyId | default "mindroom-platform" | quote }}
+  INSTANCE_MATRIX_OIDC_ENABLED: {{ $matrixOidc.enabled | default "false" | quote }}
+  INSTANCE_MATRIX_OIDC_ISSUER: {{ $matrixOidcIssuer | quote }}
+  INSTANCE_MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-synapse" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"
@@ -84,6 +101,8 @@ stringData:
   stripe_webhook_secret: {{ .Values.stripe.webhookSecret | default "" | quote }}
   provisioner_api_key: {{ .Values.provisioner.apiKey | default "" | quote }}
   instance_credentials_encryption_secret: {{ .Values.provisioner.instanceCredentialsEncryptionSecret | default "" | quote }}
+  matrix_oidc_client_secret: {{ $matrixOidc.clientSecret | default "" | quote }}
+  matrix_oidc_private_key: {{ $matrixOidc.privateKey | default "" | quote }}
   openai_key: {{ .Values.apiKeys.openai | default "" | quote }}
   anthropic_key: {{ .Values.apiKeys.anthropic | default "" | quote }}
   openrouter_key: {{ .Values.apiKeys.openrouter | default "" | quote }}
@@ -212,6 +231,12 @@ spec:
           value: "/etc/secrets/provisioner_api_key"
         - name: INSTANCE_CREDENTIALS_ENCRYPTION_SECRET_FILE
           value: "/etc/secrets/instance_credentials_encryption_secret"
+        - name: MATRIX_OIDC_CLIENT_SECRET_FILE
+          value: "/etc/secrets/matrix_oidc_client_secret"
+        - name: MATRIX_OIDC_PRIVATE_KEY_FILE
+          value: "/etc/secrets/matrix_oidc_private_key"
+        - name: INSTANCE_MATRIX_OIDC_CLIENT_SECRET_FILE
+          value: "/etc/secrets/matrix_oidc_client_secret"
         - name: OPENAI_API_KEY_FILE
           value: "/etc/secrets/openai_key"
         - name: ANTHROPIC_API_KEY_FILE

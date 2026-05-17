@@ -120,7 +120,7 @@ plans:
       dedicated_infrastructure: true
 trial:
   enabled: true
-  days: 14
+  days: 3
   applicable_plans:
   - starter
   - professional

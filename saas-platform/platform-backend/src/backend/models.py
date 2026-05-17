@@ -47,6 +47,8 @@ class SubscriptionOut(BaseModel):
     max_agents: int
     max_messages_per_day: int
     max_storage_gb: int
+    can_run_instances: bool
+    trial_days_remaining: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
