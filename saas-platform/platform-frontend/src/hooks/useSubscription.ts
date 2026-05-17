@@ -10,7 +10,7 @@ export interface Subscription {
   id: string
   account_id: string
   tier: 'free' | 'starter' | 'professional' | 'enterprise'
-  status: 'active' | 'cancelled' | 'past_due' | 'trialing'
+  status: 'active' | 'cancelled' | 'past_due' | 'trialing' | 'paused' | 'incomplete'
   stripe_subscription_id: string | null
   stripe_customer_id: string | null
   current_period_start: string | null

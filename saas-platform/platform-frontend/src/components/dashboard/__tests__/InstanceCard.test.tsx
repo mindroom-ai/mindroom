@@ -39,6 +39,24 @@ Object.defineProperty(navigator, 'clipboard', {
 })
 
 describe('InstanceCard', () => {
+  const freeSubscription = {
+    id: 'sub-free',
+    account_id: 'acc-123',
+    tier: 'free' as const,
+    status: 'active' as const,
+    stripe_subscription_id: null,
+    stripe_customer_id: null,
+    current_period_start: null,
+    current_period_end: null,
+    trial_ends_at: null,
+    cancelled_at: null,
+    max_agents: 1,
+    max_messages_per_day: 100,
+    max_storage_gb: 1,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
   beforeEach(() => {
     jest.clearAllMocks()
     mockClipboardWriteText.mockResolvedValue(undefined)
@@ -127,6 +145,16 @@ describe('InstanceCard', () => {
       // Should not show alert for aborted requests
       expect(mockAlert).not.toHaveBeenCalled()
     })
+
+    it('should send free users to billing instead of provisioning infrastructure', async () => {
+      render(<InstanceCard instance={null} subscription={freeSubscription} />)
+
+      expect(screen.queryByRole('button', { name: /Provision Instance/i })).not.toBeInTheDocument()
+      expect(screen.getByRole('link', { name: /Start Trial/i })).toHaveAttribute(
+        'href',
+        '/dashboard/billing/upgrade'
+      )
+    })
   })
 
   describe('Instance Display', () => {
@@ -152,6 +180,16 @@ describe('InstanceCard', () => {
       expect(screen.getByText('customer.matrix.mindroom.chat')).toBeInTheDocument()
       expect(screen.getByText('pro')).toBeInTheDocument()
       expect(screen.getByText('#1')).toBeInTheDocument()
+    })
+
+    it('should link Matrix access through Cinny with the homeserver prefilled', () => {
+      render(<InstanceCard instance={mockInstance} />)
+
+      const matrixLink = screen.getByRole('link', { name: /customer.matrix.mindroom.chat/i })
+      expect(matrixLink).toHaveAttribute(
+        'href',
+        'https://chat.mindroom.chat/login/https%3A%2F%2Fcustomer.matrix.mindroom.chat/'
+      )
     })
 
     it('should show correct status indicators', () => {

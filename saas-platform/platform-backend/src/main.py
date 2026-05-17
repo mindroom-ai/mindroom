@@ -18,7 +18,7 @@ from backend.config import ALLOWED_ORIGINS, ENABLE_CLEANUP_SCHEDULER, ENVIRONMEN
 from backend.metrics import instrument_app
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
-from backend.tasks.cleanup import run_all_cleanup_tasks
+from backend.tasks.cleanup import cleanup_unentitled_instances, run_all_cleanup_tasks
 from backend.routes import (
     accounts,
     admin,
@@ -47,10 +47,11 @@ if TYPE_CHECKING:
     from starlette.responses import Response as StarletteResponse
 
 
-def _run_cleanup_job() -> None:
+async def _run_cleanup_job() -> None:
     """Execute periodic cleanup tasks with logging."""
     try:
         result = run_all_cleanup_tasks()
+        result["subscription_lifecycle"] = await cleanup_unentitled_instances()
         logger = logging.getLogger("mindroom.cleanup")
         logger.info("Cleanup job completed", extra={"result": result})
     except Exception:  # noqa: BLE001

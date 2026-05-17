@@ -37,7 +37,7 @@ class SubscriptionOut(BaseModel):
     id: str
     account_id: str
     tier: Literal["free", "starter", "professional", "enterprise"]
-    status: Literal["active", "cancelled", "past_due", "trialing", "incomplete"]
+    status: Literal["active", "cancelled", "past_due", "trialing", "paused", "incomplete"]
     stripe_subscription_id: str | None = None
     stripe_customer_id: str | None = None
     current_period_start: str | None = None

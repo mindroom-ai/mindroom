@@ -41,7 +41,7 @@ autoscaling:
     targetCPUUtilizationPercentage: 65
 
 cleanupScheduler:
-  enabled: "false"
+  enabled: "true"
 
 # These should be overridden in values-staging.yaml and values-prod.yaml
 supabase:
