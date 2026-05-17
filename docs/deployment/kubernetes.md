@@ -78,7 +78,7 @@ Only enable trusted upstream auth when the instance is behind a verified access 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set-string trustedUpstreamAuth.enabled=true \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \

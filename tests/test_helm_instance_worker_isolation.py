@@ -18,12 +18,14 @@ def _render_chart(
     *set_args: str,
     release_name: str = "mindroom-demo",
     set_string_args: tuple[str, ...] = (),
+    values_files: tuple[Path, ...] = (),
 ) -> list[dict[str, Any]]:
     completed = _run_helm_template(
         chart_dir,
         *set_args,
         release_name=release_name,
         set_string_args=set_string_args,
+        values_files=values_files,
     )
     completed.check_returncode()
     return [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]
@@ -34,6 +36,7 @@ def _run_helm_template(
     *set_args: str,
     release_name: str = "mindroom-demo",
     set_string_args: tuple[str, ...] = (),
+    values_files: tuple[Path, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     helm = shutil.which("helm")
     if helm is None:
@@ -44,6 +47,7 @@ def _run_helm_template(
             "template",
             release_name,
             str(chart_dir),
+            *(arg for value in values_files for arg in ("--values", str(value))),
             *(arg for value in set_args for arg in ("--set", value)),
             *(arg for value in set_string_args for arg in ("--set-string", value)),
         ],
@@ -437,6 +441,23 @@ def test_instance_chart_renders_configurable_control_plane_resources() -> None:
     }
 
 
+def test_instance_chart_renders_with_pre_resource_release_values(tmp_path: Path) -> None:
+    """Older release values should not break chart upgrades before resources are set."""
+    values_path = tmp_path / "old-instance-values.yaml"
+    values_path.write_text(
+        "customer: demo\nbaseDomain: mindroom.chat\nmindroomResources:\nsynapseResources:\nsandboxRunnerResources:\n",
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(Path("cluster/k8s/instance"), values_files=(values_path,))
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+
+    assert _container(mindroom, "mindroom")["resources"] == {}
+    assert _container(mindroom, "sandbox-runner")["resources"] == {}
+    assert _container(synapse, "synapse")["resources"] == {}
+
+
 def test_platform_chart_renders_default_resources_for_stateless_services() -> None:
     """Platform pods need requests and limits so scheduling and HPA decisions are meaningful."""
     docs = _render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform")
@@ -451,6 +472,26 @@ def test_platform_chart_renders_default_resources_for_stateless_services() -> No
         "requests": {"cpu": "250m", "memory": "512Mi"},
         "limits": {"cpu": "1000m", "memory": "1Gi"},
     }
+
+
+def test_platform_chart_renders_with_pre_resource_release_values(tmp_path: Path) -> None:
+    """Older release values should not break chart upgrades before resources are set."""
+    values_path = tmp_path / "old-platform-values.yaml"
+    values_path.write_text(
+        "environment: production\ndomain: mindroom.chat\nresources:\n",
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/platform"),
+        release_name="mindroom-platform",
+        values_files=(values_path,),
+    )
+    frontend = _resource(docs, "Deployment", "platform-frontend")
+    backend = _resource(docs, "Deployment", "platform-backend")
+
+    assert _container(frontend, "app")["resources"] == {}
+    assert _container(backend, "app")["resources"] == {}
 
 
 def test_platform_chart_can_render_hpa_for_stateless_services() -> None:

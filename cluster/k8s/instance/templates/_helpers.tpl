@@ -92,7 +92,7 @@
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:
-    {{- toYaml $values.sandboxRunnerResources | nindent 4 }}
+    {{- toYaml ($values.sandboxRunnerResources | default (dict)) | nindent 4 }}
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:

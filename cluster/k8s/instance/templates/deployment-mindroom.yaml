@@ -213,7 +213,7 @@ spec:
           mountPath: /etc/secrets
           readOnly: true
         resources:
-          {{- toYaml .Values.mindroomResources | nindent 10 }}
+          {{- toYaml (.Values.mindroomResources | default (dict)) | nindent 10 }}
         # Startup only needs the API process to bind the socket; readiness waits for full bootstrap.
         startupProbe:
           httpGet:

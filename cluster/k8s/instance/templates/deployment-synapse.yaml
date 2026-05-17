@@ -44,7 +44,7 @@ spec:
           mountPath: /data/log.config
           subPath: log.config
         resources:
-          {{- toYaml .Values.synapseResources | nindent 10 }}
+          {{- toYaml (.Values.synapseResources | default (dict)) | nindent 10 }}
         readinessProbe:
           httpGet:
             path: /_matrix/client/versions
