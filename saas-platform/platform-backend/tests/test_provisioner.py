@@ -53,6 +53,8 @@ def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
     """Return an empty response for a missing existing instance API key Secret."""
     _ = namespace
+    if args[:2] == ["get", "pvc"]:
+        return (0, '{"items":[]}', "")
     if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
         assert "--ignore-not-found" in args
         return (0, "", "")
@@ -62,6 +64,8 @@ async def _kubectl_without_credentials_encryption_secret(args: list[str], namesp
 async def _kubectl_with_credentials_encryption_secret(args: list[str], namespace: str | None = None):
     """Return a non-empty existing credential encryption key for the instance API key Secret."""
     _ = namespace
+    if args[:2] == ["get", "pvc"]:
+        return (0, '{"items":[]}', "")
     if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
         assert "--ignore-not-found" in args
         existing_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
@@ -72,6 +76,8 @@ async def _kubectl_with_credentials_encryption_secret(args: list[str], namespace
 async def _kubectl_credentials_encryption_secret_lookup_fails(args: list[str], namespace: str | None = None):
     """Return a real kubectl failure for the existing instance API key Secret lookup."""
     _ = namespace
+    if args[:2] == ["get", "pvc"]:
+        return (0, '{"items":[]}', "")
     if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
         assert "--ignore-not-found" in args
         return (1, "", "Forbidden")

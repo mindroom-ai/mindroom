@@ -223,6 +223,33 @@ async def _provision_credentials_encryption_key(
     return ""
 
 
+async def _existing_instance_storage_class_name(instance_id: str, namespace: str) -> str | None:
+    """Return the bound PVC storage class for an existing instance."""
+    pvc_names = [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
+    code, out, err = await run_kubectl(
+        ["get", "pvc", *pvc_names, "--ignore-not-found", "-o", "json"],
+        namespace=namespace,
+    )
+    if code != 0:
+        msg = f"Failed to inspect existing PVC storage class for instance {instance_id}: {err or out}"
+        raise HTTPException(status_code=500, detail=msg)
+    if not out.strip():
+        return None
+
+    payload = json.loads(out)
+    storage_classes = {
+        item.get("spec", {}).get("storageClassName", "").strip()
+        for item in payload.get("items", [])
+        if item.get("spec", {}).get("storageClassName", "").strip()
+    }
+    if not storage_classes:
+        return None
+    if len(storage_classes) > 1:
+        msg = f"Instance {instance_id} has PVCs with different storage classes: {', '.join(sorted(storage_classes))}"
+        raise HTTPException(status_code=500, detail=msg)
+    return storage_classes.pop()
+
+
 @router.post("/system/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
@@ -329,6 +356,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     credentials_encryption_key = await _provision_credentials_encryption_key(
         customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
     )
+    storage_class_name = INSTANCE_STORAGE_CLASS_NAME
+    if existing_instance_id:
+        storage_class_name = (
+            await _existing_instance_storage_class_name(customer_id, namespace)
+        ) or INSTANCE_STORAGE_CLASS_NAME
     instance_secret_data = {
         "openai_key": OPENAI_API_KEY or "",
         "anthropic_key": ANTHROPIC_API_KEY or "",
@@ -369,8 +401,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             "--set-string",
             f"instanceSecrets.hash={instance_secret_hash}",
         ]
-        if INSTANCE_STORAGE_CLASS_NAME:
-            helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
+        if storage_class_name:
+            helm_args += ["--set", f"storageClassName={storage_class_name}"]
         if INSTANCE_MINDROOM_IMAGE:
             helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:

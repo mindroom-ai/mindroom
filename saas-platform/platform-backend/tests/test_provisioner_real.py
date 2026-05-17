@@ -224,6 +224,7 @@ class TestProvisionerCommandValidation:
             ),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command),
+            patch("backend.routes.provisioner.wait_for_deployment_ready", return_value=True),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
             mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
@@ -281,6 +282,64 @@ class TestProvisionerCommandValidation:
         assert "matrix-client-secret" not in " ".join(helm_args)
         assert set_file_args == {}
         assert captured_secret_manifests[0]["stringData"]["matrix_oidc_client_secret"] == "matrix-client-secret"
+
+    @pytest.mark.asyncio
+    async def test_reprovision_preserves_existing_pvc_storage_class(self):
+        """Re-provisioning must not try to mutate bound PVC storage classes."""
+        from backend.routes.provisioner import provision_instance
+
+        captured_helm_args = []
+
+        async def capture_helm_command(args):
+            captured_helm_args.append(args)
+            return (0, "Success", "")
+
+        async def capture_kubectl_command(args, namespace=None):
+            if args[:2] == ["get", "pvc"]:
+                return (
+                    0,
+                    json.dumps(
+                        {
+                            "items": [
+                                {
+                                    "metadata": {"name": "mindroom-storage-1"},
+                                    "spec": {"storageClassName": "local-path"},
+                                },
+                                {"metadata": {"name": "synapse-storage-1"}, "spec": {"storageClassName": "local-path"}},
+                            ]
+                        }
+                    ),
+                    "",
+                )
+            return (0, "", "")
+
+        with (
+            patch.multiple(
+                "backend.routes.provisioner",
+                PROVISIONER_API_KEY="test-key",
+                INSTANCE_STORAGE_CLASS_NAME="hcloud-volumes",
+            ),
+            patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
+            patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl_command),
+            patch("backend.routes.provisioner.wait_for_deployment_ready", return_value=True),
+            patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
+        ):
+            mock_sb.return_value.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "1"}])
+
+            await provision_instance(
+                None,
+                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "free", "instance_id": "1"},
+                "Bearer test-key",
+                None,
+            )
+
+        set_args = {}
+        for i, arg in enumerate(captured_helm_args[0]):
+            if arg == "--set":
+                key, value = captured_helm_args[0][i + 1].split("=", 1)
+                set_args[key] = value
+
+        assert set_args["storageClassName"] == "local-path"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):

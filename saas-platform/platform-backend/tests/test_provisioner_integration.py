@@ -295,6 +295,8 @@ class TestProvisionerIntegration:
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
 
                 async def kubectl_side_effect(args, **kwargs):
+                    if args[:2] == ["get", "pvc"]:
+                        return (0, '{"items":[]}', "")
                     if args[:2] == ["get", "secret"]:
                         return (0, "", "")
                     return (0, "Success", "")
