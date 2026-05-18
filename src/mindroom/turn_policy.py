@@ -26,7 +26,6 @@ from mindroom.hooks import (
     render_enrichment_block,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.responder_availability import (
     filter_materializable_responders,
     live_responder_entity_names,
@@ -654,9 +653,7 @@ class TurnPolicy:
                 )
             )
             single_visible_self = (
-                not is_thread_history_degraded(context.thread_history)
-                and len(available_responders_in_room) == 1
-                and available_responders_in_room[0] == agent_matrix_id
+                len(available_responders_in_room) == 1 and available_responders_in_room[0] == agent_matrix_id
             )
             if should_continue_active_thread or single_visible_self:
                 return ResponseAction(kind="individual")
