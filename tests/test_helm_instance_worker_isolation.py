@@ -205,22 +205,22 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     """OIDC tenants should authorize and auto-join the platform owner to managed rooms."""
     docs = _render_chart(
         Path("cluster/k8s/instance"),
-        "customer=tenant42",
+        "customer=42",
         "baseDomain=example.test",
         "matrixOidc.enabled=true",
         "matrixOidc.issuer=https://api.example.test/matrix-oidc",
         "matrixRoomAccess.mode=multi_user",
         "matrixRoomAccess.reconcileExistingRooms=true",
         set_string_args=(
-            "authorizationGlobalUsers[0]=@owner:tenant42.example.test",
+            "authorizationGlobalUsers[0]=@owner:42.example.test",
             "matrixAutoJoinRoomKeys[0]=lobby",
             "matrixAutoJoinRoomKeys[1]=dev",
         ),
     )
-    mindroom_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-config-tenant42")["data"]["config.yaml"])
-    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-tenant42")["data"]["homeserver.yaml"])
+    mindroom_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-config-42")["data"]["config.yaml"])
+    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-42")["data"]["homeserver.yaml"])
 
-    assert mindroom_config["authorization"]["global_users"] == ["@owner:tenant42.example.test"]
+    assert mindroom_config["authorization"]["global_users"] == ["@owner:42.example.test"]
     assert mindroom_config["matrix_room_access"] == {
         "mode": "multi_user",
         "multi_user_join_rule": "public",
@@ -229,8 +229,8 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
         "reconcile_existing_rooms": True,
     }
     assert synapse_config["auto_join_rooms"] == [
-        "#lobby:tenant42.example.test",
-        "#dev:tenant42.example.test",
+        "#lobby:42.example.test",
+        "#dev:42.example.test",
     ]
     assert synapse_config["autocreate_auto_join_rooms"] is False
 

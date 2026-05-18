@@ -34,7 +34,7 @@ data:
 
     auto_join_rooms:
 {{- range $roomKey := $autoJoinRoomKeys }}
-      - {{ printf "#%s:%s.%s" $roomKey $.Values.customer $.Values.baseDomain | quote }}
+      - {{ printf "#%s:%s.%s" $roomKey ($.Values.customer | toString) ($.Values.baseDomain | toString) | quote }}
 {{- end }}
     autocreate_auto_join_rooms: false
 {{- end }}
