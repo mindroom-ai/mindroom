@@ -245,9 +245,6 @@ class TestAgentResponseLogic:
                 False,
             )
 
-        assert single_visible_action.kind != "skip", (
-            "degraded planning history should still dispatch the sole visible responder"
-        )
         assert single_visible_action.kind == "individual"
 
     def test_effective_response_action_does_not_convert_reject_to_configured_team(self) -> None:
