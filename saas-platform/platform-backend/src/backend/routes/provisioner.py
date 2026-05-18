@@ -9,8 +9,10 @@ import json
 import os
 import secrets
 import tempfile
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Annotated, Any
+from uuid import UUID
 
 from backend.config import (
     ANTHROPIC_API_KEY,
@@ -67,6 +69,31 @@ from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
+
+_MATRIX_LOCALPART_ALLOWED_CHARS = frozenset("_-./=+abcdefghijklmnopqrstuvwxyz0123456789")
+_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS = (
+    "analysis",
+    "automation",
+    "business",
+    "communication",
+    "dev",
+    "docs",
+    "finance",
+    "help",
+    "home",
+    "lobby",
+    "news",
+    "ops",
+    "personal",
+    "productivity",
+    "research",
+    "science",
+)
+
+
+def _env_flag_enabled(value: str) -> bool:
+    """Return whether an env-style flag value is explicitly enabled."""
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 async def _background_mark_running_when_ready(instance_id: str, namespace: str = "mindroom-instances") -> None:
@@ -148,10 +175,61 @@ def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+def _matrix_localpart_from_email(email: str) -> str:
+    """Return the Matrix localpart Synapse derives from our OIDC email template."""
+    email_localpart = email.strip().lower().rsplit("@", maxsplit=1)[0]
+    if not email_localpart:
+        msg = "Account email is required to configure Matrix owner access"
+        raise HTTPException(status_code=500, detail=msg)
+
+    mapped = "".join(
+        chr(byte) if chr(byte) in _MATRIX_LOCALPART_ALLOWED_CHARS and chr(byte) != "=" else f"={byte:02x}"
+        for byte in email_localpart.encode("utf-8")
+    )
+    return f"=5f{mapped[1:]}" if mapped.startswith("_") else mapped
+
+
+def _owner_matrix_user_id_from_email(email: str, *, instance_id: str, base_domain: str) -> str:
+    """Build the hosted tenant owner MXID from a platform account email."""
+    return f"@{_matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
+
+
+def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: str, base_domain: str) -> str | None:
+    """Return the MXID that should be authorized for the tenant owner."""
+    if not account_id:
+        return None
+    try:
+        normalized_account_id = str(UUID(str(account_id)))
+    except ValueError:
+        logger.warning("Skipping tenant owner Matrix user for non-UUID account_id %s", account_id)
+        return None
+
+    result = sb.table("accounts").select("email").eq("id", normalized_account_id).limit(1).execute()
+    row = result.data[0] if result.data else None
+    email = row.get("email") if isinstance(row, Mapping) else None
+    if not isinstance(email, str) or not email.strip():
+        msg = f"Account {normalized_account_id} needs an email before provisioning Matrix owner access"
+        raise HTTPException(status_code=500, detail=msg)
+    return _owner_matrix_user_id_from_email(email, instance_id=instance_id, base_domain=base_domain)
+
+
 def _append_matrix_oidc_helm_args(helm_args: list[str]) -> None:
     """Forward hosted Matrix OIDC settings to the instance chart."""
     if INSTANCE_MATRIX_OIDC_ENABLED:
         helm_args += ["--set", f"matrixOidc.enabled={INSTANCE_MATRIX_OIDC_ENABLED}"]
+    if _env_flag_enabled(INSTANCE_MATRIX_OIDC_ENABLED):
+        helm_args += [
+            "--set",
+            "matrixRoomAccess.mode=multi_user",
+            "--set",
+            "matrixRoomAccess.multiUserJoinRule=public",
+            "--set",
+            "matrixRoomAccess.publishToRoomDirectory=false",
+            "--set",
+            "matrixRoomAccess.reconcileExistingRooms=true",
+        ]
+        for index, room_key in enumerate(_HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS):
+            helm_args += ["--set-string", f"matrixAutoJoinRoomKeys[{index}]={room_key}"]
     if INSTANCE_MATRIX_OIDC_ISSUER:
         helm_args += ["--set", f"matrixOidc.issuer={INSTANCE_MATRIX_OIDC_ISSUER}"]
     if INSTANCE_MATRIX_OIDC_CLIENT_ID:
@@ -347,6 +425,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     frontend_url = f"https://{customer_id}.{base_domain}"
     api_url = f"https://{customer_id}.api.{base_domain}"
     matrix_url = f"https://{customer_id}.matrix.{base_domain}"
+    owner_matrix_user_id = _owner_matrix_user_id_for_account(
+        sb,
+        account_id=account_id,
+        instance_id=customer_id,
+        base_domain=base_domain,
+    )
     try:
         sb.table("instances").update(
             {
@@ -422,6 +506,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
             helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
+        if owner_matrix_user_id:
+            helm_args += ["--set-string", f"authorizationGlobalUsers[0]={owner_matrix_user_id}"]
         _append_image_pull_secret_helm_args(helm_args, INSTANCE_IMAGE_PULL_SECRET_NAMES)
         if INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS:
             helm_args += [

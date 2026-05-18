@@ -50,6 +50,28 @@ def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
     assert "credentials_encryption_key" not in set_file_args
 
 
+def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None:
+    """Hosted owner MXIDs should match Synapse's OIDC email localpart mapping."""
+    from backend.routes.provisioner import _owner_matrix_user_id_from_email
+
+    assert (
+        _owner_matrix_user_id_from_email(
+            "Owner.User+Test@Example.COM",
+            instance_id="42",
+            base_domain="mindroom.chat",
+        )
+        == "@owner.user+test:42.mindroom.chat"
+    )
+    assert (
+        _owner_matrix_user_id_from_email(
+            "_Owner=Test@example.com",
+            instance_id="42",
+            base_domain="mindroom.chat",
+        )
+        == "@=5fowner=3dtest:42.mindroom.chat"
+    )
+
+
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
     """Return an empty response for a missing existing instance API key Secret."""
     _ = namespace
@@ -204,6 +226,55 @@ class TestProvisionerEndpoints:
         # Verify calls
         mock_kubectl.assert_called()
         mock_helm.assert_called()
+
+    def test_provision_passes_owner_matrix_user_to_instance_chart(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Provisioning should authorize the platform owner inside the hosted Matrix tenant."""
+        account_id = "11111111-1111-4111-8111-111111111111"
+        instances_table = MagicMock()
+        instances_table.insert.return_value.execute.return_value = Mock(data=[{"instance_id": "123"}])
+        instances_table.update.return_value.eq.return_value.execute.return_value = Mock()
+        accounts_table = MagicMock()
+        accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
+            data=[{"email": "Owner.User+Test@example.com"}]
+        )
+        mock_supabase.table.side_effect = lambda table: {
+            "accounts": accounts_table,
+            "instances": instances_table,
+        }[table]
+
+        with patch.multiple(
+            "backend.routes.provisioner",
+            INSTANCE_MATRIX_OIDC_ENABLED="true",
+            INSTANCE_MATRIX_OIDC_ISSUER="https://api.mindroom.test/matrix-oidc",
+            INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",
+        ):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "starter"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        helm_args = mock_helm.call_args.args[0]
+        set_args = _helm_set_args(helm_args)
+        set_string_args = _helm_set_string_args(helm_args)
+        assert set_args["matrixRoomAccess.mode"] == "multi_user"
+        assert set_args["matrixRoomAccess.multiUserJoinRule"] == "public"
+        assert set_args["matrixRoomAccess.publishToRoomDirectory"] == "false"
+        assert set_args["matrixRoomAccess.reconcileExistingRooms"] == "true"
+        assert set_string_args["matrixAutoJoinRoomKeys[0]"] == "analysis"
+        assert set_string_args["matrixAutoJoinRoomKeys[9]"] == "lobby"
+        assert set_string_args["authorizationGlobalUsers[0]"] == "@owner.user+test:123.mindroom.test"
+        _assert_helm_uses_external_instance_secret(helm_args)
 
     def test_provision_re_provision_existing(
         self,

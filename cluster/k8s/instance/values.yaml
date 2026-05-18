@@ -43,6 +43,13 @@ matrixOidc:
   clientId: "mindroom-synapse"
   clientSecret: ""
 authorizationGlobalUsers: []
+matrixRoomAccess:
+  mode: single_user_private
+  multiUserJoinRule: public
+  publishToRoomDirectory: false
+  inviteOnlyRooms: []
+  reconcileExistingRooms: false
+matrixAutoJoinRoomKeys: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
 workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods
 workerCleanupIntervalSeconds: 30

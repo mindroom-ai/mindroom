@@ -1,7 +1,7 @@
 {{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
 {{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
 {{- $matrixOidc := .Values.matrixOidc | default (dict) -}}
-{{- $synapseConfigHash := printf "%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) ($matrixOidc.enabled | default "" | toString) ($matrixOidc.issuer | default "" | toString) ($matrixOidc.clientId | default "" | toString) | sha256sum -}}
+{{- $synapseConfigHash := printf "%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) ($matrixOidc.enabled | default "" | toString) ($matrixOidc.issuer | default "" | toString) ($matrixOidc.clientId | default "" | toString) (.Values.matrixAutoJoinRoomKeys | default (list) | toJson) | sha256sum -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -201,6 +201,40 @@ def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
     assert env_values["MINDROOM_PUBLIC_URL"] == "https://tenant42.example.test"
 
 
+def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
+    """OIDC tenants should authorize and auto-join the platform owner to managed rooms."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=tenant42",
+        "baseDomain=example.test",
+        "matrixOidc.enabled=true",
+        "matrixOidc.issuer=https://api.example.test/matrix-oidc",
+        "matrixRoomAccess.mode=multi_user",
+        "matrixRoomAccess.reconcileExistingRooms=true",
+        set_string_args=(
+            "authorizationGlobalUsers[0]=@owner:tenant42.example.test",
+            "matrixAutoJoinRoomKeys[0]=lobby",
+            "matrixAutoJoinRoomKeys[1]=dev",
+        ),
+    )
+    mindroom_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-config-tenant42")["data"]["config.yaml"])
+    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-tenant42")["data"]["homeserver.yaml"])
+
+    assert mindroom_config["authorization"]["global_users"] == ["@owner:tenant42.example.test"]
+    assert mindroom_config["matrix_room_access"] == {
+        "mode": "multi_user",
+        "multi_user_join_rule": "public",
+        "publish_to_room_directory": False,
+        "invite_only_rooms": [],
+        "reconcile_existing_rooms": True,
+    }
+    assert synapse_config["auto_join_rooms"] == [
+        "#lobby:tenant42.example.test",
+        "#dev:tenant42.example.test",
+    ]
+    assert synapse_config["autocreate_auto_join_rooms"] is False
+
+
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
     """Private registry credentials should be available before pulling instance images."""
     docs = _render_chart(
@@ -359,7 +393,7 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     )
     assert "registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret" in synapse_config
     assert "registration_shared_secret:" not in synapse_config
-    assert "password_config:\n      enabled: true" in synapse_config
+    assert yaml.safe_load(synapse_config)["password_config"] == {"enabled": True}
 
 
 def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> None:

@@ -29,6 +29,15 @@ data:
 
     media_store_path: /data/media_store
     uploads_path: /data/uploads
+{{- $autoJoinRoomKeys := .Values.matrixAutoJoinRoomKeys | default (list) }}
+{{- if and (eq (toString .Values.matrixOidc.enabled) "true") $autoJoinRoomKeys }}
+
+    auto_join_rooms:
+{{- range $roomKey := $autoJoinRoomKeys }}
+      - {{ printf "#%s:%s.%s" $roomKey $.Values.customer $.Values.baseDomain | quote }}
+{{- end }}
+    autocreate_auto_join_rooms: false
+{{- end }}
 
     # Registration and authentication
 {{- if eq (toString .Values.matrixOidc.enabled) "true" }}
