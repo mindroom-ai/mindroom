@@ -9897,11 +9897,11 @@ class TestAgentBot:
         mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_resolve_response_action_skips_unmentioned_thread_when_policy_history_degraded(
+    async def test_resolve_response_action_allows_sole_responder_when_policy_history_degraded(
         self,
         tmp_path: Path,
     ) -> None:
-        """Unavailable policy history should fail closed instead of behaving like an empty thread."""
+        """Unavailable policy history should not silence the sole visible responder."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -9958,7 +9958,7 @@ class TestAgentBot:
                 False,
             )
 
-        assert action.kind == "skip"
+        assert action.kind == "individual"
         mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio
