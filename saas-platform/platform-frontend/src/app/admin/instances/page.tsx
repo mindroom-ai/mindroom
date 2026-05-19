@@ -166,7 +166,7 @@ export default function InstancesPage() {
                     </td>
                     <td className="py-3 px-4">
                       <InstanceActions
-                        instanceId={instance.instance_id || instance.subdomain}
+                        instanceId={String(instance.instance_id ?? instance.subdomain)}
                         currentStatus={instance.status}
                       />
                     </td>

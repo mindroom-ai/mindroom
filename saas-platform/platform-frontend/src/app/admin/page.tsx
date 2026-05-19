@@ -11,6 +11,11 @@ interface AdminStats {
   accounts_count?: number
   subscriptions_count?: number
   instances_count?: number
+  recent_activity?: {
+    type: string
+    description: string
+    timestamp: string
+  }[]
 }
 
 interface HealthStatus {
