@@ -3378,7 +3378,7 @@
         "search_gifs"
       ],
       "helper_text": null,
-      "icon": "GiGift",
+      "icon": "SiGiphy",
       "icon_color": "text-purple-500",
       "name": "giphy",
       "setup_type": "api_key",
@@ -5381,7 +5381,7 @@
         "summarize_table"
       ],
       "helper_text": null,
-      "icon": "SiAmazonredshift",
+      "icon": "AwsRedshift",
       "icon_color": "text-red-600",
       "name": "redshift",
       "setup_type": "special",

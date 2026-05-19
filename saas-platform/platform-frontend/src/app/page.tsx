@@ -10,7 +10,6 @@ import {
   Check,
   Code2,
   GitBranch,
-  Github,
   KeyRound,
   Lock,
   MessageSquare,
@@ -329,7 +328,7 @@ export default function LandingPage() {
                 <ArrowRight className="h-4 w-4" />
               </Link>
               <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className={secondaryCtaClass}>
-                <Github className="h-4 w-4" />
+                <GitBranch className="h-4 w-4" />
                 View source
               </a>
             </div>
