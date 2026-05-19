@@ -18,34 +18,30 @@ for (const tool of toolsMetadata.tools) {
 // Group icons by library
 const iconsByLibrary = {
   fa: [],
-  fa6: [],
   si: [],
   gi: [],
+  tb: [],
   vsc: [],
+  wi: [],
+  aws: [],
   lucide: [],
 };
 
-// Icons we know exist in fa6 instead of fa
-const fa6Icons = ["FaConfluence", "FaLinear"];
-const lucideFallbacks = new Map([
-  ["FaLinear", "ListTodo"],
-  ["GiGift", "Gift"],
-  ["SiAmazonredshift", "Database"],
-]);
-
 for (const icon of iconNames) {
   if (icon.startsWith('Fa')) {
-    if (fa6Icons.includes(icon)) {
-      iconsByLibrary.fa6.push(icon);
-    } else {
-      iconsByLibrary.fa.push(icon);
-    }
+    iconsByLibrary.fa.push(icon);
   } else if (icon.startsWith('Si')) {
     iconsByLibrary.si.push(icon);
   } else if (icon.startsWith('Gi')) {
     iconsByLibrary.gi.push(icon);
+  } else if (icon.startsWith('Tb')) {
+    iconsByLibrary.tb.push(icon);
   } else if (icon.startsWith('Vsc')) {
     iconsByLibrary.vsc.push(icon);
+  } else if (icon.startsWith('Wi')) {
+    iconsByLibrary.wi.push(icon);
+  } else if (icon.startsWith('Aws')) {
+    iconsByLibrary.aws.push(icon);
   } else {
     // Assume it's a lucide icon
     iconsByLibrary.lucide.push(icon);
@@ -68,26 +64,23 @@ function iconImport(library, icons) {
 if (iconsByLibrary.fa.length > 0) {
   imports += iconImport("react-icons/fa", iconsByLibrary.fa);
 }
-if (iconsByLibrary.fa6.length > 0) {
-  const existingFa6 = iconsByLibrary.fa6.filter(icon => !lucideFallbacks.has(icon));
-  if (existingFa6.length > 0) {
-    imports += iconImport("react-icons/fa6", existingFa6);
-  }
-}
 if (iconsByLibrary.si.length > 0) {
-  const existingSi = iconsByLibrary.si.filter(icon => !lucideFallbacks.has(icon));
-  if (existingSi.length > 0) {
-    imports += iconImport("react-icons/si", existingSi);
-  }
+  imports += iconImport("react-icons/si", iconsByLibrary.si);
 }
 if (iconsByLibrary.gi.length > 0) {
-  const existingGi = iconsByLibrary.gi.filter(icon => !lucideFallbacks.has(icon));
-  if (existingGi.length > 0) {
-    imports += iconImport("react-icons/gi", existingGi);
-  }
+  imports += iconImport("react-icons/gi", iconsByLibrary.gi);
+}
+if (iconsByLibrary.tb.length > 0) {
+  imports += iconImport("react-icons/tb", iconsByLibrary.tb);
 }
 if (iconsByLibrary.vsc.length > 0) {
   imports += iconImport("react-icons/vsc", iconsByLibrary.vsc);
+}
+if (iconsByLibrary.wi.length > 0) {
+  imports += iconImport("react-icons/wi", iconsByLibrary.wi);
+}
+if (iconsByLibrary.aws.length > 0) {
+  imports += iconImport("./awsIcons", iconsByLibrary.aws);
 }
 
 // Create the icon mapping
@@ -100,31 +93,22 @@ const iconMap: Record<string, any> = {
 for (const icon of iconsByLibrary.fa) {
   imports += `  ${icon},\n`;
 }
-for (const icon of iconsByLibrary.fa6) {
-  const fallback = lucideFallbacks.get(icon);
-  if (fallback) {
-    imports += `  ${icon}: LucideIcons.${fallback},\n`;
-  } else {
-    imports += `  ${icon},\n`;
-  }
-}
 for (const icon of iconsByLibrary.si) {
-  const fallback = lucideFallbacks.get(icon);
-  if (fallback) {
-    imports += `  ${icon}: LucideIcons.${fallback},\n`;
-  } else {
-    imports += `  ${icon},\n`;
-  }
+  imports += `  ${icon},\n`;
 }
 for (const icon of iconsByLibrary.gi) {
-  const fallback = lucideFallbacks.get(icon);
-  if (fallback) {
-    imports += `  ${icon}: LucideIcons.${fallback},\n`;
-  } else {
-    imports += `  ${icon},\n`;
-  }
+  imports += `  ${icon},\n`;
+}
+for (const icon of iconsByLibrary.tb) {
+  imports += `  ${icon},\n`;
 }
 for (const icon of iconsByLibrary.vsc) {
+  imports += `  ${icon},\n`;
+}
+for (const icon of iconsByLibrary.wi) {
+  imports += `  ${icon},\n`;
+}
+for (const icon of iconsByLibrary.aws) {
   imports += `  ${icon},\n`;
 }
 
@@ -189,9 +173,11 @@ fs.writeFileSync(outputPath, imports, "utf8");
 
 console.log(`✅ Generated icon imports for ${iconNames.size} unique icons`);
 console.log(`   - ${iconsByLibrary.fa.length} from react-icons/fa`);
-console.log(`   - ${iconsByLibrary.fa6.length} from react-icons/fa6`);
 console.log(`   - ${iconsByLibrary.si.length} from react-icons/si`);
 console.log(`   - ${iconsByLibrary.gi.length} from react-icons/gi`);
+console.log(`   - ${iconsByLibrary.tb.length} from react-icons/tb`);
 console.log(`   - ${iconsByLibrary.vsc.length} from react-icons/vsc`);
+console.log(`   - ${iconsByLibrary.wi.length} from react-icons/wi`);
+console.log(`   - ${iconsByLibrary.aws.length} from local AWS icons`);
 console.log(`   - ${iconsByLibrary.lucide.length} from lucide-react`);
 console.log(`📁 Output: ${outputPath}`);
