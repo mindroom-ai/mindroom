@@ -74,15 +74,9 @@ import {
   SiX,
   SiZoom,
 } from "react-icons/si";
-import {
-  TbBrain,
-} from "react-icons/tb";
-import {
-  WiDaySunny,
-} from "react-icons/wi";
-import {
-  AwsRedshift,
-} from "./awsIcons";
+import { TbBrain } from "react-icons/tb";
+import { WiDaySunny } from "react-icons/wi";
+import { AwsRedshift } from "./awsIcons";
 
 // Map of all icons we use
 const iconMap: Record<string, any> = {

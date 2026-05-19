@@ -1610,16 +1610,18 @@ class _MultiAgentOrchestrator:
             return
 
         normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
+        root_space_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
         root_space_id = await ensure_root_space(
             router_bot.client,
             config,
             self.runtime_paths,
             normalized_room_ids,
+            admin_user_ids=root_space_user_ids,
         )
         if root_space_id is None:
             return
 
-        invite_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
+        invite_user_ids = root_space_user_ids
         if not invite_user_ids:
             return
 

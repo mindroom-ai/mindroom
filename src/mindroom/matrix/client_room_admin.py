@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+_ROOM_ADMIN_POWER_LEVEL = 100
 _THREAD_TAGS_POWER_LEVEL = 0
 _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 
@@ -136,6 +137,85 @@ async def ensure_thread_tags_power_level(
     logger.error(
         "Failed to update room power levels for thread tags",
         room_id=room_id,
+        error=_describe_matrix_response_error(response),
+        hint="Ensure the service account is joined and can update m.room.power_levels.",
+    )
+    return False
+
+
+def _with_room_admin_power_levels(
+    power_levels_content: dict[str, Any],
+    user_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Return power-level content with the given users promoted to room admins."""
+    next_content = dict(power_levels_content)
+    existing_users = power_levels_content.get("users")
+    next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
+    for user_id in sorted(set(user_ids)):
+        current_level = next_users.get(user_id)
+        if not isinstance(current_level, int) or current_level < _ROOM_ADMIN_POWER_LEVEL:
+            next_users[user_id] = _ROOM_ADMIN_POWER_LEVEL
+    next_content["users"] = next_users
+    return next_content
+
+
+async def ensure_room_admin_power_levels(
+    client: nio.AsyncClient,
+    room_id: str,
+    user_ids: Iterable[str],
+) -> bool:
+    """Ensure the given users have Matrix room admin power in a room or Space."""
+    concrete_user_ids = {user_id for user_id in user_ids if user_id}
+    if not concrete_user_ids:
+        return True
+
+    current_response = await client.room_get_state_event(room_id, _POWER_LEVELS_EVENT_TYPE)
+    if not isinstance(current_response, nio.RoomGetStateEventResponse):
+        logger.error(
+            "Failed to read room power levels for admin reconciliation",
+            room_id=room_id,
+            user_ids=sorted(concrete_user_ids),
+            error=_describe_matrix_response_error(current_response),
+        )
+        return False
+    if not isinstance(current_response.content, dict):
+        logger.error(
+            "Room power levels state has unexpected content shape",
+            room_id=room_id,
+            user_ids=sorted(concrete_user_ids),
+            content=current_response.content,
+        )
+        return False
+
+    current_content = current_response.content
+    desired_content = _with_room_admin_power_levels(current_content, concrete_user_ids)
+    if desired_content == current_content:
+        logger.debug(
+            "Room admins already have sufficient power",
+            room_id=room_id,
+            user_ids=sorted(concrete_user_ids),
+            power_level=_ROOM_ADMIN_POWER_LEVEL,
+        )
+        return True
+
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type=_POWER_LEVELS_EVENT_TYPE,
+        content=desired_content,
+    )
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info(
+            "Updated room power levels for admins",
+            room_id=room_id,
+            user_ids=sorted(concrete_user_ids),
+            power_level=_ROOM_ADMIN_POWER_LEVEL,
+        )
+        return True
+
+    logger.error(
+        "Failed to update room power levels for admins",
+        room_id=room_id,
+        user_ids=sorted(concrete_user_ids),
         error=_describe_matrix_response_error(response),
         hint="Ensure the service account is joined and can update m.room.power_levels.",
     )
@@ -463,6 +543,7 @@ __all__ = [
     "add_room_to_space",
     "create_room",
     "create_space",
+    "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
     "ensure_room_join_rule",
     "ensure_room_name",

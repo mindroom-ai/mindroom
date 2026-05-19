@@ -16,6 +16,7 @@ from mindroom.matrix.client_room_admin import (
     add_room_to_space,
     create_room,
     create_space,
+    ensure_room_admin_power_levels,
     ensure_room_directory_visibility,
     ensure_room_join_rule,
     ensure_room_name,
@@ -439,6 +440,8 @@ async def ensure_root_space(
     config: Config,
     runtime_paths: RuntimePaths,
     room_ids: dict[str, str],
+    *,
+    admin_user_ids: set[str] | None = None,
 ) -> str | None:
     """Ensure the optional root Matrix Space exists and links the supplied managed rooms."""
     if not config.matrix_space.enabled:
@@ -450,6 +453,10 @@ async def ensure_root_space(
 
     if not await ensure_room_name(client, root_space_id, config.matrix_space.name):
         logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
+        return None
+
+    if admin_user_ids and not await ensure_room_admin_power_levels(client, root_space_id, admin_user_ids):
+        logger.warning("Failed to grant root space admin power; skipping child linking", space_id=root_space_id)
         return None
 
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)

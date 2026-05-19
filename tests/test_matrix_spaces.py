@@ -263,6 +263,75 @@ async def test_add_room_to_space_falls_back_to_state_event_when_child_missing_fr
 
 
 @pytest.mark.asyncio
+async def test_ensure_room_admin_power_levels_promotes_missing_and_underpowered_users() -> None:
+    """Root Space admins should receive PL100 without disturbing existing higher levels."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "users": {
+                "@router:example.com": 100,
+                "@existing:example.com": 150,
+                "@underpowered:example.com": 50,
+            },
+            "state_default": 50,
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!space:example.com",
+    )
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$power"},
+        room_id="!space:example.com",
+    )
+
+    result = await matrix_client.ensure_room_admin_power_levels(
+        client,
+        "!space:example.com",
+        {
+            "@existing:example.com",
+            "@underpowered:example.com",
+            "@owner:example.com",
+        },
+    )
+
+    assert result is True
+    client.room_put_state.assert_awaited_once_with(
+        room_id="!space:example.com",
+        event_type="m.room.power_levels",
+        content={
+            "users": {
+                "@router:example.com": 100,
+                "@existing:example.com": 150,
+                "@underpowered:example.com": 100,
+                "@owner:example.com": 100,
+            },
+            "state_default": 50,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_admin_power_levels_is_idempotent_when_admins_already_powered() -> None:
+    """No power-level write should happen when every target user is already an admin."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"users": {"@owner:example.com": 100}},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!space:example.com",
+    )
+
+    result = await matrix_client.ensure_room_admin_power_levels(
+        client,
+        "!space:example.com",
+        {"@owner:example.com"},
+    )
+
+    assert result is True
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tmp_path) -> None:  # noqa: ANN001
     """Enabled root Space support should create the Space, persist it, and link rooms."""
     client = AsyncMock()
@@ -282,6 +351,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock(return_value="!space:localhost")) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
+        patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=True)) as mock_admins,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
         patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
@@ -290,6 +360,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
             config,
             runtime_paths_for(config),
             {"lobby": "!lobby:localhost", "dev": "!dev:localhost"},
+            admin_user_ids={"@owner:localhost"},
         )
 
     assert space_id == "!space:localhost"
@@ -297,6 +368,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
     mock_save.assert_called_once_with(state, runtime_paths=runtime_paths_for(config))
     mock_create.assert_awaited_once()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "MindRoom")
+    mock_admins.assert_awaited_once_with(client, "!space:localhost", {"@owner:localhost"})
     assert mock_add.await_args_list == [
         call(client, "!space:localhost", "!lobby:localhost", "localhost"),
         call(client, "!space:localhost", "!dev:localhost", "localhost"),
@@ -336,6 +408,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         patch("mindroom.matrix.rooms.join_room", new=AsyncMock(return_value=True)) as mock_join,
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
+        patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=True)) as mock_admins,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
         patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
@@ -344,6 +417,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
             config,
             runtime_paths_for(config),
             {"lobby": "!lobby:localhost"},
+            admin_user_ids={"@owner:localhost"},
         )
 
     assert space_id == "!space:localhost"
@@ -352,6 +426,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
     mock_join.assert_awaited_once_with(client, "!space:localhost")
     mock_create.assert_not_awaited()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace")
+    mock_admins.assert_awaited_once_with(client, "!space:localhost", {"@owner:localhost"})
     mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost")
     mock_avatar.assert_awaited_once_with(
         client,
@@ -502,6 +577,10 @@ async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_us
         orchestrator.config,
         orchestrator.runtime_paths,
         {"lobby": "!lobby:localhost"},
+        admin_user_ids={
+            mindroom_user_id(orchestrator.config, orchestrator.runtime_paths),
+            "@owner:example.com",
+        },
     )
     # Should have invited both the internal user and the authorized owner
     invited_user_ids = {c.args[2] for c in mock_invite.await_args_list}
@@ -524,12 +603,19 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
     orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with (
-        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
+        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")) as mock_space,
         patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={"@mindroom_router:localhost"})),
         patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
         await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
 
+    mock_space.assert_awaited_once_with(
+        router_bot.client,
+        orchestrator.config,
+        orchestrator.runtime_paths,
+        {"lobby": "!lobby:localhost"},
+        admin_user_ids={"@owner:example.com"},
+    )
     mock_invite.assert_awaited_once_with(
         router_bot.client,
         "!space:localhost",
