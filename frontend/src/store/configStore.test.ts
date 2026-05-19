@@ -4143,6 +4143,14 @@ describe("configStore", () => {
             instructions: [],
             rooms: ["lobby"],
           },
+          agent2: {
+            display_name: "Agent 2",
+            role: "Test agent 2",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
         },
         rooms: {
           lobby: {
@@ -4186,13 +4194,22 @@ describe("configStore", () => {
             instructions: [],
             rooms: ["lobby"],
           },
+          {
+            id: "agent2",
+            display_name: "Agent 2",
+            role: "Test agent 2",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
         ],
         rooms: [
           {
             id: "lobby",
             display_name: "Lobby",
             description: "Main room",
-            agents: ["agent1"],
+            agents: ["agent1", "agent2"],
           },
         ],
         isDirty: true,
@@ -4202,7 +4219,10 @@ describe("configStore", () => {
       (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
 
       const savePromise = useConfigStore.getState().saveConfig();
-      useConfigStore.getState().updateRoom("lobby", { display_name: "Lobby" });
+      useConfigStore.getState().updateRoom("lobby", {
+        display_name: "Lobby",
+        agents: ["agent2", "agent1"],
+      });
 
       pendingSaveResponse.resolve({
         ok: true,

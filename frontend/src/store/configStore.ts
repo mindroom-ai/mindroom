@@ -257,10 +257,14 @@ function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
   }));
 }
 
-function sameStringList(left: string[], right: string[]): boolean {
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const rightValues = new Set(right);
   return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
+    rightValues.size === right.length &&
+    left.every((value) => rightValues.has(value))
   );
 }
 
@@ -268,7 +272,7 @@ function roomUpdateIsNoop(room: Room, updates: Partial<Room>): boolean {
   return Object.entries(updates).every(([key, value]) => {
     const current = room[key as keyof Room];
     if (Array.isArray(current) && Array.isArray(value)) {
-      return sameStringList(current, value);
+      return sameStringSet(current, value);
     }
     return current === value;
   });
