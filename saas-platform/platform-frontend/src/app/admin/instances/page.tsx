@@ -10,8 +10,8 @@ import { logger } from '@/lib/logger'
 interface Instance {
   id: string
   account_id: string
-  instance_id: number | string
-  subdomain: string
+  instance_id?: number | string | null
+  subdomain?: string | null
   status: string
   instance_url: string | null
   agent_count: number
@@ -20,6 +20,26 @@ interface Instance {
     email: string
     full_name: string | null
   }
+}
+
+function getActionInstanceId(instance: Instance): string | null {
+  const rawId = instance.instance_id ?? instance.subdomain
+  return rawId === null || rawId === undefined || rawId === '' ? null : String(rawId)
+}
+
+function renderInstanceActions(instance: Instance) {
+  const actionInstanceId = getActionInstanceId(instance)
+
+  if (!actionInstanceId) {
+    return <span className="text-sm text-gray-500 dark:text-gray-400">No ID</span>
+  }
+
+  return (
+    <InstanceActions
+      instanceId={actionInstanceId}
+      currentStatus={instance.status}
+    />
+  )
 }
 
 export default function InstancesPage() {
@@ -165,10 +185,7 @@ export default function InstancesPage() {
                       {new Date(instance.created_at).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4">
-                      <InstanceActions
-                        instanceId={String(instance.instance_id ?? instance.subdomain)}
-                        currentStatus={instance.status}
-                      />
+                      {renderInstanceActions(instance)}
                     </td>
                   </tr>
                 ))}
