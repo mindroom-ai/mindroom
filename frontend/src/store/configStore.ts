@@ -192,6 +192,7 @@ function deriveConfigCollections(
     ? Object.entries(config.teams).map(([id, team]) => ({
         id,
         ...team,
+        rooms: team.rooms ?? [],
       }))
     : [];
   const cultures = config.cultures
@@ -1599,9 +1600,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       );
 
       let updatedConfig = state.config;
+      const modelUpdateProvided = Object.prototype.hasOwnProperty.call(
+        updates,
+        "model",
+      );
 
       // If model changed, update room_models in config
-      if (updates.model !== undefined && state.config) {
+      if (modelUpdateProvided && state.config) {
         const currentRoomModels = state.config.room_models || {};
         const newRoomModels = { ...currentRoomModels };
 
@@ -1624,6 +1629,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (previousConfig && updatedConfig && updatedConfig !== previousConfig) {
         preserveRawToolEntries(previousConfig, updatedConfig);
       }
+
+      const roomMetadataTouchedPaths = (
+        ["display_name", "description"] as const
+      )
+        .filter((key) => Object.prototype.hasOwnProperty.call(updates, key))
+        .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
+      const roomModelTouchedPaths = modelUpdateProvided
+        ? ([["room_models", roomId]] as ConfigDiagnosticPath[])
+        : [];
 
       // If agents changed, update the agents' rooms arrays
       if (updates.agents) {
@@ -1650,8 +1664,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           rooms: updatedRooms,
           agents: updatedAgents,
           ...markDraftDirty(state, {}, [
-            ["rooms", roomId, "agents"],
             ["agents"],
+            ...roomMetadataTouchedPaths,
+            ...roomModelTouchedPaths,
           ]),
         };
       }
@@ -1660,12 +1675,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: updatedConfig,
         rooms: updatedRooms,
         ...markDraftDirty(state, {}, [
-          ...Object.keys(updates).map(
-            (key) => ["rooms", roomId, key] as ConfigDiagnosticPath,
-          ),
-          ...(updates.model !== undefined
-            ? ([["room_models", roomId]] as ConfigDiagnosticPath[])
-            : []),
+          ...roomMetadataTouchedPaths,
+          ...roomModelTouchedPaths,
         ]),
       };
     });
@@ -1760,7 +1771,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         rooms: updatedRooms,
         agents: updatedAgents,
-        ...markDraftDirty(state, {}, [["rooms", roomId, "agents"], ["agents"]]),
+        ...markDraftDirty(state, {}, [["agents"]]),
       };
     });
   },
@@ -1788,7 +1799,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         rooms: updatedRooms,
         agents: updatedAgents,
-        ...markDraftDirty(state, {}, [["rooms", roomId, "agents"], ["agents"]]),
+        ...markDraftDirty(state, {}, [["agents"]]),
       };
     });
   },

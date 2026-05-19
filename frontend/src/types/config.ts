@@ -226,6 +226,10 @@ export interface Team {
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
 }
 
+export type TeamConfig = Omit<Team, "id" | "rooms"> & {
+  rooms?: string[];
+};
+
 export interface Culture {
   id: string; // The key in the cultures object
   description: string;
@@ -292,7 +296,7 @@ export interface Config {
   };
   rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
   room_models?: Record<string, string>; // Room-specific model overrides for teams
-  teams?: Record<string, Omit<Team, "id">>; // Teams configuration
+  teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }
