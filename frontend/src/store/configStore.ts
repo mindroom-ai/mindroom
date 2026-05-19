@@ -221,9 +221,7 @@ function deriveConfigCollections(
     const roomModel = config.room_models?.[roomId];
     return {
       id: roomId,
-      display_name:
-        roomConfig?.display_name ??
-        roomId.charAt(0).toUpperCase() + roomId.slice(1),
+      display_name: roomConfig?.display_name ?? defaultRoomDisplayName(roomId),
       description: roomConfig?.description ?? "",
       agents: agentsInRoom,
       model: roomModel,
@@ -256,6 +254,67 @@ function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
     ...team,
     agents: team.agents.filter((agentId) => knownAgents.has(agentId)),
   }));
+}
+
+function defaultRoomDisplayName(roomId: string): string {
+  return roomId.charAt(0).toUpperCase() + roomId.slice(1);
+}
+
+function roomConfigFromRoom(room: Room): NonNullable<Config["rooms"]>[string] {
+  return {
+    display_name: room.display_name,
+    description: room.description ?? "",
+  };
+}
+
+function responderRoomIds(agents: Agent[], teams: Team[]): Set<string> {
+  const roomIds = new Set<string>();
+  agents.forEach((agent) => {
+    agent.rooms.forEach((roomId) => roomIds.add(roomId));
+  });
+  teams.forEach((team) => {
+    team.rooms.forEach((roomId) => roomIds.add(roomId));
+  });
+  return roomIds;
+}
+
+function roomHasAuthoredMetadata(room: Room): boolean {
+  return (
+    room.display_name !== defaultRoomDisplayName(room.id) ||
+    (room.description ?? "") !== ""
+  );
+}
+
+function authoredRoomsObject(
+  baseRooms: Config["rooms"],
+  rooms: Room[],
+  agents: Agent[],
+  teams: Team[],
+): NonNullable<Config["rooms"]> {
+  const currentRoomsById = new Map(rooms.map((room) => [room.id, room]));
+  const currentResponderRoomIds = responderRoomIds(agents, teams);
+  const nextRooms: NonNullable<Config["rooms"]> = {};
+
+  Object.keys(baseRooms ?? {}).forEach((roomId) => {
+    const room = currentRoomsById.get(roomId);
+    if (room) {
+      nextRooms[roomId] = roomConfigFromRoom(room);
+    }
+  });
+
+  rooms.forEach((room) => {
+    if (baseRooms?.[room.id]) {
+      return;
+    }
+    if (
+      !currentResponderRoomIds.has(room.id) ||
+      roomHasAuthoredMetadata(room)
+    ) {
+      nextRooms[room.id] = roomConfigFromRoom(room);
+    }
+  });
+
+  return nextRooms;
 }
 
 function sameStringSet(left: string[], right: string[]): boolean {
@@ -956,15 +1015,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           roomModels[room.id] = room.model;
         }
       });
-      const roomsObject = rooms.reduce(
-        (acc, room) => {
-          acc[room.id] = {
-            display_name: room.display_name,
-            description: room.description ?? "",
-          };
-          return acc;
-        },
-        {} as NonNullable<Config["rooms"]>,
+      const roomsObject = authoredRoomsObject(
+        baseConfig.rooms,
+        rooms,
+        agents,
+        teams,
       );
 
       const updatedConfig: Config = {

@@ -4506,6 +4506,106 @@ describe("configStore", () => {
       expect(state.isDirty).toBe(true);
     });
 
+    it("does not serialize team-derived rooms when creating a managed room", async () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        teams: {
+          ops: {
+            display_name: "Ops Team",
+            role: "Coordinates operations",
+            agents: ["agent1"],
+            rooms: ["war_room"],
+            mode: "coordinate",
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        teams: [
+          {
+            id: "ops",
+            display_name: "Ops Team",
+            role: "Coordinates operations",
+            agents: ["agent1"],
+            rooms: ["war_room"],
+            mode: "coordinate",
+          },
+        ],
+        rooms: [
+          {
+            id: "war_room",
+            display_name: "War_room",
+            description: "",
+            agents: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().createRoom({
+        display_name: "Project Room",
+        description: "Planning space",
+        agents: [],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.rooms).toEqual({
+        project_room: {
+          display_name: "Project Room",
+          description: "Planning space",
+        },
+      });
+    });
+
     it("should persist a newly created room even before agents are assigned", async () => {
       const mockConfig = {
         agents: {
@@ -4612,6 +4712,91 @@ describe("configStore", () => {
       expect(agent1?.rooms).not.toContain("lobby");
       expect(state.selectedRoomId).toBe(null);
       expect(state.isDirty).toBe(true);
+    });
+
+    it("does not serialize agent-derived rooms when deleting a managed room", async () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        },
+        rooms: {
+          project_room: {
+            display_name: "Project Room",
+            description: "Planning space",
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        ],
+        rooms: [
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["agent1"],
+          },
+          {
+            id: "project_room",
+            display_name: "Project Room",
+            description: "Planning space",
+            agents: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteRoom("project_room");
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.rooms).toEqual({});
+      expect(payload.agents.agent1.rooms).toEqual(["lobby"]);
     });
 
     it("should add agent to room", () => {
