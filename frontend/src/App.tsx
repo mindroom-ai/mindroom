@@ -217,6 +217,10 @@ function AppContent() {
   }, [loadConfig]);
 
   useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [currentTab]);
+
+  useEffect(() => {
     const tabsList = tabsListRef.current;
     if (!tabsList) return;
 
@@ -266,7 +270,6 @@ function AppContent() {
 
   // Handle tab change - update the URL
   const handleTabChange = (value: string) => {
-    setMobileMenuOpen(false);
     navigate(`/${value}`);
   };
 
