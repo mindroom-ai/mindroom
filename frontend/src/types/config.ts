@@ -241,6 +241,11 @@ export interface Room {
   model?: string; // Room-specific model override
 }
 
+export interface RoomConfig {
+  display_name?: string;
+  description?: string;
+}
+
 export interface VoiceSTTConfig {
   provider: string;
   model: string;
@@ -285,6 +290,7 @@ export interface Config {
   router: {
     model: string;
   };
+  rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, Omit<Team, "id">>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations

@@ -20,7 +20,7 @@ from mindroom.agent_policy import (
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
 )
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -116,6 +116,7 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "cultures",
+    "rooms",
     "room_models",
     "toolkits",
     "knowledge_bases",
@@ -338,6 +339,7 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
+    rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     toolkits: dict[str, ToolkitDefinition] = Field(
         default_factory=dict,
@@ -1516,13 +1518,13 @@ class Config(BaseModel):
         return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
-        """Extract all room aliases configured for agents and teams.
+        """Extract all configured room aliases.
 
         Returns:
-            Set of all unique room aliases from agent and team configurations
+            Set of all unique room aliases from room, agent, and team configurations
 
         """
-        all_room_aliases = set()
+        all_room_aliases = set(self.rooms)
         for agent_config in self.agents.values():
             all_room_aliases.update(agent_config.rooms)
         for team_config in self.teams.values():

@@ -439,6 +439,15 @@ class TeamConfig(BaseModel):
         return self
 
 
+class RoomConfig(BaseModel):
+    """Configuration for a managed Matrix room."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
+    description: str = Field(default="", description="Dashboard-facing room purpose")
+
+
 class CultureConfig(BaseModel):
     """Configuration for a shared culture."""
 

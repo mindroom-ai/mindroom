@@ -4128,6 +4128,90 @@ describe("configStore", () => {
       expect(state.isDirty).toBe(true);
     });
 
+    it("should ignore unchanged room updates while a save is in progress", async () => {
+      const pendingSaveResponse = deferred<{
+        ok: boolean;
+        json: () => Promise<{ success: true }>;
+      }>();
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        },
+        rooms: {
+          lobby: {
+            display_name: "Lobby",
+            description: "Main room",
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        ],
+        rooms: [
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "Main room",
+            agents: ["agent1"],
+          },
+        ],
+        isDirty: true,
+        dirtyRoots: ["rooms"],
+      });
+
+      (global.fetch as any).mockReturnValueOnce(pendingSaveResponse.promise);
+
+      const savePromise = useConfigStore.getState().saveConfig();
+      useConfigStore.getState().updateRoom("lobby", { display_name: "Lobby" });
+
+      pendingSaveResponse.resolve({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      await expect(savePromise).resolves.toEqual({ status: "saved" });
+    });
+
     it("should update agents when room agents change", () => {
       const { updateRoom } = useConfigStore.getState();
       updateRoom("lobby", { agents: ["agent1", "agent2"] });
@@ -4159,6 +4243,99 @@ describe("configStore", () => {
       const agent1 = state.agents.find((a) => a.id === "agent1");
       expect(agent1?.rooms).toContain("new_room");
       expect(state.isDirty).toBe(true);
+    });
+
+    it("should persist a newly created room even before agents are assigned", async () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        rooms: [],
+      });
+
+      const { createRoom, saveConfig } = useConfigStore.getState();
+      createRoom({
+        display_name: "Project Room",
+        description: "Planning space",
+        agents: [],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[0];
+      const payload = JSON.parse(saveCall[1].body);
+      expect(payload.rooms).toEqual({
+        project_room: {
+          display_name: "Project Room",
+          description: "Planning space",
+        },
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.rooms).toEqual([
+        {
+          id: "project_room",
+          display_name: "Project Room",
+          description: "Planning space",
+          agents: [],
+          model: undefined,
+        },
+      ]);
+      expect(state.config?.rooms).toEqual({
+        project_room: {
+          display_name: "Project Room",
+          description: "Planning space",
+        },
+      });
     });
 
     it("should delete room and update agents", () => {

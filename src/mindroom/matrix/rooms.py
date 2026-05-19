@@ -367,12 +367,15 @@ async def ensure_all_rooms_exist(
         power_users = managed_entity_power_user_ids_for_room(room_key, config, runtime_paths)
 
         # Ensure room exists
+        room_config = config.rooms.get(room_key)
+        room_name = room_config.display_name if room_config and room_config.display_name else None
         try:
             room_id = await _ensure_room_exists(
                 client=client,
                 room_key=room_key,
                 config=config,
                 runtime_paths=runtime_paths,
+                room_name=room_name,
                 power_users=power_users,
             )
         except RuntimeError:

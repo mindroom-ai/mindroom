@@ -204,20 +204,26 @@ function deriveConfigCollections(
       }))
     : [];
 
-  const roomIds = new Set<string>();
+  const roomIds = new Set<string>(Object.keys(config.rooms ?? {}));
   agents.forEach((agent) => {
     agent.rooms.forEach((room) => roomIds.add(room));
+  });
+  teams.forEach((team) => {
+    team.rooms.forEach((room) => roomIds.add(room));
   });
 
   const rooms: Room[] = Array.from(roomIds).map((roomId) => {
     const agentsInRoom = agents
       .filter((agent) => agent.rooms.includes(roomId))
       .map((a) => a.id);
+    const roomConfig = config.rooms?.[roomId];
     const roomModel = config.room_models?.[roomId];
     return {
       id: roomId,
-      display_name: roomId.charAt(0).toUpperCase() + roomId.slice(1),
-      description: "",
+      display_name:
+        roomConfig?.display_name ??
+        roomId.charAt(0).toUpperCase() + roomId.slice(1),
+      description: roomConfig?.description ?? "",
       agents: agentsInRoom,
       model: roomModel,
     };
@@ -249,6 +255,23 @@ function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
     ...team,
     agents: team.agents.filter((agentId) => knownAgents.has(agentId)),
   }));
+}
+
+function sameStringList(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function roomUpdateIsNoop(room: Room, updates: Partial<Room>): boolean {
+  return Object.entries(updates).every(([key, value]) => {
+    const current = room[key as keyof Room];
+    if (Array.isArray(current) && Array.isArray(value)) {
+      return sameStringList(current, value);
+    }
+    return current === value;
+  });
 }
 
 function normalizeAgentDelegates(delegateTo: string[] | undefined): string {
@@ -928,6 +951,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           roomModels[room.id] = room.model;
         }
       });
+      const roomsObject = rooms.reduce(
+        (acc, room) => {
+          acc[room.id] = {
+            display_name: room.display_name,
+            description: room.description ?? "",
+          };
+          return acc;
+        },
+        {} as NonNullable<Config["rooms"]>,
+      );
 
       const updatedConfig: Config = {
         ...baseConfig,
@@ -943,6 +976,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
         ...(dirtyRootSet.has("cultures")
           ? { cultures: currentCulturesObject }
+          : {}),
+        ...(dirtyRootSet.has("rooms")
+          ? { rooms: Object.keys(roomsObject).length > 0 ? roomsObject : {} }
           : {}),
         ...(dirtyRootSet.has("room_models")
           ? {
@@ -1549,6 +1585,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Update an existing room
   updateRoom: (roomId, updates) => {
     set((state) => {
+      const existingRoom = state.rooms.find((room) => room.id === roomId);
+      if (!existingRoom || roomUpdateIsNoop(existingRoom, updates)) {
+        return {};
+      }
+
       const updatedRooms = state.rooms.map((room) =>
         room.id === roomId ? { ...room, ...updates } : room,
       );
@@ -1582,8 +1623,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       // If agents changed, update the agents' rooms arrays
       if (updates.agents) {
-        const oldRoom = state.rooms.find((r) => r.id === roomId);
-        const oldAgents = oldRoom?.agents || [];
+        const oldAgents = existingRoom.agents;
         const newAgents = updates.agents;
 
         // Remove room from agents no longer in the room

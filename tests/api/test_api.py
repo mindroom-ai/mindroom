@@ -2350,6 +2350,46 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     assert saved_config["defaults"] == {}
 
 
+def test_save_config_persists_unassigned_configured_rooms(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Dashboard-created rooms should survive save even before responders are assigned."""
+    new_config = {
+        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Helpful assistant",
+                "rooms": [],
+            },
+        },
+        "rooms": {
+            "project_room": {
+                "display_name": "Project Room",
+                "description": "Planning space",
+            },
+        },
+        "defaults": {},
+        "router": {"model": "default"},
+    }
+
+    response = test_client.put("/api/config/save", json=new_config)
+    assert response.status_code == 200
+
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert saved_config["rooms"] == {
+        "project_room": {
+            "display_name": "Project Room",
+            "description": "Planning space",
+        },
+    }
+
+    response = test_client.get("/api/rooms")
+    assert response.status_code == 200
+    assert "project_room" in response.json()
+
+
 def test_save_config_preserves_explicit_compaction_model_null_clear(
     test_client: TestClient,
     temp_config_file: Path,
