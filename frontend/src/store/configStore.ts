@@ -267,6 +267,21 @@ function roomConfigFromRoom(room: Room): NonNullable<Config["rooms"]>[string] {
   };
 }
 
+function roomConfigWithMetadataEdits(
+  baseConfig: NonNullable<Config["rooms"]>[string],
+  baseRoom: Room | undefined,
+  room: Room,
+): NonNullable<Config["rooms"]>[string] {
+  const nextConfig = { ...baseConfig };
+  if (!baseRoom || room.display_name !== baseRoom.display_name) {
+    nextConfig.display_name = room.display_name;
+  }
+  if (!baseRoom || (room.description ?? "") !== (baseRoom.description ?? "")) {
+    nextConfig.description = room.description ?? "";
+  }
+  return nextConfig;
+}
+
 function responderRoomIds(agents: Agent[], teams: Team[]): Set<string> {
   const roomIds = new Set<string>();
   agents.forEach((agent) => {
@@ -287,18 +302,24 @@ function roomHasAuthoredMetadata(room: Room): boolean {
 
 function authoredRoomsObject(
   baseRooms: Config["rooms"],
+  baseUiRooms: Room[],
   rooms: Room[],
   agents: Agent[],
   teams: Team[],
 ): NonNullable<Config["rooms"]> {
   const currentRoomsById = new Map(rooms.map((room) => [room.id, room]));
+  const baseRoomsById = new Map(baseUiRooms.map((room) => [room.id, room]));
   const currentResponderRoomIds = responderRoomIds(agents, teams);
   const nextRooms: NonNullable<Config["rooms"]> = {};
 
-  Object.keys(baseRooms ?? {}).forEach((roomId) => {
+  Object.entries(baseRooms ?? {}).forEach(([roomId, baseConfig]) => {
     const room = currentRoomsById.get(roomId);
     if (room) {
-      nextRooms[roomId] = roomConfigFromRoom(room);
+      nextRooms[roomId] = roomConfigWithMetadataEdits(
+        baseConfig,
+        baseRoomsById.get(roomId),
+        room,
+      );
     }
   });
 
@@ -1017,6 +1038,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
       const roomsObject = authoredRoomsObject(
         baseConfig.rooms,
+        baseCollections.rooms,
         rooms,
         agents,
         teams,

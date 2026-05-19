@@ -4606,6 +4606,71 @@ describe("configStore", () => {
       });
     });
 
+    it("preserves omitted fields on existing managed rooms when creating another room", async () => {
+      const mockConfig = {
+        agents: {},
+        rooms: {
+          analysis_room: {},
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        rooms: [
+          {
+            id: "analysis_room",
+            display_name: "Analysis_room",
+            description: "",
+            agents: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().createRoom({
+        display_name: "Project Room",
+        description: "Planning space",
+        agents: [],
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.rooms).toEqual({
+        analysis_room: {},
+        project_room: {
+          display_name: "Project Room",
+          description: "Planning space",
+        },
+      });
+    });
+
     it("should persist a newly created room even before agents are assigned", async () => {
       const mockConfig = {
         agents: {
@@ -4797,6 +4862,73 @@ describe("configStore", () => {
       const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
       expect(payload.rooms).toEqual({});
       expect(payload.agents.agent1.rooms).toEqual(["lobby"]);
+    });
+
+    it("preserves omitted fields on existing managed rooms when deleting another room", async () => {
+      const mockConfig = {
+        agents: {},
+        rooms: {
+          analysis_room: {},
+          project_room: {
+            display_name: "Project Room",
+            description: "Planning space",
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        rooms: [
+          {
+            id: "analysis_room",
+            display_name: "Analysis_room",
+            description: "",
+            agents: [],
+          },
+          {
+            id: "project_room",
+            display_name: "Project Room",
+            description: "Planning space",
+            agents: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteRoom("project_room");
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.rooms).toEqual({
+        analysis_room: {},
+      });
     });
 
     it("should add agent to room", () => {
