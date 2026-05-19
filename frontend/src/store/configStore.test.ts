@@ -5055,6 +5055,116 @@ describe("configStore", () => {
       expect(state.agents[0].rooms).toEqual([]);
     });
 
+    it("deleting an unassigned managed room does not dirty responder collections", async () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        },
+        teams: {
+          team1: {
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1"],
+            rooms: ["lobby"],
+            mode: "coordinate",
+          },
+        },
+        rooms: {
+          project_room: {
+            display_name: "Project Room",
+            description: "Planning space",
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        ],
+        teams: [
+          {
+            id: "team1",
+            display_name: "Team 1",
+            role: "Test team",
+            agents: ["agent1"],
+            rooms: ["lobby"],
+            mode: "coordinate",
+          },
+        ],
+        rooms: [
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["agent1"],
+          },
+          {
+            id: "project_room",
+            display_name: "Project Room",
+            description: "Planning space",
+            agents: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteRoom("project_room");
+
+      const state = useConfigStore.getState();
+      expect(state.dirtyRoots).toContain("rooms");
+      expect(state.dirtyRoots).not.toContain("agents");
+      expect(state.dirtyRoots).not.toContain("teams");
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.agents).toEqual(mockConfig.agents);
+      expect(payload.teams).toEqual(mockConfig.teams);
+      expect(payload.rooms).toEqual({});
+    });
+
     it("does not serialize agent-derived rooms when deleting a managed room", async () => {
       const mockConfig = {
         agents: {

@@ -1020,9 +1020,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...(dirtyRootSet.has("cultures")
           ? { cultures: currentCulturesObject }
           : {}),
-        ...(dirtyRootSet.has("rooms")
-          ? { rooms: Object.keys(roomsObject).length > 0 ? roomsObject : {} }
-          : {}),
+        ...(dirtyRootSet.has("rooms") ? { rooms: roomsObject } : {}),
         ...(dirtyRootSet.has("room_models")
           ? {
               room_models:
@@ -1816,21 +1814,38 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Delete a room
   deleteRoom: (roomId) => {
     set((state) => {
+      const agentsReferenceRoom = state.agents.some((agent) =>
+        agent.rooms.includes(roomId),
+      );
+      const teamsReferenceRoom = state.teams.some((team) =>
+        team.rooms.includes(roomId),
+      );
+
       // Remove room from all agents
-      const updatedAgents = state.agents.map((agent) => ({
-        ...agent,
-        rooms: agent.rooms.filter((r) => r !== roomId),
-      }));
+      const updatedAgents = agentsReferenceRoom
+        ? state.agents.map((agent) => ({
+            ...agent,
+            rooms: agent.rooms.filter((r) => r !== roomId),
+          }))
+        : state.agents;
 
       // Remove room from teams
-      const updatedTeams = state.teams.map((team) => ({
-        ...team,
-        rooms: team.rooms.filter((r) => r !== roomId),
-      }));
+      const updatedTeams = teamsReferenceRoom
+        ? state.teams.map((team) => ({
+            ...team,
+            rooms: team.rooms.filter((r) => r !== roomId),
+          }))
+        : state.teams;
 
       // Remove from room_models if it exists
       let updatedConfig = state.config;
-      const touchedPaths: ConfigDiagnosticPath[] = [["agents"], ["teams"]];
+      const touchedPaths: ConfigDiagnosticPath[] = [];
+      if (agentsReferenceRoom) {
+        touchedPaths.push(["agents"]);
+      }
+      if (teamsReferenceRoom) {
+        touchedPaths.push(["teams"]);
+      }
       if (state.config?.rooms?.[roomId]) {
         updatedConfig = deleteDraftRoomMetadata(state.config, roomId);
         touchedPaths.push(["rooms"]);

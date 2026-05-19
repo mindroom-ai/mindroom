@@ -13058,6 +13058,49 @@ class TestMultiAgentOrchestrator:
         }
 
     @pytest.mark.asyncio
+    async def test_ensure_room_invitations_invites_authorized_users_to_standalone_rooms(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Managed rooms without responders should still invite authorized users."""
+        config = _runtime_bound_config(
+            Config(
+                rooms={"lobby": {"display_name": "Lobby"}},
+                authorization={
+                    "global_users": ["@alice:localhost"],
+                    "default_room_access": False,
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.client = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot}
+        state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
+        state.add_room("lobby", "!room1:localhost", "#lobby:localhost", "Lobby")
+        state.save(runtime_paths=orchestrator.runtime_paths)
+
+        async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
+            return {"@mindroom_router:localhost"}
+
+        mock_invite = AsyncMock(return_value=True)
+
+        with (
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
+            patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
+            patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
+            patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
+            patch("mindroom.orchestrator.invite_to_room", mock_invite),
+            patch("mindroom.orchestrator.configured_bot_user_ids_for_room", return_value=set()),
+        ):
+            await orchestrator._ensure_room_invitations()
+
+        mock_invite.assert_awaited_once_with(router_bot.client, "!room1:localhost", "@alice:localhost")
+
+    @pytest.mark.asyncio
     async def test_ensure_room_invitations_skips_non_matrix_authorization_entries(self, tmp_path: Path) -> None:
         """Only concrete Matrix user IDs should be invited from authorization lists."""
         config = _runtime_bound_config(
@@ -13311,6 +13354,45 @@ class TestMultiAgentOrchestrator:
         assert reconciliation_join_states == [False, True]
         assert router_bot.ensure_rooms.await_count == 1
         assert general_bot.ensure_rooms.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_reconcile_post_update_rooms_runs_for_room_metadata_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Display-name-only room edits should run room reconciliation without bot restarts."""
+        config = _runtime_bound_config(
+            Config(rooms={"lobby": {"display_name": "Project Lobby"}}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        plan = ConfigUpdatePlan(
+            new_config=config,
+            changed_mcp_servers=set(),
+            configured_entities={ROUTER_AGENT_NAME},
+            entities_to_restart=set(),
+            new_entities=set(),
+            removed_entities=set(),
+            mindroom_user_changed=False,
+            matrix_room_access_changed=False,
+            matrix_space_changed=False,
+            authorization_changed=False,
+            room_metadata_changed=True,
+        )
+
+        with (
+            patch.object(
+                orchestrator,
+                "_ensure_rooms_exist",
+                new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
+            ) as ensure_rooms,
+            patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as ensure_space,
+        ):
+            await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
+
+        ensure_rooms.assert_awaited_once_with()
+        ensure_space.assert_awaited_once_with({"lobby": "!room1:localhost"})
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization

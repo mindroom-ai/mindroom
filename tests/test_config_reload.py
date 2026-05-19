@@ -17,7 +17,7 @@ import yaml
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
@@ -1805,6 +1805,37 @@ def test_config_update_plan_does_not_restart_for_request_time_prompt_change() ->
 
     assert plan.entities_to_restart == set()
     assert plan.only_support_service_changes is True
+
+
+def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -> None:
+    """Room display-name edits should reconcile Matrix room state without bot restarts."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            rooms={"lobby": RoomConfig(display_name="Lobby")},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            rooms={"lobby": RoomConfig(display_name="Project Lobby")},
+            router=RouterConfig(model="default"),
+        ),
+    )
+
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.room_metadata_changed is True
+    assert plan.only_support_service_changes is False
 
 
 def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:

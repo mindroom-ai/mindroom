@@ -900,9 +900,7 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
 
     def read_rooms(config_data: dict[str, Any]) -> list[str]:
         rooms: set[str] = set()
-        room_configs = config_data.get("rooms", {})
-        if isinstance(room_configs, dict):
-            rooms.update(room_key for room_key in room_configs if isinstance(room_key, str))
+        rooms.update(config_data.get("rooms", {}))
         for agent_data in config_data.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)

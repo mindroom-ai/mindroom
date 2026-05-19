@@ -23,6 +23,7 @@ from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     configured_bot_user_ids_for_room,
     entity_identity_registry,
+    is_configured_room,
 )
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
@@ -1412,7 +1413,7 @@ class _MultiAgentOrchestrator:
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
             return
-        if plan.matrix_space_changed:
+        if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
 
@@ -1757,12 +1758,13 @@ class _MultiAgentOrchestrator:
 
         for room_id in joined_rooms:
             configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
-            if not configured_bots:
+            if not configured_bots and not is_configured_room(config, room_id, self.runtime_paths):
                 continue
 
             current_members = await get_room_members(router_bot.client, room_id)
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
-            await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
+            if configured_bots:
+                await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
 
         logger.info("Ensured room invitations for all configured responders and authorized users")
 
