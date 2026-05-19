@@ -4311,6 +4311,70 @@ describe("configStore", () => {
       expect(state.isDirty).toBe(true);
     });
 
+    it("writes room metadata edits to draft config rooms", () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        rooms: [
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["agent1"],
+          },
+        ],
+      });
+
+      useConfigStore.getState().updateRoom("lobby", {
+        display_name: "Project Lobby",
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.rooms).toEqual({
+        lobby: {
+          display_name: "Project Lobby",
+        },
+      });
+      expect(
+        state.rooms.find((room) => room.id === "lobby")?.display_name,
+      ).toBe("Project Lobby");
+      expect(state.dirtyRoots).toContain("rooms");
+    });
+
     it("does not serialize derived rooms for membership-only updates", async () => {
       const mockConfig = {
         agents: {
@@ -4402,6 +4466,92 @@ describe("configStore", () => {
       expect(payload.rooms).toBeUndefined();
       expect(payload.agents.agent1.rooms).toEqual(["lobby"]);
       expect(payload.agents.agent2.rooms).toEqual(["lobby"]);
+    });
+
+    it("does not create managed room metadata for membership-only updates", () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+          agent2: {
+            display_name: "Agent 2",
+            role: "Test agent 2",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+          {
+            id: "agent2",
+            display_name: "Agent 2",
+            role: "Test agent 2",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        rooms: [
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["agent1"],
+          },
+        ],
+      });
+
+      useConfigStore.getState().updateRoom("lobby", {
+        agents: ["agent1", "agent2"],
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.rooms).toBeUndefined();
+      expect(state.dirtyRoots).not.toContain("rooms");
+      expect(state.dirtyRoots).toContain("agents");
     });
 
     it("does not serialize derived rooms for model-only updates", async () => {
@@ -4504,6 +4654,64 @@ describe("configStore", () => {
       const agent1 = state.agents.find((a) => a.id === "agent1");
       expect(agent1?.rooms).toContain("new_room");
       expect(state.isDirty).toBe(true);
+    });
+
+    it("writes newly created managed room metadata to draft config rooms", () => {
+      const mockConfig = {
+        agents: {},
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [],
+        rooms: [],
+      });
+
+      useConfigStore.getState().createRoom({
+        display_name: "Project Room",
+        description: "Planning space",
+        agents: [],
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.rooms).toEqual({
+        project_room: {
+          display_name: "Project Room",
+          description: "Planning space",
+        },
+      });
+      expect(state.rooms).toEqual([
+        {
+          id: "project_room",
+          display_name: "Project Room",
+          description: "Planning space",
+          agents: [],
+          model: undefined,
+        },
+      ]);
+      expect(state.dirtyRoots).toContain("rooms");
     });
 
     it("does not serialize team-derived rooms when creating a managed room", async () => {
@@ -4777,6 +4985,74 @@ describe("configStore", () => {
       expect(agent1?.rooms).not.toContain("lobby");
       expect(state.selectedRoomId).toBe(null);
       expect(state.isDirty).toBe(true);
+    });
+
+    it("deleting a derived room does not dirty managed room metadata", () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["lobby"],
+          },
+        ],
+        rooms: [
+          {
+            id: "lobby",
+            display_name: "Lobby",
+            description: "",
+            agents: ["agent1"],
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteRoom("lobby");
+
+      const state = useConfigStore.getState();
+      expect(state.config?.rooms).toBeUndefined();
+      expect(state.dirtyRoots).not.toContain("rooms");
+      expect(state.dirtyRoots).toEqual(expect.arrayContaining(["agents"]));
+      expect(state.agents[0].rooms).toEqual([]);
     });
 
     it("does not serialize agent-derived rooms when deleting a managed room", async () => {

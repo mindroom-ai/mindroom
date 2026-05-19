@@ -173,6 +173,35 @@ function markDraftDirty<T extends object>(
   };
 }
 
+function deriveRooms(
+  config: Pick<Config, "rooms" | "room_models">,
+  agents: Agent[],
+  teams: Team[],
+): Room[] {
+  const roomIds = new Set<string>(Object.keys(config.rooms ?? {}));
+  agents.forEach((agent) => {
+    agent.rooms.forEach((room) => roomIds.add(room));
+  });
+  teams.forEach((team) => {
+    team.rooms.forEach((room) => roomIds.add(room));
+  });
+
+  return Array.from(roomIds).map((roomId) => {
+    const agentsInRoom = agents
+      .filter((agent) => agent.rooms.includes(roomId))
+      .map((a) => a.id);
+    const roomConfig = config.rooms?.[roomId];
+    const roomModel = config.room_models?.[roomId];
+    return {
+      id: roomId,
+      display_name: roomConfig?.display_name ?? defaultRoomDisplayName(roomId),
+      description: roomConfig?.description ?? "",
+      agents: agentsInRoom,
+      model: roomModel,
+    };
+  });
+}
+
 function deriveConfigCollections(
   config: Config,
 ): Pick<ConfigState, "agents" | "teams" | "cultures" | "rooms"> {
@@ -205,28 +234,7 @@ function deriveConfigCollections(
       }))
     : [];
 
-  const roomIds = new Set<string>(Object.keys(config.rooms ?? {}));
-  agents.forEach((agent) => {
-    agent.rooms.forEach((room) => roomIds.add(room));
-  });
-  teams.forEach((team) => {
-    team.rooms.forEach((room) => roomIds.add(room));
-  });
-
-  const rooms: Room[] = Array.from(roomIds).map((roomId) => {
-    const agentsInRoom = agents
-      .filter((agent) => agent.rooms.includes(roomId))
-      .map((a) => a.id);
-    const roomConfig = config.rooms?.[roomId];
-    const roomModel = config.room_models?.[roomId];
-    return {
-      id: roomId,
-      display_name: roomConfig?.display_name ?? defaultRoomDisplayName(roomId),
-      description: roomConfig?.description ?? "",
-      agents: agentsInRoom,
-      model: roomModel,
-    };
-  });
+  const rooms = deriveRooms(config, agents, teams);
 
   return { agents, teams, cultures, rooms };
 }
@@ -257,85 +265,9 @@ function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
 }
 
 function defaultRoomDisplayName(roomId: string): string {
-  return roomId.charAt(0).toUpperCase() + roomId.slice(1);
-}
-
-function roomConfigFromRoom(room: Room): NonNullable<Config["rooms"]>[string] {
-  return {
-    display_name: room.display_name,
-    description: room.description ?? "",
-  };
-}
-
-function roomConfigWithMetadataEdits(
-  baseConfig: NonNullable<Config["rooms"]>[string],
-  baseRoom: Room | undefined,
-  room: Room,
-): NonNullable<Config["rooms"]>[string] {
-  const nextConfig = { ...baseConfig };
-  if (!baseRoom || room.display_name !== baseRoom.display_name) {
-    nextConfig.display_name = room.display_name;
-  }
-  if (!baseRoom || (room.description ?? "") !== (baseRoom.description ?? "")) {
-    nextConfig.description = room.description ?? "";
-  }
-  return nextConfig;
-}
-
-function responderRoomIds(agents: Agent[], teams: Team[]): Set<string> {
-  const roomIds = new Set<string>();
-  agents.forEach((agent) => {
-    agent.rooms.forEach((roomId) => roomIds.add(roomId));
-  });
-  teams.forEach((team) => {
-    team.rooms.forEach((roomId) => roomIds.add(roomId));
-  });
-  return roomIds;
-}
-
-function roomHasAuthoredMetadata(room: Room): boolean {
-  return (
-    room.display_name !== defaultRoomDisplayName(room.id) ||
-    (room.description ?? "") !== ""
-  );
-}
-
-function authoredRoomsObject(
-  baseRooms: Config["rooms"],
-  baseUiRooms: Room[],
-  rooms: Room[],
-  agents: Agent[],
-  teams: Team[],
-): NonNullable<Config["rooms"]> {
-  const currentRoomsById = new Map(rooms.map((room) => [room.id, room]));
-  const baseRoomsById = new Map(baseUiRooms.map((room) => [room.id, room]));
-  const currentResponderRoomIds = responderRoomIds(agents, teams);
-  const nextRooms: NonNullable<Config["rooms"]> = {};
-
-  Object.entries(baseRooms ?? {}).forEach(([roomId, baseConfig]) => {
-    const room = currentRoomsById.get(roomId);
-    if (room) {
-      nextRooms[roomId] = roomConfigWithMetadataEdits(
-        baseConfig,
-        baseRoomsById.get(roomId),
-        room,
-      );
-    }
-  });
-
-  rooms.forEach((room) => {
-    if (baseRooms?.[room.id]) {
-      return;
-    }
-    if (
-      !currentResponderRoomIds.has(room.id) ||
-      roomHasAuthoredMetadata(room)
-    ) {
-      nextRooms[room.id] = roomConfigFromRoom(room);
-    }
-  });
-
-  return nextRooms;
+  return roomId
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function sameStringSet(left: string[], right: string[]): boolean {
@@ -357,6 +289,47 @@ function roomUpdateIsNoop(room: Room, updates: Partial<Room>): boolean {
     }
     return current === value;
   });
+}
+
+function hasUpdateKey<T extends object>(updates: T, key: keyof T): boolean {
+  return Object.prototype.hasOwnProperty.call(updates, key);
+}
+
+function roomsFromDraft(
+  config: Config | null,
+  fallbackRooms: Room[],
+  agents: Agent[],
+  teams: Team[],
+): Room[] {
+  return config ? deriveRooms(config, agents, teams) : fallbackRooms;
+}
+
+function updateDraftRoomMetadata(
+  config: Config,
+  roomId: string,
+  updates: Pick<Partial<Room>, "display_name" | "description">,
+): Config {
+  const nextRooms = { ...(config.rooms ?? {}) };
+  const nextRoomConfig = { ...(nextRooms[roomId] ?? {}) };
+  if (hasUpdateKey(updates, "display_name")) {
+    nextRoomConfig.display_name = updates.display_name;
+  }
+  if (hasUpdateKey(updates, "description")) {
+    nextRoomConfig.description = updates.description ?? "";
+  }
+  nextRooms[roomId] = nextRoomConfig;
+  return {
+    ...config,
+    rooms: nextRooms,
+  };
+}
+
+function deleteDraftRoomMetadata(config: Config, roomId: string): Config {
+  const { [roomId]: _removedRoom, ...nextRooms } = config.rooms ?? {};
+  return {
+    ...config,
+    rooms: nextRooms,
+  };
 }
 
 function normalizeAgentDelegates(delegateTo: string[] | undefined): string {
@@ -934,7 +907,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       agents,
       teams,
       cultures,
-      rooms,
       committedGeneration,
       agentPoliciesStale,
       loadedConfig,
@@ -1030,19 +1002,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Culture, "id">>,
       );
 
-      const roomModels: Record<string, string> = {};
-      rooms.forEach((room) => {
-        if (room.model) {
-          roomModels[room.id] = room.model;
-        }
-      });
-      const roomsObject = authoredRoomsObject(
-        baseConfig.rooms,
-        baseCollections.rooms,
-        rooms,
-        agents,
-        teams,
-      );
+      const roomModels = config.room_models ?? {};
+      const roomsObject = config.rooms ?? {};
 
       const updatedConfig: Config = {
         ...baseConfig,
@@ -1399,6 +1360,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       return {
         agents: nextAgents,
+        rooms: roomsFromDraft(
+          state.config,
+          state.rooms,
+          nextAgents,
+          state.teams,
+        ),
         ...markDraftDirty(state, {}, touchedPaths),
       };
     });
@@ -1448,6 +1415,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       return {
         agents: nextAgents,
+        rooms: roomsFromDraft(
+          state.config,
+          state.rooms,
+          nextAgents,
+          state.teams,
+        ),
         ...markDraftDirty(state, {}, touchedPaths),
         privateWorkerScopeBackups: nextBackups,
       };
@@ -1473,6 +1446,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     };
     set((state) => ({
       agents: [...state.agents, newAgent],
+      rooms: roomsFromDraft(
+        state.config,
+        state.rooms,
+        [...state.agents, newAgent],
+        state.teams,
+      ),
       selectedAgentId: id,
       ...markDraftDirty(state, {}, [["agents"]]),
     }));
@@ -1501,15 +1480,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ([id]) => id !== agentId,
       ),
     );
+    const nextTeams = removeMissingTeamMembers(state.teams, nextAgents);
     const { [agentId]: _removedBackup, ...remainingBackups } =
       state.privateWorkerScopeBackups;
     set({
       agents: nextAgents,
-      teams: removeMissingTeamMembers(state.teams, nextAgents),
+      teams: nextTeams,
       cultures: state.cultures.map((culture) => ({
         ...culture,
         agents: culture.agents.filter((id) => id !== agentId),
       })),
+      rooms: roomsFromDraft(state.config, state.rooms, nextAgents, nextTeams),
       agentPoliciesByAgent: nextAgentPoliciesByAgent,
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId:
@@ -1538,9 +1519,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const touchedPaths = Object.keys(normalizedUpdates).map(
         (key) => ["teams", teamId, key] as ConfigDiagnosticPath,
       );
+      const nextTeams = state.teams.map((team) =>
+        team.id === teamId ? { ...team, ...normalizedUpdates } : team,
+      );
       return {
-        teams: state.teams.map((team) =>
-          team.id === teamId ? { ...team, ...normalizedUpdates } : team,
+        teams: nextTeams,
+        rooms: roomsFromDraft(
+          state.config,
+          state.rooms,
+          state.agents,
+          nextTeams,
         ),
         ...markDraftDirty(state, {}, touchedPaths),
       };
@@ -1556,6 +1544,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     };
     set((state) => ({
       teams: [...state.teams, newTeam],
+      rooms: roomsFromDraft(state.config, state.rooms, state.agents, [
+        ...state.teams,
+        newTeam,
+      ]),
       selectedTeamId: id,
       ...markDraftDirty(state, {}, [["teams"]]),
     }));
@@ -1563,12 +1555,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Delete a team
   deleteTeam: (teamId) => {
-    set((state) => ({
-      teams: state.teams.filter((team) => team.id !== teamId),
-      selectedTeamId:
-        state.selectedTeamId === teamId ? null : state.selectedTeamId,
-      ...markDraftDirty(state, {}, [["teams"]]),
-    }));
+    set((state) => {
+      const nextTeams = state.teams.filter((team) => team.id !== teamId);
+      return {
+        teams: nextTeams,
+        rooms: roomsFromDraft(
+          state.config,
+          state.rooms,
+          state.agents,
+          nextTeams,
+        ),
+        selectedTeamId:
+          state.selectedTeamId === teamId ? null : state.selectedTeamId,
+        ...markDraftDirty(state, {}, [["teams"]]),
+      };
+    });
   },
 
   // Select a culture for editing
@@ -1677,10 +1678,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       );
 
       let updatedConfig = state.config;
-      const modelUpdateProvided = Object.prototype.hasOwnProperty.call(
-        updates,
-        "model",
-      );
+      const modelUpdateProvided = hasUpdateKey(updates, "model");
+      const metadataUpdateProvided =
+        hasUpdateKey(updates, "display_name") ||
+        hasUpdateKey(updates, "description");
 
       // If model changed, update room_models in config
       if (modelUpdateProvided && state.config) {
@@ -1702,6 +1703,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         };
       }
 
+      if (metadataUpdateProvided && updatedConfig) {
+        updatedConfig = updateDraftRoomMetadata(updatedConfig, roomId, updates);
+      }
+
       const previousConfig = state.config;
       if (previousConfig && updatedConfig && updatedConfig !== previousConfig) {
         preserveRawToolEntries(previousConfig, updatedConfig);
@@ -1710,7 +1715,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const roomMetadataTouchedPaths = (
         ["display_name", "description"] as const
       )
-        .filter((key) => Object.prototype.hasOwnProperty.call(updates, key))
+        .filter((key) => hasUpdateKey(updates, key))
         .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
       const roomModelTouchedPaths = modelUpdateProvided
         ? ([["room_models", roomId]] as ConfigDiagnosticPath[])
@@ -1738,8 +1743,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
         return {
           config: updatedConfig,
-          rooms: updatedRooms,
           agents: updatedAgents,
+          rooms: roomsFromDraft(
+            updatedConfig,
+            updatedRooms,
+            updatedAgents,
+            state.teams,
+          ),
           ...markDraftDirty(state, {}, [
             ["agents"],
             ...roomMetadataTouchedPaths,
@@ -1750,7 +1760,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       return {
         config: updatedConfig,
-        rooms: updatedRooms,
+        rooms: roomsFromDraft(
+          updatedConfig,
+          updatedRooms,
+          state.agents,
+          state.teams,
+        ),
         ...markDraftDirty(state, {}, [
           ...roomMetadataTouchedPaths,
           ...roomModelTouchedPaths,
@@ -1775,12 +1790,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         }
         return agent;
       });
+      const updatedConfig = state.config
+        ? updateDraftRoomMetadata(state.config, id, roomData)
+        : state.config;
+      const touchedPaths: ConfigDiagnosticPath[] = [["rooms"]];
+      if (roomData.agents.length > 0) {
+        touchedPaths.push(["agents"]);
+      }
 
       return {
-        rooms: [...state.rooms, newRoom],
+        config: updatedConfig,
+        rooms: roomsFromDraft(
+          updatedConfig,
+          [...state.rooms, newRoom],
+          updatedAgents,
+          state.teams,
+        ),
         agents: updatedAgents,
         selectedRoomId: id,
-        ...markDraftDirty(state, {}, [["rooms"], ["agents"]]),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
   },
@@ -1802,28 +1830,36 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       // Remove from room_models if it exists
       let updatedConfig = state.config;
-      if (state.config?.room_models?.[roomId]) {
-        const { [roomId]: _, ...remainingModels } = state.config.room_models;
+      const touchedPaths: ConfigDiagnosticPath[] = [["agents"], ["teams"]];
+      if (state.config?.rooms?.[roomId]) {
+        updatedConfig = deleteDraftRoomMetadata(state.config, roomId);
+        touchedPaths.push(["rooms"]);
+      }
+      if (updatedConfig?.room_models?.[roomId]) {
+        const { [roomId]: _, ...remainingModels } = updatedConfig.room_models;
         updatedConfig = {
-          ...state.config,
+          ...updatedConfig,
           room_models: remainingModels,
         };
+        touchedPaths.push(["room_models", roomId]);
+      }
+      if (state.config && updatedConfig && updatedConfig !== state.config) {
         preserveRawToolEntries(state.config, updatedConfig);
       }
 
       return {
-        rooms: state.rooms.filter((room) => room.id !== roomId),
         agents: updatedAgents,
         teams: updatedTeams,
         config: updatedConfig,
+        rooms: roomsFromDraft(
+          updatedConfig,
+          state.rooms.filter((room) => room.id !== roomId),
+          updatedAgents,
+          updatedTeams,
+        ),
         selectedRoomId:
           state.selectedRoomId === roomId ? null : state.selectedRoomId,
-        ...markDraftDirty(state, {}, [
-          ["rooms"],
-          ["agents"],
-          ["teams"],
-          ["room_models", roomId],
-        ]),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
   },
@@ -1846,8 +1882,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
 
       return {
-        rooms: updatedRooms,
         agents: updatedAgents,
+        rooms: roomsFromDraft(
+          state.config,
+          updatedRooms,
+          updatedAgents,
+          state.teams,
+        ),
         ...markDraftDirty(state, {}, [["agents"]]),
       };
     });
@@ -1874,8 +1915,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
 
       return {
-        rooms: updatedRooms,
         agents: updatedAgents,
+        rooms: roomsFromDraft(
+          state.config,
+          updatedRooms,
+          updatedAgents,
+          state.teams,
+        ),
         ...markDraftDirty(state, {}, [["agents"]]),
       };
     });
@@ -1892,6 +1938,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
+        rooms: deriveRooms(nextConfig, state.agents, state.teams),
         ...markDraftDirty(state, {}, [["room_models"]]),
       };
     });
