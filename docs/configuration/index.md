@@ -459,6 +459,10 @@ matrix_delivery:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
+When `matrix_space.enabled` is `true`, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
+If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
+Room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+
 `matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
 Leave it `false` to preserve Matrix E2EE device-trust checks.
 Setting it to `true` can improve bot delivery when rooms contain unverified devices, but Matrix may encrypt messages for devices the bot has not verified.

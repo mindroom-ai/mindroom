@@ -342,6 +342,10 @@ matrix_space:
   name: "MindRoom"  # Display name for the root Space
 ```
 
+Concrete Matrix users in `authorization.global_users` receive root Space admin power.
+The configured `mindroom_user` also receives root Space admin power when the internal account exists.
+Room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
+
 ## Matrix Delivery Configuration
 
 Configure outgoing Matrix delivery policy:

@@ -332,6 +332,56 @@ async def test_ensure_room_admin_power_levels_is_idempotent_when_admins_already_
 
 
 @pytest.mark.asyncio
+async def test_ensure_room_admin_power_levels_returns_false_when_power_levels_read_fails() -> None:
+    """Power-level read failures should fail closed and avoid overwriting state."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "forbidden",
+        status_code="M_FORBIDDEN",
+        room_id="!space:example.com",
+    )
+
+    result = await matrix_client.ensure_room_admin_power_levels(
+        client,
+        "!space:example.com",
+        {"@owner:example.com"},
+    )
+
+    assert result is False
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_admin_power_levels_returns_false_when_power_level_write_fails() -> None:
+    """Power-level write failures should report reconciliation failure."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"users": {}},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!space:example.com",
+    )
+    client.room_put_state.return_value = nio.RoomPutStateError(
+        "forbidden",
+        status_code="M_FORBIDDEN",
+        room_id="!space:example.com",
+    )
+
+    result = await matrix_client.ensure_room_admin_power_levels(
+        client,
+        "!space:example.com",
+        {"@owner:example.com"},
+    )
+
+    assert result is False
+    client.room_put_state.assert_awaited_once_with(
+        room_id="!space:example.com",
+        event_type="m.room.power_levels",
+        content={"users": {"@owner:example.com": 100}},
+    )
+
+
+@pytest.mark.asyncio
 async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tmp_path) -> None:  # noqa: ANN001
     """Enabled root Space support should create the Space, persist it, and link rooms."""
     client = AsyncMock()
@@ -511,6 +561,41 @@ async def test_ensure_root_space_returns_none_when_name_write_fails(tmp_path) ->
         )
 
     assert space_id is None
+    mock_add.assert_not_awaited()
+    mock_avatar.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_root_space_returns_none_when_admin_power_reconciliation_fails(tmp_path) -> None:  # noqa: ANN001
+    """If root Space admin promotion fails, reconciliation should skip child linking."""
+    client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
+    client.rooms = {"!space:localhost": MagicMock()}
+    state = MatrixState(space_room_id="!space:localhost")
+    config = _config_with_runtime_paths(
+        tmp_path,
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True},
+    )
+
+    with (
+        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
+        patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
+        patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
+        patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=False)) as mock_admins,
+        patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
+    ):
+        space_id = await matrix_rooms.ensure_root_space(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": "!lobby:localhost"},
+            admin_user_ids={"@owner:localhost"},
+        )
+
+    assert space_id is None
+    mock_admins.assert_awaited_once_with(client, "!space:localhost", {"@owner:localhost"})
     mock_add.assert_not_awaited()
     mock_avatar.assert_not_awaited()
 
