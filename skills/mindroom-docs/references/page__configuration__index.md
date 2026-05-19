@@ -429,8 +429,16 @@ authorization:
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
+# Managed room metadata (optional)
+# Keys are managed room aliases.
+# Rooms listed here are created even before agents or teams are assigned.
+rooms:
+  lobby:
+    display_name: Lobby
+    description: Main assistant room
+
 # Room-specific model overrides (optional)
-# Keys are room aliases, values are model names from the models section
+# Keys are room aliases, values are model names from the models section.
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 

@@ -242,6 +242,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             # For existing rooms, ensure they have a topic set
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
+            await ensure_room_name(client, room_id, room_name)
             await ensure_room_has_topic(client, room_id, room_key, room_name, config, runtime_paths)
             await ensure_thread_tags_power_level(client, room_id)
 

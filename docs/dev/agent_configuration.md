@@ -29,8 +29,9 @@ The configuration file has these top-level sections:
 14. **mindroom_user** - Internal MindRoom user account settings
 15. **timezone** - Timezone for scheduled tasks (default: `UTC`)
 16. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-17. **room_models** - Per-room model overrides
-18. **plugins** - Plugin paths for tool/skill extensions
+17. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
+18. **room_models** - Per-room model overrides
+19. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 

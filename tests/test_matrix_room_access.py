@@ -175,6 +175,8 @@ async def test_existing_room_reconciliation_respects_flag(
     monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    ensure_room_name = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", ensure_room_name)
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     ensure_thread_tags_power_level = AsyncMock(return_value=True)
     monkeypatch.setattr(
@@ -195,6 +197,11 @@ async def test_existing_room_reconciliation_respects_flag(
     )
 
     assert room_id == "!lobby:example.com"
+    ensure_room_name.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        "Lobby",
+    )
     ensure_thread_tags_power_level.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
