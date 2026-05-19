@@ -57,6 +57,10 @@ import * as LucideIcons from "lucide-react";
 `;
 
 function iconImport(library, icons) {
+  if (icons.length === 1) {
+    return `import { ${icons[0]} } from "${library}";\n`;
+  }
+
   return `import {\n  ${icons.join(",\n  ")},\n} from "${library}";\n`;
 }
 
