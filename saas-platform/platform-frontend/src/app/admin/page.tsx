@@ -7,15 +7,9 @@ import { apiCall } from '@/lib/api'
 import { logger } from '@/lib/logger'
 
 interface AdminStats {
-  // Keep legacy shape for compatibility; we compute values defensively
-  accounts_count?: number
-  subscriptions_count?: number
-  instances_count?: number
-  recent_activity?: {
-    type: string
-    description: string
-    timestamp: string
-  }[]
+  accounts: number
+  active_subscriptions: number
+  running_instances: number
 }
 
 interface HealthStatus {
@@ -24,11 +18,18 @@ interface HealthStatus {
   stripe: boolean
 }
 
+interface RecentActivity {
+  created_at: string
+  action: string
+  account_id: string | null
+}
+
 interface AdminMetrics {
-  totalAccounts: number
-  activeSubscriptions: number
-  runningInstances: number
-  mrr: number
+  total_accounts: number
+  active_subscriptions: number
+  instances_by_status: Record<string, number>
+  subscription_revenue: number
+  recent_instances: RecentActivity[]
 }
 
 export default function AdminDashboard() {
@@ -48,23 +49,18 @@ export default function AdminDashboard() {
         ])
 
         if (statsRes.ok) {
-          const data = await statsRes.json()
+          const data = await statsRes.json() as AdminStats
           setStats(data)
         }
         if (healthRes.ok) {
-          const data = await healthRes.json()
+          const data = await healthRes.json() as HealthStatus
           setHealth(data)
         } else {
           setHealth({ status: 'degraded', supabase: false, stripe: false })
         }
         if (metricsRes.ok) {
-          const data = await metricsRes.json()
-          setMetrics({
-            totalAccounts: data.totalAccounts ?? 0,
-            activeSubscriptions: data.activeSubscriptions ?? 0,
-            runningInstances: data.runningInstances ?? 0,
-            mrr: data.mrr ?? 0,
-          })
+          const data = await metricsRes.json() as AdminMetrics
+          setMetrics(data)
         }
       } catch (error) {
         logger.error('Error fetching admin data:', error)
@@ -84,28 +80,24 @@ export default function AdminDashboard() {
     )
   }
 
-  const accountsVal = (stats as any)?.accounts ?? stats?.accounts_count ?? 0
-  const subsVal = (stats as any)?.active_subscriptions ?? stats?.subscriptions_count ?? 0
-  const runningVal = (stats as any)?.running_instances ?? stats?.instances_count ?? 0
-
   const statCards = [
     {
       title: 'Total Accounts',
-      value: accountsVal,
+      value: stats?.accounts ?? 0,
       icon: Users,
       change: '+12%',
       changeType: 'positive' as const
     },
     {
       title: 'Active Subscriptions',
-      value: subsVal,
+      value: stats?.active_subscriptions ?? 0,
       icon: CreditCard,
       change: '+8%',
       changeType: 'positive' as const
     },
     {
       title: 'Running Instances',
-      value: runningVal,
+      value: stats?.running_instances ?? 0,
       icon: Server,
       change: '+23%',
       changeType: 'positive' as const
@@ -134,7 +126,9 @@ export default function AdminDashboard() {
               <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">MRR (est.)</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">${metrics.mrr.toLocaleString()}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+                ${metrics.subscription_revenue.toLocaleString()}
+              </div>
             </CardContent>
           </Card>
           <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -142,7 +136,9 @@ export default function AdminDashboard() {
               <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">Accounts</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{metrics.totalAccounts}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+                {metrics.total_accounts}
+              </div>
             </CardContent>
           </Card>
           <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -150,7 +146,9 @@ export default function AdminDashboard() {
               <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">Active Subs</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{metrics.activeSubscriptions}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+                {metrics.active_subscriptions}
+              </div>
             </CardContent>
           </Card>
           <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -158,7 +156,9 @@ export default function AdminDashboard() {
               <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">Running Inst.</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{metrics.runningInstances}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+                {metrics.instances_by_status.running ?? 0}
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -194,34 +194,22 @@ export default function AdminDashboard() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            {stats?.recent_activity?.map((activity, index) => (
-              <div key={index} className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">{activity.type}</p>
-                  <p className="text-xs text-gray-500">{activity.description} - {activity.timestamp}</p>
-                </div>
-              </div>
-            )) || (
-              <>
-                <div className="flex items-center justify-between">
+            {metrics?.recent_instances.length ? (
+              metrics.recent_instances.map((activity) => (
+                <div
+                  key={`${activity.created_at}-${activity.account_id ?? 'system'}-${activity.action}`}
+                  className="flex items-center justify-between"
+                >
                   <div>
-                    <p className="text-sm font-medium">New account registered</p>
-                    <p className="text-xs text-gray-500">user@example.com - 2 minutes ago</p>
+                    <p className="text-sm font-medium">{activity.action}</p>
+                    <p className="text-xs text-gray-500">
+                      {activity.account_id ?? 'System'} - {activity.created_at}
+                    </p>
                   </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium">Instance deployed</p>
-                    <p className="text-xs text-gray-500">customer-123 - 15 minutes ago</p>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium">Subscription upgraded</p>
-                    <p className="text-xs text-gray-500">Pro plan - 1 hour ago</p>
-                  </div>
-                </div>
-              </>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500 dark:text-gray-400">No recent activity</p>
             )}
           </div>
         </CardContent>

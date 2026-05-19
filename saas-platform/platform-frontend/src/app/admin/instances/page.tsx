@@ -22,13 +22,9 @@ interface Instance {
   }
 }
 
-function getActionInstanceId(instance: Instance): string | null {
-  const rawId = instance.instance_id ?? instance.subdomain
-  return rawId === null || rawId === undefined || rawId === '' ? null : String(rawId)
-}
-
 function renderInstanceActions(instance: Instance) {
-  const actionInstanceId = getActionInstanceId(instance)
+  const rawId = instance.instance_id ?? instance.subdomain
+  const actionInstanceId = rawId === null || rawId === undefined || rawId === '' ? null : String(rawId)
 
   if (!actionInstanceId) {
     return <span className="text-sm text-gray-500 dark:text-gray-400">No ID</span>

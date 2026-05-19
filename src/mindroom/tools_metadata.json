@@ -5381,7 +5381,7 @@
         "summarize_table"
       ],
       "helper_text": null,
-      "icon": "FaAws",
+      "icon": "SiAmazonredshift",
       "icon_color": "text-red-600",
       "name": "redshift",
       "setup_type": "special",

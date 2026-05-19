@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
-    icon="FaAws",
+    icon="SiAmazonredshift",
     icon_color="text-red-600",
     config_fields=[
         ConfigField(

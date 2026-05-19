@@ -123,6 +123,7 @@ const iconMap: Record<string, any> = {
   SiOpenai,
   SiPostgresql,
   SiPython,
+  SiAmazonredshift: LucideIcons.Database,
   SiTrello,
   SiZendesk,
   SiGmail,
@@ -142,7 +143,7 @@ const iconMap: Record<string, any> = {
   SiReddit,
   SiX,
   SiZoom,
-  GiGift: LucideIcons.Gift, // Fallback icon
+  GiGift: LucideIcons.Gift,
 };
 
 /**

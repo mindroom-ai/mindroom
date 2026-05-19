@@ -27,6 +27,11 @@ const iconsByLibrary = {
 
 // Icons we know exist in fa6 instead of fa
 const fa6Icons = ["FaConfluence", "FaLinear"];
+const lucideFallbacks = new Map([
+  ["FaLinear", "ListTodo"],
+  ["GiGift", "Gift"],
+  ["SiAmazonredshift", "Database"],
+]);
 
 for (const icon of iconNames) {
   if (icon.startsWith('Fa')) {
@@ -64,18 +69,19 @@ if (iconsByLibrary.fa.length > 0) {
   imports += iconImport("react-icons/fa", iconsByLibrary.fa);
 }
 if (iconsByLibrary.fa6.length > 0) {
-  // Note: FaLinear doesn't exist, we'll handle it in the mapping
-  const existingFa6 = iconsByLibrary.fa6.filter(icon => icon !== "FaLinear");
+  const existingFa6 = iconsByLibrary.fa6.filter(icon => !lucideFallbacks.has(icon));
   if (existingFa6.length > 0) {
     imports += iconImport("react-icons/fa6", existingFa6);
   }
 }
 if (iconsByLibrary.si.length > 0) {
-  imports += iconImport("react-icons/si", iconsByLibrary.si);
+  const existingSi = iconsByLibrary.si.filter(icon => !lucideFallbacks.has(icon));
+  if (existingSi.length > 0) {
+    imports += iconImport("react-icons/si", existingSi);
+  }
 }
 if (iconsByLibrary.gi.length > 0) {
-  // GiGift doesn't exist in react-icons, skip it
-  const existingGi = iconsByLibrary.gi.filter(icon => icon !== "GiGift");
+  const existingGi = iconsByLibrary.gi.filter(icon => !lucideFallbacks.has(icon));
   if (existingGi.length > 0) {
     imports += iconImport("react-icons/gi", existingGi);
   }
@@ -95,20 +101,25 @@ for (const icon of iconsByLibrary.fa) {
   imports += `  ${icon},\n`;
 }
 for (const icon of iconsByLibrary.fa6) {
-  if (icon === "FaLinear") {
-    // Use a fallback for FaLinear
-    imports += `  FaLinear: LucideIcons.ListTodo, // Fallback icon\n`;
+  const fallback = lucideFallbacks.get(icon);
+  if (fallback) {
+    imports += `  ${icon}: LucideIcons.${fallback},\n`;
   } else {
     imports += `  ${icon},\n`;
   }
 }
 for (const icon of iconsByLibrary.si) {
-  imports += `  ${icon},\n`;
+  const fallback = lucideFallbacks.get(icon);
+  if (fallback) {
+    imports += `  ${icon}: LucideIcons.${fallback},\n`;
+  } else {
+    imports += `  ${icon},\n`;
+  }
 }
 for (const icon of iconsByLibrary.gi) {
-  if (icon === "GiGift") {
-    // Use a fallback for GiGift
-    imports += `  GiGift: LucideIcons.Gift, // Fallback icon\n`;
+  const fallback = lucideFallbacks.get(icon);
+  if (fallback) {
+    imports += `  ${icon}: LucideIcons.${fallback},\n`;
   } else {
     imports += `  ${icon},\n`;
   }
