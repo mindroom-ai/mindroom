@@ -24,7 +24,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-5.5 | `gpt-5.5` |
 | OpenAI Codex subscription | Frontier via Codex CLI | GPT-5.5 | `gpt-5.5` |
-| Google (Gemini API) | Max intelligence | Gemini 3 Pro Preview | `gemini-3-pro-preview` |
+| Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
 | Google (Gemini API) | Standard text / coding | Gemini 3.5 Flash | `gemini-3.5-flash` |
 | Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
@@ -35,7 +35,7 @@ For `vertexai_claude`, use the current Vertex AI request name from the provider 
 Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-4-6` and `claude-opus-4-7`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Gemini API text and coding work, prefer `gemini-3.5-flash` as the standard stable model unless you intentionally need the cheaper Flash-Lite tier.
-Use `gemini-3-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
+Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
 Current Vertex AI image docs prominently document `gemini-3-pro-image-preview` and `gemini-2.5-flash-image`, and the right default depends on the specific Vertex surface you are editing.
