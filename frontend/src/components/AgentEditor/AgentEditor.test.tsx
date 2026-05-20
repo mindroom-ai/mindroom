@@ -374,11 +374,14 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
+    const inlineSummary = screen.getByText(
+      "Run shell commands in the agent workspace with timeout handling.",
+    );
+    expect(inlineSummary).toBeInTheDocument();
+    expect(inlineSummary).toHaveClass("line-clamp-2");
     expect(
-      screen.getByText(
-        "Run shell commands in the agent workspace with timeout handling.",
-      ),
-    ).toBeInTheDocument();
+      screen.getByRole("checkbox", { name: "Shell Commands" }),
+    ).not.toHaveAttribute("aria-label");
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -398,9 +401,9 @@ describe("AgentEditor", () => {
       within(details).getByRole("link", { name: "Open documentation" }),
     ).toHaveAttribute("href", "https://docs.example.com/shell");
     expect(within(details).getByText("Setup")).toBeInTheDocument();
-    expect(within(details).getByText("none")).toBeInTheDocument();
+    expect(within(details).getByText("None")).toBeInTheDocument();
     expect(within(details).getByText("Default Runtime")).toBeInTheDocument();
-    expect(within(details).getByText("worker")).toBeInTheDocument();
+    expect(within(details).getByText("Worker")).toBeInTheDocument();
     expect(within(details).getByText("run_command")).toBeInTheDocument();
     expect(within(details).getByText("+1 more")).toBeInTheDocument();
   });
@@ -414,6 +417,7 @@ describe("AgentEditor", () => {
           description: "Read and write workspace files.",
           setup_type: "none",
           status: "available",
+          docs_url: "javascript:alert(1)",
         },
       ],
       loading: false,
@@ -439,6 +443,9 @@ describe("AgentEditor", () => {
       within(details).queryByText("No documentation"),
     ).not.toBeInTheDocument();
     expect(within(details).queryByText("No functions")).not.toBeInTheDocument();
+    expect(
+      within(details).queryByRole("link", { name: "Open documentation" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows customized indicators and opens the inline tool settings panel for checked tools", () => {
@@ -481,6 +488,9 @@ describe("AgentEditor", () => {
     render(<AgentEditor />);
 
     expect(screen.getByText("Customized")).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "Shell Commands" }),
+    ).toHaveAttribute("aria-label", "Shell Commands");
     fireEvent.click(screen.getByRole("button", { name: "Shell Commands" }));
 
     expect(

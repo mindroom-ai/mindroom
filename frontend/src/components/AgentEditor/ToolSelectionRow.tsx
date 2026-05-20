@@ -44,7 +44,9 @@ export function ToolSelectionRow({
           <Checkbox
             id={checkboxId}
             checked={isChecked}
-            aria-label={tool.display_name}
+            aria-label={
+              isChecked && showSettings ? tool.display_name : undefined
+            }
             onCheckedChange={(checked) => onCheckedChange(checked === true)}
             className="mt-0.5 h-5 w-5 flex-shrink-0 sm:h-4 sm:w-4"
           />
@@ -76,7 +78,7 @@ export function ToolSelectionRow({
               )}
             </div>
             {tool.description && (
-              <p className="mt-1 truncate text-xs text-muted-foreground">
+              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                 {tool.description}
               </p>
             )}

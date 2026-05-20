@@ -9,13 +9,18 @@ import {
 import type { ToolInfo } from "@/hooks/useTools";
 
 const MAX_VISIBLE_FUNCTIONS = 6;
+const SAFE_DOCS_URL_PATTERN = /^https?:\/\//i;
 
 interface ToolInfoPopoverProps {
   tool: ToolInfo;
 }
 
 function formatMetadataValue(value: string): string {
-  return value.replace(/_/g, " ");
+  return value
+    .replace(/_/g, " ")
+    .split(" ")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 function MetadataRow({
@@ -39,6 +44,10 @@ function MetadataRow({
 
 export function ToolInfoPopover({ tool }: ToolInfoPopoverProps) {
   const detailsLabel = `${tool.display_name} tool details`;
+  const docsUrl =
+    tool.docs_url != null && SAFE_DOCS_URL_PATTERN.test(tool.docs_url)
+      ? tool.docs_url
+      : null;
   const functionNames = tool.function_names ?? [];
   const visibleFunctionNames = functionNames.slice(0, MAX_VISIBLE_FUNCTIONS);
   const hiddenFunctionCount =
@@ -130,15 +139,15 @@ export function ToolInfoPopover({ tool }: ToolInfoPopoverProps) {
           </div>
         )}
 
-        {tool.docs_url && (
+        {docsUrl && (
           <a
-            href={tool.docs_url}
+            href={docsUrl}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
           >
             Open documentation
-            <ExternalLink className="h-3 w-3" />
+            <ExternalLink className="h-3 w-3" aria-hidden="true" />
           </a>
         )}
       </PopoverContent>
