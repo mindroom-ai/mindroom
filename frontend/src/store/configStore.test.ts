@@ -122,6 +122,50 @@ describe("configStore", () => {
       expect(state.syncStatus).toBe("synced");
     });
 
+    it("uses the room id fallback for blank authored room display names", async () => {
+      const mockConfig = {
+        agents: {},
+        rooms: {
+          project_room: {
+            display_name: "   ",
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: {},
+        }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.rooms).toEqual([
+        {
+          id: "project_room",
+          display_name: "Project Room",
+          description: "",
+          agents: [],
+          model: undefined,
+        },
+      ]);
+      expect(state.config?.rooms?.project_room).not.toHaveProperty(
+        "display_name",
+      );
+    });
+
     it("normalizes mixed tool entries when loading configuration", async () => {
       const mockConfig = {
         agents: {
@@ -4373,6 +4417,98 @@ describe("configStore", () => {
         state.rooms.find((room) => room.id === "lobby")?.display_name,
       ).toBe("Project Lobby");
       expect(state.dirtyRoots).toContain("rooms");
+    });
+
+    it("normalizes blank room display-name edits to omitted metadata", async () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["project_room"],
+          },
+        },
+        rooms: {
+          project_room: {
+            display_name: "Project Alpha",
+            description: "Planning space",
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["project_room"],
+          },
+        ],
+        rooms: [
+          {
+            id: "project_room",
+            display_name: "Project Alpha",
+            description: "Planning space",
+            agents: ["agent1"],
+          },
+        ],
+      });
+
+      useConfigStore.getState().updateRoom("project_room", {
+        display_name: "   ",
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.rooms?.project_room).toEqual({
+        description: "Planning space",
+      });
+      expect(
+        state.rooms.find((room) => room.id === "project_room")?.display_name,
+      ).toBe("Project Room");
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.rooms).toEqual({
+        project_room: {
+          description: "Planning space",
+        },
+      });
     });
 
     it("does not serialize derived rooms for membership-only updates", async () => {

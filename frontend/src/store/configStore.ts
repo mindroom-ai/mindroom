@@ -5,6 +5,7 @@ import {
   AgentPoliciesByAgent,
   Team,
   Room,
+  RoomConfig,
   ModelConfig,
   KnowledgeBaseConfig,
   Culture,
@@ -194,7 +195,9 @@ function deriveRooms(
     const roomModel = config.room_models?.[roomId];
     return {
       id: roomId,
-      display_name: roomConfig?.display_name ?? defaultRoomDisplayName(roomId),
+      display_name:
+        normalizedRoomDisplayName(roomConfig?.display_name) ??
+        defaultRoomDisplayName(roomId),
       description: roomConfig?.description ?? "",
       agents: agentsInRoom,
       model: roomModel,
@@ -270,6 +273,33 @@ function defaultRoomDisplayName(roomId: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function normalizedRoomDisplayName(
+  displayName: string | undefined,
+): string | undefined {
+  const trimmed = displayName?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizedRoomConfig(roomConfig: RoomConfig): RoomConfig {
+  const { display_name: _displayName, ...remainingConfig } = roomConfig;
+  const displayName = normalizedRoomDisplayName(roomConfig.display_name);
+  return displayName
+    ? { ...remainingConfig, display_name: displayName }
+    : remainingConfig;
+}
+
+function normalizedRoomConfigs(rooms: Config["rooms"]): Config["rooms"] {
+  if (!rooms) {
+    return rooms;
+  }
+  return Object.fromEntries(
+    Object.entries(rooms).map(([roomId, roomConfig]) => [
+      roomId,
+      normalizedRoomConfig(roomConfig),
+    ]),
+  );
+}
+
 function sameStringSet(left: string[], right: string[]): boolean {
   if (left.length !== right.length) {
     return false;
@@ -312,7 +342,12 @@ function updateDraftRoomMetadata(
   const nextRooms = { ...(config.rooms ?? {}) };
   const nextRoomConfig = { ...(nextRooms[roomId] ?? {}) };
   if (hasUpdateKey(updates, "display_name")) {
-    nextRoomConfig.display_name = updates.display_name;
+    const displayName = normalizedRoomDisplayName(updates.display_name);
+    if (displayName) {
+      nextRoomConfig.display_name = displayName;
+    } else {
+      delete nextRoomConfig.display_name;
+    }
   }
   if (hasUpdateKey(updates, "description")) {
     nextRoomConfig.description = updates.description ?? "";
@@ -701,6 +736,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       } = normalizeConfigToolEntries(rawConfig);
       const normalizedConfig: Config = {
         ...loadedConfig,
+        rooms: normalizedRoomConfigs(loadedConfig.rooms),
         knowledge_bases: loadedConfig.knowledge_bases || {},
         cultures: loadedConfig.cultures || {},
       };
@@ -1774,10 +1810,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Create a new room
   createRoom: (roomData) => {
-    const id = roomData.display_name.toLowerCase().replace(/\s+/g, "_");
+    const displayName =
+      normalizedRoomDisplayName(roomData.display_name) ?? "New Room";
+    const id = displayName.toLowerCase().replace(/\s+/g, "_");
     const newRoom: Room = {
       id,
       ...roomData,
+      display_name: displayName,
     };
 
     set((state) => {
