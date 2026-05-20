@@ -1245,6 +1245,9 @@ timezone: America/Los_Angeles      # Default: UTC
 When `matrix_space.enabled` is `true`, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
 If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
 Room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 `matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
 Leave it `false` to preserve Matrix E2EE device-trust checks.
@@ -13197,6 +13200,9 @@ MindRoom grants root Space admin power to concrete Matrix users in `authorizatio
 MindRoom also grants root Space admin power to the configured `mindroom_user` when that internal account exists.
 Room-specific users in `authorization.room_permissions` are not root Space admins unless they are also listed in `authorization.global_users`.
 This lets owners add, remove, and reorder Space children in Matrix clients while keeping room-specific collaborators scoped to their rooms.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
 The `name` field controls the Space's display name and can be changed at any time.
@@ -13660,8 +13666,9 @@ matrix_space:
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
-Root Space admin power is reconciled before child links are written.
-The admin set is the concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` when that internal account exists.
+Root Space admin power is granted before child links are written.
+The grant set is the concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` when that internal account exists.
+MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from `authorization.global_users`.
 Room-scoped authorization entries are intentionally not used for root Space admin grants.
 
 ## Delivery Policy

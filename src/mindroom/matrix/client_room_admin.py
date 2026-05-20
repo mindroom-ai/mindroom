@@ -147,7 +147,7 @@ def _with_room_admin_power_levels(
     power_levels_content: dict[str, Any],
     user_ids: Iterable[str],
 ) -> dict[str, Any]:
-    """Return power-level content with the given users promoted to room admins."""
+    """Return power-level content with users promoted while preserving existing admins."""
     next_content = dict(power_levels_content)
     existing_users = power_levels_content.get("users")
     next_users = dict(existing_users) if isinstance(existing_users, dict) else {}
@@ -164,7 +164,7 @@ async def ensure_room_admin_power_levels(
     room_id: str,
     user_ids: Iterable[str],
 ) -> bool:
-    """Ensure the given users have Matrix room admin power in a room or Space."""
+    """Grant Matrix room admin power to users without revoking existing admins."""
     concrete_user_ids = {user_id for user_id in user_ids if user_id}
     if not concrete_user_ids:
         return True
