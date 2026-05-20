@@ -386,7 +386,7 @@ memory:
 models:
   default:
     provider: openrouter
-    id: google/gemini-3-flash-preview
+    id: google/gemini-3.5-flash
     context_window: 1000000
   gpt5mini:
     provider: openrouter
@@ -410,7 +410,7 @@ models:
     context_window: 200000
   gemini_flash:
     provider: openrouter
-    id: google/gemini-3-flash-preview
+    id: google/gemini-3.5-flash
     context_window: 1000000
   gemini_lite:
     provider: openrouter
