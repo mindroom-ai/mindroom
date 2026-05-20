@@ -607,8 +607,15 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
                 active_config_path=str(current.runtime_paths.config_path),
             )
             return False
+        same_successful_config = (
+            result.success
+            and current.config_load_result is not None
+            and current.config_load_result.success
+            and validated_payload == current.config_data
+        )
         current_state.snapshot = _published_snapshot(
             current,
+            increment_generation=not same_successful_config,
             config_data=validated_payload if validated_payload is not None else current.config_data,
             runtime_config=runtime_config if runtime_config is not None else current.runtime_config,
             config_load_result=result,

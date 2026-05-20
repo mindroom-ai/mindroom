@@ -2677,6 +2677,34 @@ def test_config_generation_headers_protect_full_and_raw_save_endpoints(
     assert stale_raw_save_response.status_code == 409
 
 
+def test_config_reload_after_api_save_keeps_returned_generation(test_client: TestClient) -> None:
+    """The file watcher should not make an API save response immediately stale."""
+    initial_load = test_client.post("/api/config/load")
+    assert initial_load.status_code == 200
+    initial_generation = int(initial_load.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    first_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("first"),
+    )
+    assert first_save_response.status_code == 200
+    first_save_generation = int(first_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+
+    reloaded_config_response = test_client.post("/api/config/load")
+    assert reloaded_config_response.status_code == 200
+    assert int(reloaded_config_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == first_save_generation
+
+    second_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(first_save_generation)},
+        json=_authored_config_payload("second"),
+    )
+    assert second_save_response.status_code == 200
+
+
 def test_first_party_config_writers_advance_generation_before_watcher_reload(
     test_client: TestClient,
 ) -> None:
