@@ -306,6 +306,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
+        source_fingerprint = (
+            current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
+        )
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -313,6 +316,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             runtime_config=runtime_config,
             auth_state=auth_state,
             config_load_result=config_load_result,
+            source_fingerprint=source_fingerprint,
         )
     config_lifecycle.register_api_app(api_app)
 

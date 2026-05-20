@@ -180,6 +180,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         config_data={"agents": {"old": {"display_name": "Old"}}},
         runtime_config=runtime_config,
         config_load_result=load_result,
+        source_fingerprint="old-source",
         auth_state=auth_state,
     )
 
@@ -190,6 +191,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert preserved.config_data is snapshot.config_data
     assert preserved.runtime_config is runtime_config
     assert preserved.config_load_result is load_result
+    assert preserved.source_fingerprint == "old-source"
     assert preserved.auth_state is auth_state
 
     cleared = config_lifecycle._published_snapshot(
@@ -198,6 +200,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         config_data={},
         runtime_config=None,
         config_load_result=None,
+        source_fingerprint=None,
         auth_state=None,
     )
 
@@ -206,6 +209,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert cleared.config_data == {}
     assert cleared.runtime_config is None
     assert cleared.config_load_result is None
+    assert cleared.source_fingerprint is None
     assert cleared.auth_state is None
 
 
@@ -570,10 +574,12 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     main.initialize_api_app(fresh_app, first_runtime)
     config_lifecycle.load_config_into_app(first_runtime, fresh_app)
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert main._app_context(fresh_app).source_fingerprint is not None
 
     main.initialize_api_app(fresh_app, second_runtime)
 
     assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).source_fingerprint is None
 
 
 def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: Path) -> None:
@@ -595,10 +601,12 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     main.initialize_api_app(fresh_app, runtime_one)
     config_lifecycle.load_config_into_app(runtime_one, fresh_app)
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert main._app_context(fresh_app).source_fingerprint is not None
 
     main.initialize_api_app(fresh_app, runtime_two)
 
     assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).source_fingerprint is None
 
 
 def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path: Path) -> None:
@@ -612,6 +620,8 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
         config_path=tmp_path / "second.yaml",
         process_env={},
     )
+    first_runtime.config_path.write_text("agents: {}\n", encoding="utf-8")
+    second_runtime.config_path.write_text("agents: {}\n", encoding="utf-8")
     started = threading.Event()
     allow_finish = threading.Event()
     original_loader = config_lifecycle.load_runtime_config_model
@@ -2703,6 +2713,36 @@ def test_config_reload_after_api_save_keeps_returned_generation(test_client: Tes
         json=_authored_config_payload("second"),
     )
     assert second_save_response.status_code == 200
+    assert int(second_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > first_save_generation
+
+
+def test_external_raw_config_reload_advances_generation_for_same_authored_config(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """External raw-only edits should still make older raw editor drafts stale."""
+    initial_raw_response = test_client.get("/api/config/raw")
+    assert initial_raw_response.status_code == 200
+    initial_generation = int(initial_raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    initial_source = initial_raw_response.json()["source"]
+
+    externally_edited_source = f"# external operator note\n{initial_source}"
+    temp_config_file.write_text(externally_edited_source, encoding="utf-8")
+
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+
+    reloaded_raw_response = test_client.get("/api/config/raw")
+    assert reloaded_raw_response.status_code == 200
+    assert int(reloaded_raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
+    assert reloaded_raw_response.json() == {"source": externally_edited_source}
+
+    stale_save_response = test_client.put(
+        "/api/config/raw",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json={"source": initial_source},
+    )
+    assert stale_save_response.status_code == 409
+    assert temp_config_file.read_text(encoding="utf-8") == externally_edited_source
 
 
 def test_first_party_config_writers_advance_generation_before_watcher_reload(
