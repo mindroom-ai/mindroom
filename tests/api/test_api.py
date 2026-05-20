@@ -621,44 +621,41 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
         process_env={},
     )
     first_runtime.config_path.write_text("agents: {}\n", encoding="utf-8")
-    second_runtime.config_path.write_text("agents: {}\n", encoding="utf-8")
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"second": {"display_name": "Second", "role": "valid", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
     started = threading.Event()
     allow_finish = threading.Event()
-    original_loader = config_lifecycle.load_runtime_config_model
+    original_load_result = config_lifecycle._load_config_result
 
-    def _fake_loader(
+    def _fake_load_result(
         runtime_paths: constants.RuntimePaths,
-        *,
-        tolerate_plugin_load_errors: bool = False,
-    ) -> Config:
+    ) -> tuple[config_lifecycle.ConfigLoadResult, dict[str, Any] | None, Config | None, str | None]:
         if runtime_paths == first_runtime:
             started.set()
             allow_finish.wait(timeout=1)
-            message = "invalid old config"
-            raise yaml.YAMLError(message)
-        if runtime_paths == second_runtime:
-            return Config.validate_with_runtime(
-                {
-                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                    "router": {"model": "default"},
-                    "agents": {
-                        "second": {
-                            "display_name": "Second",
-                            "role": "valid",
-                            "rooms": [],
-                        },
-                    },
-                },
-                second_runtime,
+            return (
+                config_lifecycle.ConfigLoadResult(
+                    success=False,
+                    error_status_code=422,
+                    error_detail="invalid old config",
+                ),
+                None,
+                None,
+                "stale-old-source",
             )
-        return original_loader(
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
+        return original_load_result(runtime_paths)
 
-    with patch.object(config_lifecycle, "load_runtime_config_model", side_effect=_fake_loader):
-        main.initialize_api_app(fresh_app, first_runtime)
+    main.initialize_api_app(fresh_app, first_runtime)
 
+    with patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result):
         stale_thread = threading.Thread(
             target=config_lifecycle.load_config_into_app,
             args=(first_runtime, fresh_app),
@@ -2743,6 +2740,53 @@ def test_external_raw_config_reload_advances_generation_for_same_authored_config
     )
     assert stale_save_response.status_code == 409
     assert temp_config_file.read_text(encoding="utf-8") == externally_edited_source
+
+
+def test_config_reload_uses_source_fingerprint_from_validated_source(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """A file edit during reload should not publish new config under the old source identity."""
+    initial_response = test_client.post("/api/config/load")
+    assert initial_response.status_code == 200
+    initial_generation = int(initial_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    initial_agents = initial_response.json()["agents"]
+
+    interleaved_source = yaml.safe_dump(_authored_config_payload("interleaved"), sort_keys=True)
+    original_read_bytes = Path.read_bytes
+    mutated = False
+
+    def _read_then_mutate(path: Path) -> bytes:
+        nonlocal mutated
+        source = original_read_bytes(path)
+        if path == temp_config_file and not mutated:
+            mutated = True
+            temp_config_file.write_text(interleaved_source, encoding="utf-8")
+        return source
+
+    with patch.object(Path, "read_bytes", autospec=True, side_effect=_read_then_mutate):
+        assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+
+    reloaded_response = test_client.post("/api/config/load")
+    assert reloaded_response.status_code == 200
+    assert reloaded_response.json()["agents"] == initial_agents
+    assert int(reloaded_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == initial_generation
+
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+    interleaved_response = test_client.post("/api/config/load")
+    assert interleaved_response.status_code == 200
+    assert list(interleaved_response.json()["agents"]) == ["interleaved"]
+    assert int(interleaved_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
+
+    stale_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("stale"),
+    )
+    assert stale_save_response.status_code == 409
+    assert yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))["agents"] == {
+        "interleaved": {"display_name": "Interleaved", "role": "valid", "rooms": []},
+    }
 
 
 def test_first_party_config_writers_advance_generation_before_watcher_reload(

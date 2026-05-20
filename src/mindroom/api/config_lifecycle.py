@@ -135,19 +135,18 @@ def _source_fingerprint(source: bytes | str) -> str:
     return hashlib.sha256(source_bytes).hexdigest()
 
 
-def _config_source_fingerprint(runtime_paths: constants.RuntimePaths) -> str:
-    """Return the raw source identity for the active config file."""
-    return _source_fingerprint(runtime_paths.config_path.read_bytes())
-
-
 def _load_config_result(
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[ConfigLoadResult, dict[str, Any] | None, Config | None, str | None]:
     """Load and validate one config file without mutating shared app state."""
     source_fingerprint: str | None = None
     try:
-        source_fingerprint = _config_source_fingerprint(runtime_paths)
-        runtime_config = load_runtime_config_model(
+        source_bytes = runtime_paths.config_path.read_bytes()
+        source_fingerprint = _source_fingerprint(source_bytes)
+        source_text = source_bytes.decode("utf-8")
+        data = yaml.safe_load(source_text) or {}
+        runtime_config = Config.validate_with_runtime(
+            data,
             runtime_paths,
             tolerate_plugin_load_errors=True,
         )
@@ -174,6 +173,8 @@ def _load_config_result(
             source_fingerprint,
         )
     else:
+        logger.info("loaded_agent_configuration", path=str(runtime_paths.config_path))
+        logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
         logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
         return ConfigLoadResult(success=True), validated_payload, runtime_config, source_fingerprint
 
