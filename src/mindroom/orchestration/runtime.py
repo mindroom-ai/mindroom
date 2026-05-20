@@ -534,7 +534,15 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
                 await bot.prepare_for_sync_shutdown()
                 await iteration.cancel()
 
-        if not bot.running or (max_retries >= 0 and retry_count >= max_retries):
+        if not bot.running:
+            break
+        if max_retries >= 0 and retry_count >= max_retries:
+            logger.error(
+                "sync_loop_retries_exhausted",
+                agent=bot.agent_name,
+                retry_count=retry_count,
+                max_retries=max_retries,
+            )
             break
 
         wait_time = retry_delay_seconds(

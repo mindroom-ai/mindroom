@@ -1269,12 +1269,46 @@ async def test_clean_sync_return_while_running_restarts(monkeypatch: pytest.Monk
 
     bot.sync_forever = return_once_then_stop
 
-    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    retry_attempts: list[int] = []
+
+    def fake_retry_delay(attempt: int, **_kwargs: float) -> float:
+        retry_attempts.append(attempt)
+        return 0.0
+
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", fake_retry_delay)
 
     await sync_forever_with_restart(bot, max_retries=3)
 
     assert bot.sync_calls == 2
     assert bot.prepare_for_sync_shutdown_calls == 2
+    assert retry_attempts == [1]
+
+
+@pytest.mark.asyncio
+async def test_running_bot_logs_when_sync_retries_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry exhaustion should be visible if the bot is still logically running."""
+    bot = _FakeBot()
+
+    async def clean_return() -> None:
+        bot.sync_calls += 1
+
+    bot.sync_forever = clean_return
+    logger = MagicMock()
+
+    monkeypatch.setattr(runtime_helpers, "logger", logger)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+
+    await sync_forever_with_restart(bot, max_retries=2)
+
+    assert bot.running is True
+    assert bot.sync_calls == 2
+    assert bot.prepare_for_sync_shutdown_calls == 2
+    logger.error.assert_called_once_with(
+        "sync_loop_retries_exhausted",
+        agent="test_agent",
+        retry_count=2,
+        max_retries=2,
+    )
 
 
 # ---------------------------------------------------------------------------
