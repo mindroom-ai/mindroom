@@ -53,6 +53,16 @@ def test_saas_default_config_models_match_central_defaults() -> None:
     assert config["voice"]["stt"]["model"] == model_defaults.OPENAI_TRANSCRIPTION
 
 
+def test_saas_default_uses_current_gemini_flash() -> None:
+    """The SaaS default and named Flash preset should use the current Gemini Flash model."""
+    expected_model = "google/gemini-3.5-flash"
+    old_preview_model = "google/gemini-3-flash-preview"
+
+    assert model_defaults.SAAS_MODEL_PRESETS["default"].id == expected_model
+    assert model_defaults.SAAS_MODEL_PRESETS["gemini_flash"].id == expected_model
+    assert old_preview_model not in {preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values()}
+
+
 def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> None:
     """Config init should comment every non-default OpenRouter model alias we expose elsewhere."""
     openrouter_saas_aliases = {
