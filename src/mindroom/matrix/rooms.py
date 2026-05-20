@@ -370,7 +370,9 @@ async def ensure_all_rooms_exist(
 
         # Ensure room exists
         room_config = config.rooms.get(room_key)
-        room_name = room_config.display_name if room_config and room_config.display_name else None
+        room_name = None
+        if room_config is not None:
+            room_name = room_config.display_name or _room_key_to_name(room_key)
         try:
             room_id = await _ensure_room_exists(
                 client=client,

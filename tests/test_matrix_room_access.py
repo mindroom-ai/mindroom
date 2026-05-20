@@ -1030,6 +1030,55 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_resets_authored_room_to_default_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Authored room entries without display_name should manage the default Matrix name."""
+    config = _config_with_runtime_paths(tmp_path, rooms={"project_room": {}})
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.managed_entity_power_user_ids_for_room",
+        lambda _room_key, _config, _runtime_paths: [],
+    )
+    ensure_room_exists_mock = AsyncMock(return_value="!project:example.com")
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"project_room": "!project:example.com"}
+    ensure_room_exists_mock.assert_awaited_once()
+    assert ensure_room_exists_mock.await_args.kwargs["room_name"] == "Project Room"
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_leaves_membership_only_room_name_unmanaged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent/team-derived rooms should not imply Matrix room rename intent."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        agents={"assistant": {"display_name": "Assistant", "rooms": ["project_room"]}},
+    )
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.managed_entity_power_user_ids_for_room",
+        lambda _room_key, _config, _runtime_paths: [],
+    )
+    ensure_room_exists_mock = AsyncMock(return_value="!project:example.com")
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"project_room": "!project:example.com"}
+    ensure_room_exists_mock.assert_awaited_once()
+    assert ensure_room_exists_mock.await_args.kwargs["room_name"] is None
+
+
+@pytest.mark.asyncio
 async def test_is_user_online_scans_cached_rooms_when_room_id_is_none() -> None:
     """Presence checks without a room hint should still use cached room membership first."""
     mock_client = AsyncMock(spec=nio.AsyncClient)
