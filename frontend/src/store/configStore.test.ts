@@ -4511,6 +4511,84 @@ describe("configStore", () => {
       });
     });
 
+    it("does not promote derived rooms when clearing default display names", () => {
+      const mockConfig = {
+        agents: {
+          agent1: {
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["project_room"],
+          },
+        },
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [
+          {
+            id: "agent1",
+            display_name: "Agent 1",
+            role: "Test agent",
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: ["project_room"],
+          },
+        ],
+        rooms: [
+          {
+            id: "project_room",
+            display_name: "Project Room",
+            description: "",
+            agents: ["agent1"],
+          },
+        ],
+      });
+
+      useConfigStore.getState().updateRoom("project_room", {
+        display_name: "   ",
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.rooms).toBeUndefined();
+      expect(state.rooms).toEqual([
+        {
+          id: "project_room",
+          display_name: "Project Room",
+          description: "",
+          agents: ["agent1"],
+          model: undefined,
+        },
+      ]);
+      expect(state.dirtyRoots).not.toContain("rooms");
+      expect(state.isDirty).toBe(false);
+    });
+
     it("does not serialize derived rooms for membership-only updates", async () => {
       const mockConfig = {
         agents: {

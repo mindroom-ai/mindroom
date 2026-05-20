@@ -300,6 +300,17 @@ function normalizedRoomConfigs(rooms: Config["rooms"]): Config["rooms"] {
   );
 }
 
+function hasOwnRoomConfig(rooms: Config["rooms"], roomId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(rooms ?? {}, roomId);
+}
+
+function roomConfigHasMetadata(roomConfig: RoomConfig): boolean {
+  return (
+    normalizedRoomDisplayName(roomConfig.display_name) !== undefined ||
+    (roomConfig.description ?? "") !== ""
+  );
+}
+
 function sameStringSet(left: string[], right: string[]): boolean {
   if (left.length !== right.length) {
     return false;
@@ -340,6 +351,7 @@ function updateDraftRoomMetadata(
   updates: Pick<Partial<Room>, "display_name" | "description">,
 ): Config {
   const nextRooms = { ...(config.rooms ?? {}) };
+  const hadAuthoredRoom = hasOwnRoomConfig(config.rooms, roomId);
   const nextRoomConfig = { ...(nextRooms[roomId] ?? {}) };
   if (hasUpdateKey(updates, "display_name")) {
     const displayName = normalizedRoomDisplayName(updates.display_name);
@@ -352,7 +364,11 @@ function updateDraftRoomMetadata(
   if (hasUpdateKey(updates, "description")) {
     nextRoomConfig.description = updates.description ?? "";
   }
-  nextRooms[roomId] = nextRoomConfig;
+  const normalizedConfig = normalizedRoomConfig(nextRoomConfig);
+  if (!hadAuthoredRoom && !roomConfigHasMetadata(normalizedConfig)) {
+    return config;
+  }
+  nextRooms[roomId] = normalizedConfig;
   return {
     ...config,
     rooms: nextRooms,
@@ -1716,6 +1732,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const metadataUpdateProvided =
         hasUpdateKey(updates, "display_name") ||
         hasUpdateKey(updates, "description");
+      let roomMetadataTouchedPaths: ConfigDiagnosticPath[] = [];
 
       // If model changed, update room_models in config
       if (modelUpdateProvided && state.config) {
@@ -1738,7 +1755,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       if (metadataUpdateProvided && updatedConfig) {
+        const configBeforeMetadataUpdate = updatedConfig;
         updatedConfig = updateDraftRoomMetadata(updatedConfig, roomId, updates);
+        if (updatedConfig !== configBeforeMetadataUpdate) {
+          roomMetadataTouchedPaths = (["display_name", "description"] as const)
+            .filter((key) => hasUpdateKey(updates, key))
+            .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
+        }
+      } else if (metadataUpdateProvided) {
+        roomMetadataTouchedPaths = (["display_name", "description"] as const)
+          .filter((key) => hasUpdateKey(updates, key))
+          .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
       }
 
       const previousConfig = state.config;
@@ -1746,11 +1773,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         preserveRawToolEntries(previousConfig, updatedConfig);
       }
 
-      const roomMetadataTouchedPaths = (
-        ["display_name", "description"] as const
-      )
-        .filter((key) => hasUpdateKey(updates, key))
-        .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
       const roomModelTouchedPaths = modelUpdateProvided
         ? ([["room_models", roomId]] as ConfigDiagnosticPath[])
         : [];
@@ -1792,6 +1814,22 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         };
       }
 
+      const touchedPaths = [
+        ...roomMetadataTouchedPaths,
+        ...roomModelTouchedPaths,
+      ];
+      if (touchedPaths.length === 0) {
+        return {
+          config: updatedConfig,
+          rooms: roomsFromDraft(
+            updatedConfig,
+            updatedRooms,
+            state.agents,
+            state.teams,
+          ),
+        };
+      }
+
       return {
         config: updatedConfig,
         rooms: roomsFromDraft(
@@ -1800,10 +1838,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           state.agents,
           state.teams,
         ),
-        ...markDraftDirty(state, {}, [
-          ...roomMetadataTouchedPaths,
-          ...roomModelTouchedPaths,
-        ]),
+        ...markDraftDirty(state, {}, touchedPaths),
       };
     });
   },
