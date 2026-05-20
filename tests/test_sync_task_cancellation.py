@@ -1251,6 +1251,32 @@ async def test_restart_resets_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -
     assert bot.sync_calls == 2
 
 
+@pytest.mark.asyncio
+async def test_clean_sync_return_while_running_restarts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clean sync_forever return is only a shutdown if the bot stopped.
+
+    nio can return from sync_forever without raising even though the bot is
+    still marked running. The supervisor must not treat that as intentional
+    shutdown, otherwise the entity stays present but stops syncing forever.
+    """
+    bot = _FakeBot()
+
+    async def return_once_then_stop() -> None:
+        bot.sync_calls += 1
+        if bot.sync_calls == 1:
+            return
+        bot.running = False
+
+    bot.sync_forever = return_once_then_stop
+
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+
+    await sync_forever_with_restart(bot, max_retries=3)
+
+    assert bot.sync_calls == 2
+    assert bot.prepare_for_sync_shutdown_calls == 2
+
+
 # ---------------------------------------------------------------------------
 # R4 Fix 1: Immediate sync_forever() failure must retry, not exit cleanly
 # ---------------------------------------------------------------------------

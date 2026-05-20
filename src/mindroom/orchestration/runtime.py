@@ -510,8 +510,15 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
             await iteration.wait()
-            # sync_forever returned normally, so the bot was stopped intentionally.
-            break
+            if not bot.running:
+                # sync_forever returned normally after an intentional stop.
+                break
+            retry_count += 1
+            logger.warning(
+                "sync_loop_returned_while_bot_running",
+                agent=bot.agent_name,
+                retry_count=retry_count,
+            )
         except asyncio.CancelledError:
             # Task cancellation is part of normal shutdown.
             logger.info("sync_task_cancelled", agent=bot.agent_name)
