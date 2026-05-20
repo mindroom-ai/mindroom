@@ -179,7 +179,10 @@ function deriveRooms(
   agents: Agent[],
   teams: Team[],
 ): Room[] {
-  const roomIds = new Set<string>(Object.keys(config.rooms ?? {}));
+  const roomIds = new Set<string>([
+    ...Object.keys(config.rooms ?? {}),
+    ...Object.keys(config.room_models ?? {}),
+  ]);
   agents.forEach((agent) => {
     agent.rooms.forEach((room) => roomIds.add(room));
   });
@@ -1862,10 +1865,29 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         }
         return agent;
       });
-      const updatedConfig = state.config
-        ? updateDraftRoomMetadata(state.config, id, roomData)
+      let updatedConfig = state.config
+        ? updateDraftRoomMetadata(state.config, id, newRoom)
         : state.config;
       const touchedPaths: ConfigDiagnosticPath[] = [["rooms"]];
+      if (state.config && updatedConfig && updatedConfig !== state.config) {
+        preserveRawToolEntries(state.config, updatedConfig);
+      }
+      if (roomData.model !== undefined && updatedConfig) {
+        const previousConfig = updatedConfig;
+        const nextRoomModels = { ...(updatedConfig.room_models ?? {}) };
+        if (roomData.model) {
+          nextRoomModels[id] = roomData.model;
+        } else {
+          delete nextRoomModels[id];
+        }
+        updatedConfig = {
+          ...updatedConfig,
+          room_models:
+            Object.keys(nextRoomModels).length > 0 ? nextRoomModels : undefined,
+        };
+        preserveRawToolEntries(previousConfig, updatedConfig);
+        touchedPaths.push(["room_models", id]);
+      }
       if (roomData.agents.length > 0) {
         touchedPaths.push(["agents"]);
       }

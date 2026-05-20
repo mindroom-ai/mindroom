@@ -166,6 +166,48 @@ describe("configStore", () => {
       );
     });
 
+    it("shows room-specific model overrides even without room metadata or memberships", async () => {
+      const mockConfig = {
+        agents: {},
+        room_models: {
+          project_room: "claude",
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+          claude: {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: {},
+        }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState().rooms).toEqual([
+        {
+          id: "project_room",
+          display_name: "Project Room",
+          description: "",
+          agents: [],
+          model: "claude",
+        },
+      ]);
+    });
+
     it("normalizes mixed tool entries when loading configuration", async () => {
       const mockConfig = {
         agents: {
@@ -1766,6 +1808,73 @@ describe("configStore", () => {
         "gmail",
         "file",
       ]);
+    });
+
+    it("preserves structured tool entries when a room creation clone is followed by agent edits", async () => {
+      const mockConfig = {
+        agents: {
+          test: {
+            display_name: "Test Agent",
+            role: "Test role",
+            tools: ["calculator", { shell: { sandbox: "tight" } }],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: { test: makeAgentPolicy("test") },
+        }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+      useConfigStore.getState().createRoom({
+        display_name: "Project Room",
+        description: "Planning space",
+        agents: [],
+      });
+      useConfigStore
+        .getState()
+        .updateAgent("test", { tools: ["shell", "browser"] });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls[2];
+      expect(JSON.parse(saveCall[1].body)).toMatchObject({
+        agents: {
+          test: {
+            tools: [{ shell: { sandbox: "tight" } }, "browser"],
+          },
+        },
+        rooms: {
+          project_room: {
+            display_name: "Project Room",
+            description: "Planning space",
+          },
+        },
+      });
     });
 
     it("stores backend validation issues without poisoning the global load error", async () => {
@@ -4926,6 +5035,75 @@ describe("configStore", () => {
         },
       ]);
       expect(state.dirtyRoots).toContain("rooms");
+    });
+
+    it("writes a model selected during room creation to draft room models", async () => {
+      const mockConfig = {
+        agents: {},
+        memory: {
+          embedder: {
+            provider: "ollama",
+            config: {
+              model: "nomic-embed-text",
+              host: "http://localhost:11434",
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: "ollama",
+            id: "test-model",
+          },
+          claude: {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: "default",
+        },
+      } as Config;
+
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [],
+        rooms: [],
+      });
+
+      useConfigStore.getState().createRoom({
+        display_name: "Project Room",
+        description: "Planning space",
+        agents: [],
+        model: "claude",
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.config?.room_models).toEqual({
+        project_room: "claude",
+      });
+      expect(state.rooms[0]).toMatchObject({
+        id: "project_room",
+        model: "claude",
+      });
+      expect(state.dirtyRoots).toEqual(
+        expect.arrayContaining(["rooms", "room_models"]),
+      );
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.room_models).toEqual({
+        project_room: "claude",
+      });
     });
 
     it("does not serialize team-derived rooms when creating a managed room", async () => {
