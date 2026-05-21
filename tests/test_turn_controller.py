@@ -13,6 +13,7 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -101,6 +102,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     )
 
     captured_envelope: MessageEnvelope | None = None
+    captured_metadata: dict[str, object] | None = None
 
     async def generate_response(
         prompt: str,
@@ -114,11 +116,12 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         system_enrichment_items: tuple[object, ...] = (),  # noqa: ARG001
         response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,  # noqa: ARG001
-        matrix_run_metadata: dict[str, object] | None = None,  # noqa: ARG001
+        matrix_run_metadata: dict[str, object] | None = None,
     ) -> str | None:
-        nonlocal captured_envelope
+        nonlocal captured_envelope, captured_metadata
         assert response_envelope is not None
         captured_envelope = response_envelope
+        captured_metadata = matrix_run_metadata
         assert prompt == "The user selected: Option 1"
         assert response_envelope.target.room_id == room.room_id
         assert response_envelope.target.reply_to_event_id == selection.question_event_id
@@ -155,6 +158,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         room,
         selection=selection,
         user_id="@user:localhost",
+        source_event_id="$selection:localhost",
     )
 
     bot._delivery_gateway.send_text.assert_awaited_once()
@@ -163,7 +167,10 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert ack_request.target.reply_to_event_id is None
     generate_response_mock.assert_awaited_once()
     assert captured_envelope is not None
+    assert captured_envelope.source_event_id == "$selection:localhost"
     assert captured_envelope.target.resolved_thread_id == selection.thread_id
+    assert captured_metadata is not None
+    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
 
 
 @pytest.mark.asyncio

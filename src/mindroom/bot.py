@@ -1636,6 +1636,7 @@ class AgentBot:
                 room,
                 selection=result,
                 user_id=event.sender,
+                source_event_id=event.event_id,
             )
             return
 

@@ -3787,6 +3787,15 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         assert request.existing_event_is_placeholder is True
         assert request.reply_to_event_id == "$question:example.com"
         assert request.thread_id == "thread_id"
+        assert request.response_envelope.source_event_id == "$reaction:example.com"
+        assert request.matrix_run_metadata == {
+            MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$reaction:example.com"],
+            **_run_response_context_metadata(
+                response_owner="test_agent",
+                history_scope=_agent_history_scope("test_agent"),
+                conversation_target=MessageTarget.resolve("!test:example.com", "thread_id", "$question:example.com"),
+            ),
+        }
 
 
 @pytest.mark.asyncio

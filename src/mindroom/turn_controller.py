@@ -1266,7 +1266,7 @@ class TurnController:
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         response_envelope = MessageEnvelope(
-            source_event_id=selection.question_event_id,
+            source_event_id=source_event_id or selection.question_event_id,
             room_id=room.room_id,
             target=response_target,
             requester_id=user_id,
