@@ -132,10 +132,6 @@ def load_pricing_config_model() -> PricingConfig:
 
 
 def _stripe_mode() -> Literal["test", "live"]:
-    publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
-    if publishable_key.startswith("pk_live_"):
-        return "live"
-
     secret_key = os.getenv("STRIPE_SECRET_KEY", "")
     if secret_key.startswith(("sk_live_", "rk_live_")):
         return "live"

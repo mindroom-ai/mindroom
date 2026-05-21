@@ -37,7 +37,9 @@ class TestStripeDebugUtils:
         products = stripe.Product.list(limit=100)
 
         # Find MindRoom products
-        mindroom_products = [p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"]
+        mindroom_products = [
+            p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"
+        ]
 
         # Should have at least one MindRoom product
         assert len(mindroom_products) > 0, "No MindRoom products found in Stripe"

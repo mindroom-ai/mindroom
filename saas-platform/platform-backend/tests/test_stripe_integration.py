@@ -48,7 +48,9 @@ class TestStripeIntegration:
         """Test that MindRoom product exists in Stripe."""
         products = stripe.Product.list(limit=100)
 
-        mindroom_products = [p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"]
+        mindroom_products = [
+            p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"
+        ]
 
         assert len(mindroom_products) > 0, "No MindRoom product found in Stripe"
 

@@ -155,7 +155,7 @@ class TestPricingHelperFunctions:
 
     def test_get_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting Stripe price IDs."""
-        monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_test_mock")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock")
 
         # Starter monthly
         assert get_stripe_price_id("starter", "monthly") == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
@@ -181,12 +181,28 @@ class TestPricingHelperFunctions:
 
     def test_get_live_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting live Stripe price IDs in live mode."""
-        monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_live_mock")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_mock")
 
         assert get_stripe_price_id("starter", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
         assert get_stripe_price_id("starter", "yearly") == "price_1TZQJK3GVsrZHuzXuazROiIy"
         assert get_stripe_price_id("professional", "monthly") == "price_1TZQJL3GVsrZHuzXSzAgw8U4"
         assert get_stripe_price_id("professional", "yearly") == "price_1TZQJL3GVsrZHuzXO0WBASeh"
+
+    def test_publishable_key_does_not_determine_stripe_price_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server-side Stripe price IDs must match the server-side secret key."""
+        monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_live_mock")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock")
+
+        assert get_stripe_price_id("starter", "monthly") == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
+
+    def test_stripe_secret_file_determines_price_mode(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Production file-mounted secrets select live price IDs."""
+        secret_file = tmp_path / "stripe_secret_key"
+        secret_file.write_text("sk_live_mock", encoding="utf-8")
+        monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+        monkeypatch.setenv("STRIPE_SECRET_KEY_FILE", str(secret_file))
+
+        assert get_stripe_price_id("starter", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
 
     def test_get_plan_details(self) -> None:
         """Test getting plan details."""
