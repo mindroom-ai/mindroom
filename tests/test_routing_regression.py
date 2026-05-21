@@ -29,6 +29,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
@@ -181,18 +182,24 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
     )
     target = MessageTarget.resolve("!room:localhost", "$thread", "$msg")
 
-    def envelope(sender_id: str) -> MessageEnvelope:
+    def envelope(
+        sender_id: str,
+        *,
+        requester_id: str | None = None,
+        origin: TurnOrigin | None = None,
+    ) -> MessageEnvelope:
         return MessageEnvelope(
             source_event_id="$msg",
             room_id="!room:localhost",
             target=target,
-            requester_id=sender_id,
+            requester_id=requester_id or sender_id,
             sender_id=sender_id,
             body="follow up",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="research",
             source_kind="message",
+            origin=origin,
         )
 
     assert policy._should_queue_follow_up_in_active_response_thread(
@@ -205,6 +212,27 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
         context=context,
         target=target,
         source_envelope=envelope("@actual_news:localhost"),
+        has_active_response_for_target=lambda _target: True,
+    )
+    assert policy._should_queue_follow_up_in_active_response_thread(
+        context=context,
+        target=target,
+        source_envelope=envelope(
+            ids["router"].full_id,
+            requester_id="@human:localhost",
+            origin=TurnOrigin(
+                transport_sender_id=ids["router"].full_id,
+                requester_id="@human:localhost",
+                author_id="@human:localhost",
+                sender_entity_name="router",
+                requester_entity_name=None,
+                sender_kind=SenderKind.MANAGED_ENTITY,
+                requester_kind=SenderKind.USER,
+                intent=TurnIntent.ROUTER_HANDOFF,
+                source_kind="trusted_internal_relay",
+                trust=TurnTrust.TRUSTED_USER_RELAY,
+            ),
+        ),
         has_active_response_for_target=lambda _target: True,
     )
 
@@ -538,6 +566,7 @@ class TestRoutingRegression:
             [],
             None,
             requester_user_id="@bob:localhost",
+            extra_content={ORIGINAL_SENDER_KEY: "@stale:localhost"},
         )
 
         mock_suggest_responder.assert_not_awaited()

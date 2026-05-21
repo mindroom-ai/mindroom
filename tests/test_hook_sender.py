@@ -49,6 +49,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_origin import TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
@@ -785,6 +786,10 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     assert dispatch is not None
     dispatch = dispatch.dispatch
     assert dispatch.context is trusted_context
+    assert dispatch.envelope.origin is not None
+    assert dispatch.envelope.origin.intent == TurnIntent.ROUTER_HANDOFF
+    assert dispatch.envelope.origin.trust == TurnTrust.TRUSTED_USER_RELAY
+    assert dispatch.envelope.origin.author_id == "@user:localhost"
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(
         room,
         event,

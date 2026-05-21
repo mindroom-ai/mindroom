@@ -105,7 +105,6 @@ def classify_turn_origin(
         transport_sender_id=transport_sender_id,
         requester_id=requester_id,
         author_id=_author_id(
-            requester_id=requester_id,
             original_sender=original_sender,
             trust=trust,
         ),
@@ -129,13 +128,17 @@ def original_sender_for_router_handoff(
     target_entity_name: str | None,
     requester_id: str,
     requester_entity_name: str | None,
+    inherited_original_sender: str | None = None,
+    inherited_original_sender_entity_name: str | None = None,
 ) -> str | None:
     """Return original-sender metadata for a real router handoff."""
     if target_entity_name is None:
         return None
-    if requester_entity_name is not None:
-        return None
-    return requester_id
+    if requester_entity_name is None:
+        return requester_id
+    if inherited_original_sender is not None and inherited_original_sender_entity_name is None:
+        return inherited_original_sender
+    return None
 
 
 def _turn_trust(
@@ -153,12 +156,11 @@ def _turn_trust(
 
 def _author_id(
     *,
-    requester_id: str,
     original_sender: str | None,
     trust: TurnTrust,
 ) -> str | None:
     if trust == TurnTrust.TRUSTED_USER_RELAY:
-        return original_sender or requester_id
+        return original_sender
     return original_sender
 
 

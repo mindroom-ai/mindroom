@@ -162,3 +162,33 @@ def test_router_handoff_original_sender_only_for_human_targeted_handoff() -> Non
         )
         is None
     )
+    assert (
+        original_sender_for_router_handoff(
+            target_entity_name="general",
+            requester_id="@human:localhost",
+            requester_entity_name=None,
+            inherited_original_sender="@stale:localhost",
+            inherited_original_sender_entity_name=None,
+        )
+        == "@human:localhost"
+    )
+    assert (
+        original_sender_for_router_handoff(
+            target_entity_name="general",
+            requester_id="@mindroom_alpha:localhost",
+            requester_entity_name="alpha",
+            inherited_original_sender="@human:localhost",
+            inherited_original_sender_entity_name=None,
+        )
+        == "@human:localhost"
+    )
+    assert (
+        original_sender_for_router_handoff(
+            target_entity_name="general",
+            requester_id="@mindroom_alpha:localhost",
+            requester_entity_name="alpha",
+            inherited_original_sender="@mindroom_alpha:localhost",
+            inherited_original_sender_entity_name="alpha",
+        )
+        is None
+    )
