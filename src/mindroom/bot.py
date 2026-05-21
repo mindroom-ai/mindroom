@@ -1661,7 +1661,6 @@ class AgentBot:
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
         *,
-        target: MessageTarget | None = None,
         payload: DispatchPayload,
         response_envelope: MessageEnvelope,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
@@ -1686,7 +1685,6 @@ class AgentBot:
                 attachment_ids=tuple(payload.attachment_ids) if payload.attachment_ids is not None else None,
                 response_envelope=response_envelope,
                 correlation_id=correlation_id,
-                target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1713,7 +1711,6 @@ class AgentBot:
         model_prompt: str | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
-        target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
@@ -1737,7 +1734,6 @@ class AgentBot:
                 apply for this response.
             response_envelope: Normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
-            target: Optional canonical response target used for lifecycle locking and delivery.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
                 for unseen-message tracking, coalesced edit regeneration, and cleanup.
             on_lifecycle_lock_acquired: Optional callback that runs after the response
@@ -1762,7 +1758,6 @@ class AgentBot:
                 attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
                 response_envelope=response_envelope,
                 correlation_id=correlation_id,
-                target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -1966,7 +1961,6 @@ class TeamBot(AgentBot):
         model_prompt: str | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
-        target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
@@ -1987,7 +1981,6 @@ class TeamBot(AgentBot):
                     attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
                     response_envelope=response_envelope,
                     correlation_id=correlation_id,
-                    target=target,
                     matrix_run_metadata=matrix_run_metadata,
                     system_enrichment_items=system_enrichment_items,
                     on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
@@ -2036,11 +2029,7 @@ class TeamBot(AgentBot):
             return response_event_id
         assert team_resolution.mode is not None
 
-        resolved_target = target or self._conversation_resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        )
+        resolved_target = response_envelope.target
         registry = entity_identity_registry(self.config, self.runtime_paths)
         agent_names = [
             registry.current_entity_name_for_user_id(mid.full_id, include_router=False) or mid.username
@@ -2075,7 +2064,6 @@ class TeamBot(AgentBot):
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            target=resolved_target,
             payload=DispatchPayload(
                 prompt=memory_prompt,
                 model_prompt=model_prompt_text,

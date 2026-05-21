@@ -1048,10 +1048,11 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         source={"content": {"body": "hello", "msgtype": "m.text"}},
     )
     context = _dispatch_context(bot)
+    target = MessageTarget.resolve("!room:localhost", None, event.event_id)
     expected = MessageEnvelope(
         source_event_id=event.event_id,
         room_id="!room:localhost",
-        target=MessageTarget.resolve("!room:localhost", None, event.event_id),
+        target=target,
         requester_id="@user:localhost",
         sender_id=event.sender,
         body=event.body,
@@ -1068,6 +1069,7 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         event=event,
         requester_user_id="@user:localhost",
         context=context,
+        target=target,
     )
 
     assert envelope is expected
@@ -1076,6 +1078,7 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         event=event,
         requester_user_id="@user:localhost",
         context=context,
+        target=target,
     )
 
 

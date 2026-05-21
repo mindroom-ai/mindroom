@@ -1072,10 +1072,7 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
 
     lifecycle = coordinator._build_lifecycle(
         response_kind="ai",
-        request=replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            target=target,
-        ),
+        request=_response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
     )
     watch = lifecycle.setup_session_watch(
         tool_context=tool_context,
@@ -2199,9 +2196,11 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
 
         mock_ai.side_effect = fake_ai_response
 
+        target = MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg")
+        base_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread")
         request = replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
-            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+            base_request,
+            response_envelope=replace(base_request.response_envelope, target=target),
         )
         await coordinator.process_and_respond(request)
 
@@ -2234,9 +2233,11 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
 
         mock_stream.side_effect = fake_stream_agent_response
 
+        target = MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg")
+        base_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread")
         request = replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
-            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+            base_request,
+            response_envelope=replace(base_request.response_envelope, target=target),
         )
         await coordinator.process_and_respond_streaming(request)
 

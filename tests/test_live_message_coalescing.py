@@ -5053,7 +5053,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         await build_payload(dispatch.context)
 
     with (
-        patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(

@@ -741,7 +741,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     call_kwargs = mock_generate_response.call_args.kwargs
     assert call_kwargs["reply_to_event_id"] == "$original:example.com"
     assert call_kwargs["thread_id"] == stored_target.resolved_thread_id
-    assert call_kwargs["target"] == stored_target
+    assert call_kwargs["response_envelope"].target == stored_target
 
 
 def test_remove_run_by_event_id_removes_team_runs() -> None:
@@ -1390,7 +1390,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
-        assert call_kwargs["target"] == stored_target
+        assert call_kwargs["response_envelope"].target == stored_target
         assert call_kwargs["matrix_run_metadata"] == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
@@ -1533,7 +1533,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert call_kwargs["reply_to_event_id"] == "$original:example.com"
         assert call_kwargs["existing_event_id"] == "$response:example.com"
         assert call_kwargs["existing_event_is_placeholder"] is False
-        assert call_kwargs["target"] == stored_target
+        assert call_kwargs["response_envelope"].target == stored_target
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
@@ -1913,7 +1913,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             "Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
-        assert call_kwargs["target"] == stored_target
+        assert call_kwargs["response_envelope"].target == stored_target
         assert call_kwargs["matrix_run_metadata"] == {
             "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
             "matrix_source_event_prompts": {
@@ -3648,7 +3648,7 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
     mock_generate_response.assert_awaited_once()
     call_kwargs = mock_generate_response.call_args.kwargs
     assert call_kwargs["existing_event_id"] == "$response-new:example.com"
-    assert call_kwargs["target"].session_id == "!test:example.com"
+    assert call_kwargs["response_envelope"].target.session_id == "!test:example.com"
     assert _response_event_id(restarted_bot, "$original:example.com") == "$response-new:example.com"
 
 

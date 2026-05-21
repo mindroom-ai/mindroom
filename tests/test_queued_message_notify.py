@@ -873,16 +873,12 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=envelope,
-                target=target,
                 requires_model_history_refresh=True,
             ),
         )
 
     assert request.thread_id is None
     assert request.thread_history == []
-    assert request.target is not None
-    assert request.target.resolved_thread_id is None
-    assert request.response_envelope is not None
     assert request.response_envelope.target.resolved_thread_id is None
 
 
@@ -910,7 +906,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         request: ResponseRequest,
         **_kwargs: object,
     ) -> FinalDeliveryOutcome:
-        observed_delivery_targets.append(request.target)
+        observed_delivery_targets.append(request.response_envelope.target)
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id="$response",
@@ -942,7 +938,6 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                target=stable_target,
             ),
         )
 
@@ -969,7 +964,6 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
         return replace(
             request,
             thread_id=retarget.resolved_thread_id,
-            target=retarget,
             response_envelope=_envelope(source_event_id="$event", target=retarget),
         )
 
@@ -988,7 +982,7 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
         request: ResponseRequest,
         **_kwargs: object,
     ) -> FinalDeliveryOutcome:
-        observed_delivery_targets.append(request.target)
+        observed_delivery_targets.append(request.response_envelope.target)
         return FinalDeliveryOutcome(
             terminal_status="completed",
             event_id="$response",
@@ -1026,7 +1020,6 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                target=stable_target,
                 prepare_after_lock=prepare_after_lock,
             ),
         )
@@ -1095,7 +1088,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                target=stable_target,
             ),
             team_agents=[],
             team_mode="coordinate",
@@ -1129,7 +1121,6 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
         return replace(
             request,
             thread_id=retarget.resolved_thread_id,
-            target=retarget,
             response_envelope=_envelope(source_event_id="$event", target=retarget),
         )
 
@@ -1174,7 +1165,6 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                target=stable_target,
                 prepare_after_lock=prepare_after_lock,
             ),
             team_agents=[],

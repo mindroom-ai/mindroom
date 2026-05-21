@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -123,6 +124,7 @@ class TestResponseTrackingRegression:
             command_event,
             "@user:localhost",
             command,
+            target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
         )
 
         # Verify response was sent
@@ -143,6 +145,7 @@ class TestResponseTrackingRegression:
             command_event,
             "@user:localhost",
             command,
+            target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
         )
 
         # Should NOT send another response if properly tracked

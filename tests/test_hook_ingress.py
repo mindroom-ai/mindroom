@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks.context import MessageEnvelope
-from mindroom.hooks.ingress import hook_ingress_policy, should_handle_interactive_text_response
+from mindroom.hooks.ingress import hook_ingress_policy
 from mindroom.hooks.types import format_hook_source, split_hook_source
 from mindroom.message_target import MessageTarget
 from tests.conftest import message_origin
@@ -126,7 +126,7 @@ def test_automation_source_kinds_do_not_answer_interactive_prompts() -> None:
     assert is_automation_source_kind("scheduled")
     assert not is_automation_source_kind("message")
 
-    assert not should_handle_interactive_text_response(_envelope(source_kind="hook"))
-    assert not should_handle_interactive_text_response(_envelope(source_kind="hook_dispatch"))
-    assert not should_handle_interactive_text_response(_envelope(source_kind="scheduled"))
-    assert should_handle_interactive_text_response(_envelope(source_kind="message"))
+    assert not _envelope(source_kind="hook").origin.may_answer_interactive_prompt
+    assert not _envelope(source_kind="hook_dispatch").origin.may_answer_interactive_prompt
+    assert not _envelope(source_kind="scheduled").origin.may_answer_interactive_prompt
+    assert _envelope(source_kind="message").origin.may_answer_interactive_prompt

@@ -45,7 +45,6 @@ class _GenerateResponse(Protocol):
         user_id: str | None = None,
         response_envelope: MessageEnvelope,
         correlation_id: str | None = None,
-        target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
@@ -284,7 +283,6 @@ class EditRegenerator:
             prompt=regeneration_prompt,
             reply_to_event_id=regeneration_turn_record.anchor_event_id,
             thread_id=regeneration_target.resolved_thread_id,
-            target=regeneration_target,
             thread_history=context.thread_history,
             existing_event_id=response_event_id,
             existing_event_is_placeholder=False,

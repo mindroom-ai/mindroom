@@ -345,7 +345,7 @@ class ConversationResolver:
         event: DispatchEvent,
         requester_user_id: str,
         context: MessageContext,
-        target: MessageTarget | None = None,
+        target: MessageTarget,
         attachment_ids: list[str] | None = None,
         agent_name: str | None = None,
         body: str | None = None,
@@ -366,18 +366,12 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
         )
-        resolved_target = target or self.build_message_target(
-            room_id=room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
         registry = entity_identity_registry(config, self.deps.runtime_paths)
 
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
-            target=resolved_target,
+            target=target,
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,

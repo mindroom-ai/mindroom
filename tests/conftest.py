@@ -1038,7 +1038,6 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             system_enrichment_items=request.system_enrichment_items,
             response_envelope=request.response_envelope,
             correlation_id=request.correlation_id,
-            target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
         )
         return _resolved_event_id_from_test_result(result)

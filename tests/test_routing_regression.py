@@ -29,7 +29,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
-from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -52,6 +52,43 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for routing regression tests."""
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
+
+
+def _policy_dispatch(
+    *,
+    agent_name: str,
+    room_id: str,
+    context: MessageContext,
+    requester_user_id: str,
+    body: str,
+    source_event_id: str = "$event",
+) -> PreparedDispatch:
+    """Build a complete prepared dispatch for direct turn-policy tests."""
+    target = MessageTarget.resolve(room_id, context.thread_id, source_event_id)
+    envelope = MessageEnvelope(
+        source_event_id=source_event_id,
+        room_id=room_id,
+        target=target,
+        requester_id=requester_user_id,
+        sender_id=requester_user_id,
+        body=body,
+        attachment_ids=(),
+        mentioned_agents=tuple(context.mentioned_agents),
+        agent_name=agent_name,
+        source_kind="message",
+        origin=message_origin(
+            sender_id=requester_user_id,
+            requester_id=requester_user_id,
+            source_kind="message",
+        ),
+    )
+    return PreparedDispatch(
+        requester_user_id=requester_user_id,
+        context=context,
+        target=target,
+        correlation_id=source_event_id,
+        envelope=envelope,
+    )
 
 
 def setup_test_bot(
@@ -952,11 +989,17 @@ class TestRoutingRegression:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_agent_respond,
         ):
             action = await alpha_bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(
+                    agent_name=alpha_bot.agent_name,
+                    room_id=room.room_id,
+                    context=context,
+                    requester_user_id="@user:localhost",
+                    body="can anyone help?",
+                ),
                 room,
-                "@user:localhost",
                 "can anyone help?",
                 False,
+                has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -1028,11 +1071,17 @@ class TestRoutingRegression:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(
+                agent_name=bot.agent_name,
+                room_id=room.room_id,
+                context=context,
+                requester_user_id="@user:localhost",
+                body="ops, help",
+            ),
             room,
-            "@user:localhost",
             "ops, help",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "reject"

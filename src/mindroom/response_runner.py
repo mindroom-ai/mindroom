@@ -296,7 +296,6 @@ class ResponseRequest:
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
     correlation_id: str | None = None
-    target: MessageTarget | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
@@ -550,10 +549,6 @@ class ResponseRunner:
             ),
         )
 
-    def _resolve_request_target(self, request: ResponseRequest) -> MessageTarget:
-        """Resolve the canonical response target for one request."""
-        return request.target or request.response_envelope.target
-
     def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return still-running response event IDs for one room."""
         return {
@@ -569,7 +564,7 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget], Awaitable[str | None]],
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
-        resolved_target = self._resolve_request_target(request)
+        resolved_target = request.response_envelope.target
         return await self._lifecycle_coordinator.run_locked_response(
             target=resolved_target,
             response_envelope=request.response_envelope,
@@ -590,7 +585,6 @@ class ResponseRunner:
         return replace(
             request,
             thread_id=resolved_target.resolved_thread_id,
-            target=resolved_target,
             response_envelope=response_envelope,
         )
 
@@ -877,7 +871,7 @@ class ResponseRunner:
             if request.existing_event_id is None or request.existing_event_is_placeholder
             else resolved_target.with_thread_root(request.thread_id)
         )
-        delivery_request_base = replace(resolved_request, target=delivery_target)
+        delivery_request_base = resolved_request
         session_id = resolved_target.session_id
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
@@ -931,10 +925,6 @@ class ResponseRunner:
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
             nonlocal final_delivery_outcome, tracked_event_id, delivery_stage_started
             delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
-            delivery_target = delivery_request.target
-            if delivery_target is None:
-                msg = "Team response delivery target was not resolved"
-                raise RuntimeError(msg)
             if message_id is not None:
                 tracked_event_id = message_id
                 team_turn_recorder.set_response_event_id(message_id)
@@ -1181,9 +1171,6 @@ class ResponseRunner:
 
         try:
             run_message_id = await self.run_cancellable_response(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
                 target=delivery_target,
                 response_function=generate_team_response,
                 thinking_message=thinking_msg,
@@ -1302,24 +1289,16 @@ class ResponseRunner:
     async def run_cancellable_response(
         self,
         *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
+        target: MessageTarget,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
         thinking_message: str | None = None,
         existing_event_id: str | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
-        target: MessageTarget | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response generation function with cancellation support."""
-        resolved_target = target or self.deps.resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        )
         try:
             self.in_flight_response_count += 1
             return await ResponseAttemptRunner(
@@ -1337,7 +1316,7 @@ class ResponseRunner:
                 ),
             ).run(
                 ResponseAttemptRequest(
-                    target=resolved_target,
+                    target=target,
                     response_function=response_function,
                     thinking_message=thinking_message,
                     existing_event_id=existing_event_id,
@@ -1357,11 +1336,9 @@ class ResponseRunner:
         existing_event_uses_thread_id: bool,
         room_mode: bool,
     ) -> _PreparedResponseRuntime:
-        resolved_target = self._resolve_request_target(request)
+        resolved_target = request.response_envelope.target
         response_thread_id = (
-            resolved_target.resolved_thread_id
-            if request.target is not None
-            else request.thread_id
+            request.thread_id
             if request.existing_event_id and existing_event_uses_thread_id
             else request.response_envelope.target.resolved_thread_id
         )
@@ -1996,7 +1973,6 @@ class ResponseRunner:
             model_prompt=model_prompt_text,
             thread_history=model_thread_history,
             media=request.media or MediaInputs(),
-            target=resolved_target,
         )
 
         session_id = resolved_target.session_id
@@ -2143,9 +2119,6 @@ class ResponseRunner:
         run_message_id: str | None = None
         try:
             run_message_id = await self.run_cancellable_response(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
                 target=resolved_target,
                 response_function=generate,
                 thinking_message=thinking_msg,

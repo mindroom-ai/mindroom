@@ -49,8 +49,3 @@ def hook_ingress_policy(envelope: MessageEnvelope) -> HookIngressPolicy:
         bypass_unmentioned_agent_gate=policy.bypass_unmentioned_agent_gate,
         allow_full_dispatch=False,
     )
-
-
-def should_handle_interactive_text_response(envelope: MessageEnvelope) -> bool:
-    """Return whether one inbound text event may answer an interactive prompt."""
-    return envelope.origin.may_answer_interactive_prompt

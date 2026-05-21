@@ -1280,6 +1280,7 @@ class TestCommandThreadContextRoomMode:
                 event=event,
                 requester_user_id="@user:localhost",
                 command=command,
+                target=MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True),
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None

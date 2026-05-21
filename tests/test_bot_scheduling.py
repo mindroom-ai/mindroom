@@ -123,7 +123,16 @@ async def _execute_command(
     command: Command,
 ) -> None:
     """Execute one command through the current planner owner."""
-    await bot._turn_controller._execute_command(room, event, requester_user_id, command)
+    content = event.source.get("content", {})
+    relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else {}
+    thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+    target = MessageTarget.resolve(
+        room.room_id,
+        thread_id,
+        event.event_id,
+        thread_start_root_event_id=None if thread_id else event.event_id,
+    )
+    await bot._turn_controller._execute_command(room, event, requester_user_id, command, target=target)
 
 
 @pytest.fixture

@@ -29,10 +29,11 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import should_agent_respond
-from mindroom.turn_policy import ResponseAction, TurnPolicy, TurnPolicyDeps
-from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
+from tests.conftest import bind_runtime_paths, create_mock_room, request_envelope, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -217,6 +218,22 @@ class TestAgentResponseLogic:
             has_non_agent_mentions=False,
         )
         assert context.planning_thread_history_unavailable is True
+        target = MessageTarget.resolve(room.room_id, context.thread_id, "$event")
+        dispatch = PreparedDispatch(
+            requester_user_id=self.sender,
+            context=context,
+            target=target,
+            correlation_id="$event",
+            envelope=request_envelope(
+                room_id=room.room_id,
+                reply_to_event_id="$event",
+                thread_id=context.thread_id,
+                prompt="continue",
+                user_id=self.sender,
+                target=target,
+                agent_name="calculator",
+            ),
+        )
 
         candidate_ids = entity_ids(self.config, self.runtime_paths)
         with patch(
@@ -224,11 +241,11 @@ class TestAgentResponseLogic:
             new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
             multiple_visible_action = await policy.resolve_response_action(
-                context,
+                dispatch,
                 room,
-                self.sender,
                 "continue",
                 False,
+                has_active_response_for_target=lambda _target: False,
             )
 
         assert multiple_visible_action.kind == "skip"
@@ -238,11 +255,11 @@ class TestAgentResponseLogic:
             new=AsyncMock(return_value=[candidate_ids["calculator"]]),
         ):
             single_visible_action = await policy.resolve_response_action(
-                context,
+                dispatch,
                 room,
-                self.sender,
                 "continue",
                 False,
+                has_active_response_for_target=lambda _target: False,
             )
 
         assert single_visible_action.kind == "individual"

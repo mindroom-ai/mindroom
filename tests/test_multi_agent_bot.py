@@ -361,6 +361,40 @@ def _matrix_room(
     return room
 
 
+def _policy_dispatch(
+    bot: AgentBot | TeamBot,
+    room: nio.MatrixRoom,
+    context: MessageContext,
+    requester_user_id: str,
+    body: str,
+    *,
+    source_event_id: str = "$event",
+    source_kind: str = "message",
+) -> PreparedDispatch:
+    """Build the complete prepared dispatch required by turn-policy tests."""
+    target = MessageTarget.resolve(room.room_id, context.thread_id, source_event_id)
+    envelope = MessageEnvelope(
+        source_event_id=source_event_id,
+        room_id=room.room_id,
+        target=target,
+        requester_id=requester_user_id,
+        sender_id=requester_user_id,
+        body=body,
+        attachment_ids=(),
+        mentioned_agents=tuple(context.mentioned_agents),
+        agent_name=bot.agent_name,
+        source_kind=source_kind,
+        origin=message_origin(sender_id=requester_user_id, requester_id=requester_user_id, source_kind=source_kind),
+    )
+    return PreparedDispatch(
+        requester_user_id=requester_user_id,
+        context=context,
+        target=target,
+        correlation_id=source_event_id,
+        envelope=envelope,
+    )
+
+
 def _agent_response_handled_turn(
     *,
     agent_name: str,
@@ -405,7 +439,6 @@ def _response_request(
     attachment_ids: Sequence[str] | None = None,
     response_envelope: MessageEnvelope,
     correlation_id: str | None = None,
-    target: MessageTarget | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> ResponseRequest:
@@ -424,7 +457,6 @@ def _response_request(
         attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
         response_envelope=response_envelope,
         correlation_id=correlation_id,
-        target=target,
         matrix_run_metadata=matrix_run_metadata,
         system_enrichment_items=system_enrichment_items,
     )
@@ -2541,7 +2573,6 @@ class TestAgentBot:
                     reply_to_event_id="$reply_plain:localhost",
                     thread_history=[],
                     user_id="@user:localhost",
-                    target=target,
                     response_envelope=request_envelope(
                         room_id="!test:localhost",
                         reply_to_event_id="$reply_plain:localhost",
@@ -2599,7 +2630,6 @@ class TestAgentBot:
                     reply_to_event_id="$thread_root:localhost",
                     thread_history=[],
                     user_id="@user:localhost",
-                    target=target,
                     response_envelope=request_envelope(
                         room_id="!test:localhost",
                         reply_to_event_id="$thread_root:localhost",
@@ -5899,7 +5929,6 @@ class TestAgentBot:
                 thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
-                target=resolved_target,
                 response_envelope=response_envelope,
             )
 
@@ -7150,8 +7179,6 @@ class TestAgentBot:
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
-        assert generate_kwargs["target"].source_thread_id is None
-        assert generate_kwargs["target"].resolved_thread_id == "$img_event"
         assert generate_kwargs["response_envelope"].target.source_thread_id is None
         assert generate_kwargs["response_envelope"].target.resolved_thread_id == "$img_event"
         assert generate_kwargs["user_id"] == "@user:localhost"
@@ -7623,8 +7650,6 @@ class TestAgentBot:
         assert generate_kwargs["reply_to_event_id"] == "$file_event"
         assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
-        assert generate_kwargs["target"].source_thread_id is None
-        assert generate_kwargs["target"].resolved_thread_id == "$file_event"
         assert generate_kwargs["response_envelope"].target.source_thread_id is None
         assert generate_kwargs["response_envelope"].target.resolved_thread_id == "$file_event"
         assert generate_kwargs["user_id"] == "@user:localhost"
@@ -8651,11 +8676,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                "@user:localhost",
                 "help me",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8707,11 +8732,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                "@alice:localhost",
                 "calculator and general, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8763,11 +8788,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
-                "@user:localhost",
                 "general and research, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8820,11 +8845,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8878,11 +8903,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                "@alice:localhost",
                 "calculator and general, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -8930,11 +8955,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.decide_team_formation", new=AsyncMock(return_value=TeamResolution.none())):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
-                "@bob:localhost",
                 "can someone help?",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -8975,11 +9000,11 @@ class TestAgentBot:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
-            "@bob:localhost",
             "calculator, help",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "skip"
@@ -9038,11 +9063,11 @@ class TestAgentBot:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
-            "@bob:localhost",
             "ops, help",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "skip"
@@ -9114,11 +9139,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -9192,11 +9217,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -9247,11 +9272,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -9301,11 +9326,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                "@user:localhost",
                 "help me",
                 True,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -9396,13 +9421,16 @@ class TestAgentBot:
             ) as mock_has_active_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "stop if you see this",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9478,13 +9506,16 @@ class TestAgentBot:
             patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "continue",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9542,13 +9573,16 @@ class TestAgentBot:
 
         with patch.object(bot._response_runner, "has_active_response_for_target", return_value=True):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "continue",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9618,13 +9652,16 @@ class TestAgentBot:
             ) as mock_has_active_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "stop if you see this",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9696,13 +9733,16 @@ class TestAgentBot:
             ) as mock_has_active_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "stop if you see this",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9954,11 +9994,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
-                "@bas:localhost",
                 "I fixed two issues",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -10020,11 +10060,11 @@ class TestAgentBot:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
-            "@bas:localhost",
             "Follow-up",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "individual"
@@ -10086,11 +10126,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                "@bas:localhost",
                 "Follow-up",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -10151,11 +10191,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                "@bas:localhost",
                 "Follow-up",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -11256,7 +11296,7 @@ class TestAgentBot:
                 return_value=envelope,
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11351,7 +11391,7 @@ class TestAgentBot:
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11503,7 +11543,7 @@ class TestAgentBot:
             ),
             patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11590,7 +11630,7 @@ class TestAgentBot:
             ),
             patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",

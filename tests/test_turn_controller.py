@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.message_target import MessageTarget
+    from mindroom.hooks import MessageEnvelope
 
 
 async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
@@ -100,7 +100,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         delivery_gateway=bot._delivery_gateway,
     )
 
-    captured_target = None
+    captured_envelope: MessageEnvelope | None = None
 
     async def generate_response(
         room_id: str,
@@ -115,13 +115,13 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         attachment_ids: list[str] | None = None,  # noqa: ARG001
         model_prompt: str | None = None,  # noqa: ARG001
         system_enrichment_items: tuple[object, ...] = (),  # noqa: ARG001
-        response_envelope: object | None = None,  # noqa: ARG001
+        response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,  # noqa: ARG001
-        target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, object] | None = None,  # noqa: ARG001
     ) -> str | None:
-        nonlocal captured_target
-        captured_target = target
+        nonlocal captured_envelope
+        assert response_envelope is not None
+        captured_envelope = response_envelope
         assert room_id == room.room_id
         assert prompt == "The user selected: Option 1"
         assert reply_to_event_id == selection.question_event_id
@@ -129,8 +129,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         assert thread_history == []
         assert existing_event_id == "$ack:localhost"
         assert existing_event_is_placeholder is True
-        assert target is not None
-        assert target.reply_to_event_id == selection.question_event_id
+        assert response_envelope.target.reply_to_event_id == selection.question_event_id
 
         async def response_stream() -> AsyncIterator[str]:
             yield "Processed selection"
@@ -149,7 +148,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
                 response_stream=response_stream(),
                 existing_event_id=existing_event_id,
                 adopt_existing_placeholder=existing_event_is_placeholder,
-                target=target,
+                target=response_envelope.target,
             )
 
         mock_edit.assert_awaited()
@@ -170,8 +169,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id is None
     generate_response_mock.assert_awaited_once()
-    assert captured_target is not None
-    assert captured_target.resolved_thread_id == selection.thread_id
+    assert captured_envelope is not None
+    assert captured_envelope.target.resolved_thread_id == selection.thread_id
 
 
 @pytest.mark.asyncio

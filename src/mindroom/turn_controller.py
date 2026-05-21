@@ -56,7 +56,6 @@ from mindroom.hooks import (
     MessageEnvelope,
     build_hook_matrix_admin,
     hook_ingress_policy,
-    should_handle_interactive_text_response,
 )
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -808,7 +807,7 @@ class TurnController:
         ):
             return
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
-        if should_handle_interactive_text_response(envelope):
+        if envelope.origin.may_answer_interactive_prompt:
             selection = await interactive.handle_text_response(
                 self._client(),
                 room,
@@ -1139,18 +1138,12 @@ class TurnController:
         requester_user_id: str,
         command: Command,
         *,
-        target: MessageTarget | None = None,
+        target: MessageTarget,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=event),
         )
-        if target is None:
-            target = await self.deps.resolver.resolve_dispatch_target(
-                room,
-                event,
-                caller_label="command_context",
-            )
 
         async def send_response(
             response_text: str,
@@ -1281,7 +1274,6 @@ class TurnController:
                 existing_event_is_placeholder=True,
                 user_id=user_id,
                 response_envelope=response_envelope,
-                target=response_target,
                 matrix_run_metadata=selection_matrix_run_metadata,
             ),
         )
@@ -1664,7 +1656,6 @@ class TurnController:
                         attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
                         response_envelope=prepared_payload.envelope,
                         correlation_id=request.correlation_id,
-                        target=request.target,
                         matrix_run_metadata=matrix_run_metadata,
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         requires_model_history_refresh=False,
@@ -1686,7 +1677,6 @@ class TurnController:
                             user_id=dispatch.requester_user_id,
                             response_envelope=dispatch.envelope,
                             correlation_id=dispatch.correlation_id,
-                            target=dispatch.target,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             prepare_after_lock=prepare_request_after_lock,
@@ -1707,7 +1697,6 @@ class TurnController:
                             user_id=dispatch.requester_user_id,
                             response_envelope=dispatch.envelope,
                             correlation_id=dispatch.correlation_id,
-                            target=dispatch.target,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             prepare_after_lock=prepare_request_after_lock,
