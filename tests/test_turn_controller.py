@@ -11,13 +11,24 @@ import pytest
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
+from mindroom.coalescing import CoalescingGate
+from mindroom.coalescing_batch import CoalescedBatch, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
+from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+)
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.turn_controller import _VISIBLE_ROUTER_VOICE_ECHO_KEY
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -27,6 +38,7 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -53,6 +65,254 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
     except TimeoutError as exc:
         msg = "Timed out waiting for async test condition"
         raise AssertionError(msg) from exc
+
+
+def _make_general_bot(tmp_path: Path) -> AgentBot:
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"])}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+    persist_entity_accounts(config, runtime_paths_for(config))
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+    return bot
+
+
+def _prepared_text_event(
+    *,
+    event_id: str,
+    body: str,
+    sender: str = "@user:localhost",
+    source_kind: str | None = None,
+    content_overrides: dict[str, object] | None = None,
+) -> PreparedTextEvent:
+    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+    if source_kind is not None:
+        content[SOURCE_KIND_KEY] = source_kind
+    if content_overrides is not None:
+        content.update(content_overrides)
+    return PreparedTextEvent(
+        sender=sender,
+        event_id=event_id,
+        body=body,
+        source={
+            "content": content,
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+        server_timestamp=1000000,
+        source_kind_override=source_kind,
+    )
+
+
+@pytest.mark.asyncio
+async def test_active_thread_voice_stays_normal_and_coalesces(tmp_path: Path) -> None:
+    """Voice follow-ups during active responses should remain in one coalesced batch."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
+
+    voice_events = [
+        _prepared_text_event(event_id="$voice-1", body="first transcription", source_kind=VOICE_SOURCE_KIND),
+        _prepared_text_event(event_id="$voice-2", body="second transcription", source_kind=VOICE_SOURCE_KIND),
+    ]
+    for event in voice_events:
+        target = bot._turn_controller.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id="$thread:localhost",
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = bot._turn_controller.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id="@user:localhost",
+            target=target,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+        await bot._turn_controller._enqueue_prepared_text_for_dispatch(
+            room=room,
+            prepared_event=event,
+            dispatch_event=event,
+            envelope=envelope,
+            coalescing_thread_id="$thread:localhost",
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$voice-1", "$voice-2"]]
+    assert [pending.dispatch_policy_source_kind for pending in batches[0].pending_events] == [None, None]
+    assert ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND not in {
+        pending.dispatch_policy_source_kind for pending in batches[0].pending_events
+    }
+    assert "first transcription" in batches[0].prompt
+    assert "second transcription" in batches[0].prompt
+
+
+@pytest.mark.asyncio
+async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None:
+    """Router voice echoes should be marked handled without dispatching to agents."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    echo_event = _prepared_text_event(
+        event_id="$voice-echo",
+        body="🎤 transcribed audio",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        content_overrides={
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            _VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+    )
+
+    with patch(
+        "mindroom.turn_controller.interactive.handle_text_response",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as mock_interactive:
+        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=echo_event,
+            dispatch_event=echo_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+
+    await gate.drain_all()
+
+    mock_interactive.assert_not_awaited()
+    assert batches == []
+    assert bot._turn_store.is_handled("$voice-echo")
+
+
+@pytest.mark.asyncio
+async def test_voice_coalescing_real_trusted_router_handoff_still_dispatches(tmp_path: Path) -> None:
+    """Trusted router handoffs without the voice echo marker should still dispatch."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    handoff_event = _prepared_text_event(
+        event_id="$router-handoff",
+        body="@general could you help with this?",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        content_overrides={ORIGINAL_SENDER_KEY: "@user:localhost"},
+    )
+
+    with patch(
+        "mindroom.turn_controller.interactive.handle_text_response",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=handoff_event,
+            dispatch_event=handoff_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$router-handoff"]]
+    assert batches[0].source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert not bot._turn_store.is_handled("$router-handoff")
+
+
+@pytest.mark.asyncio
+async def test_voice_coalescing_command_hook_and_scheduled_bypasses_remain() -> None:
+    """Command, hook, and scheduled source kinds should keep their solo bypass behavior."""
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    pending_events = [
+        PendingEvent(
+            event=_prepared_text_event(event_id="$command", body="!help", source_kind=MESSAGE_SOURCE_KIND),
+            room=room,
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
+        PendingEvent(
+            event=_prepared_text_event(event_id="$hook", body="hook dispatch", source_kind=HOOK_DISPATCH_SOURCE_KIND),
+            room=room,
+            source_kind=HOOK_DISPATCH_SOURCE_KIND,
+        ),
+        PendingEvent(
+            event=_prepared_text_event(event_id="$scheduled", body="scheduled", source_kind=SCHEDULED_SOURCE_KIND),
+            room=room,
+            source_kind=SCHEDULED_SOURCE_KIND,
+        ),
+    ]
+
+    key = ("!test:localhost", "$thread:localhost", "@user:localhost")
+    for pending_event in pending_events:
+        await gate.enqueue(key, pending_event)
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$command"], ["$hook"], ["$scheduled"]]
+    assert all("quick succession" not in batch.prompt for batch in batches)
 
 
 @pytest.mark.asyncio

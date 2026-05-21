@@ -11410,12 +11410,12 @@ class TestAgentBot:
         assert pending_event.source_kind == source_kind
 
     @pytest.mark.asyncio
-    async def test_voice_preview_reserves_active_thread_follow_up(
+    async def test_voice_preview_uses_normal_coalescing_during_active_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Transcribed voice follow-ups should share the active-response notice path."""
+        """Transcribed voice follow-ups should stay coalescible during active responses."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _install_runtime_cache_support(bot)
@@ -11461,23 +11461,15 @@ class TestAgentBot:
             )
 
         mock_echo.assert_awaited_once()
-        mock_reserve_waiting_human_message.assert_called_once()
-        reserved_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
-        assert reserved_target.resolved_thread_id == "$thread_root"
-        reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
-        assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
+        mock_reserve_waiting_human_message.assert_not_called()
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-        assert len(pending_event.dispatch_metadata) == 1
-        metadata = pending_event.dispatch_metadata[0]
-        assert metadata.kind == "queued_notice_reservation"
-        assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is True
+        assert pending_event.dispatch_policy_source_kind is None
+        assert pending_event.dispatch_metadata == ()
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(

@@ -133,6 +133,7 @@ if TYPE_CHECKING:
 type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
+_VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 
 
 def _queued_notice_dispatch_metadata(
@@ -519,11 +520,49 @@ class TurnController:
         envelope: MessageEnvelope,
     ) -> bool:
         """Return whether one human thread follow-up should skip in-flight coalescing."""
+        if envelope.source_kind == VOICE_SOURCE_KIND:
+            return False
         if envelope.target.resolved_thread_id is None:
             return False
         if not envelope.origin.may_answer_interactive_prompt:
             return False
         return self.deps.response_runner.has_active_response_for_target(envelope.target)
+
+    def _reserve_queued_notice_for_bypassing_active_thread_follow_up(
+        self,
+        *,
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+    ) -> QueuedHumanNoticeReservation | None:
+        """Reserve a queued-human notice only for active follow-ups that stay solo."""
+        if not self._should_bypass_coalescing_for_active_thread_follow_up(envelope=envelope):
+            return None
+        return self.deps.response_runner.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+        )
+
+    def _retarget_queued_notice_for_bypassing_active_thread_follow_up(
+        self,
+        *,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        previous_target: MessageTarget | None,
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+    ) -> QueuedHumanNoticeReservation | None:
+        """Move a queued-human notice when a solo active follow-up target changes."""
+        if queued_notice_reservation is None:
+            return self._reserve_queued_notice_for_bypassing_active_thread_follow_up(
+                target=target,
+                envelope=envelope,
+            )
+        if previous_target is None or self._same_response_lifecycle_target(previous_target, target):
+            return queued_notice_reservation
+        queued_notice_reservation.cancel()
+        return self._reserve_queued_notice_for_bypassing_active_thread_follow_up(
+            target=target,
+            envelope=envelope,
+        )
 
     @staticmethod
     def _same_response_lifecycle_target(left: MessageTarget, right: MessageTarget) -> bool:
@@ -805,6 +844,13 @@ class TurnController:
         original_sender = self._trusted_human_original_sender_for_event(prepared_event)
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
         prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
+        if (
+            isinstance(content, dict)
+            and content.get(_VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+            and content.get(SOURCE_KIND_KEY) == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        ):
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(prepared_event.event_id))
+            return
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             VOICE_SOURCE_KIND,
@@ -977,6 +1023,7 @@ class TurnController:
         )
         extra_content: dict[str, Any] = {
             SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            _VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         }
         if relay_original_sender is not None:
             extra_content[ORIGINAL_SENDER_KEY] = relay_original_sender
@@ -2266,9 +2313,9 @@ class TurnController:
                 target=target,
                 source_kind=VOICE_SOURCE_KIND,
             )
-            queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+            queued_notice_reservation = self._reserve_queued_notice_for_bypassing_active_thread_follow_up(
                 target=target,
-                response_envelope=envelope,
+                envelope=envelope,
             )
         reservation_released_or_handed_off = False
         try:
@@ -2313,17 +2360,12 @@ class TurnController:
                 target=normalized_target,
                 source_kind=VOICE_SOURCE_KIND,
             )
-            if queued_notice_reservation is None:
-                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                    target=normalized_target,
-                    response_envelope=envelope,
-                )
-            elif target is not None and not self._same_response_lifecycle_target(target, normalized_target):
-                queued_notice_reservation.cancel()
-                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                    target=normalized_target,
-                    response_envelope=envelope,
-                )
+            queued_notice_reservation = self._retarget_queued_notice_for_bypassing_active_thread_follow_up(
+                queued_notice_reservation=queued_notice_reservation,
+                previous_target=target,
+                target=normalized_target,
+                envelope=envelope,
+            )
             await self._enqueue_prepared_text_for_dispatch(
                 room=room,
                 prepared_event=normalized_voice.event,

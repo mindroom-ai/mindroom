@@ -262,8 +262,8 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
 
 
 @pytest.mark.asyncio
-async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: AgentBot) -> None:
-    """Audio follow-ups should notify an active response before transcription finishes."""
+async def test_voice_message_does_not_reserve_active_turn_before_stt(mock_home_bot: AgentBot) -> None:
+    """Audio follow-ups should remain coalescible while transcription is pending."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -315,7 +315,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(prepare_started.wait(), timeout=0.2)
-            assert queued_signal.pending_human_messages == 1
+            assert queued_signal.pending_human_messages == 0
             allow_prepare.set()
             await task
     finally:
@@ -337,11 +337,11 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
     ],
 )
 @pytest.mark.asyncio
-async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
+async def test_voice_message_does_not_reserve_active_turn_signal_when_post_stt_echo_fails(
     mock_home_bot: AgentBot,
     echo_error: BaseException,
 ) -> None:
-    """Post-STT failures before dispatch handoff should release the pre-STT reservation."""
+    """Post-STT failures before dispatch handoff should not leave a voice reservation."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -381,7 +381,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
     )
 
     async def fail_visible_echo(*_args: object, **_kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 1
+        assert queued_signal.pending_human_messages == 0
         raise echo_error
 
     queued_signal.begin_response_turn()
@@ -414,10 +414,10 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
 
 
 @pytest.mark.asyncio
-async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
+async def test_voice_message_keeps_normal_dispatch_when_stt_thread_changes(
     mock_home_bot: AgentBot,
 ) -> None:
-    """A post-STT target change should cancel the pre-STT notice and reserve the final target."""
+    """A post-STT target change should not create solo voice dispatch metadata."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -463,15 +463,11 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
     lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
     pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
     post_stt_signal = lifecycle._get_or_create_queued_signal(post_stt_target)
-    captured_reservations: list[object] = []
 
     async def capture_enqueue(*_args: object, **kwargs: object) -> None:
         assert pre_stt_signal.pending_human_messages == 0
-        assert post_stt_signal.pending_human_messages == 1
-        reservation = kwargs["queued_notice_reservation"]
-        assert reservation is not None
-        captured_reservations.append(reservation)
-        reservation.cancel()
+        assert post_stt_signal.pending_human_messages == 0
+        assert kwargs["queued_notice_reservation"] is None
 
     pre_stt_signal.begin_response_turn()
     post_stt_signal.begin_response_turn()
@@ -496,7 +492,6 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
         pre_stt_signal.finish_response_turn()
         post_stt_signal.finish_response_turn()
 
-    assert len(captured_reservations) == 1
     assert pre_stt_signal.pending_human_messages == 0
     assert post_stt_signal.pending_human_messages == 0
     assert not pre_stt_signal.is_set()
@@ -504,10 +499,10 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
 
 
 @pytest.mark.asyncio
-async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
+async def test_room_mode_voice_stays_normal_until_queued_dispatch_owns_it(
     mock_home_bot: AgentBot,
 ) -> None:
-    """Room-mode voice should signal the room-level active turn before STT finishes."""
+    """Room-mode voice should avoid solo notice metadata before dispatch."""
     bot = mock_home_bot
     bot.config.agents["home"].thread_mode = "room"
     room = MagicMock(spec=nio.MatrixRoom)
@@ -546,7 +541,6 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
-    captured_reservations: list[object] = []
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
 
@@ -559,11 +553,8 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         return normalized_voice
 
     async def capture_enqueue(*_args: object, **kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 1
-        reservation = kwargs["queued_notice_reservation"]
-        assert reservation is not None
-        captured_reservations.append(reservation)
-        reservation.cancel()
+        assert queued_signal.pending_human_messages == 0
+        assert kwargs["queued_notice_reservation"] is None
 
     queued_signal.begin_response_turn()
     task: asyncio.Task[None] | None = None
@@ -585,7 +576,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(prepare_started.wait(), timeout=0.2)
-            assert queued_signal.pending_human_messages == 1
+            assert queued_signal.pending_human_messages == 0
             allow_prepare.set()
             await task
     finally:
@@ -595,6 +586,5 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
                 await task
         queued_signal.finish_response_turn()
 
-    assert len(captured_reservations) == 1
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
