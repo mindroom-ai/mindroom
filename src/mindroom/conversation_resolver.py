@@ -35,6 +35,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
+from mindroom.turn_origin import classify_turn_origin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -348,6 +349,8 @@ class ConversationResolver:
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int | None = None,
+        original_sender: str | None = None,
+        trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -366,6 +369,8 @@ class ConversationResolver:
             event_source=event.source,
         )
         registry = entity_identity_registry(config, self.deps.runtime_paths)
+        sender_entity_name = registry.current_entity_name_for_user_id(event.sender)
+        requester_entity_name = registry.current_entity_name_for_user_id(requester_user_id)
 
         return MessageEnvelope(
             source_event_id=event.event_id,
@@ -386,6 +391,15 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
+            origin=classify_turn_origin(
+                transport_sender_id=event.sender,
+                requester_id=requester_user_id,
+                sender_entity_name=sender_entity_name,
+                requester_entity_name=requester_entity_name,
+                source_kind=resolved_source_kind,
+                original_sender=original_sender,
+                trusted_user_relay=trusted_user_relay,
+            ),
         )
 
     def build_ingress_envelope(
@@ -402,6 +416,8 @@ class ConversationResolver:
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int | None = None,
+        original_sender: str | None = None,
+        trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
         """Build one lightweight ingress envelope without extracting thread context."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -412,6 +428,9 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
         )
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        sender_entity_name = registry.current_entity_name_for_user_id(event.sender)
+        requester_entity_name = registry.current_entity_name_for_user_id(requester_user_id)
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
@@ -433,6 +452,15 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
+            origin=classify_turn_origin(
+                transport_sender_id=event.sender,
+                requester_id=requester_user_id,
+                sender_entity_name=sender_entity_name,
+                requester_entity_name=requester_entity_name,
+                source_kind=resolved_source_kind,
+                original_sender=original_sender,
+                trusted_user_relay=trusted_user_relay,
+            ),
         )
 
     async def coalescing_thread_id(

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.turn_origin import TurnOrigin
 
     from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
@@ -235,6 +236,7 @@ class MessageEnvelope:
     hook_source: str | None = None
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
+    origin: TurnOrigin | None = None
 
 
 @dataclass(slots=True)

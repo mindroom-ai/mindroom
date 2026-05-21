@@ -26,6 +26,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import should_agent_respond
 from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_origin import TurnIntent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -1180,6 +1181,9 @@ class TestCommandHandling:
         assert result is not None
         assert result.dispatch.requester_user_id == "@mindroom_router:localhost"
         assert result.dispatch.envelope.source_kind == SCHEDULED_SOURCE_KIND
+        assert result.dispatch.envelope.origin is not None
+        assert result.dispatch.envelope.origin.intent == TurnIntent.SCHEDULED_FIRE
+        assert not result.dispatch.envelope.origin.blocks_unmentioned_managed_sender
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
         assert "ignore_unmentioned_agent_event" not in debug_calls
 

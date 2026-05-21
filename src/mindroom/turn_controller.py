@@ -47,7 +47,7 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, is_automation_source_kind, is_voice_event
+from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
@@ -93,6 +93,7 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.timing import timing_scope as timing_scope_context
+from mindroom.turn_origin import original_sender_for_router_handoff
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
@@ -944,6 +945,7 @@ class TurnController:
     ) -> _DispatchPreparation | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
+        use_trusted_router_relay_context = False
         if use_command_context:
             dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
@@ -957,7 +959,7 @@ class TurnController:
                 extract_context_start,
                 path="command",
             )
-        elif self._should_use_trusted_router_relay_context(
+        elif use_trusted_router_relay_context := self._should_use_trusted_router_relay_context(
             event,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
@@ -1018,6 +1020,8 @@ class TurnController:
             ),
             hook_source=ingress_metadata.hook_source if ingress_metadata is not None else None,
             message_received_depth=(ingress_metadata.message_received_depth if ingress_metadata is not None else None),
+            original_sender=(payload_metadata.original_sender if payload_metadata is not None else None),
+            trusted_user_relay=use_trusted_router_relay_context,
         )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.build_message_envelope",
@@ -1040,14 +1044,17 @@ class TurnController:
             self._mark_source_events_responded(handled_turn)
             return None
 
-        sender_agent_name = self._managed_entity_name_for_sender(requester_user_id)
-        if (
-            sender_agent_name
-            # Plain hook sends follow normal mention routing; hook_dispatch bypasses via ingress_policy.
-            and envelope.source_kind != SCHEDULED_SOURCE_KIND
-            and not context.am_i_mentioned
-            and not ingress_policy.bypass_unmentioned_agent_gate
-        ):
+        sender_agent_name = (
+            envelope.origin.requester_entity_name
+            if envelope.origin is not None
+            else self._managed_entity_name_for_sender(requester_user_id)
+        )
+        blocks_unmentioned_managed_sender = (
+            envelope.origin.blocks_unmentioned_managed_sender
+            if envelope.origin is not None
+            else sender_agent_name is not None and not ingress_policy.bypass_unmentioned_agent_gate
+        )
+        if blocks_unmentioned_managed_sender and not context.am_i_mentioned:
             self.deps.logger.debug(
                 "ignore_unmentioned_agent_event",
                 agent=sender_agent_name,
@@ -1302,12 +1309,13 @@ class TurnController:
         )
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
-        if (
-            suggested_entity
-            and ORIGINAL_SENDER_KEY not in routed_extra_content
-            and self._managed_entity_name_for_sender(requester_user_id) is None
-        ):
-            routed_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+        handoff_original_sender = original_sender_for_router_handoff(
+            target_entity_name=suggested_entity,
+            requester_id=requester_user_id,
+            requester_entity_name=self._managed_entity_name_for_sender(requester_user_id),
+        )
+        if handoff_original_sender is not None and ORIGINAL_SENDER_KEY not in routed_extra_content:
+            routed_extra_content[ORIGINAL_SENDER_KEY] = handoff_original_sender
         routed_media_events = list(media_events or [])
         if not routed_media_events and is_matrix_media_dispatch_event(event):
             routed_media_events.append(event)

@@ -160,7 +160,11 @@ class ResponseLifecycleCoordinator:
         response_envelope: MessageEnvelope | None,
     ) -> bool:
         """Return whether one queued ingress should interrupt the active turn."""
-        return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
+        if response_envelope is None:
+            return False
+        if response_envelope.origin is not None:
+            return response_envelope.origin.may_answer_interactive_prompt
+        return not is_automation_source_kind(response_envelope.source_kind)
 
     def reserve_waiting_human_message(
         self,

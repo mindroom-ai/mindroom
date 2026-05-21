@@ -172,6 +172,7 @@ class IngressHookRunner:
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
             dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,
+            origin=dispatch.envelope.origin,
         )
         model_prompt = payload.model_prompt
         if hook_registered:
@@ -718,10 +719,13 @@ class TurnPolicy:
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        if (
-            is_automation_source_kind(source_envelope.source_kind)
-            or registry.current_entity_name_for_user_id(source_envelope.sender_id) is not None
-        ):
+        source_origin = source_envelope.origin
+        source_is_automation = (
+            not source_origin.may_answer_interactive_prompt
+            if source_origin is not None
+            else is_automation_source_kind(source_envelope.source_kind)
+        )
+        if source_is_automation or registry.current_entity_name_for_user_id(source_envelope.sender_id) is not None:
             return False
         policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind
         if policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
