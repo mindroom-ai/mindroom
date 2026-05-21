@@ -4,6 +4,7 @@ import base64
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
+from backend.openrouter import CreatedOpenRouterKey
 from fastapi.testclient import TestClient
 
 
@@ -226,6 +227,123 @@ class TestProvisionerEndpoints:
         # Verify calls
         mock_kubectl.assert_called()
         mock_helm.assert_called()
+
+    def test_byok_provisioning_does_not_inject_platform_openrouter_key(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """BYOK instances should not receive a shared platform OpenRouter key."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with (
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch("backend.routes.provisioner.create_openrouter_key", create=True) as create_key,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == ""
+        create_key.assert_not_called()
+
+    def test_hobby_provisioning_creates_monthly_limited_openrouter_key(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Hobby instances should get a per-customer $15 monthly OpenRouter key."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+        created_key = CreatedOpenRouterKey(
+            key="sk-or-v1-hobby-customer",
+            hash="hobby_hash",
+            label="MindRoom hobby instance 123",
+            limit_usd=15,
+            limit_reset="monthly",
+        )
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True) as create_key,
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        plan = create_key.call_args.kwargs["plan"]
+        assert plan.monthly_limit_usd == 15
+        assert plan.name == "MindRoom hobby account acc_test_123 instance 123"
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+        update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
+        assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
+
+    def test_pro_provisioning_uses_larger_resource_profile_and_openrouter_limit(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Pro instances should get a $150 OpenRouter limit and larger Kubernetes resources."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+        created_key = CreatedOpenRouterKey(
+            key="sk-or-v1-pro-customer",
+            hash="pro_hash",
+            label="MindRoom pro instance 123",
+            limit_usd=150,
+            limit_reset="monthly",
+        )
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True) as create_key,
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "pro"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        plan = create_key.call_args.kwargs["plan"]
+        assert plan.monthly_limit_usd == 150
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == "sk-or-v1-pro-customer"
+        set_args = _helm_set_args(mock_helm.call_args.args[0])
+        assert set_args["storage"] == "25Gi"
+        assert set_args["mindroomResources.requests.memory"] == "1Gi"
+        assert set_args["mindroomResources.limits.memory"] == "4Gi"
+        assert set_args["synapseResources.requests.memory"] == "1Gi"
+        assert set_args["sandboxRunnerResources.limits.memory"] == "2Gi"
 
     def test_provision_passes_owner_matrix_user_to_instance_chart(
         self,

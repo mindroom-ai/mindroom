@@ -1,5 +1,5 @@
 // Database types for Supabase
-type PlanTier = 'free' | 'starter' | 'professional' | 'enterprise'
+type PlanTier = 'free' | 'byok' | 'hobby' | 'pro' | 'enterprise'
 type AccountStatus = 'active' | 'suspended' | 'deleted' | 'pending_verification'
 type SubscriptionStatus = 'trialing' | 'active' | 'cancelled' | 'past_due' | 'paused'
 
@@ -123,9 +123,14 @@ export type Database = {
           id: string
           subscription_id: string
           subdomain: string
-          status: 'provisioning' | 'running' | 'failed' | 'stopped'
+          status: 'provisioning' | 'running' | 'stopped' | 'error' | 'deprovisioned' | 'restarting'
           frontend_url: string | null
           backend_url: string | null
+          openrouter_key_hash: string | null
+          openrouter_key_label: string | null
+          openrouter_key_limit_usd: number | null
+          openrouter_key_limit_reset: string | null
+          openrouter_key_created_at: string | null
           created_at: string
           updated_at: string
         }
@@ -133,9 +138,14 @@ export type Database = {
           id?: string
           subscription_id: string
           subdomain: string
-          status?: 'provisioning' | 'running' | 'failed' | 'stopped'
+          status?: 'provisioning' | 'running' | 'stopped' | 'error' | 'deprovisioned' | 'restarting'
           frontend_url?: string | null
           backend_url?: string | null
+          openrouter_key_hash?: string | null
+          openrouter_key_label?: string | null
+          openrouter_key_limit_usd?: number | null
+          openrouter_key_limit_reset?: string | null
+          openrouter_key_created_at?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -143,9 +153,14 @@ export type Database = {
           id?: string
           subscription_id?: string
           subdomain?: string
-          status?: 'provisioning' | 'running' | 'failed' | 'stopped'
+          status?: 'provisioning' | 'running' | 'stopped' | 'error' | 'deprovisioned' | 'restarting'
           frontend_url?: string | null
           backend_url?: string | null
+          openrouter_key_hash?: string | null
+          openrouter_key_label?: string | null
+          openrouter_key_limit_usd?: number | null
+          openrouter_key_limit_reset?: string | null
+          openrouter_key_created_at?: string | null
           created_at?: string
           updated_at?: string
         }

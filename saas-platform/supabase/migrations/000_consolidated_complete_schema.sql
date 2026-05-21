@@ -113,6 +113,13 @@ CREATE TABLE instances (
     matrix_url TEXT, -- Synapse Matrix server URL
     matrix_server_url TEXT, -- Alias for compatibility
 
+    -- Non-secret OpenRouter key metadata for included AI budget plans
+    openrouter_key_hash TEXT,
+    openrouter_key_label TEXT,
+    openrouter_key_limit_usd INTEGER,
+    openrouter_key_limit_reset TEXT,
+    openrouter_key_created_at TIMESTAMPTZ,
+
     -- Resource limits
     memory_limit_mb INTEGER DEFAULT 512,
     cpu_limit DECIMAL(3,2) DEFAULT 0.5,

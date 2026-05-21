@@ -15,6 +15,9 @@ stripe:
   secretKey: # sk_live_...
   webhookSecret: # whsec_...
 
+apiKeys:
+  openrouterProvisioning: # OpenRouter management key for per-customer included AI budget keys.
+
 cleanupScheduler:
   enabled: "true"
 
