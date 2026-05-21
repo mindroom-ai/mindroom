@@ -1484,6 +1484,8 @@ class TestRunApiFlags:
         result = runner.invoke(app, ["run", "--help"])
         assert result.exit_code == 0
         output = normalize_console_output(result.output)
+        assert "--config" in output
+        assert "-c" in output
         assert "--api" in output
         assert "--no-api" in output
         assert "--api-port" in output
@@ -1539,6 +1541,72 @@ class TestRunApiFlags:
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
 
+    def test_run_config_path_updates_runtime_paths(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should let an explicit config path own the implicit storage root."""
+        ambient_config = tmp_path / "ambient" / "config.yaml"
+        ambient_config.parent.mkdir()
+        ambient_config.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+        config_dir = tmp_path / "selected"
+        cfg = config_dir / "config.yaml"
+        config_dir.mkdir()
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(ambient_config))
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        async def _fake_main(**kwargs: object) -> None:
+            runtime_paths = kwargs["runtime_paths"]
+            assert isinstance(runtime_paths, constants_module.RuntimePaths)
+            assert runtime_paths.config_path == cfg.resolve()
+            assert runtime_paths.storage_root == config_dir.resolve() / "mindroom_data"
+            assert runtime_paths.process_env["MINDROOM_CONFIG_PATH"] == str(cfg.resolve())
+            assert runtime_paths.process_env["MINDROOM_STORAGE_PATH"] == str(
+                config_dir.resolve() / "mindroom_data",
+            )
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
+            result = runner.invoke(app, ["run", "--config", str(cfg)])
+
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+
+    def test_run_config_short_flag_updates_runtime_paths(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Run should expose `-c` as the short form for explicit config selection."""
+        config_dir = tmp_path / "selected"
+        cfg = config_dir / "config.yaml"
+        config_dir.mkdir()
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+
+        async def _fake_main(**kwargs: object) -> None:
+            runtime_paths = kwargs["runtime_paths"]
+            assert isinstance(runtime_paths, constants_module.RuntimePaths)
+            assert runtime_paths.config_path == cfg.resolve()
+            assert runtime_paths.storage_root == config_dir.resolve() / "mindroom_data"
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
+            result = runner.invoke(app, ["run", "-c", str(cfg)])
+
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+
     def test_run_storage_path_updates_runtime_paths(
         self,
         tmp_path: Path,
@@ -1571,6 +1639,31 @@ class TestRunApiFlags:
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
             result = _invoke_with_runtime(["run", "--storage-path", str(runtime_storage)], cfg)
+
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
+
+    def test_run_short_config_path_keeps_storage_path_override(self, tmp_path: Path) -> None:
+        """Run should allow `-c` with an explicit storage override."""
+        config_dir = tmp_path / "profile"
+        config_dir.mkdir()
+        cfg = config_dir / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        storage_root = tmp_path / "explicit-storage"
+
+        async def _fake_main(**kwargs: object) -> None:
+            runtime_paths = kwargs["runtime_paths"]
+            assert isinstance(runtime_paths, constants_module.RuntimePaths)
+            assert runtime_paths.config_path == cfg.resolve()
+            assert runtime_paths.storage_root == storage_root.resolve()
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
+            result = runner.invoke(app, ["run", "-c", str(cfg), "--storage-path", str(storage_root)])
 
         assert result.exit_code == 0
         mock_main.assert_awaited_once()
