@@ -1405,6 +1405,26 @@ async def test_enumerate_room_thread_root_ids_zero_new_roots_guard_truncates() -
 
 
 @pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -> None:
+    """Duplicate roots on the final page should honor completed pagination."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
+                ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], None),
+            ],
+        ),
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$thread-one:localhost", "$thread-two:localhost"]
+    assert truncated is False
+
+
+@pytest.mark.asyncio
 async def test_list_tagged_threads_include_untagged_propagates_room_threads_page_error() -> None:
     """Room-wide include-untagged listing should preserve /threads error details."""
     client = AsyncMock()

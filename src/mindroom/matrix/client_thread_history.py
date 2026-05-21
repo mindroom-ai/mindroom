@@ -1184,30 +1184,25 @@ async def enumerate_room_thread_root_ids(
             limit=page_size,
             page_token=page_token,
         )
-        if not thread_roots:
-            if next_token is None:
-                break
-            if next_token in seen_next_tokens:
+        if thread_roots:
+            new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
+                thread_roots,
+                thread_root_ids,
+                seen_thread_root_ids,
+                max_thread_roots=max_thread_roots,
+            )
+            if discarded_due_to_cap:
                 truncated = True
                 break
-
-            seen_next_tokens.add(next_token)
-            page_token = next_token
-            continue
-
-        new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
-            thread_roots,
-            thread_root_ids,
-            seen_thread_root_ids,
-            max_thread_roots=max_thread_roots,
-        )
-        if discarded_due_to_cap or new_root_count == 0:
-            truncated = True
-            break
-        if next_token is None:
-            break
-        if len(thread_root_ids) >= max_thread_roots:
-            truncated = True
+            if next_token is None:
+                break
+            if new_root_count == 0:
+                truncated = True
+                break
+            if len(thread_root_ids) >= max_thread_roots:
+                truncated = True
+                break
+        elif next_token is None:
             break
         if next_token in seen_next_tokens:
             truncated = True
