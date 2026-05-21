@@ -52,6 +52,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -11126,7 +11127,7 @@ class TestAgentBot:
                 "content": {
                     "msgtype": "m.text",
                     "body": f"@mindroom_calculator:localhost {source_kind} says hello",
-                    "com.mindroom.source_kind": source_kind,
+                    SOURCE_KIND_KEY: source_kind,
                     ORIGINAL_SENDER_KEY: "@user:localhost",
                 },
             },
@@ -11186,7 +11187,7 @@ class TestAgentBot:
             sender="@user:localhost",
             event_id="$voice-followup",
             body="please stop",
-            source={"content": {"msgtype": "m.text", "body": "please stop", "com.mindroom.source_kind": "voice"}},
+            source={"content": {"msgtype": "m.text", "body": "please stop", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=1234567890,
             source_kind_override="voice",
         )

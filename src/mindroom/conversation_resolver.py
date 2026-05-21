@@ -10,7 +10,7 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
@@ -264,7 +264,7 @@ class ConversationResolver:
         registry = entity_identity_registry(config, self.deps.runtime_paths)
         source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
         if resolved_source_kind is None and isinstance(content, dict):
-            source_kind_override = content.get("com.mindroom.source_kind")
+            source_kind_override = content.get(SOURCE_KIND_KEY)
             if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:

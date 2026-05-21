@@ -11,6 +11,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_WARMUP_SUFFIX_KEY,
@@ -773,7 +774,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     content = {
         "body": "trusted metadata " * 10000,
         "msgtype": "m.text",
-        "com.mindroom.source_kind": source_kind,
+        SOURCE_KIND_KEY: source_kind,
         "com.mindroom.hook_source": "message_received",
         "com.mindroom.skip_mentions": True,
         "formatted_body": '<a href="https://matrix.to/#/@mindroom_agent:localhost">agent</a>',
@@ -799,7 +800,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     resolved = await extract_and_resolve_message(event, client)
 
     assert resolved["body"] == content["body"]
-    assert resolved["content"]["com.mindroom.source_kind"] == source_kind
+    assert resolved["content"][SOURCE_KIND_KEY] == source_kind
     assert resolved["content"]["com.mindroom.hook_source"] == "message_received"
     assert resolved["content"]["com.mindroom.skip_mentions"] is True
     assert resolved["content"]["formatted_body"] == content["formatted_body"]

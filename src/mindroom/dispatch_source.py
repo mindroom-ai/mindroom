@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast, runtime_checkable
 
+from mindroom.constants import SOURCE_KIND_KEY
+
 _MESSAGE_SOURCE_KIND = "message"
 _VOICE_SOURCE_KIND = "voice"
 _IMAGE_SOURCE_KIND = "image"
@@ -54,7 +56,7 @@ def is_automation_source_kind(source_kind: str) -> bool:
 
 
 def _source_kind_from_content(content: Mapping[str, Any]) -> str | None:
-    source_kind = content.get("com.mindroom.source_kind")
+    source_kind = content.get(SOURCE_KIND_KEY)
     return source_kind if isinstance(source_kind, str) else None
 
 

@@ -12,6 +12,7 @@ from mindroom.turn_origin import (
     TurnTrust,
     classify_turn_origin,
     original_sender_for_router_handoff,
+    original_sender_for_router_relay,
 )
 
 
@@ -159,6 +160,35 @@ def test_router_handoff_original_sender_only_for_human_targeted_handoff() -> Non
             target_entity_name="general",
             requester_id="@mindroom_router:localhost",
             requester_entity_name="router",
+        )
+        is None
+    )
+
+
+def test_router_relay_original_sender_preserves_human_requester_or_inherited_human() -> None:
+    """Router relay metadata uses a human requester or a trusted inherited human author."""
+    assert (
+        original_sender_for_router_relay(
+            requester_id="@human:localhost",
+            requester_entity_name=None,
+        )
+        == "@human:localhost"
+    )
+    assert (
+        original_sender_for_router_relay(
+            requester_id="@mindroom_router:localhost",
+            requester_entity_name="router",
+            inherited_original_sender="@human:localhost",
+            inherited_original_sender_entity_name=None,
+        )
+        == "@human:localhost"
+    )
+    assert (
+        original_sender_for_router_relay(
+            requester_id="@mindroom_router:localhost",
+            requester_entity_name="router",
+            inherited_original_sender="@mindroom_router:localhost",
+            inherited_original_sender_entity_name="router",
         )
         is None
     )

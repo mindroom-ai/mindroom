@@ -29,6 +29,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
@@ -208,7 +209,7 @@ def _text_event(
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     if source_kind is not None:
-        content["com.mindroom.source_kind"] = source_kind
+        content[SOURCE_KIND_KEY] = source_kind
     if original_sender is not None:
         content[ORIGINAL_SENDER_KEY] = original_sender
     return cast(
@@ -810,7 +811,7 @@ def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> N
         sender="@user:localhost",
         event_id="$voice1",
         body="transcribed voice",
-        source={"content": {"body": "transcribed voice", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"body": "transcribed voice", SOURCE_KIND_KEY: "voice"}},
     )
 
     batch = build_coalesced_batch(
@@ -831,7 +832,7 @@ def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> N
         sender="@user:localhost",
         event_id="$synthetic",
         body="synthetic",
-        source={"content": {"body": "synthetic", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"body": "synthetic", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1_712_350_003_000,
     )
 
@@ -872,7 +873,7 @@ def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -
         sender="@user:localhost",
         event_id="$voice1",
         body="voice prompt",
-        source={"content": {"body": "voice prompt", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"body": "voice prompt", SOURCE_KIND_KEY: "voice"}},
     )
     image_event = _image_event(event_id="$img1", server_timestamp=1000)
     text_event = _text_event(event_id="$m2", body="follow-up", server_timestamp=1001)
@@ -1472,7 +1473,7 @@ async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_
         sender="@user:localhost",
         event_id="$voice_followup",
         body="voice follow-up",
-        source={"content": {"body": "voice follow-up", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"body": "voice follow-up", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1000,
         source_kind_override="voice",
     )
@@ -3288,7 +3289,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         "content": {
             "msgtype": "m.text",
             "body": "!help",
-            "com.mindroom.source_kind": "voice",
+            SOURCE_KIND_KEY: "voice",
             ORIGINAL_SENDER_KEY: "@user:localhost",
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
@@ -3652,7 +3653,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
         source={
             "content": {
                 "body": "transcribed voice",
-                "com.mindroom.source_kind": "voice",
+                SOURCE_KIND_KEY: "voice",
                 VOICE_RAW_AUDIO_FALLBACK_KEY: True,
             },
         },
@@ -3950,7 +3951,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         event_id="$s1",
         body="scheduled task output",
         source={
-            "content": {"msgtype": "m.text", "body": "scheduled task output", "com.mindroom.source_kind": "scheduled"},
+            "content": {"msgtype": "m.text", "body": "scheduled task output", SOURCE_KIND_KEY: "scheduled"},
         },
         server_timestamp=1000,
         source_kind_override="scheduled",
@@ -4002,7 +4003,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         sender="@mindroom_test_agent:localhost",
         event_id="$h1",
         body="hook result",
-        source={"content": {"msgtype": "m.text", "body": "hook result", "com.mindroom.source_kind": "hook"}},
+        source={"content": {"msgtype": "m.text", "body": "hook result", SOURCE_KIND_KEY: "hook"}},
         server_timestamp=1000,
         source_kind_override="hook",
     )
@@ -4053,7 +4054,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         sender="@mindroom_test_agent:localhost",
         event_id="$s1",
         body="scheduled fire 1",
-        source={"content": {"msgtype": "m.text", "body": "scheduled fire 1", "com.mindroom.source_kind": "scheduled"}},
+        source={"content": {"msgtype": "m.text", "body": "scheduled fire 1", SOURCE_KIND_KEY: "scheduled"}},
         server_timestamp=1000,
         source_kind_override="scheduled",
     )
@@ -4237,7 +4238,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
             "content": {
                 "msgtype": "m.text",
                 "body": "!schedule tomorrow at 9am turn off the lights",
-                "com.mindroom.source_kind": "voice",
+                SOURCE_KIND_KEY: "voice",
             },
         },
         server_timestamp=1000,
@@ -4472,7 +4473,7 @@ async def test_gate_final_envelope_preserves_active_voice_source_and_policy(tmp_
         sender="@user:localhost",
         event_id="$voice-active",
         body="!help",
-        source={"content": {"msgtype": "m.text", "body": "!help", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"msgtype": "m.text", "body": "!help", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1000,
         source_kind_override="voice",
     )
@@ -4504,7 +4505,7 @@ async def test_gate_final_envelope_preserves_non_active_voice_command_policy(tmp
         sender="@user:localhost",
         event_id="$voice-normal",
         body="!help",
-        source={"content": {"msgtype": "m.text", "body": "!help", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"msgtype": "m.text", "body": "!help", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=1000,
         source_kind_override="voice",
     )

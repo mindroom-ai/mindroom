@@ -12,12 +12,14 @@ from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
+from mindroom.coalescing import COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
@@ -970,6 +972,11 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
     assert request.target.resolved_thread_id == "$voice_event"
     assert request.skip_mentions is True
+    assert request.extra_content is not None
+    assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert request.extra_content[SOURCE_KIND_KEY] == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+    assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in request.extra_content
 
 
 @pytest.mark.asyncio
@@ -1053,13 +1060,39 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert echo_request.target.reply_to_event_id == "$voice_event"
     assert echo_request.response_text == f"{VOICE_PREFIX}summarize this audio"
     assert echo_request.skip_mentions is True
-    assert echo_request.extra_content is None
+    assert echo_request.extra_content is not None
+    assert echo_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert echo_request.extra_content[SOURCE_KIND_KEY] == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+    assert echo_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in echo_request.extra_content
     assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
     assert handoff_request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_marks_raw_audio_fallback(tmp_path) -> None:  # noqa: ANN001
+    """Visible router voice echoes should preserve the raw-audio fallback marker."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        await bot._on_media_message(room, event)
+
+    bot._delivery_gateway.send_text.assert_called_once()
+    request = bot._delivery_gateway.send_text.call_args.args[0]
+    assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert request.extra_content is not None
+    assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert request.extra_content[SOURCE_KIND_KEY] == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+    assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 
 @pytest.mark.asyncio

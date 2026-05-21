@@ -12,6 +12,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.matrix.media import (
@@ -266,7 +267,7 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
         VOICE_RAW_AUDIO_FALLBACK_KEY,
         "com.mindroom.hook_source",
         "com.mindroom.skip_mentions",
-        "com.mindroom.source_kind",
+        SOURCE_KIND_KEY,
     },
 )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.hooks.types import HookMessageSender  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -61,7 +62,7 @@ async def send_hook_message(
     from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
     content_extra = dict(extra_content or {})
-    content_extra["com.mindroom.source_kind"] = "hook_dispatch" if trigger_dispatch else "hook"
+    content_extra[SOURCE_KIND_KEY] = "hook_dispatch" if trigger_dispatch else "hook"
     content_extra["com.mindroom.hook_source"] = source_hook
 
     latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(

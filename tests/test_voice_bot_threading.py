@@ -16,6 +16,7 @@ from mindroom import inbound_turn_normalizer
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.matrix.users import AgentMatrixUser
@@ -369,7 +370,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 continue",
-            source={"content": {"body": "🎤 continue", "com.mindroom.source_kind": "voice"}},
+            source={"content": {"body": "🎤 continue", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=voice_event.server_timestamp,
             source_kind_override="voice",
         ),
@@ -436,7 +437,7 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
         sender=voice_event.sender,
         event_id=voice_event.event_id,
         body="🎤 continue somewhere else",
-        source={"content": {"body": "🎤 continue somewhere else", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"body": "🎤 continue somewhere else", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=voice_event.server_timestamp,
         source_kind_override="voice",
     )
@@ -528,7 +529,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 room mode follow-up",
-            source={"content": {"body": "🎤 room mode follow-up", "com.mindroom.source_kind": "voice"}},
+            source={"content": {"body": "🎤 room mode follow-up", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=voice_event.server_timestamp,
             source_kind_override="voice",
         ),

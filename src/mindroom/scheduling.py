@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_for_room
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
@@ -979,7 +979,7 @@ async def _execute_scheduled_workflow(
             )
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
-            content["com.mindroom.source_kind"] = "scheduled"
+            content[SOURCE_KIND_KEY] = "scheduled"
             delivered = await send_and_track_message(client, workflow.room_id, content, config, conversation_cache)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()

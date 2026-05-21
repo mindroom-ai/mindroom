@@ -24,6 +24,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -93,7 +94,7 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.timing import timing_scope as timing_scope_context
-from mindroom.turn_origin import original_sender_for_router_handoff
+from mindroom.turn_origin import original_sender_for_router_handoff, original_sender_for_router_relay
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
@@ -243,7 +244,7 @@ class TurnController:
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
                 )
-            raw_source_kind = content.get("com.mindroom.source_kind")
+            raw_source_kind = content.get(SOURCE_KIND_KEY)
             source_kind = raw_source_kind if isinstance(raw_source_kind, str) else None
             if original_sender and self._should_trust_original_sender_metadata(
                 sender=sender,
@@ -333,7 +334,7 @@ class TurnController:
             return False
         source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
         if source_kind is None:
-            raw_source_kind = content.get("com.mindroom.source_kind")
+            raw_source_kind = content.get(SOURCE_KIND_KEY)
             source_kind = raw_source_kind if isinstance(raw_source_kind, str) else None
         if source_kind not in {None, "", "message", COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY}:
             return False
@@ -383,7 +384,7 @@ class TurnController:
     ) -> str | None:
         """Run shared early-exit checks for inbound text and media events."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        source_kind = content.get("com.mindroom.source_kind") if isinstance(content, dict) else None
+        source_kind = content.get(SOURCE_KIND_KEY) if isinstance(content, dict) else None
         requester_user_id = self._requester_user_id(
             sender=event.sender,
             source=event.source,
@@ -905,8 +906,10 @@ class TurnController:
         *,
         text: str,
         thread_id: str | None,
+        requester_user_id: str,
+        normalized_source: dict[str, Any],
     ) -> str | None:
-        """Optionally post a display-only router echo for normalized audio."""
+        """Optionally post a visible router echo for normalized audio."""
         if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
             return None
 
@@ -925,11 +928,45 @@ class TurnController:
                 target=target,
                 response_text=text,
                 skip_mentions=True,
+                extra_content=self._visible_router_voice_echo_extra_content(
+                    requester_user_id=requester_user_id,
+                    normalized_source=normalized_source,
+                ),
             ),
         )
         if visible_echo_event_id is not None:
             self.deps.turn_store.record_visible_echo(event.event_id, visible_echo_event_id)
         return visible_echo_event_id
+
+    def _visible_router_voice_echo_extra_content(
+        self,
+        *,
+        requester_user_id: str,
+        normalized_source: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return trusted relay metadata for a visible router voice echo."""
+        payload_metadata = payload_metadata_from_source(normalized_source, trust_internal_metadata=True)
+        inherited_original_sender = payload_metadata.original_sender
+        relay_original_sender = original_sender_for_router_relay(
+            requester_id=requester_user_id,
+            requester_entity_name=self._managed_entity_name_for_sender(requester_user_id),
+            inherited_original_sender=inherited_original_sender,
+            inherited_original_sender_entity_name=(
+                self._managed_entity_name_for_sender(inherited_original_sender)
+                if inherited_original_sender is not None
+                else None
+            ),
+        )
+        extra_content: dict[str, Any] = {
+            SOURCE_KIND_KEY: COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+        }
+        if relay_original_sender is not None:
+            extra_content[ORIGINAL_SENDER_KEY] = relay_original_sender
+        if payload_metadata.attachment_ids:
+            extra_content[ATTACHMENT_IDS_KEY] = list(payload_metadata.attachment_ids)
+        if payload_metadata.raw_audio_fallback:
+            extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+        return extra_content
 
     async def _prepare_dispatch(
         self,
@@ -2228,6 +2265,8 @@ class TurnController:
                 event,
                 text=normalized_voice.event.body,
                 thread_id=normalized_voice.effective_thread_id,
+                requester_user_id=prechecked_event.requester_user_id,
+                normalized_source=normalized_voice.event.source,
             )
 
             envelope = self.deps.resolver.build_ingress_envelope(

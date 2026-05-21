@@ -134,6 +134,22 @@ def original_sender_for_router_handoff(
     """Return original-sender metadata for a real router handoff."""
     if target_entity_name is None:
         return None
+    return original_sender_for_router_relay(
+        requester_id=requester_id,
+        requester_entity_name=requester_entity_name,
+        inherited_original_sender=inherited_original_sender,
+        inherited_original_sender_entity_name=inherited_original_sender_entity_name,
+    )
+
+
+def original_sender_for_router_relay(
+    *,
+    requester_id: str,
+    requester_entity_name: str | None,
+    inherited_original_sender: str | None = None,
+    inherited_original_sender_entity_name: str | None = None,
+) -> str | None:
+    """Return original-sender metadata for router-authored user relays."""
     if requester_entity_name is None:
         return requester_id
     if inherited_original_sender is not None and inherited_original_sender_entity_name is None:

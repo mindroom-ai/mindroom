@@ -15,7 +15,7 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
@@ -1163,7 +1163,7 @@ class TestCommandHandling:
                     "content": {
                         "msgtype": "m.text",
                         "body": "⏰ [Automated Task]\nCheck the workloop status",
-                        "com.mindroom.source_kind": SCHEDULED_SOURCE_KIND,
+                        SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
                         ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
                     },
                 },
