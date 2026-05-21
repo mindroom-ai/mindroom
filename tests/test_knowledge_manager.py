@@ -466,7 +466,10 @@ def test_refresh_scheduler_module_exports_one_concrete_scheduler_name() -> None:
 
 
 @pytest.mark.asyncio
-async def test_file_mode_refresh_publishes_source_metadata_without_vector_collection(tmp_path: Path) -> None:
+async def test_file_mode_refresh_publishes_source_metadata_without_vector_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Refreshing file-only knowledge should avoid Chroma collections and embedders."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -478,19 +481,57 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
         modes={"docs": "files"},
     )
     runtime_paths = runtime_paths_for(config)
+    embedder_factory = MagicMock(return_value=object())
+    monkeypatch.setattr(knowledge_manager_module, "_create_embedder", embedder_factory)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_index_state(published_index_metadata_path(key))
 
     assert result.indexed_count == 0
-    assert result.index_published is False
+    assert result.index_published is True
     assert result.availability is KnowledgeAvailability.READY
     assert state is not None
     assert state.status == "complete"
     assert state.collection is None
     assert state.indexed_count == 0
     assert _VectorDb.collections == {}
+    embedder_factory.assert_not_called()
+
+
+def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
+    """File-only metadata should cover every managed file agents can inspect."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    diagram = docs_path / "diagram.png"
+    diagram.write_bytes(b"before")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+        modes={"docs": "files"},
+    )
+
+    before = knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        tracked_relative_paths={"guide.md", "diagram.png"},
+    )
+    diagram.write_bytes(b"after")
+
+    assert (
+        knowledge_source_signature(
+            config,
+            "docs",
+            docs_path,
+            tracked_relative_paths={"guide.md", "diagram.png"},
+        )
+        != before
+    )
 
 
 def test_failed_notice_without_index_says_unavailable() -> None:
@@ -2024,6 +2065,26 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     )
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+
+
+def test_file_mode_indexing_settings_ignore_semantic_only_settings(tmp_path: Path) -> None:
+    """File-only metadata compatibility should not depend on embedders or chunking."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    assert key.indexing_settings.embedder_provider == ""
+    assert key.indexing_settings.embedder_model == ""
+    assert key.indexing_settings.embedder_host == ""
+    assert key.indexing_settings.embedder_dimensions == ""
+    assert key.indexing_settings.chunk_size == ""
+    assert key.indexing_settings.chunk_overlap == ""
 
 
 @pytest.mark.asyncio

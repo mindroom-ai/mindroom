@@ -689,6 +689,28 @@ def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: P
     refresh.assert_not_awaited()
 
 
+def test_file_mode_upload_accepts_non_semantic_extension(tmp_path: Path) -> None:
+    """File-only bases manage directly accessible files without semantic extension filtering."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    config = _knowledge_config(docs, mode="files")
+    _publish_committed_runtime_config(client.app, config)
+    scheduler = _RecordingRefreshScheduler()
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("diagram.png", b"\x89PNG\r\n\x1a\n", "image/png"))],
+        )
+
+    assert response.status_code == 200
+    assert response.json()["uploaded"] == ["diagram.png"]
+    assert (docs / "diagram.png").read_bytes() == b"\x89PNG\r\n\x1a\n"
+    assert scheduler.scheduled == []
+    refresh.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("base_config", "filename"),
     [

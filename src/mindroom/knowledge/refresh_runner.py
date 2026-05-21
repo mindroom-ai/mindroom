@@ -629,7 +629,7 @@ async def _refresh_file_mode_binding_locked(
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=0,
-        index_published=False,
+        index_published=True,
         availability=KnowledgeAvailability.READY,
         last_error=None,
     )

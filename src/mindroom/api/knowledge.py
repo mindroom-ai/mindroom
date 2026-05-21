@@ -14,7 +14,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import git_checkout_present, include_semantic_knowledge_relative_path
+from mindroom.knowledge.manager import git_checkout_present, include_knowledge_relative_path
 from mindroom.knowledge.manager import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.manager import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
@@ -416,7 +416,7 @@ def _reject_non_file_upload_destination(destination: Path, relative_path: str) -
 
 
 def _reject_unmanaged_knowledge_file_path(config: Config, base_id: str, relative_path: str) -> None:
-    if include_semantic_knowledge_relative_path(config, base_id, relative_path):
+    if include_knowledge_relative_path(config, base_id, relative_path):
         return
     raise HTTPException(
         status_code=415,

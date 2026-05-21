@@ -386,15 +386,25 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
 
 
 def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
-    embedder_config = config.memory.embedder.config
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
-    embedder_provider, embedder_model, embedder_host, embedder_dimensions = effective_knowledge_embedder_signature(
-        config.memory.embedder.provider,
-        embedder_config.model,
-        host=embedder_config.host,
-        dimensions=embedder_config.dimensions,
-    )
+    if base_config.mode == "semantic":
+        embedder_config = config.memory.embedder.config
+        embedder_provider, embedder_model, embedder_host, embedder_dimensions = effective_knowledge_embedder_signature(
+            config.memory.embedder.provider,
+            embedder_config.model,
+            host=embedder_config.host,
+            dimensions=embedder_config.dimensions,
+        )
+        chunk_size = str(base_config.chunk_size)
+        chunk_overlap = str(base_config.chunk_overlap)
+    else:
+        embedder_provider = ""
+        embedder_model = ""
+        embedder_host = ""
+        embedder_dimensions = ""
+        chunk_size = ""
+        chunk_overlap = ""
     return IndexingSettings(
         base_id=base_id,
         storage_root=str(storage_path.resolve()),
@@ -404,8 +414,8 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         embedder_model=embedder_model,
         embedder_host=embedder_host,
         embedder_dimensions=embedder_dimensions,
-        chunk_size=str(base_config.chunk_size),
-        chunk_overlap=str(base_config.chunk_overlap),
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         repo_identity=credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
         git_branch=git_config.branch if git_config is not None else "",
         git_lfs=str(git_config.lfs) if git_config is not None else "",
@@ -659,6 +669,13 @@ def include_semantic_knowledge_relative_path(config: Config, base_id: str, relat
     return suffix not in exclude_extensions
 
 
+def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+    """Return whether a relative path belongs to the active source set for one base."""
+    if config.get_knowledge_base_config(base_id).mode == "files":
+        return _include_knowledge_relative_path(config, base_id, relative_path)
+    return include_semantic_knowledge_relative_path(config, base_id, relative_path)
+
+
 def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
     try:
         relative_path = path.relative_to(root)
@@ -674,7 +691,7 @@ def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
 
 
 def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
-    """Return whether a file belongs to the managed semantic file set."""
+    """Return whether a file belongs to the active source set for one base."""
     root = knowledge_root.resolve()
     candidate = file_path if file_path.is_absolute() else root / file_path
     try:
@@ -691,11 +708,11 @@ def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, 
     if not candidate.is_file():
         return False
     relative_path = candidate.relative_to(root)
-    return include_semantic_knowledge_relative_path(config, base_id, relative_path.as_posix())
+    return include_knowledge_relative_path(config, base_id, relative_path.as_posix())
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
-    """List managed semantic files without constructing a knowledge manager."""
+    """List managed files without constructing a knowledge manager."""
     root = knowledge_root.resolve()
     if not root.is_dir():
         return []
@@ -711,7 +728,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     return sorted(files)
 
 
-def _semantic_file_paths_from_relative_paths(
+def _knowledge_file_paths_from_relative_paths(
     config: Config,
     base_id: str,
     knowledge_root: Path,
@@ -763,9 +780,7 @@ def _git_tracked_relative_paths_from_checkout(
         raise RuntimeError(msg)
 
     return {
-        path
-        for path in result.stdout.split("\x00")
-        if path and include_semantic_knowledge_relative_path(config, base_id, path)
+        path for path in result.stdout.split("\x00") if path and include_knowledge_relative_path(config, base_id, path)
     }
 
 
@@ -776,11 +791,11 @@ def list_git_tracked_knowledge_files(
     *,
     timeout_seconds: float | None = None,
 ) -> list[Path]:
-    """List Git-tracked semantic files using the same source set as indexing."""
+    """List Git-tracked files using the active source set for one base."""
     root = knowledge_root.resolve()
     if not git_checkout_present(root, timeout_seconds=timeout_seconds):
         return []
-    return _semantic_file_paths_from_relative_paths(
+    return _knowledge_file_paths_from_relative_paths(
         config,
         base_id,
         root,
@@ -815,7 +830,7 @@ def knowledge_source_signature(
             if tracked_relative_paths is not None
             else _git_tracked_relative_paths_from_checkout(config, base_id, root)
         )
-        files = _semantic_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
+        files = _knowledge_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
     for path in files:
         try:
             stat = path.stat()
@@ -1054,14 +1069,8 @@ class KnowledgeManager:
             timeout_seconds=self._git_sync_timeout_seconds(),
         )
 
-    def _include_semantic_relative_path(self, relative_path: str) -> bool:
-        if not self._include_relative_path(relative_path):
-            return False
-
-        return include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path)
-
-    def _include_relative_path(self, relative_path: str) -> bool:
-        return _include_knowledge_relative_path(self.config, self.base_id, relative_path)
+    def _include_active_relative_path(self, relative_path: str) -> bool:
+        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     async def _run_git(
         self,
@@ -1171,7 +1180,7 @@ class KnowledgeManager:
     async def _git_list_tracked_files(self) -> set[str]:
         output = await self._run_git(["ls-files", "-z"])
         raw_paths = [entry for entry in output.split("\x00") if entry]
-        tracked_files = {path for path in raw_paths if self._include_semantic_relative_path(path)}
+        tracked_files = {path for path in raw_paths if self._include_active_relative_path(path)}
         self._git_tracked_relative_paths = set(tracked_files)
         return tracked_files
 
@@ -1255,7 +1264,7 @@ class KnowledgeManager:
             changed_paths = after_files
         else:
             diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_semantic_relative_path(path)}
+            changed_paths = {path for path in diff_output.splitlines() if self._include_active_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
@@ -1273,7 +1282,7 @@ class KnowledgeManager:
                     self.base_id,
                     knowledge_root,
                 )
-            return _semantic_file_paths_from_relative_paths(
+            return _knowledge_file_paths_from_relative_paths(
                 self.config,
                 self.base_id,
                 knowledge_root,

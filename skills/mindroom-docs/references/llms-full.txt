@@ -1575,7 +1575,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`. Semantic bases add indexed RAG search, and file-mode bases expose workspace file paths for agents with file-aware tools |
+| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`. Semantic bases add indexed RAG search. File-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -11450,10 +11450,12 @@ agents:
     knowledge_bases: [source_docs]
 ```
 
-File mode does not create a ChromaDB collection, does not call the embedder, and does not expose `search_knowledge_base` for that base.
+File mode does not create a ChromaDB collection.
+It does not call the embedder.
+It does not expose `search_knowledge_base` for that base.
 When the source is inside the agent workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
 Targets outside the workspace are not advertised for direct file-tool access because the default tools enforce workspace containment after symlinks are resolved.
-Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refresh publishes only lightweight source metadata instead of a vector index.
+Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refreshes publish only lightweight source metadata instead of a vector index.
 
 ## Configuration
 
@@ -11472,7 +11474,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `description` | string | `""` | Short description of what the knowledge base contains. Semantic bases use this in `search_knowledge_base` metadata, and file-mode bases use it in workspace-path instructions |
+| `description` | string | `""` | Short description of what the knowledge base contains. Semantic bases use this in `search_knowledge_base` metadata. File-mode bases use it in workspace-path instructions |
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index. `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |

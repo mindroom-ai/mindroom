@@ -79,10 +79,12 @@ agents:
     knowledge_bases: [source_docs]
 ```
 
-File mode does not create a ChromaDB collection, does not call the embedder, and does not expose `search_knowledge_base` for that base.
+File mode does not create a ChromaDB collection.
+It does not call the embedder.
+It does not expose `search_knowledge_base` for that base.
 When the source is inside the agent workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
 Targets outside the workspace are not advertised for direct file-tool access because the default tools enforce workspace containment after symlinks are resolved.
-Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refresh publishes only lightweight source metadata instead of a vector index.
+Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refreshes publish only lightweight source metadata instead of a vector index.
 
 ## Configuration
 
@@ -101,7 +103,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `description` | string | `""` | Short description of what the knowledge base contains. Semantic bases use this in `search_knowledge_base` metadata, and file-mode bases use it in workspace-path instructions |
+| `description` | string | `""` | Short description of what the knowledge base contains. Semantic bases use this in `search_knowledge_base` metadata. File-mode bases use it in workspace-path instructions |
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index. `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
