@@ -132,9 +132,10 @@ def load_pricing_config_model() -> PricingConfig:
 
 
 def _stripe_mode() -> Literal["test", "live"]:
+    # Server-side price IDs must match the secret key used for Stripe API calls.
     secret_key = os.getenv("STRIPE_SECRET_KEY", "")
-    if secret_key.startswith(("sk_live_", "rk_live_")):
-        return "live"
+    if secret_key:
+        return "live" if secret_key.startswith(("sk_live_", "rk_live_")) else "test"
 
     secret_file = os.getenv("STRIPE_SECRET_KEY_FILE", "")
     if secret_file:

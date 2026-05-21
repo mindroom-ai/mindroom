@@ -16,6 +16,14 @@ from backend.pricing import (
 )
 
 
+@pytest.fixture(autouse=True)
+def clear_stripe_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pricing mode tests isolated from host Stripe configuration."""
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("STRIPE_SECRET_KEY_FILE", raising=False)
+    monkeypatch.delenv("STRIPE_PUBLISHABLE_KEY", raising=False)
+
+
 class TestPricingConfig:
     """Test pricing configuration loading and validation."""
 
@@ -199,10 +207,20 @@ class TestPricingHelperFunctions:
         """Production file-mounted secrets select live price IDs."""
         secret_file = tmp_path / "stripe_secret_key"
         secret_file.write_text("sk_live_mock", encoding="utf-8")
-        monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
         monkeypatch.setenv("STRIPE_SECRET_KEY_FILE", str(secret_file))
 
         assert get_stripe_price_id("starter", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
+
+    def test_stripe_secret_env_takes_precedence_over_secret_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Environment secret precedence matches backend.config._get_secret."""
+        secret_file = tmp_path / "stripe_secret_key"
+        secret_file.write_text("sk_live_mock", encoding="utf-8")
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock")
+        monkeypatch.setenv("STRIPE_SECRET_KEY_FILE", str(secret_file))
+
+        assert get_stripe_price_id("starter", "monthly") == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
 
     def test_get_plan_details(self) -> None:
         """Test getting plan details."""
