@@ -6,9 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger, stripe
-from pydantic import BaseModel
 from backend.deps import ensure_supabase, limiter, verify_admin
-from backend.utils.audit import create_audit_log
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -24,6 +22,7 @@ from backend.models import (
     SyncResult,
     UpdateAccountStatusResponse,
 )
+from backend.pricing import load_pricing_config_model
 from backend.routes.provisioner import (
     provision_instance,
     restart_instance_provisioner,
@@ -32,7 +31,9 @@ from backend.routes.provisioner import (
     sync_instances,
     uninstall_instance,
 )
+from backend.utils.audit import create_audit_log
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 
 router = APIRouter()
 ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
@@ -51,6 +52,18 @@ def audit_log_entry(
         details=details,
         success=True,  # Admin actions that reach this point are successful
     )
+
+
+def _monthly_plan_prices_usd() -> dict[str, int]:
+    """Return configured monthly prices in dollars for automatic MRR estimates."""
+    pricing = load_pricing_config_model()
+    prices: dict[str, int] = {}
+    for tier, plan in pricing.plans.items():
+        if isinstance(plan.price_monthly, int):
+            prices[tier] = plan.price_monthly // 100
+        else:
+            prices[tier] = 0
+    return prices
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
@@ -325,7 +338,7 @@ async def get_dashboard_metrics(
         _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
         subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        tier_prices = {"byok": 10, "hobby": 20, "pro": 200, "enterprise": 999, "free": 0}
+        tier_prices = _monthly_plan_prices_usd()
         mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 
         seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
