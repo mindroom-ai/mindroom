@@ -1,6 +1,7 @@
 """Comprehensive HTTP API tests for provisioner endpoints."""
 
 import base64
+import inspect
 import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
@@ -50,6 +51,18 @@ def _assert_helm_uses_external_instance_secret(helm_args: list[str]) -> None:
     assert "instanceSecrets.hash" in set_string_args
     assert "credentials_encryption_key" not in set_args
     assert "credentials_encryption_key" not in set_file_args
+
+
+def _applied_instance_secret_data(apply_secret: AsyncMock) -> dict[str, str]:
+    """Return the Secret payload passed to _apply_instance_secret."""
+    from backend.routes.provisioner import _apply_instance_secret
+
+    apply_secret.assert_awaited()
+    bound = inspect.signature(_apply_instance_secret).bind(
+        *apply_secret.await_args.args,
+        **apply_secret.await_args.kwargs,
+    )
+    return bound.arguments["secret_data"]
 
 
 def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None:
@@ -350,7 +363,7 @@ class TestProvisionerEndpoints:
             )
 
         assert response.status_code == 200
-        secret_data = apply_secret.call_args.args[2]
+        secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == ""
         create_key.assert_not_called()
 
@@ -377,7 +390,7 @@ class TestProvisionerEndpoints:
             )
 
         assert response.status_code == 200
-        secret_data = apply_secret.call_args.args[2]
+        secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openai_key"] == ""
         assert secret_data["anthropic_key"] == ""
         assert secret_data["google_key"] == ""
@@ -417,7 +430,7 @@ class TestProvisionerEndpoints:
             )
 
         assert response.status_code == 200
-        secret_data = apply_secret.call_args.args[2]
+        secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
         assert secret_data["openai_key"] == ""
         assert secret_data["anthropic_key"] == ""
@@ -463,7 +476,7 @@ class TestProvisionerEndpoints:
         plan = create_key.call_args.kwargs["plan"]
         assert plan.monthly_limit_usd == 15
         assert plan.name == "MindRoom hobby account acc_test_123 instance 123"
-        secret_data = apply_secret.call_args.args[2]
+        secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
         update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
         assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
@@ -506,7 +519,7 @@ class TestProvisionerEndpoints:
             )
 
         assert response.status_code == 200
-        secret_data = apply_secret.call_args.args[2]
+        secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
 
     def test_hobby_provisioning_missing_openrouter_management_key_returns_operator_error(
@@ -577,7 +590,7 @@ class TestProvisionerEndpoints:
         assert response.status_code == 200
         plan = create_key.call_args.kwargs["plan"]
         assert plan.monthly_limit_usd == 150
-        secret_data = apply_secret.call_args.args[2]
+        secret_data = _applied_instance_secret_data(apply_secret)
         assert secret_data["openrouter_key"] == "sk-or-v1-pro-customer"
         set_args = _helm_set_args(mock_helm.call_args.args[0])
         assert set_args["storage"] == "25Gi"
