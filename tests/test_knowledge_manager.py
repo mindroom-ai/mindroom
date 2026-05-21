@@ -1859,8 +1859,8 @@ def test_raw_git_url_index_metadata_is_config_mismatch(tmp_path: Path) -> None:
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    stale_settings = list(key.indexing_settings)
-    stale_settings[knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX] = raw_repo_url
+    stale_settings = dict(key.indexing_settings)
+    stale_settings[knowledge_manager_module._INDEXING_SETTING_REPO_IDENTITY] = raw_repo_url
     collection = "raw_git_metadata_collection"
     _VectorDb.collections[collection] = [
         {"content": "raw git metadata", "metadata": {"source_path": "doc.md"}},
@@ -1909,7 +1909,7 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": dict(key.indexing_settings),
                 "status": "complete",
                 "collection": collection,
                 "indexed_count": 1,
@@ -1964,7 +1964,7 @@ def test_metadata_state_alone_serves_published_index(tmp_path: Path) -> None:
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": dict(key.indexing_settings),
                 "status": "complete",
                 "collection": collection,
                 "indexed_count": 1,
@@ -1980,8 +1980,8 @@ def test_metadata_state_alone_serves_published_index(tmp_path: Path) -> None:
     assert lookup.availability is KnowledgeAvailability.READY
 
 
-def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -> None:
-    """Compatibility helpers must stay aligned with the indexing settings tuple layout."""
+def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
+    """Compatibility helpers must use explicit indexing setting names."""
     docs_path = tmp_path / "docs"
     config = _config(
         tmp_path,
@@ -1992,16 +1992,15 @@ def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
 
-    assert len(key.indexing_settings) == knowledge_manager_module._INDEXING_SETTINGS_LAYOUT_LENGTH
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_BASE_ID_INDEX] == "docs"
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_CHUNK_SIZE_INDEX] == "5000"
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX] == "0"
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX] == (
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTING_BASE_ID] == "docs"
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTING_CHUNK_SIZE] == "5000"
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTING_CHUNK_OVERLAP] == "0"
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTING_REPO_IDENTITY] == (
         credential_free_url_identity("https://example.com/org/repo.git")
     )
     assert (
-        knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX
-        in knowledge_manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES
+        knowledge_manager_module._INDEXING_SETTING_REPO_IDENTITY
+        in knowledge_manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_KEYS
     )
 
 
@@ -2794,8 +2793,8 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_refresh_rebuilds_stale_list_metadata_without_serving_old_collection(tmp_path: Path) -> None:
-    """List-shaped metadata is stale format and forces a fresh publish."""
+async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collection(tmp_path: Path) -> None:
+    """Malformed metadata forces a fresh publish without serving the old collection."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2810,7 +2809,7 @@ async def test_refresh_rebuilds_stale_list_metadata_without_serving_old_collecti
     ]
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
+    metadata_path.write_text(json.dumps(["malformed"]), encoding="utf-8")
     doc.write_text("stale list new", encoding="utf-8")
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -3388,7 +3387,7 @@ def test_stale_metadata_without_collection_returns_unavailable_index(tmp_path: P
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": dict(key.indexing_settings),
                 "status": "complete",
                 "collection": "missing_collection",
                 "indexed_count": 1,
@@ -3420,7 +3419,7 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": dict(key.indexing_settings),
                 "status": "complete",
                 "collection": "broken_collection",
                 "indexed_count": 1,
@@ -3469,7 +3468,7 @@ def test_published_index_handle_open_failure_degrades_and_schedules_repair_refre
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": dict(key.indexing_settings),
                 "status": "complete",
                 "collection": collection,
                 "indexed_count": 1,
@@ -4689,7 +4688,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         knowledge_utils._refresh_schedule_due(
             refresh_target,
             KnowledgeAvailability.READY,
-            settings=key.indexing_settings,
+            settings_fingerprint=tuple(sorted(key.indexing_settings.items())),
             cooldown_seconds=300,
         )
         _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
@@ -4939,7 +4938,7 @@ def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
         knowledge_registry.save_published_index_state(
             metadata_path,
             knowledge_registry.PublishedIndexState(
-                settings=("settings",),
+                settings={"setting": "value"},
                 status="complete",
                 collection="collection",
                 source_signature="signature",

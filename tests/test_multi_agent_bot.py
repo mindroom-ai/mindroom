@@ -1146,7 +1146,7 @@ class TestAgentBot:
                 base_id="research",
                 storage_root=str(tmp_path),
                 knowledge_path=str(tmp_path / "kb"),
-                indexing_settings=(),
+                indexing_settings={},
             ),
             index=SimpleNamespace(
                 knowledge=expected_knowledge,
@@ -1228,7 +1228,7 @@ class TestAgentBot:
                     base_id=base_id,
                     storage_root=str(tmp_path),
                     knowledge_path=str(tmp_path / f"kb_{base_id}"),
-                    indexing_settings=(),
+                    indexing_settings={},
                 ),
                 index=SimpleNamespace(
                     knowledge={"research": research_knowledge, "legal": legal_knowledge}[base_id],

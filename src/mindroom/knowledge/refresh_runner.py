@@ -825,7 +825,7 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
     if state is None:
         return None
     return (
-        state.settings,
+        tuple(sorted(state.settings.items())),
         state.status,
         state.index_kind,
         state.collection,

@@ -322,7 +322,7 @@ class TestDelegateKnowledge:
                     base_id=base_id,
                     storage_root=str(tmp_path),
                     knowledge_path=str(tmp_path / base_id),
-                    indexing_settings=(),
+                    indexing_settings={},
                 ),
                 index=None,
                 availability=KnowledgeAvailability.INITIALIZING,

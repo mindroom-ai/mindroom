@@ -115,7 +115,7 @@ def _knowledge_lookup(
         base_id=base_id,
         storage_root="memory",
         knowledge_path=f"memory/{base_id}",
-        indexing_settings=(),
+        indexing_settings={},
     )
     return SimpleNamespace(
         key=key,

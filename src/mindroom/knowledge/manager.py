@@ -131,29 +131,48 @@ _TEXT_LIKE_EXTENSIONS = {
     ".proto",
 }
 _FileSignature = tuple[int, int, str]
-_INDEXING_SETTINGS_BASE_ID_INDEX = 0
-_INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
-_INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
-_INDEXING_SETTINGS_MODE_INDEX = 3
-INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 8
-_INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 8
-_INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 9
-_INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 10
-INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
-    _INDEXING_SETTINGS_BASE_ID_INDEX,
-    _INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
-    _INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
-    _INDEXING_SETTINGS_MODE_INDEX,
-    _INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
-    11,
-    12,
-    13,
-    14,
-    15,
-    16,
-    17,
+_INDEXING_SETTING_BASE_ID = "base_id"
+_INDEXING_SETTING_STORAGE_ROOT = "storage_root"
+_INDEXING_SETTING_KNOWLEDGE_PATH = "knowledge_path"
+_INDEXING_SETTING_MODE = "mode"
+_INDEXING_SETTING_EMBEDDER_PROVIDER = "embedder_provider"
+_INDEXING_SETTING_EMBEDDER_MODEL = "embedder_model"
+_INDEXING_SETTING_EMBEDDER_HOST = "embedder_host"
+_INDEXING_SETTING_EMBEDDER_DIMENSIONS = "embedder_dimensions"
+_INDEXING_SETTING_CHUNK_SIZE = "chunk_size"
+_INDEXING_SETTING_CHUNK_OVERLAP = "chunk_overlap"
+_INDEXING_SETTING_REPO_IDENTITY = "repo_identity"
+_INDEXING_SETTING_GIT_BRANCH = "git_branch"
+_INDEXING_SETTING_GIT_LFS = "git_lfs"
+_INDEXING_SETTING_GIT_SKIP_HIDDEN = "git_skip_hidden"
+_INDEXING_SETTING_GIT_INCLUDE_PATTERNS = "git_include_patterns"
+_INDEXING_SETTING_GIT_EXCLUDE_PATTERNS = "git_exclude_patterns"
+_INDEXING_SETTING_INCLUDE_EXTENSIONS = "include_extensions"
+_INDEXING_SETTING_EXCLUDE_EXTENSIONS = "exclude_extensions"
+INDEXING_SETTINGS_QUERY_COMPATIBLE_KEYS = (
+    _INDEXING_SETTING_BASE_ID,
+    _INDEXING_SETTING_STORAGE_ROOT,
+    _INDEXING_SETTING_KNOWLEDGE_PATH,
+    _INDEXING_SETTING_MODE,
+    _INDEXING_SETTING_EMBEDDER_PROVIDER,
+    _INDEXING_SETTING_EMBEDDER_MODEL,
+    _INDEXING_SETTING_EMBEDDER_HOST,
+    _INDEXING_SETTING_EMBEDDER_DIMENSIONS,
 )
-_INDEXING_SETTINGS_LAYOUT_LENGTH = 18
+INDEXING_SETTINGS_CORPUS_COMPATIBLE_KEYS = (
+    _INDEXING_SETTING_BASE_ID,
+    _INDEXING_SETTING_STORAGE_ROOT,
+    _INDEXING_SETTING_KNOWLEDGE_PATH,
+    _INDEXING_SETTING_MODE,
+    _INDEXING_SETTING_REPO_IDENTITY,
+    _INDEXING_SETTING_GIT_BRANCH,
+    _INDEXING_SETTING_GIT_LFS,
+    _INDEXING_SETTING_GIT_SKIP_HIDDEN,
+    _INDEXING_SETTING_GIT_INCLUDE_PATTERNS,
+    _INDEXING_SETTING_GIT_EXCLUDE_PATTERNS,
+    _INDEXING_SETTING_INCLUDE_EXTENSIONS,
+    _INDEXING_SETTING_EXCLUDE_EXTENSIONS,
+)
 
 
 @runtime_checkable
@@ -198,7 +217,7 @@ class _CollectionExistenceEmbedder(Embedder):
 
 @dataclass(frozen=True)
 class _PersistedIndexState:
-    settings: tuple[str, ...]
+    settings: dict[str, str]
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
     last_published_at: str | None = None
@@ -286,36 +305,44 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
 
 
-def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
+def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> dict[str, str]:
     embedder_config = config.memory.embedder.config
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
-    settings = (
-        base_id,
-        str(storage_path.resolve()),
-        str(knowledge_path.resolve()),
-        base_config.mode,
-        *effective_knowledge_embedder_signature(
-            config.memory.embedder.provider,
-            embedder_config.model,
-            host=embedder_config.host,
-            dimensions=embedder_config.dimensions,
-        ),
-        str(base_config.chunk_size),
-        str(base_config.chunk_overlap),
-        credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
-        git_config.branch if git_config is not None else "",
-        str(git_config.lfs) if git_config is not None else "",
-        str(git_config.skip_hidden) if git_config is not None else "",
-        str(tuple(git_config.include_patterns)) if git_config is not None else "",
-        str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
-        str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else "",
-        str(tuple(base_config.exclude_extensions)),
+    embedder_provider, embedder_model, embedder_host, embedder_dimensions = effective_knowledge_embedder_signature(
+        config.memory.embedder.provider,
+        embedder_config.model,
+        host=embedder_config.host,
+        dimensions=embedder_config.dimensions,
     )
-    if len(settings) != _INDEXING_SETTINGS_LAYOUT_LENGTH:
-        msg = "Knowledge indexing settings layout constants must match _indexing_settings_key"
-        raise AssertionError(msg)
-    return settings
+    return {
+        _INDEXING_SETTING_BASE_ID: base_id,
+        _INDEXING_SETTING_STORAGE_ROOT: str(storage_path.resolve()),
+        _INDEXING_SETTING_KNOWLEDGE_PATH: str(knowledge_path.resolve()),
+        _INDEXING_SETTING_MODE: base_config.mode,
+        _INDEXING_SETTING_EMBEDDER_PROVIDER: embedder_provider,
+        _INDEXING_SETTING_EMBEDDER_MODEL: embedder_model,
+        _INDEXING_SETTING_EMBEDDER_HOST: embedder_host,
+        _INDEXING_SETTING_EMBEDDER_DIMENSIONS: embedder_dimensions,
+        _INDEXING_SETTING_CHUNK_SIZE: str(base_config.chunk_size),
+        _INDEXING_SETTING_CHUNK_OVERLAP: str(base_config.chunk_overlap),
+        _INDEXING_SETTING_REPO_IDENTITY: credential_free_url_identity(git_config.repo_url)
+        if git_config is not None
+        else "",
+        _INDEXING_SETTING_GIT_BRANCH: git_config.branch if git_config is not None else "",
+        _INDEXING_SETTING_GIT_LFS: str(git_config.lfs) if git_config is not None else "",
+        _INDEXING_SETTING_GIT_SKIP_HIDDEN: str(git_config.skip_hidden) if git_config is not None else "",
+        _INDEXING_SETTING_GIT_INCLUDE_PATTERNS: str(tuple(git_config.include_patterns))
+        if git_config is not None
+        else "",
+        _INDEXING_SETTING_GIT_EXCLUDE_PATTERNS: str(tuple(git_config.exclude_patterns))
+        if git_config is not None
+        else "",
+        _INDEXING_SETTING_INCLUDE_EXTENSIONS: str(tuple(base_config.include_extensions))
+        if base_config.include_extensions is not None
+        else "",
+        _INDEXING_SETTING_EXCLUDE_EXTENSIONS: str(tuple(base_config.exclude_extensions)),
+    }
 
 
 def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
@@ -757,7 +784,7 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    _indexing_settings: tuple[str, ...] = field(init=False)
+    _indexing_settings: dict[str, str] = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
@@ -885,7 +912,7 @@ class KnowledgeManager:
         self,
         status: Literal["resetting", "indexing", "complete"],
         *,
-        settings: tuple[str, ...] | None = None,
+        settings: Mapping[str, str] | None = None,
         collection: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,

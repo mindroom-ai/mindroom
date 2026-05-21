@@ -23,6 +23,7 @@ from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.knowledge import manager as knowledge_manager_module
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.registry import (
     load_published_index_state,
@@ -91,7 +92,7 @@ def _write_index_metadata(
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
-        "settings": list(key.indexing_settings),
+        "settings": dict(key.indexing_settings),
         "status": "complete",
         "collection": collection,
         "indexed_count": 0 if indexed_count is None else indexed_count,
@@ -372,7 +373,7 @@ def test_status_rejects_query_incompatible_published_index(tmp_path: Path) -> No
     key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
     metadata_path = published_index_metadata_path(key)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["settings"][3] = "different-embedder-provider"
+    metadata["settings"][knowledge_manager_module._INDEXING_SETTING_EMBEDDER_PROVIDER] = "different-embedder-provider"
     metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
     _publish_committed_runtime_config(client.app, config)
 

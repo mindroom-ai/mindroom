@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, tuple[object, ...] | None], float] = {}
 _EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 
@@ -122,15 +122,19 @@ def _lookup_knowledge_for_base(
         return None
 
 
+def _settings_fingerprint(settings: Mapping[str, str] | None) -> tuple[object, ...] | None:
+    return tuple(sorted(settings.items())) if settings is not None else None
+
+
 def _refresh_schedule_due(
     key: KnowledgeRefreshTarget,
     availability: KnowledgeAvailability,
     *,
-    settings: tuple[str, ...] | None = None,
+    settings_fingerprint: tuple[object, ...] | None = None,
     cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     now = time.monotonic()
-    cache_key = (key, availability, settings)
+    cache_key = (key, availability, settings_fingerprint)
     last_scheduled_at = _refresh_scheduled_at.get(cache_key)
     if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
         return False
@@ -248,16 +252,17 @@ def _embedded_userinfo_fingerprint(repo_url: str) -> str:
     return hmac.new(_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()
 
 
-def _refresh_retry_settings(
+def _refresh_retry_settings_fingerprint(
     lookup: PublishedIndexResolution,
     config: Config,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
-) -> tuple[str, ...] | None:
+) -> tuple[object, ...] | None:
+    settings_fingerprint = tuple(sorted(lookup.key.indexing_settings.items()))
     if availability is KnowledgeAvailability.CONFIG_MISMATCH:
-        return lookup.key.indexing_settings
+        return settings_fingerprint
     if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return lookup.key.indexing_settings + _failed_refresh_retry_fingerprint(lookup, config, runtime_paths)
+        return (*settings_fingerprint, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
     return None
 
 
@@ -306,7 +311,7 @@ def _schedule_refresh_for_availability(
             else _refresh_schedule_due(
                 refresh_target,
                 KnowledgeAvailability.READY,
-                settings=lookup.key.indexing_settings,
+                settings_fingerprint=_settings_fingerprint(lookup.key.indexing_settings),
                 cooldown_seconds=_schedule_refresh_on_access_cooldown_seconds(lookup, config),
             )
         )
@@ -329,7 +334,7 @@ def _schedule_refresh_for_availability(
         if not scheduler_is_refreshing and _refresh_schedule_due(
             refresh_target,
             availability,
-            settings=lookup.key.indexing_settings,
+            settings_fingerprint=_settings_fingerprint(lookup.key.indexing_settings),
         ):
             refresh_scheduler.schedule_refresh(
                 base_id,
@@ -345,7 +350,7 @@ def _schedule_refresh_for_availability(
     ) and _refresh_schedule_due(
         refresh_target,
         availability,
-        settings=_refresh_retry_settings(lookup, config, runtime_paths, availability),
+        settings_fingerprint=_refresh_retry_settings_fingerprint(lookup, config, runtime_paths, availability),
         cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     ):
         refresh_scheduler.schedule_refresh(
