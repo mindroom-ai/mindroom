@@ -97,6 +97,9 @@ apiKeys:
   openai: ""
   anthropic: ""
   openrouter: ""
+  openrouterProvisioning: ""
+  google: ""
+  deepseek: ""
 
 # Ingress options
 ingress:

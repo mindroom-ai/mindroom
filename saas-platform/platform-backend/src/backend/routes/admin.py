@@ -325,7 +325,7 @@ async def get_dashboard_metrics(
         _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
         subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
+        tier_prices = {"byok": 10, "hobby": 20, "pro": 200, "enterprise": 999, "free": 0}
         mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 
         seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()

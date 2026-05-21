@@ -4,6 +4,7 @@ import base64
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
+from backend.openrouter import CreatedOpenRouterKey
 from fastapi.testclient import TestClient
 
 
@@ -69,6 +70,24 @@ def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None
             base_domain="mindroom.chat",
         )
         == "@=5fowner=3dtest:42.mindroom.chat"
+    )
+
+
+@pytest.mark.parametrize("stored_limit", ["not-a-number", object()])
+def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(stored_limit: object) -> None:
+    """Malformed advisory OpenRouter metadata should not block fresh provisioning."""
+    from backend.routes.provisioner import _matching_openrouter_metadata
+
+    assert (
+        _matching_openrouter_metadata(
+            {
+                "openrouter_key_hash": "hash_123",
+                "openrouter_key_limit_reset": "monthly",
+                "openrouter_key_limit_usd": stored_limit,
+            },
+            15,
+        )
+        is False
     )
 
 
@@ -175,7 +194,6 @@ class TestProvisionerEndpoints:
             PLATFORM_DOMAIN="mindroom.test",
             SUPABASE_URL="https://supabase.test",
             SUPABASE_ANON_KEY="test-anon-key",
-            OPENROUTER_API_KEY="test-openrouter",
             OPENAI_API_KEY="test-openai",
         ):
             yield
@@ -208,7 +226,7 @@ class TestProvisionerEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
-        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "starter"}
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
@@ -226,6 +244,198 @@ class TestProvisionerEndpoints:
         # Verify calls
         mock_kubectl.assert_called()
         mock_helm.assert_called()
+
+    def test_byok_provisioning_does_not_inject_platform_openrouter_key(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """BYOK instances should not receive a shared platform OpenRouter key."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with (
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+            patch("backend.routes.provisioner.create_openrouter_key", create=True) as create_key,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == ""
+        create_key.assert_not_called()
+
+    def test_hobby_provisioning_creates_monthly_limited_openrouter_key(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Hobby instances should get a per-customer $15 monthly OpenRouter key."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+        created_key = CreatedOpenRouterKey(
+            key="sk-or-v1-hobby-customer",
+            hash="hobby_hash",
+            label="MindRoom hobby instance 123",
+            limit_usd=15,
+            limit_reset="monthly",
+        )
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+            patch(
+                "backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True
+            ) as create_key,
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        plan = create_key.call_args.kwargs["plan"]
+        assert plan.monthly_limit_usd == 15
+        assert plan.name == "MindRoom hobby account acc_test_123 instance 123"
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+        update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
+        assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
+
+    def test_hobby_provisioning_continues_if_openrouter_metadata_persist_fails(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Generated OpenRouter keys should still be applied if audit metadata persistence fails."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+        created_key = CreatedOpenRouterKey(
+            key="sk-or-v1-hobby-customer",
+            hash="hobby_hash",
+            label="MindRoom hobby instance 123",
+            limit_usd=15,
+            limit_reset="monthly",
+        )
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
+            patch(
+                "backend.routes.provisioner._persist_openrouter_key_metadata",
+                side_effect=RuntimeError("supabase unavailable"),
+            ),
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+
+    def test_hobby_provisioning_missing_openrouter_management_key_returns_operator_error(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Missing OpenRouter management configuration is a platform operator error."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "", create=True),
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 500
+        assert "OPENROUTER_PROVISIONING_API_KEY" in response.json()["detail"]
+        apply_secret.assert_not_called()
+        update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
+        assert any(payload.get("status") == "error" for payload in update_payloads)
+
+    def test_pro_provisioning_uses_larger_resource_profile_and_openrouter_limit(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Pro instances should get a $150 OpenRouter limit and larger Kubernetes resources."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+        created_key = CreatedOpenRouterKey(
+            key="sk-or-v1-pro-customer",
+            hash="pro_hash",
+            label="MindRoom pro instance 123",
+            limit_usd=150,
+            limit_reset="monthly",
+        )
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+            patch(
+                "backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True
+            ) as create_key,
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "pro"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        plan = create_key.call_args.kwargs["plan"]
+        assert plan.monthly_limit_usd == 150
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == "sk-or-v1-pro-customer"
+        set_args = _helm_set_args(mock_helm.call_args.args[0])
+        assert set_args["storage"] == "25Gi"
+        assert set_args["mindroomResources.requests.memory"] == "1Gi"
+        assert set_args["mindroomResources.limits.memory"] == "4Gi"
+        assert set_args["synapseResources.requests.memory"] == "1Gi"
+        assert set_args["sandboxRunnerResources.limits.memory"] == "2Gi"
 
     def test_provision_passes_owner_matrix_user_to_instance_chart(
         self,
@@ -259,7 +469,7 @@ class TestProvisionerEndpoints:
         ):
             response = client.post(
                 "/system/provision",
-                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "starter"},
+                json={"subscription_id": "sub_test_123", "account_id": account_id, "tier": "byok"},
                 headers=valid_auth_header,
             )
 
@@ -294,7 +504,7 @@ class TestProvisionerEndpoints:
         provision_data = {
             "subscription_id": "sub_test_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "byok",
             "instance_id": "456",  # Existing instance
         }
 
@@ -329,7 +539,7 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
             },
             headers=valid_auth_header,
@@ -361,7 +571,7 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
                 "enable_credentials_encryption": True,
             },
@@ -394,7 +604,7 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
                 "enable_credentials_encryption": True,
             },
@@ -424,14 +634,14 @@ class TestProvisionerEndpoints:
             json={
                 "subscription_id": "sub_test_123",
                 "account_id": "acc_test_123",
-                "tier": "professional",
+                "tier": "byok",
                 "instance_id": "456",
             },
             headers=valid_auth_header,
         )
 
         assert response.status_code == 500
-        assert "Failed to inspect existing credential encryption state" in response.json()["detail"]
+        assert "Failed to inspect existing Secret value credentials_encryption_key" in response.json()["detail"]
         mock_helm.assert_not_called()
 
     def test_provision_instance_not_found_for_reprovision(

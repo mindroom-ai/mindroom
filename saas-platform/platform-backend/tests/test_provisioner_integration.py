@@ -70,7 +70,7 @@ class TestProvisionerIntegration:
 
                         response = client.post(
                             "/system/provision",
-                            json={"subscription_id": "sub-123", "account_id": "acc-456", "tier": "professional"},
+                            json={"subscription_id": "sub-123", "account_id": "acc-456", "tier": "byok"},
                             headers=valid_auth,
                         )
 
@@ -109,7 +109,7 @@ class TestProvisionerIntegration:
 
                     response = client.post(
                         "/system/provision",
-                        json={"subscription_id": "sub-789", "account_id": "acc-111", "tier": "starter"},
+                        json={"subscription_id": "sub-789", "account_id": "acc-111", "tier": "byok"},
                         headers=valid_auth,
                     )
 
@@ -144,7 +144,7 @@ class TestProvisionerIntegration:
                             json={
                                 "subscription_id": "sub-lifecycle",
                                 "account_id": "acc-lifecycle",
-                                "tier": "professional",
+                                "tier": "byok",
                             },
                             headers=valid_auth,
                         )
@@ -251,7 +251,7 @@ class TestProvisionerIntegration:
                                 json={
                                     "subscription_id": f"sub-concurrent-{i}",
                                     "account_id": f"acc-concurrent-{i}",
-                                    "tier": "starter",
+                                    "tier": "byok",
                                 },
                                 headers=valid_auth,
                             )
@@ -288,7 +288,7 @@ class TestProvisionerIntegration:
 
             def update_side_effect(data):
                 updates.append(data)
-                return Mock(eq=Mock(return_value=Mock(execute=Mock(return_value=Mock()))))
+                return Mock(eq=Mock(return_value=Mock(execute=Mock(return_value=Mock(data=[existing_instance])))))
 
             mock_db.table().update.side_effect = update_side_effect
 
@@ -314,7 +314,7 @@ class TestProvisionerIntegration:
                             json={
                                 "subscription_id": "sub-reprov",
                                 "account_id": "acc-reprov",
-                                "tier": "professional",
+                                "tier": "byok",
                                 "instance_id": 555,  # Re-use existing ID
                             },
                             headers=valid_auth,
@@ -423,7 +423,7 @@ class TestProvisionerIntegration:
                                 result = asyncio.run(
                                     provision_instance(
                                         None,  # request
-                                        {"subscription_id": "sub-bg", "account_id": "acc-bg", "tier": "professional"},
+                                        {"subscription_id": "sub-bg", "account_id": "acc-bg", "tier": "byok"},
                                         "Bearer test-api-key",
                                         BackgroundTasks(),
                                     )
@@ -464,7 +464,7 @@ class TestProvisionerIntegration:
 
                         response = client.post(
                             "/system/provision",
-                            json={"subscription_id": "sub-recovery", "account_id": "acc-recovery", "tier": "starter"},
+                            json={"subscription_id": "sub-recovery", "account_id": "acc-recovery", "tier": "byok"},
                             headers=valid_auth,
                         )
 

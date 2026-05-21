@@ -12,10 +12,12 @@ interface PricingPlan {
   name: string
   price_monthly: string
   price_yearly: string
-  price_model?: string
   description: string
   features: string[]
   recommended?: boolean
+  included_ai_budget_usd?: number
+  requires_customer_provider_keys?: boolean
+  resource_profile?: 'small' | 'pro'
   limits?: {
     max_agents: number | string
     max_messages_per_day: number | string
@@ -36,7 +38,6 @@ export default function UpgradePage() {
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null)
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly')
   const [isProcessing, setIsProcessing] = useState(false)
-  const [userCount, setUserCount] = useState(1)
   const [pricingConfig, setPricingConfig] = useState<PricingConfig | null>(null)
   const [pricingLoading, setPricingLoading] = useState(true)
 
@@ -73,9 +74,7 @@ export default function UpgradePage() {
     setIsProcessing(true)
 
     try {
-      // Pass quantity for professional plan
-      const quantity = plan.price_model === 'per_user' ? userCount : 1
-      const { url } = await createCheckoutSession(selectedPlan, billingCycle, quantity)
+      const { url } = await createCheckoutSession(selectedPlan, billingCycle)
       window.location.href = url
     } catch (error) {
       logger.error('Error creating checkout session:', error)
@@ -108,8 +107,7 @@ export default function UpgradePage() {
     .filter(([key]) => key !== 'free')
     .map(([key, plan]) => ({ ...plan, id: key }))
     .sort((a, b) => {
-      // Sort order: starter, professional, enterprise
-      const order = ['starter', 'professional', 'enterprise']
+      const order = ['byok', 'hobby', 'pro', 'enterprise']
       return order.indexOf(a.id) - order.indexOf(b.id)
     })
 
@@ -181,7 +179,6 @@ export default function UpgradePage() {
           // Parse prices and calculate display values
           const monthlyPrice = plan.price_monthly
           const yearlyPrice = plan.price_yearly
-          const isPerUser = plan.price_model === 'per_user'
           const isCustom = monthlyPrice === 'Custom'
 
           // Calculate yearly monthly equivalent (with discount)
@@ -239,7 +236,7 @@ export default function UpgradePage() {
                   </span>
                   {!isCustom && (
                     <span className="text-gray-600 dark:text-gray-400 ml-1">
-                      {isPerUser ? '/user/month' : '/month'}
+                      /month
                     </span>
                   )}
                 </div>
@@ -251,41 +248,19 @@ export default function UpgradePage() {
                     </div>
                   </div>
                 )}
-                {isPerUser && billingCycle === 'monthly' && (
-                  <div className="mt-3 space-y-2">
-                    <label className="text-sm text-gray-600 dark:text-gray-400">Number of users:</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="100"
-                      value={userCount}
-                      onChange={(e) => setUserCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-                      onClick={(e) => e.stopPropagation()}
-                      className="w-full px-3 py-1 border border-gray-300 dark:border-gray-600 rounded-md text-sm dark:bg-gray-800 dark:text-white"
-                      disabled={selectedPlan !== plan.id}
-                    />
-                    <div className="text-xs text-gray-500 dark:text-gray-400">
-                      Total: ${(parseFloat(monthlyPrice.replace('$', '')) * userCount).toFixed(2)}/month
-                    </div>
-                  </div>
-                )}
-                {isPerUser && billingCycle === 'yearly' && (
-                  <div className="mt-3 space-y-2">
-                    <label className="text-sm text-gray-600 dark:text-gray-400">Number of users:</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="100"
-                      value={userCount}
-                      onChange={(e) => setUserCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-                      onClick={(e) => e.stopPropagation()}
-                      className="w-full px-3 py-1 border border-gray-300 dark:border-gray-600 rounded-md text-sm dark:bg-gray-800 dark:text-white"
-                      disabled={selectedPlan !== plan.id}
-                    />
-                    <div className="text-xs text-gray-500 dark:text-gray-400">
-                      Total: ${(parseFloat(yearlyPrice.replace('$', '')) * userCount).toFixed(2)}/year
-                    </div>
-                  </div>
+                {plan.included_ai_budget_usd && plan.included_ai_budget_usd > 0 ? (
+                  <p className="mt-3 text-xs font-medium text-orange-700 dark:text-orange-300">
+                    Includes ${plan.included_ai_budget_usd}/month AI usage
+                  </p>
+                ) : plan.requires_customer_provider_keys ? (
+                  <p className="mt-3 text-xs font-medium text-gray-600 dark:text-gray-400">
+                    Bring your own model provider keys
+                  </p>
+                ) : null}
+                {plan.resource_profile === 'pro' && (
+                  <p className="mt-1 text-xs font-medium text-purple-700 dark:text-purple-300">
+                    Larger hosted resource profile
+                  </p>
                 )}
               </div>
 
@@ -315,15 +290,6 @@ export default function UpgradePage() {
                 Selected: <span className="font-semibold dark:text-white">{pricingConfig.plans[selectedPlan]?.name}</span>
                 {' '}({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} billing)
               </p>
-              {pricingConfig.plans[selectedPlan]?.price_model === 'per_user' && (
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {userCount} user{userCount > 1 ? 's' : ''} •
-                  {billingCycle === 'yearly'
-                    ? ` $${(parseFloat(pricingConfig.plans[selectedPlan].price_yearly.replace('$', '')) * userCount).toFixed(2)}/year`
-                    : ` $${(parseFloat(pricingConfig.plans[selectedPlan].price_monthly.replace('$', '')) * userCount).toFixed(2)}/month`
-                  }
-                </p>
-              )}
             </div>
           )}
         </div>

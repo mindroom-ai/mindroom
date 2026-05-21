@@ -51,7 +51,7 @@ class TestAccountsEndpoints:
                 {
                     "id": "sub_123",
                     "account_id": "acc_test_123",
-                    "tier": "professional",
+                    "tier": "pro",
                     "status": "active",
                     "instances": [{"id": "inst_123", "instance_id": "123", "status": "running"}],
                 }
@@ -68,7 +68,7 @@ class TestAccountsEndpoints:
         assert data["id"] == "acc_test_123"
         assert data["email"] == "test@example.com"
         assert len(data["subscriptions"]) == 1
-        assert data["subscriptions"][0]["tier"] == "professional"
+        assert data["subscriptions"][0]["tier"] == "pro"
 
     def test_get_current_account_not_found(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting account when it doesn't exist."""
@@ -272,14 +272,14 @@ class TestAccountsEndpoints:
                 {
                     "id": "sub_1",
                     "account_id": "acc_test_123",
-                    "tier": "starter",
+                    "tier": "byok",
                     "status": "cancelled",
                     "instances": [],
                 },
                 {
                     "id": "sub_2",
                     "account_id": "acc_test_123",
-                    "tier": "professional",
+                    "tier": "pro",
                     "status": "active",
                     "instances": [
                         {"id": "inst_1", "instance_id": "1", "status": "running"},

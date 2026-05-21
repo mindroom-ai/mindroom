@@ -6,7 +6,7 @@ from typing import Annotated, Any
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
 from backend.models import WebhookResponse
-from backend.pricing import get_plan_limits_from_metadata
+from backend.pricing import get_plan_limits_from_metadata, get_stripe_price_match
 from fastapi import APIRouter, Header, HTTPException, Request
 
 router = APIRouter()
@@ -23,10 +23,10 @@ def _maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
 
 
 def _get_tier_from_price(price: dict) -> str:
-    """Extract tier from price metadata.
+    """Extract the canonical tier for a Stripe price."""
+    if match := get_stripe_price_match(price.get("id")):
+        return match.tier
 
-    Our sync-stripe-prices.py script sets metadata.tier with the tier name.
-    """
     if (metadata := price.get("metadata", {})) and (tier := metadata.get("tier")):
         return tier
 
@@ -39,10 +39,10 @@ def _get_tier_from_price(price: dict) -> str:
 
 
 def _get_billing_cycle_from_price(price: dict) -> str:
-    """Extract billing cycle from price metadata.
+    """Extract the canonical billing cycle for a Stripe price."""
+    if match := get_stripe_price_match(price.get("id")):
+        return match.billing_cycle
 
-    Our sync-stripe-prices.py script sets metadata.billing_cycle.
-    """
     if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
         return cycle
 
@@ -74,18 +74,7 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
     tier = _get_tier_from_price(price_data)
     _billing_cycle = _get_billing_cycle_from_price(price_data)
-    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
-
-    # Get plan limits
     limits = get_plan_limits_from_metadata(tier)
-
-    # Handle per-user limits for professional plan
-    if tier == "professional" and quantity > 1:
-        # Scale limits by user count
-        if limits.get("max_agents") and isinstance(limits["max_agents"], int):
-            limits["max_agents"] = limits["max_agents"] * quantity
-        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
-            limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
 
     # Prepare subscription data
     subscription_data = {
@@ -144,18 +133,7 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
     price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
     tier = _get_tier_from_price(price_data)
     _billing_cycle = _get_billing_cycle_from_price(price_data)
-    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
-
-    # Get plan limits
     limits = get_plan_limits_from_metadata(tier)
-
-    # Handle per-user limits for professional plan
-    if tier == "professional" and quantity > 1:
-        # Scale limits by user count
-        if limits.get("max_agents") and isinstance(limits["max_agents"], int):
-            limits["max_agents"] = limits["max_agents"] * quantity
-        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
-            limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
 
     # Prepare subscription data
     subscription_data = {

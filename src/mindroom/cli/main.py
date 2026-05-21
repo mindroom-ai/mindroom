@@ -92,7 +92,7 @@ def run(
         None,
         "--config",
         "-c",
-        help="Use this config file path. Defaults storage beside the selected config unless --storage-path is set.",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
     ),
     storage_path: Path | None = typer.Option(  # noqa: B008
         None,

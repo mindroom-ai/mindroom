@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -56,7 +57,9 @@ class Plan(BaseModel):
     stripe_price_id_monthly_live: str | None = None
     stripe_price_id_yearly_live: str | None = None
     recommended: bool = False
-    price_model: Literal["per_user"] | None = None
+    included_ai_budget_usd: int = 0
+    requires_customer_provider_keys: bool = False
+    resource_profile: Literal["small", "pro"] = "small"
 
 
 class Trial(BaseModel):
@@ -80,6 +83,14 @@ class PricingConfig(BaseModel):
     plans: dict[str, Plan]
     trial: Trial
     discounts: Discounts
+
+
+@dataclass(frozen=True)
+class StripePriceMatch:
+    """Canonical plan metadata for a configured Stripe price ID."""
+
+    tier: str
+    billing_cycle: Literal["monthly", "yearly"]
 
 
 def find_pricing_config_path() -> Path:
@@ -132,13 +143,10 @@ def load_pricing_config_model() -> PricingConfig:
 
 
 def _stripe_mode() -> Literal["test", "live"]:
-    publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
-    if publishable_key.startswith("pk_live_"):
-        return "live"
-
+    # Server-side price IDs must match the secret key used for Stripe API calls.
     secret_key = os.getenv("STRIPE_SECRET_KEY", "")
-    if secret_key.startswith(("sk_live_", "rk_live_")):
-        return "live"
+    if secret_key:
+        return "live" if secret_key.startswith(("sk_live_", "rk_live_")) else "test"
 
     secret_file = os.getenv("STRIPE_SECRET_KEY_FILE", "")
     if secret_file:
@@ -153,7 +161,7 @@ def get_stripe_price_id(plan: str, billing_cycle: str = "monthly") -> str | None
     """Get Stripe price ID for a specific plan and billing cycle.
 
     Args:
-        plan: Plan key (e.g., 'starter', 'professional')
+        plan: Plan key (e.g., 'byok', 'hobby', 'pro')
         billing_cycle: Either 'monthly' or 'yearly'
 
     Returns:
@@ -179,11 +187,25 @@ def get_stripe_price_id(plan: str, billing_cycle: str = "monthly") -> str | None
     return None
 
 
+def get_stripe_price_match(price_id: str | None) -> StripePriceMatch | None:
+    """Return canonical plan metadata for a configured Stripe price ID."""
+    if not price_id:
+        return None
+
+    config = load_pricing_config_model()
+    for tier, plan in config.plans.items():
+        if price_id in {plan.stripe_price_id_monthly, plan.stripe_price_id_monthly_live}:
+            return StripePriceMatch(tier=tier, billing_cycle="monthly")
+        if price_id in {plan.stripe_price_id_yearly, plan.stripe_price_id_yearly_live}:
+            return StripePriceMatch(tier=tier, billing_cycle="yearly")
+    return None
+
+
 def get_plan_details(plan: str) -> Plan | None:
     """Get full details for a specific plan.
 
     Args:
-        plan: Plan key (e.g., 'starter', 'professional')
+        plan: Plan key (e.g., 'byok', 'hobby', 'pro')
 
     Returns:
         Plan object or None if not found
@@ -213,7 +235,7 @@ def get_plan_limits_from_metadata(tier: str) -> dict[str, Any]:
     """Get plan limits for a specific tier.
 
     Args:
-        tier: Plan tier (e.g., 'free', 'starter', 'professional', 'enterprise')
+        tier: Plan tier (e.g., 'free', 'byok', 'hobby', 'pro', 'enterprise')
 
     Returns:
         Dictionary of plan limits with keys like 'max_agents', 'max_messages_per_day'

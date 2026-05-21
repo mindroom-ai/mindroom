@@ -15610,7 +15610,7 @@ Example provision request:
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
+  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
@@ -15768,6 +15768,9 @@ Start MindRoom with your configuration.
 │                                          ERROR)                                        │
 │                                          [env var: LOG_LEVEL]                          │
 │                                          [default: INFO]                               │
+│ --config        -c              PATH     Use this config file path. Defaults the       │
+│                                          storage location to the selected config       │
+│                                          directory unless --storage-path is set.       │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │ --api               --no-api             Start the bundled dashboard/API server        │

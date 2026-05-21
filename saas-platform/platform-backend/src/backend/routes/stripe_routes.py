@@ -17,7 +17,6 @@ class CheckoutRequest(BaseModel):
 
     tier: str
     billing_cycle: str = "monthly"  # monthly or yearly
-    quantity: int = 1  # For per-user pricing (professional plan)
 
 
 @router.post("/stripe/checkout", response_model=UrlResponse)
@@ -59,11 +58,8 @@ async def create_checkout_session(
             )
             return {"url": portal_session.url}
 
-    # Use quantity for professional plan (per-user pricing)
-    quantity = payload.quantity if payload.tier == "professional" else 1
-
     checkout_params = {
-        "line_items": [{"price": price_id, "quantity": quantity}],
+        "line_items": [{"price": price_id, "quantity": 1}],
         "mode": "subscription",
         "success_url": f"https://app.{PLATFORM_DOMAIN}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
         "cancel_url": f"https://app.{PLATFORM_DOMAIN}/dashboard/billing/upgrade?cancelled=true",
@@ -73,7 +69,6 @@ async def create_checkout_session(
             "metadata": {
                 "tier": payload.tier,
                 "billing_cycle": payload.billing_cycle,
-                "quantity": str(quantity),
                 "supabase_user_id": user["account_id"],
             }
         },

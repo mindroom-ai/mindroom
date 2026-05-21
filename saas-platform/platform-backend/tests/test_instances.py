@@ -181,7 +181,7 @@ class TestInstancesEndpoints:
     ):
         """Test provisioning a new instance for user."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter", "status": "active"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
 
         # Setup mock chains for different queries
         subscription_mock = MagicMock()
@@ -221,14 +221,14 @@ class TestInstancesEndpoints:
         mock_provision_instance.assert_called_once()
         call_args = mock_provision_instance.call_args[1]
         assert call_args["data"]["subscription_id"] == "sub_123"
-        assert call_args["data"]["tier"] == "starter"
+        assert call_args["data"]["tier"] == "byok"
 
     def test_provision_user_instance_existing(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock, mock_provisioner_api_key
     ):
         """Test provisioning when instance already exists."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter", "status": "active"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
         existing_instance = {
             "id": 1,
             "instance_id": "456",
@@ -288,7 +288,7 @@ class TestInstancesEndpoints:
     ):
         """Test reprovisioning a deprovisioned instance."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "professional", "status": "active"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "pro", "status": "active"}
         deprovisioned_instance = {
             "id": 1,
             "instance_id": "789",
@@ -410,7 +410,7 @@ class TestInstancesEndpoints:
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
         subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "starter", "status": "active"}])
+        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "byok", "status": "active"}])
 
         def table_side_effect(table_name):
             if table_name == "instances":
@@ -445,7 +445,7 @@ class TestInstancesEndpoints:
         expired_trial = {
             "id": "sub_123",
             "account_id": "acc_test_123",
-            "tier": "starter",
+            "tier": "byok",
             "status": "trialing",
             "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         }
@@ -532,7 +532,7 @@ class TestInstancesEndpoints:
         subscription_mock.select.return_value = subscription_mock
         subscription_mock.eq.return_value = subscription_mock
         subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "starter", "status": "active"}])
+        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "byok", "status": "active"}])
 
         def table_side_effect(table_name):
             if table_name == "instances":
@@ -635,7 +635,7 @@ class TestInstancesEndpoints:
     ):
         """Test provisioning when instance is already provisioning."""
         # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter", "status": "active"}
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
         provisioning_instance = {
             "id": 1,
             "instance_id": "456",

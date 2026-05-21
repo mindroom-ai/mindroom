@@ -102,7 +102,7 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
     subscription_query.select.return_value = subscription_query
     subscription_query.eq.return_value = subscription_query
     subscription_query.limit.return_value = subscription_query
-    subscription_query.execute.return_value = Mock(data=[{"id": "sub-123", "tier": "starter", "status": "active"}])
+    subscription_query.execute.return_value = Mock(data=[{"id": "sub-123", "tier": "byok", "status": "active"}])
 
     supabase = MagicMock()
     supabase.table.side_effect = [instance_query, subscription_query]

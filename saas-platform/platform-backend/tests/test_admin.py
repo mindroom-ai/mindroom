@@ -201,7 +201,7 @@ class TestAdminEndpoints:
 
         # Mock subscription query for provision_instance
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "sub_123", "account_id": "acc_123", "tier": "starter"}
+            data={"id": "sub_123", "account_id": "acc_123", "tier": "byok"}
         )
 
         with patch("backend.routes.admin.provision_instance") as mock_provision:
@@ -249,7 +249,7 @@ class TestAdminEndpoints:
             "status": "active",
             "created_at": datetime.now(UTC).isoformat(),
         }
-        subscription_data = {"id": "sub_123", "account_id": "acc_123", "tier": "professional", "status": "active"}
+        subscription_data = {"id": "sub_123", "account_id": "acc_123", "tier": "pro", "status": "active"}
         instance_data = {"id": "inst_123", "instance_id": "123", "account_id": "acc_123", "status": "running"}
 
         # Setup mocks for different queries
@@ -298,7 +298,7 @@ class TestAdminEndpoints:
         data = response.json()
         assert data["account"]["id"] == "acc_123"
         assert data["account"]["email"] == "user@example.com"
-        assert data["subscription"]["tier"] == "professional"
+        assert data["subscription"]["tier"] == "pro"
         assert len(data["instances"]) == 1
 
     def test_admin_update_account_status(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
@@ -439,7 +439,7 @@ class TestAdminEndpoints:
         subs_data_mock = MagicMock()
         subs_data_mock.select.return_value = subs_data_mock
         subs_data_mock.eq.return_value = subs_data_mock
-        subs_data_mock.execute.return_value = Mock(data=[{"tier": "starter"}, {"tier": "professional"}])
+        subs_data_mock.execute.return_value = Mock(data=[{"tier": "byok"}, {"tier": "pro"}])
 
         # Mock usage metrics for messages
         usage_mock = MagicMock()

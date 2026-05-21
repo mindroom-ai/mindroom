@@ -9,7 +9,7 @@ from typing import Any
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import HTTPException
 
-PAID_TIERS = frozenset({"starter", "professional", "enterprise"})
+PAID_TIERS = frozenset({"byok", "hobby", "pro", "enterprise"})
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:

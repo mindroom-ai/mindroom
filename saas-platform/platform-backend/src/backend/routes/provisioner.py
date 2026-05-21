@@ -11,9 +11,11 @@ import secrets
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import Annotated, Any
 from uuid import UUID
 
+import anyio
 from backend.config import (
     ANTHROPIC_API_KEY,
     DEEPSEEK_API_KEY,
@@ -45,7 +47,7 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
     INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
     OPENAI_API_KEY,
-    OPENROUTER_API_KEY,
+    OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
     SANDBOX_PROXY_TOKEN,
@@ -65,6 +67,14 @@ from backend.k8s import (
     wait_for_deployment_ready,
 )
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
+from backend.openrouter import (
+    CreatedOpenRouterKey,
+    OpenRouterConfigurationError,
+    OpenRouterError,
+    OpenRouterKeyPlan,
+    create_openrouter_key,
+)
+from backend.pricing import get_plan_details
 from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
@@ -89,6 +99,24 @@ _HOSTED_MATRIX_AUTO_JOIN_ROOM_KEYS = (
     "research",
     "science",
 )
+
+_RESOURCE_PROFILE_HELM_VALUES = {
+    "pro": {
+        "storage": "25Gi",
+        "mindroomResources.requests.memory": "1Gi",
+        "mindroomResources.requests.cpu": "500m",
+        "mindroomResources.limits.memory": "4Gi",
+        "mindroomResources.limits.cpu": "2000m",
+        "synapseResources.requests.memory": "1Gi",
+        "synapseResources.requests.cpu": "500m",
+        "synapseResources.limits.memory": "4Gi",
+        "synapseResources.limits.cpu": "2000m",
+        "sandboxRunnerResources.requests.memory": "512Mi",
+        "sandboxRunnerResources.requests.cpu": "250m",
+        "sandboxRunnerResources.limits.memory": "2Gi",
+        "sandboxRunnerResources.limits.cpu": "1000m",
+    },
+}
 
 
 def _env_flag_enabled(value: str) -> bool:
@@ -243,6 +271,12 @@ def _append_image_pull_secret_helm_args(helm_args: list[str], secret_names: str)
         helm_args += ["--set-string", f"imagePullSecrets[{index}].name={name}"]
 
 
+def _append_resource_profile_helm_args(helm_args: list[str], resource_profile: str) -> None:
+    """Forward configured resource profile overrides to the instance chart."""
+    for key, value in _RESOURCE_PROFILE_HELM_VALUES.get(resource_profile, {}).items():
+        helm_args += ["--set", f"{key}={value}"]
+
+
 def _instance_secret_name(instance_id: str) -> str:
     """Return the externally managed Secret name for an instance."""
     return f"mindroom-api-keys-{instance_id}"
@@ -278,25 +312,30 @@ async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: 
     return _instance_secret_hash(secret_data)
 
 
-async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
-    """Return the existing credential encryption key from an instance Secret when present."""
+async def _existing_instance_secret_value(instance_id: str, namespace: str, key: str) -> str | None:
+    """Return an existing instance Secret value when present."""
     secret_name = _instance_secret_name(instance_id)
     code, out, err = await run_kubectl(
-        ["get", "secret", secret_name, "--ignore-not-found", "-o=jsonpath={.data.credentials_encryption_key}"],
+        ["get", "secret", secret_name, "--ignore-not-found", f"-o=jsonpath={{.data.{key}}}"],
         namespace=namespace,
     )
     if code != 0:
-        msg = f"Failed to inspect existing credential encryption state for instance {instance_id}: {err or out}"
+        msg = f"Failed to inspect existing Secret value {key} for instance {instance_id}: {err or out}"
         raise HTTPException(status_code=500, detail=msg)
-    encoded_key = out.strip()
-    if not encoded_key:
+    encoded_value = out.strip()
+    if not encoded_value:
         return None
     try:
-        key = base64.b64decode(encoded_key, validate=True).decode("utf-8").strip()
+        value = base64.b64decode(encoded_value, validate=True).decode("utf-8").strip()
     except (binascii.Error, UnicodeDecodeError) as exc:
-        msg = f"Instance {instance_id} has an invalid credential encryption key Secret value"
+        msg = f"Instance {instance_id} has an invalid {key} Secret value"
         raise HTTPException(status_code=500, detail=msg) from exc
-    return key or None
+    return value or None
+
+
+async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
+    """Return the existing credential encryption key from an instance Secret when present."""
+    return await _existing_instance_secret_value(instance_id, namespace, "credentials_encryption_key")
 
 
 async def _provision_credentials_encryption_key(
@@ -340,6 +379,99 @@ async def _existing_instance_storage_class_name(instance_id: str, namespace: str
     return storage_classes.pop()
 
 
+def _openrouter_key_name(*, tier: str, account_id: Any, instance_id: str) -> str:
+    """Return a stable human-readable OpenRouter key name."""
+    return f"MindRoom {tier} account {account_id} instance {instance_id}"
+
+
+def _matching_openrouter_metadata(row: Mapping[str, Any] | None, monthly_limit_usd: int) -> bool:
+    """Return whether stored OpenRouter metadata matches the requested budget."""
+    if not row:
+        return False
+    try:
+        stored_limit = int(row.get("openrouter_key_limit_usd") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        row.get("openrouter_key_hash") is not None
+        and row.get("openrouter_key_limit_reset") == "monthly"
+        and stored_limit == monthly_limit_usd
+    )
+
+
+def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
+    """Persist non-secret OpenRouter key metadata for reuse and audit."""
+    sb.table("instances").update(
+        {
+            "openrouter_key_hash": created_key.hash,
+            "openrouter_key_label": created_key.label,
+            "openrouter_key_limit_usd": created_key.limit_usd,
+            "openrouter_key_limit_reset": created_key.limit_reset,
+            "openrouter_key_created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    ).eq("instance_id", instance_id).execute()
+
+
+def _mark_instance_provision_error(sb: Any, instance_id: str, context: str) -> None:
+    """Mark a failed provisioning attempt as error without hiding the original failure."""
+    try:
+        sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
+            "instance_id", instance_id
+        ).execute()
+    except Exception:
+        logger.warning("Failed to update instance status to error after %s", context)
+
+
+async def _provision_openrouter_key(
+    *,
+    sb: Any,
+    account_id: Any,
+    instance_id: str,
+    tier: str,
+    existing_instance_row: Mapping[str, Any] | None,
+    namespace: str,
+) -> str:
+    """Return the OpenRouter key value this tenant instance should receive."""
+    plan = get_plan_details(tier)
+    monthly_limit_usd = plan.included_ai_budget_usd if plan else 0
+    if monthly_limit_usd <= 0:
+        return ""
+
+    if _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
+        existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
+        if existing_key:
+            return existing_key
+
+    create_key = partial(
+        create_openrouter_key,
+        management_api_key=OPENROUTER_PROVISIONING_API_KEY,
+        plan=OpenRouterKeyPlan(
+            name=_openrouter_key_name(tier=tier, account_id=account_id, instance_id=instance_id),
+            monthly_limit_usd=monthly_limit_usd,
+        ),
+    )
+    try:
+        created_key = await anyio.to_thread.run_sync(create_key)
+    except OpenRouterConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except OpenRouterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        await anyio.to_thread.run_sync(
+            partial(
+                _persist_openrouter_key_metadata,
+                sb,
+                instance_id,
+                created_key,
+            )
+        )
+    except Exception:
+        logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
+    return created_key.key
+
+
 @router.post("/system/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
@@ -371,6 +503,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             if not update_res.data:
                 msg = f"Instance {customer_id} not found"
                 raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
+            existing_instance_row = update_res.data[0]
             logger.info("Re-provisioning existing instance %s", customer_id)
         except HTTPException:
             raise
@@ -399,6 +532,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 msg = "Failed to insert instance"
                 raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
             customer_id = insert_res.data[0]["instance_id"]
+            existing_instance_row = insert_res.data[0]
         except HTTPException:
             raise
         except Exception as e:
@@ -457,20 +591,27 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         storage_class_name = (
             await _existing_instance_storage_class_name(customer_id, namespace)
         ) or INSTANCE_STORAGE_CLASS_NAME
-    instance_secret_data = {
-        "openai_key": OPENAI_API_KEY or "",
-        "anthropic_key": ANTHROPIC_API_KEY or "",
-        "openrouter_key": OPENROUTER_API_KEY or "",
-        "google_key": GOOGLE_API_KEY or "",
-        "deepseek_key": DEEPSEEK_API_KEY or "",
-        "supabase_service_key": SUPABASE_SERVICE_KEY or "",
-        "sandbox_proxy_token": sandbox_proxy_token,
-        "credentials_encryption_key": credentials_encryption_key,
-        "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
-        "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
-    }
-
     try:
+        openrouter_key = await _provision_openrouter_key(
+            sb=sb,
+            account_id=account_id,
+            instance_id=customer_id,
+            tier=tier,
+            existing_instance_row=existing_instance_row,
+            namespace=namespace,
+        )
+        instance_secret_data = {
+            "openai_key": OPENAI_API_KEY or "",
+            "anthropic_key": ANTHROPIC_API_KEY or "",
+            "openrouter_key": openrouter_key,
+            "google_key": GOOGLE_API_KEY or "",
+            "deepseek_key": DEEPSEEK_API_KEY or "",
+            "supabase_service_key": SUPABASE_SERVICE_KEY or "",
+            "sandbox_proxy_token": sandbox_proxy_token,
+            "credentials_encryption_key": credentials_encryption_key,
+            "matrix_oidc_client_secret": INSTANCE_MATRIX_OIDC_CLIENT_SECRET or "",
+            "matrix_registration_shared_secret": _instance_matrix_registration_shared_secret(customer_id),
+        }
         instance_secret_hash = _instance_secret_hash(instance_secret_data)
         # Use upgrade --install to handle both new and re-provisioning cases
         helm_args = [
@@ -502,6 +643,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         ]
         if storage_class_name:
             helm_args += ["--set", f"storageClassName={storage_class_name}"]
+        plan = get_plan_details(tier)
+        if plan:
+            _append_resource_profile_helm_args(helm_args, plan.resource_profile)
         if INSTANCE_MINDROOM_IMAGE:
             helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
@@ -560,13 +704,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         _append_matrix_oidc_helm_args(helm_args)
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
-            # Mark as error in DB
-            try:
-                sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
-                    "instance_id", customer_id
-                ).execute()
-            except Exception:
-                logger.warning("Failed to update instance status to error after helm failure")
             msg = f"Helm install failed: {stderr}"
             raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         logger.info("Helm install output: %s", stdout)
@@ -574,16 +711,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Helm's resource pruning cannot delete the externally managed Secret.
         await _apply_instance_secret(customer_id, namespace, instance_secret_data)
     except HTTPException:
+        _mark_instance_provision_error(sb, customer_id, "deployment HTTP exception")
         raise
     except Exception as e:
         logger.exception("Failed to deploy instance")
-        # Mark as error in DB
-        try:
-            sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
-                "instance_id", customer_id
-            ).execute()
-        except Exception:
-            logger.warning("Failed to update instance status to error after deploy exception")
+        _mark_instance_provision_error(sb, customer_id, "deploy exception")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.

@@ -21,7 +21,8 @@ import yaml
 from dotenv import load_dotenv
 
 # Load environment variables
-env_path = Path(__file__).parent.parent / ".env"
+repo_root = Path(__file__).resolve().parents[2]
+env_path = repo_root / "saas-platform" / ".env"
 load_dotenv(env_path)
 
 # Initialize Stripe
@@ -31,9 +32,20 @@ if not stripe.api_key:
     sys.exit(1)
 
 # Load pricing config
-config_path = Path(__file__).parent.parent / "pricing-config.yaml"
+config_path = repo_root / "saas-platform" / "pricing-config.yaml"
 with open(config_path) as f:
     config = yaml.safe_load(f)
+
+
+def as_dict(value):
+    """Convert Stripe metadata objects to plain dictionaries."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, stripe.StripeObject):
+        return value.to_dict()
+    return dict(value)
 
 
 def sync_product():
@@ -43,7 +55,7 @@ def sync_product():
     # Look for existing product
     existing_product = None
     for product in products.data:
-        if product.metadata.get("platform") == "mindroom":
+        if as_dict(product.metadata).get("platform") == "mindroom":
             existing_product = product
             break
 
@@ -77,13 +89,10 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
     # Determine price amount
     amount = plan_data["price_monthly"] if billing_cycle == "monthly" else plan_data["price_yearly"]
 
-    # Check if this is per-user pricing
-    price_model = plan_data.get("price_model", "flat")
-
     # Search for existing price with matching metadata
     prices = stripe.Price.list(product=product_id, limit=100)
     for price in prices.data:
-        metadata = price.metadata or {}
+        metadata = as_dict(price.metadata)
         if metadata.get("tier") == plan_key and metadata.get("billing_cycle") == billing_cycle:
             print(f"  Found existing price for {plan_key} ({billing_cycle}): {price.id}")
             return price.id
@@ -107,11 +116,6 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
         },
         "lookup_key": f"{plan_key}_{billing_cycle}",
     }
-
-    # Add per-user billing if applicable
-    if price_model == "per_user":
-        price_params["recurring"]["usage_type"] = "licensed"
-        price_params["billing_scheme"] = "per_unit"
 
     price = stripe.Price.create(**price_params)
     print(f"  ✅ Created new price for {plan_key} ({billing_cycle}): {price.id}")

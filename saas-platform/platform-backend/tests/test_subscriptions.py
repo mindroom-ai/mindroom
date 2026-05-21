@@ -50,7 +50,7 @@ class TestSubscriptionsEndpoints:
         subscription = {
             "id": "sub_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "pro",
             "status": "active",
             "stripe_subscription_id": "stripe_sub_123",
             "current_period_start": datetime.now(UTC).isoformat(),
@@ -69,7 +69,7 @@ class TestSubscriptionsEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == "sub_123"
-        assert data["tier"] == "professional"
+        assert data["tier"] == "pro"
         assert data["status"] == "active"
         assert data["can_run_instances"] is True
         assert data["trial_days_remaining"] is None
@@ -301,7 +301,7 @@ class TestSubscriptionsEndpoints:
         subscription = {
             "id": "sub_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "pro",
             "status": "trialing",
             "trial_ends_at": trial_end.isoformat(),
             "stripe_subscription_id": "stripe_sub_123",
@@ -330,7 +330,7 @@ class TestSubscriptionsEndpoints:
         expired_trial = {
             "id": "sub_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "pro",
             "status": "trialing",
             "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
             "stripe_subscription_id": "stripe_sub_123",
