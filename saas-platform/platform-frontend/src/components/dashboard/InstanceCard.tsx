@@ -211,6 +211,7 @@ export function InstanceCard({
   const cinnyLoginUrl = instance.matrix_server_url
     ? buildCinnyLoginUrl(instance.matrix_server_url)
     : null
+  const chatInterfaceUrl = cinnyLoginUrl || instance.matrix_server_url
   const lastSynced = instance.kubernetes_synced_at
     ? formatRelativeTime(instance.kubernetes_synced_at)
     : null
@@ -319,12 +320,12 @@ export function InstanceCard({
         </div>
 
         {/* Chat Interface */}
-        {instance.matrix_server_url && (
+        {chatInterfaceUrl && (
           <div className="flex items-center justify-between">
             <span className="text-gray-600 dark:text-gray-400">Chat Interface</span>
             <div className="flex items-center gap-2">
               <Link
-                href={cinnyLoginUrl || instance.matrix_server_url}
+                href={chatInterfaceUrl}
                 target="_blank"
                 className="flex items-center gap-1 text-purple-600 hover:text-purple-700 dark:text-purple-400 dark:hover:text-purple-300 font-medium"
               >
@@ -360,22 +361,22 @@ export function InstanceCard({
       {/* Action Buttons */}
       {instance.status === 'running' && instance.frontend_url && (
         <div className="mt-6 pt-6 border-t dark:border-gray-700">
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className={`grid gap-3 ${chatInterfaceUrl ? 'sm:grid-cols-2' : ''}`}>
             <Link
               href={instance.frontend_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
             >
               <ExternalLink className="w-4 h-4" />
               Open MindRoom
             </Link>
-            {cinnyLoginUrl && (
+            {chatInterfaceUrl && (
               <Link
-                href={cinnyLoginUrl}
+                href={chatInterfaceUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-purple-200 bg-purple-50 text-purple-700 rounded-xl font-semibold hover:bg-purple-100 dark:border-purple-800/50 dark:bg-purple-900/20 dark:text-purple-200 dark:hover:bg-purple-900/30 transition-colors"
+                className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 border border-purple-200 bg-purple-50 text-purple-700 rounded-xl font-semibold hover:bg-purple-100 dark:border-purple-800/50 dark:bg-purple-900/20 dark:text-purple-200 dark:hover:bg-purple-900/30 transition-colors"
               >
                 <MessageCircle className="w-4 h-4" />
                 Open Chat Interface
