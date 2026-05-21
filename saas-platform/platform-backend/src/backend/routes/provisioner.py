@@ -73,6 +73,7 @@ from backend.openrouter import (
     OpenRouterError,
     OpenRouterKeyPlan,
     create_openrouter_key,
+    delete_openrouter_key,
 )
 from backend.pricing import get_plan_details
 from backend.process import run_helm
@@ -399,6 +400,16 @@ def _matching_openrouter_metadata(row: Mapping[str, Any] | None, monthly_limit_u
     )
 
 
+def _stored_openrouter_key_hash(row: Mapping[str, Any] | None) -> str | None:
+    """Return a stored OpenRouter key hash when it is usable for lifecycle cleanup."""
+    if not row:
+        return None
+    key_hash = row.get("openrouter_key_hash")
+    if isinstance(key_hash, str) and key_hash.strip():
+        return key_hash.strip()
+    return None
+
+
 def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
     """Persist non-secret OpenRouter key metadata for reuse and audit."""
     sb.table("instances").update(
@@ -443,6 +454,7 @@ async def _provision_openrouter_key(
         if existing_key:
             return existing_key
 
+    superseded_key_hash = _stored_openrouter_key_hash(existing_instance_row)
     create_key = partial(
         create_openrouter_key,
         management_api_key=OPENROUTER_PROVISIONING_API_KEY,
@@ -458,6 +470,7 @@ async def _provision_openrouter_key(
     except OpenRouterError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    metadata_persisted = False
     try:
         await anyio.to_thread.run_sync(
             partial(
@@ -467,8 +480,25 @@ async def _provision_openrouter_key(
                 created_key,
             )
         )
+        metadata_persisted = True
     except Exception:
         logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
+    if metadata_persisted and superseded_key_hash and superseded_key_hash != created_key.hash:
+        try:
+            await anyio.to_thread.run_sync(
+                partial(
+                    delete_openrouter_key,
+                    management_api_key=OPENROUTER_PROVISIONING_API_KEY,
+                    key_hash=superseded_key_hash,
+                )
+            )
+        except OpenRouterError:
+            logger.warning(
+                "Failed to revoke superseded OpenRouter key %s for instance %s",
+                superseded_key_hash,
+                instance_id,
+                exc_info=True,
+            )
     return created_key.key
 
 

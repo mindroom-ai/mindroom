@@ -1,10 +1,11 @@
 """Comprehensive HTTP API tests for provisioner endpoints."""
 
 import base64
+import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
-from backend.openrouter import CreatedOpenRouterKey
+from backend.openrouter import CreatedOpenRouterKey, OpenRouterError
 from fastapi.testclient import TestClient
 
 
@@ -89,6 +90,85 @@ def test_matching_openrouter_metadata_treats_invalid_stored_limit_as_cache_miss(
         )
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_provision_openrouter_key_revokes_superseded_stored_hash() -> None:
+    """Replacing a stored OpenRouter key should revoke the superseded key hash."""
+    from backend.routes.provisioner import _provision_openrouter_key
+
+    sb = MagicMock()
+    sb.table().update().eq().execute.return_value = Mock()
+    created_key = CreatedOpenRouterKey(
+        key="sk-or-v1-new-customer",
+        hash="new_hash",
+        label="MindRoom hobby instance 123",
+        limit_usd=15,
+        limit_reset="monthly",
+    )
+
+    with (
+        patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+        patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
+        patch("backend.routes.provisioner.delete_openrouter_key", create=True) as delete_key,
+    ):
+        result = await _provision_openrouter_key(
+            sb=sb,
+            account_id="acc_123",
+            instance_id="123",
+            tier="hobby",
+            existing_instance_row={
+                "openrouter_key_hash": "old_hash",
+                "openrouter_key_limit_usd": 10,
+                "openrouter_key_limit_reset": "monthly",
+            },
+            namespace="mindroom-instances",
+        )
+
+    assert result == "sk-or-v1-new-customer"
+    delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="old_hash")
+
+
+@pytest.mark.asyncio
+async def test_provision_openrouter_key_logs_superseded_hash_revoke_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """Superseded key deletion failure should be visible but not lose the replacement key."""
+    from backend.routes.provisioner import _provision_openrouter_key
+
+    sb = MagicMock()
+    sb.table().update().eq().execute.return_value = Mock()
+    created_key = CreatedOpenRouterKey(
+        key="sk-or-v1-new-customer",
+        hash="new_hash",
+        label="MindRoom hobby instance 123",
+        limit_usd=15,
+        limit_reset="monthly",
+    )
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+        patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
+        patch(
+            "backend.routes.provisioner.delete_openrouter_key",
+            side_effect=OpenRouterError("OpenRouter key deletion failed"),
+            create=True,
+        ),
+    ):
+        result = await _provision_openrouter_key(
+            sb=sb,
+            account_id="acc_123",
+            instance_id="123",
+            tier="hobby",
+            existing_instance_row={
+                "openrouter_key_hash": "old_hash",
+                "openrouter_key_limit_usd": 10,
+                "openrouter_key_limit_reset": "monthly",
+            },
+            namespace="mindroom-instances",
+        )
+
+    assert result == "sk-or-v1-new-customer"
+    assert "Failed to revoke superseded OpenRouter key old_hash for instance 123" in caplog.text
 
 
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):

@@ -11,6 +11,7 @@ from backend.openrouter import (
     OpenRouterError,
     OpenRouterKeyPlan,
     create_openrouter_key,
+    delete_openrouter_key,
 )
 
 
@@ -155,4 +156,37 @@ def test_create_openrouter_key_rejects_invalid_limit_value() -> None:
             management_api_key="sk-or-v1-management",
             plan=OpenRouterKeyPlan(name="MindRoom instance 42", monthly_limit_usd=15),
             http_post=http_post,
+        )
+
+
+def test_delete_openrouter_key_sends_management_delete_request() -> None:
+    """OpenRouter provisioning should revoke superseded customer keys by hash."""
+    captured: dict[str, Any] = {}
+
+    def http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        captured["url"] = url
+        captured["headers"] = headers
+        return 200, b'{"deleted":true}'
+
+    delete_openrouter_key(
+        management_api_key="sk-or-v1-management",
+        key_hash="hash_123",
+        http_delete=http_delete,
+    )
+
+    assert captured["url"] == "https://openrouter.ai/api/v1/keys/hash_123"
+    assert captured["headers"]["Authorization"] == "Bearer sk-or-v1-management"
+
+
+def test_delete_openrouter_key_reports_openrouter_failures() -> None:
+    """Failed OpenRouter key revocation should surface an operator-readable error."""
+
+    def http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:  # noqa: ARG001
+        return 404, b'{"error":{"message":"Key not found"}}'
+
+    with pytest.raises(OpenRouterError, match='OpenRouter key deletion failed with status 404: {"error"'):
+        delete_openrouter_key(
+            management_api_key="sk-or-v1-management",
+            key_hash="hash_123",
+            http_delete=http_delete,
         )
