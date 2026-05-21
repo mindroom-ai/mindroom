@@ -55,7 +55,7 @@ def _default_http_post(url: str, headers: dict[str, str], body: bytes) -> tuple[
 
 
 def _default_http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, headers=headers, method="DELETE")
+    request = urllib.request.Request(url, data=b"{}", headers=headers, method="DELETE")
     try:
         with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
             return response.status, response.read()
@@ -127,16 +127,24 @@ def delete_openrouter_key(
     http_delete: HttpDelete = _default_http_delete,
 ) -> None:
     """Delete an OpenRouter API key by hash."""
-    if not management_api_key.strip():
+    if not isinstance(management_api_key, str):
+        msg = "OPENROUTER_PROVISIONING_API_KEY must be a string"
+        raise OpenRouterConfigurationError(msg)
+    management_api_key = management_api_key.strip()
+    if not management_api_key:
         msg = "OPENROUTER_PROVISIONING_API_KEY is required to delete OpenRouter keys"
         raise OpenRouterConfigurationError(msg)
-    if not key_hash.strip():
+    if not isinstance(key_hash, str):
+        msg = "OpenRouter key_hash must be a string"
+        raise OpenRouterError(msg)
+    key_hash = key_hash.strip()
+    if not key_hash:
         msg = "OpenRouter key_hash is required to delete OpenRouter keys"
         raise OpenRouterError(msg)
 
-    quoted_hash = urllib.parse.quote(key_hash.strip(), safe="")
+    quoted_hash = urllib.parse.quote(key_hash, safe="")
     headers = {
-        "Authorization": f"Bearer {management_api_key.strip()}",
+        "Authorization": f"Bearer {management_api_key}",
         "Content-Type": "application/json",
     }
     status, response_body = http_delete(f"{OPENROUTER_KEYS_URL}/{quoted_hash}", headers)
@@ -145,11 +153,15 @@ def delete_openrouter_key(
         msg = f"OpenRouter key deletion failed with status {status}: {error_detail}"
         raise OpenRouterError(msg)
 
+    decoded_body = response_body.decode("utf-8", errors="replace")
     try:
-        payload = json.loads(response_body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        msg = "Failed to decode OpenRouter key deletion response"
+        payload = json.loads(decoded_body)
+    except json.JSONDecodeError as exc:
+        msg = f"OpenRouter key deletion response is invalid JSON: {decoded_body}"
         raise OpenRouterError(msg) from exc
+    if not isinstance(payload, dict):
+        msg = f"OpenRouter key deletion response has invalid response type: {decoded_body}"
+        raise OpenRouterError(msg)
     if payload.get("deleted") is not True:
-        msg = "OpenRouter key deletion response did not confirm deletion"
+        msg = f"OpenRouter key deletion response did not confirm deletion: {decoded_body}"
         raise OpenRouterError(msg)

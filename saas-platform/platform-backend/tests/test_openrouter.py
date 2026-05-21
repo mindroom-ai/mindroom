@@ -178,6 +178,39 @@ def test_delete_openrouter_key_sends_management_delete_request() -> None:
     assert captured["headers"]["Authorization"] == "Bearer sk-or-v1-management"
 
 
+def test_delete_openrouter_key_default_transport_sends_empty_json_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenRouter's delete endpoint expects an explicit empty JSON request body."""
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"deleted":true}'
+
+    def urlopen(request: Any, timeout: int) -> FakeResponse:
+        captured["url"] = request.full_url
+        captured["data"] = request.data
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("backend.openrouter.urllib.request.urlopen", urlopen)
+
+    delete_openrouter_key(management_api_key="sk-or-v1-management", key_hash="hash_123")
+
+    assert captured == {
+        "url": "https://openrouter.ai/api/v1/keys/hash_123",
+        "data": b"{}",
+        "timeout": 20,
+    }
+
+
 def test_delete_openrouter_key_reports_openrouter_failures() -> None:
     """Failed OpenRouter key revocation should surface an operator-readable error."""
 
@@ -185,6 +218,56 @@ def test_delete_openrouter_key_reports_openrouter_failures() -> None:
         return 404, b'{"error":{"message":"Key not found"}}'
 
     with pytest.raises(OpenRouterError, match='OpenRouter key deletion failed with status 404: {"error"'):
+        delete_openrouter_key(
+            management_api_key="sk-or-v1-management",
+            key_hash="hash_123",
+            http_delete=http_delete,
+        )
+
+
+@pytest.mark.parametrize(
+    ("management_api_key", "expected_error"),
+    [(None, "OPENROUTER_PROVISIONING_API_KEY must be a string"), ("", "OPENROUTER_PROVISIONING_API_KEY is required")],
+)
+def test_delete_openrouter_key_rejects_invalid_management_key(management_api_key: object, expected_error: str) -> None:
+    """Local delete configuration errors should fail before making an OpenRouter request."""
+
+    def http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:  # noqa: ARG001
+        raise AssertionError("delete request should not be sent")
+
+    with pytest.raises(OpenRouterConfigurationError, match=expected_error):
+        delete_openrouter_key(
+            management_api_key=management_api_key,  # type: ignore[arg-type]
+            key_hash="hash_123",
+            http_delete=http_delete,
+        )
+
+
+@pytest.mark.parametrize(
+    ("key_hash", "expected_error"),
+    [(None, "OpenRouter key_hash must be a string"), ("", "OpenRouter key_hash is required")],
+)
+def test_delete_openrouter_key_rejects_invalid_key_hash(key_hash: object, expected_error: str) -> None:
+    """Delete input errors should be reported separately from management-key configuration errors."""
+
+    def http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:  # noqa: ARG001
+        raise AssertionError("delete request should not be sent")
+
+    with pytest.raises(OpenRouterError, match=expected_error):
+        delete_openrouter_key(
+            management_api_key="sk-or-v1-management",
+            key_hash=key_hash,  # type: ignore[arg-type]
+            http_delete=http_delete,
+        )
+
+
+def test_delete_openrouter_key_rejects_malformed_success_response() -> None:
+    """Malformed delete responses should include enough context for operator debugging."""
+
+    def http_delete(url: str, headers: dict[str, str]) -> tuple[int, bytes]:  # noqa: ARG001
+        return 200, b"[]"
+
+    with pytest.raises(OpenRouterError, match=r"invalid response.*\[\]"):
         delete_openrouter_key(
             management_api_key="sk-or-v1-management",
             key_hash="hash_123",
