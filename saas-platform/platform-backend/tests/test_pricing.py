@@ -203,8 +203,10 @@ class TestPricingHelperFunctions:
 
         assert get_stripe_price_id("byok", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
         assert get_stripe_price_id("byok", "yearly") == "price_1TZQJK3GVsrZHuzXuazROiIy"
-        assert get_stripe_price_id("hobby", "monthly") is None
-        assert get_stripe_price_id("pro", "monthly") is None
+        assert get_stripe_price_id("hobby", "monthly") == "price_1TZRzu3GVsrZHuzXUXJEQ6Ng"
+        assert get_stripe_price_id("hobby", "yearly") == "price_1TZRzu3GVsrZHuzX77678390"
+        assert get_stripe_price_id("pro", "monthly") == "price_1TZRzv3GVsrZHuzXFRd9cUgz"
+        assert get_stripe_price_id("pro", "yearly") == "price_1TZRzv3GVsrZHuzXrXOhvBy0"
 
     def test_publishable_key_does_not_determine_stripe_price_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Server-side Stripe price IDs must match the server-side secret key."""

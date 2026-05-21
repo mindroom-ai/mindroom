@@ -99,6 +99,8 @@ plans:
       custom_development: false
       on_premise: false
       dedicated_infrastructure: false
+    stripe_price_id_monthly_live: price_1TZRzu3GVsrZHuzXUXJEQ6Ng
+    stripe_price_id_yearly_live: price_1TZRzu3GVsrZHuzX77678390
   pro:
     name: Pro
     price_monthly: 20000
@@ -132,6 +134,8 @@ plans:
       custom_development: false
       on_premise: false
       dedicated_infrastructure: false
+    stripe_price_id_monthly_live: price_1TZRzv3GVsrZHuzXFRd9cUgz
+    stripe_price_id_yearly_live: price_1TZRzv3GVsrZHuzXrXOhvBy0
   enterprise:
     name: Enterprise
     price_monthly: custom
