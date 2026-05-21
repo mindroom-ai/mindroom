@@ -35,7 +35,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
-from mindroom.turn_origin import classify_turn_origin
+from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -288,6 +288,27 @@ class ConversationResolver:
                     resolved_message_received_depth = depth_override
         return resolved_source_kind, resolved_hook_source, resolved_message_received_depth
 
+    def _turn_origin_for_event(
+        self,
+        *,
+        event: DispatchEvent,
+        requester_user_id: str,
+        source_kind: str,
+        original_sender: str | None,
+        trusted_user_relay: bool,
+    ) -> TurnOrigin:
+        """Build canonical origin metadata for one inbound event envelope."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return classify_turn_origin(
+            transport_sender_id=event.sender,
+            requester_id=requester_user_id,
+            sender_entity_name=registry.current_entity_name_for_user_id(event.sender),
+            requester_entity_name=registry.current_entity_name_for_user_id(requester_user_id),
+            source_kind=source_kind,
+            original_sender=original_sender,
+            trusted_user_relay=trusted_user_relay,
+        )
+
     def build_message_target(
         self,
         *,
@@ -369,8 +390,6 @@ class ConversationResolver:
             event_source=event.source,
         )
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        sender_entity_name = registry.current_entity_name_for_user_id(event.sender)
-        requester_entity_name = registry.current_entity_name_for_user_id(requester_user_id)
 
         return MessageEnvelope(
             source_event_id=event.event_id,
@@ -391,11 +410,9 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
-            origin=classify_turn_origin(
-                transport_sender_id=event.sender,
-                requester_id=requester_user_id,
-                sender_entity_name=sender_entity_name,
-                requester_entity_name=requester_entity_name,
+            origin=self._turn_origin_for_event(
+                event=event,
+                requester_user_id=requester_user_id,
                 source_kind=resolved_source_kind,
                 original_sender=original_sender,
                 trusted_user_relay=trusted_user_relay,
@@ -428,9 +445,6 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
         )
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        sender_entity_name = registry.current_entity_name_for_user_id(event.sender)
-        requester_entity_name = registry.current_entity_name_for_user_id(requester_user_id)
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
@@ -452,11 +466,9 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
-            origin=classify_turn_origin(
-                transport_sender_id=event.sender,
-                requester_id=requester_user_id,
-                sender_entity_name=sender_entity_name,
-                requester_entity_name=requester_entity_name,
+            origin=self._turn_origin_for_event(
+                event=event,
+                requester_user_id=requester_user_id,
                 source_kind=resolved_source_kind,
                 original_sender=original_sender,
                 trusted_user_relay=trusted_user_relay,

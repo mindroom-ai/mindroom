@@ -104,10 +104,7 @@ def classify_turn_origin(
     return TurnOrigin(
         transport_sender_id=transport_sender_id,
         requester_id=requester_id,
-        author_id=_author_id(
-            original_sender=original_sender,
-            trust=trust,
-        ),
+        author_id=original_sender,
         sender_entity_name=sender_entity_name,
         requester_entity_name=requester_entity_name,
         sender_kind=sender_kind,
@@ -168,16 +165,6 @@ def _turn_trust(
     if sender_kind == SenderKind.MANAGED_ENTITY:
         return TurnTrust.TRUSTED_INTERNAL
     return TurnTrust.EXTERNAL
-
-
-def _author_id(
-    *,
-    original_sender: str | None,
-    trust: TurnTrust,
-) -> str | None:
-    if trust == TurnTrust.TRUSTED_USER_RELAY:
-        return original_sender
-    return original_sender
 
 
 def _turn_intent(
