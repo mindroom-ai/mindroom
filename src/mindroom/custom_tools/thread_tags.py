@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -24,6 +25,7 @@ from mindroom.thread_tags import (
     normalize_tag_name,
     remove_thread_tag,
     set_thread_tag,
+    thread_tags_match_filters,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -50,21 +52,6 @@ def _serialized_tags_for_output(
     return {tag: serialized[tag]} if tag in serialized else {}
 
 
-def _thread_matches_tag_filters(
-    tags: Mapping[str, ThreadTagRecord],
-    *,
-    tag: str | None,
-    include_tag: str | None,
-    exclude_tag: str | None,
-) -> bool:
-    """Return whether one tagged thread matches the requested list filters."""
-    if tag is not None and tag not in tags:
-        return False
-    if include_tag is not None and include_tag not in tags:
-        return False
-    return exclude_tag is None or exclude_tag not in tags
-
-
 class ThreadTagsTools(Toolkit):
     """Tools for tagging Matrix threads via shared room state."""
 
@@ -77,6 +64,12 @@ class ThreadTagsTools(Toolkit):
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("thread_tags", status, **kwargs)
+
+    @staticmethod
+    def _ordered_payload(status: str, **kwargs: object) -> str:
+        payload: dict[str, object] = {"status": status, "tool": "thread_tags"}
+        payload.update(kwargs)
+        return json.dumps(payload, sort_keys=False)
 
     @classmethod
     def _context_error(cls) -> str:
@@ -324,8 +317,9 @@ class ThreadTagsTools(Toolkit):
             Defaults to False.
 
         Returns:
-          Dict with `room_id`, `tag_state` (mapping of thread_id -> tag dict), and,
-          when `include_untagged=True`, `include_untagged: bool` and `truncated: bool`.
+          Returns a JSON object with `room_id`, `room_wide`, `threads` (mapping of
+          thread_id -> tag dict), and, when `include_untagged=True`,
+          `include_untagged: bool` and `truncated: bool`.
         """
         context = get_tool_runtime_context()
         if context is None:
@@ -381,7 +375,7 @@ class ThreadTagsTools(Toolkit):
             )
             try:
                 if include_untagged:
-                    listing = await list_tagged_threads(
+                    listing: ThreadTagsListing = await list_tagged_threads(
                         context.client,
                         resolved_room_id,
                         tag=normalized_tag,
@@ -389,17 +383,14 @@ class ThreadTagsTools(Toolkit):
                         exclude_tag=normalized_exclude_tag,
                         include_untagged=True,
                     )
-                    assert isinstance(listing, ThreadTagsListing)
-                    threads = listing.tag_state
-                    truncated = listing.truncated
                 else:
-                    threads = await list_tagged_threads(
+                    listing = await list_tagged_threads(
                         context.client,
                         resolved_room_id,
                         tag=room_wide_tag,
                     )
-                    truncated = False
-                    assert isinstance(threads, dict)
+                threads = listing.tag_state
+                truncated = listing.truncated
             except RoomThreadsPageError as exc:
                 error_payload: dict[str, object] = {
                     "action": "list",
@@ -430,7 +421,7 @@ class ThreadTagsTools(Toolkit):
                 thread_root_id: _serialized_tags_for_output(state.tags, tag=normalized_tag)
                 for thread_root_id, state in threads.items()
                 if include_untagged
-                or _thread_matches_tag_filters(
+                or thread_tags_match_filters(
                     state.tags,
                     tag=None if room_wide_tag is not None else normalized_tag,
                     include_tag=normalized_include_tag,
@@ -438,7 +429,7 @@ class ThreadTagsTools(Toolkit):
                 )
             }
             if include_untagged:
-                return self._payload(
+                return self._ordered_payload(
                     "ok",
                     action="list",
                     room_id=resolved_room_id,
@@ -449,7 +440,6 @@ class ThreadTagsTools(Toolkit):
                     include_untagged=True,
                     truncated=truncated,
                     threads=serialized_threads,
-                    tag_state=serialized_threads,
                 )
 
             return self._payload(
@@ -508,7 +498,7 @@ class ThreadTagsTools(Toolkit):
             )
 
         tags = {}
-        if state is not None and _thread_matches_tag_filters(
+        if state is not None and thread_tags_match_filters(
             state.tags,
             tag=normalized_tag,
             include_tag=normalized_include_tag,

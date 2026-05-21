@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -1138,6 +1138,28 @@ async def get_room_threads_page(
     return response.thread_roots, response.next_batch
 
 
+def _append_unique_thread_root_ids(
+    thread_roots: Iterable[nio.Event],
+    thread_root_ids: list[str],
+    seen_thread_root_ids: set[str],
+    *,
+    max_thread_roots: int,
+) -> tuple[int, bool]:
+    """Append unseen thread roots up to the cap and report discarded roots."""
+    new_root_count = 0
+    for thread_root in thread_roots:
+        thread_root_id = thread_root.event_id
+        if thread_root_id in seen_thread_root_ids:
+            continue
+        if len(thread_root_ids) >= max_thread_roots:
+            return new_root_count, True
+        seen_thread_root_ids.add(thread_root_id)
+        thread_root_ids.append(thread_root_id)
+        new_root_count += 1
+
+    return new_root_count, False
+
+
 async def enumerate_room_thread_root_ids(
     client: nio.AsyncClient,
     room_id: str,
@@ -1147,11 +1169,15 @@ async def enumerate_room_thread_root_ids(
 ) -> tuple[list[str], bool]:
     """Return unique room thread-root IDs in /threads order."""
     thread_root_ids: list[str] = []
+    truncated = max_thread_roots <= 0
+    if truncated:
+        return thread_root_ids, truncated
+
     seen_thread_root_ids: set[str] = set()
     seen_next_tokens: set[str] = set()
     page_token: str | None = None
 
-    while len(thread_root_ids) < max_thread_roots:
+    while not truncated:
         thread_roots, next_token = await get_room_threads_page(
             client,
             room_id,
@@ -1159,30 +1185,30 @@ async def enumerate_room_thread_root_ids(
             page_token=page_token,
         )
         if not thread_roots:
-            return thread_root_ids, False
+            break
 
-        new_root_count = 0
-        for thread_root in thread_roots:
-            thread_root_id = thread_root.event_id
-            if thread_root_id in seen_thread_root_ids:
-                continue
-            seen_thread_root_ids.add(thread_root_id)
-            thread_root_ids.append(thread_root_id)
-            new_root_count += 1
-            if len(thread_root_ids) >= max_thread_roots:
-                return thread_root_ids, True
-
-        if new_root_count == 0:
-            return thread_root_ids, True
+        new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
+            thread_roots,
+            thread_root_ids,
+            seen_thread_root_ids,
+            max_thread_roots=max_thread_roots,
+        )
+        if discarded_due_to_cap or new_root_count == 0:
+            truncated = True
+            break
         if next_token is None:
-            return thread_root_ids, False
+            break
+        if len(thread_root_ids) >= max_thread_roots:
+            truncated = True
+            break
         if next_token in seen_next_tokens:
-            return thread_root_ids, True
+            truncated = True
+            break
 
         seen_next_tokens.add(next_token)
         page_token = next_token
 
-    return thread_root_ids, True
+    return thread_root_ids, truncated
 
 
 __all__ = [

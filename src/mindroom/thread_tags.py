@@ -510,6 +510,9 @@ def _thread_tags_match_filters(
     return exclude_tag is None or exclude_tag not in tags
 
 
+thread_tags_match_filters = _thread_tags_match_filters
+
+
 async def _put_thread_tag_state(
     client: nio.AsyncClient,
     room_id: str,
@@ -882,7 +885,7 @@ async def list_tagged_threads(
     include_tag: str | None = None,
     exclude_tag: str | None = None,
     include_untagged: bool = False,
-) -> dict[str, ThreadTagsState] | ThreadTagsListing:
+) -> ThreadTagsListing:
     """Return all currently tagged thread markers for a room."""
     normalized_tag = normalize_tag_name(tag) if tag is not None else None
     normalized_include_tag = normalize_tag_name(include_tag) if include_tag is not None else None
@@ -890,26 +893,20 @@ async def list_tagged_threads(
 
     tagged_threads = await _get_room_thread_tags_states(client, room_id)
     if not include_untagged:
-        if normalized_include_tag is None and normalized_exclude_tag is None:
-            if normalized_tag is None:
-                return tagged_threads
-
-            return {
+        return ThreadTagsListing(
+            tag_state={
                 thread_root_id: state
                 for thread_root_id, state in tagged_threads.items()
-                if normalized_tag in state.tags
-            }
-
-        return {
-            thread_root_id: state
-            for thread_root_id, state in tagged_threads.items()
-            if _thread_tags_match_filters(
-                state.tags,
-                tag=normalized_tag,
-                include_tag=normalized_include_tag,
-                exclude_tag=normalized_exclude_tag,
-            )
-        }
+                if _thread_tags_match_filters(
+                    state.tags,
+                    tag=normalized_tag,
+                    include_tag=normalized_include_tag,
+                    exclude_tag=normalized_exclude_tag,
+                )
+            },
+            include_untagged=False,
+            truncated=False,
+        )
 
     thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, room_id)
     merged_threads: dict[str, ThreadTagsState] = {}

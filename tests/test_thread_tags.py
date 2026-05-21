@@ -1150,8 +1150,10 @@ async def test_list_tagged_threads_filters_non_matching_events_and_supports_tag_
     all_threads = await list_tagged_threads(client, "!room:localhost")
     resolved_threads = await list_tagged_threads(client, "!room:localhost", tag="resolved")
 
-    assert set(all_threads) == {"$thread-one:localhost", "$thread-two:localhost"}
-    assert set(resolved_threads) == {"$thread-one:localhost"}
+    assert all_threads.include_untagged is False
+    assert all_threads.truncated is False
+    assert set(all_threads.tag_state) == {"$thread-one:localhost", "$thread-two:localhost"}
+    assert set(resolved_threads.tag_state) == {"$thread-one:localhost"}
 
 
 @pytest.mark.asyncio
@@ -1163,9 +1165,11 @@ async def test_list_tagged_threads_default_does_not_enumerate_room_threads() -> 
     )
 
     with patch("mindroom.thread_tags.enumerate_room_thread_root_ids", new=AsyncMock()) as mock_enumerate:
-        threads = await list_tagged_threads(client, "!room:localhost", include_untagged=False)
+        listing = await list_tagged_threads(client, "!room:localhost", include_untagged=False)
 
-    assert list(threads) == ["$thread-one:localhost"]
+    assert list(listing.tag_state) == ["$thread-one:localhost"]
+    assert listing.include_untagged is False
+    assert listing.truncated is False
     mock_enumerate.assert_not_awaited()
 
 
@@ -1233,6 +1237,36 @@ async def test_list_tagged_threads_include_untagged_appends_tagged_state_only_th
 
 
 @pytest.mark.asyncio
+async def test_list_tagged_threads_include_untagged_filters_tagged_state_only_threads() -> None:
+    """Tagged-state-only roots should obey filters while keeping trailing order."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-live:localhost", "blocked"),
+        _thread_tag_state_event("$thread-orphan:localhost", "resolved"),
+    )
+
+    with patch(
+        "mindroom.thread_tags.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=(["$thread-live:localhost"], False)),
+    ):
+        unresolved_listing = await list_tagged_threads(
+            client,
+            "!room:localhost",
+            exclude_tag="resolved",
+            include_untagged=True,
+        )
+        other_listing = await list_tagged_threads(
+            client,
+            "!room:localhost",
+            exclude_tag="other",
+            include_untagged=True,
+        )
+
+    assert list(unresolved_listing.tag_state) == ["$thread-live:localhost"]
+    assert list(other_listing.tag_state) == ["$thread-live:localhost", "$thread-orphan:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
     """Room thread enumeration should follow pagination to completion."""
     client = AsyncMock()
@@ -1254,6 +1288,36 @@ async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
     assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
     assert mock_get_page.await_args_list[1].kwargs["page_token"] == "A"  # noqa: S105
     assert mock_get_page.await_args_list[2].kwargs["page_token"] == "B"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_truncated() -> None:
+    """Exact cap completion should not report truncation without a continuation token."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
+                ([_thread_root_event("$thread-three:localhost"), _thread_root_event("$thread-four:localhost")], None),
+            ],
+        ),
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(
+            client,
+            "!room:localhost",
+            max_thread_roots=4,
+            page_size=2,
+        )
+
+    assert thread_root_ids == [
+        "$thread-one:localhost",
+        "$thread-two:localhost",
+        "$thread-three:localhost",
+        "$thread-four:localhost",
+    ]
+    assert truncated is False
 
 
 @pytest.mark.asyncio
