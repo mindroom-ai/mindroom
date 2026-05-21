@@ -1313,6 +1313,52 @@ async def test_enumerate_room_thread_root_ids_skips_empty_page_with_next_token()
 
 
 @pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_follows_consecutive_empty_pages() -> None:
+    """Room thread enumeration should tolerate sparse pagination before roots."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([], "empty-1"),
+                ([], "empty-2"),
+                ([], "empty-3"),
+                ([_thread_root_event("$root_A"), _thread_root_event("$root_B")], None),
+            ],
+        ),
+    ) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$root_A", "$root_B"]
+    assert truncated is False
+    assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
+    assert mock_get_page.await_args_list[1].kwargs["page_token"] == "empty-1"  # noqa: S105
+    assert mock_get_page.await_args_list[2].kwargs["page_token"] == "empty-2"  # noqa: S105
+    assert mock_get_page.await_args_list[3].kwargs["page_token"] == "empty-3"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_truncates_fresh_empty_token_loop() -> None:
+    """Room thread enumeration should bound fresh-token empty-page loops."""
+    client = AsyncMock()
+    page_count = 0
+
+    async def get_empty_page(*_args: object, **_kwargs: object) -> tuple[list[object], str]:
+        nonlocal page_count
+        page_count += 1
+        assert page_count <= 110
+        return [], f"token-{page_count}"
+
+    with patch("mindroom.matrix.client_thread_history.get_room_threads_page", new=get_empty_page):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == []
+    assert truncated is True
+    assert page_count < 110
+
+
+@pytest.mark.asyncio
 async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_truncated() -> None:
     """Exact cap completion should not report truncation without a continuation token."""
     client = AsyncMock()

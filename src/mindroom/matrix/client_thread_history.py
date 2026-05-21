@@ -52,6 +52,7 @@ logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
+_MAX_THREAD_ENUMERATION_PAGES = 100
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -1160,6 +1161,22 @@ def _append_unique_thread_root_ids(
     return new_root_count, False
 
 
+def _non_empty_thread_root_page_truncated(
+    *,
+    discarded_due_to_cap: bool,
+    next_token: str | None,
+    new_root_count: int,
+    thread_root_count: int,
+    max_thread_roots: int,
+) -> bool:
+    """Report whether a non-empty /threads page exhausted enumeration safety guards."""
+    return (
+        discarded_due_to_cap
+        or (next_token is not None and new_root_count == 0)
+        or (next_token is not None and thread_root_count >= max_thread_roots)
+    )
+
+
 async def enumerate_room_thread_root_ids(
     client: nio.AsyncClient,
     room_id: str,
@@ -1176,6 +1193,7 @@ async def enumerate_room_thread_root_ids(
     seen_thread_root_ids: set[str] = set()
     seen_next_tokens: set[str] = set()
     page_token: str | None = None
+    pages_fetched = 0
 
     while not truncated:
         thread_roots, next_token = await get_room_threads_page(
@@ -1184,6 +1202,7 @@ async def enumerate_room_thread_root_ids(
             limit=page_size,
             page_token=page_token,
         )
+        pages_fetched += 1
         if thread_roots:
             new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
                 thread_roots,
@@ -1191,20 +1210,23 @@ async def enumerate_room_thread_root_ids(
                 seen_thread_root_ids,
                 max_thread_roots=max_thread_roots,
             )
-            if discarded_due_to_cap:
+            if _non_empty_thread_root_page_truncated(
+                discarded_due_to_cap=discarded_due_to_cap,
+                next_token=next_token,
+                new_root_count=new_root_count,
+                thread_root_count=len(thread_root_ids),
+                max_thread_roots=max_thread_roots,
+            ):
                 truncated = True
                 break
             if next_token is None:
                 break
-            if new_root_count == 0:
-                truncated = True
-                break
-            if len(thread_root_ids) >= max_thread_roots:
-                truncated = True
-                break
         elif next_token is None:
             break
         if next_token in seen_next_tokens:
+            truncated = True
+            break
+        if pages_fetched >= _MAX_THREAD_ENUMERATION_PAGES:
             truncated = True
             break
 
