@@ -48,7 +48,9 @@ from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_m
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    message_origin,
     patch_response_runner_module,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -103,6 +105,7 @@ def _envelope(
         mentioned_agents=(),
         agent_name=agent_name,
         source_kind="message",
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 
@@ -559,6 +562,12 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
                 thread_history=[],
                 prompt="Please reply",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please reply",
+                    user_id="@user:localhost",
+                ),
                 system_enrichment_items=system_items,
             ),
         )
@@ -608,6 +617,12 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
                 thread_history=[],
                 prompt="Please reply",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please reply",
+                    user_id="@user:localhost",
+                ),
                 system_enrichment_items=system_items,
             ),
         )

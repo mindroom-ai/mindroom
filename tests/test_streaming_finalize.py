@@ -36,7 +36,13 @@ from mindroom.post_response_effects import (
 )
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_matrix_client_mock,
+    message_origin,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -102,6 +108,7 @@ def _envelope() -> MessageEnvelope:
         mentioned_agents=(),
         agent_name="code",
         source_kind="message",
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 

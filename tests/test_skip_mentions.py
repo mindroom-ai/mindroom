@@ -32,6 +32,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     make_event_cache_mock,
+    message_origin,
     runtime_paths_for,
     sync_bot_runtime_state,
     test_runtime_paths,
@@ -319,6 +320,7 @@ def _delivery_envelope() -> MessageEnvelope:
         mentioned_agents=(),
         agent_name="email_agent",
         source_kind="message",
+        origin=message_origin(sender_id="@user:server", requester_id="@user:server", source_kind="message"),
     )
 
 

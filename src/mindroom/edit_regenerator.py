@@ -43,7 +43,7 @@ class _GenerateResponse(Protocol):
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
         user_id: str | None = None,
-        response_envelope: MessageEnvelope | None = None,
+        response_envelope: MessageEnvelope,
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,

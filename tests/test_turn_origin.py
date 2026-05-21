@@ -7,9 +7,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
 from mindroom.turn_origin import (
-    SenderKind,
     TurnIntent,
-    TurnTrust,
     classify_turn_origin,
     original_sender_for_router_handoff,
     original_sender_for_router_relay,
@@ -28,10 +26,10 @@ def test_managed_sender_message_is_chatter_that_requires_mention() -> None:
         trusted_user_relay=False,
     )
 
-    assert origin.sender_kind == SenderKind.MANAGED_ENTITY
-    assert origin.requester_kind == SenderKind.MANAGED_ENTITY
+    assert origin.sender_kind.value == "managed_entity"
+    assert origin.requester_kind.value == "managed_entity"
     assert origin.intent == TurnIntent.MANAGED_MESSAGE
-    assert origin.trust == TurnTrust.TRUSTED_INTERNAL
+    assert origin.trust.value == "trusted_internal"
     assert origin.blocks_unmentioned_managed_sender
     assert not origin.may_dispatch_without_mention
 
@@ -49,8 +47,7 @@ def test_scheduled_managed_sender_bypasses_agent_chatter_gate() -> None:
     )
 
     assert origin.intent == TurnIntent.SCHEDULED_FIRE
-    assert origin.trust == TurnTrust.TRUSTED_INTERNAL
-    assert origin.author_id == "@mindroom_router:localhost"
+    assert origin.trust.value == "trusted_internal"
     assert not origin.blocks_unmentioned_managed_sender
     assert origin.may_dispatch_without_mention
 
@@ -114,8 +111,7 @@ def test_router_handoff_is_trusted_user_relay() -> None:
     )
 
     assert origin.intent == TurnIntent.ROUTER_HANDOFF
-    assert origin.trust == TurnTrust.TRUSTED_USER_RELAY
-    assert origin.author_id == "@human:localhost"
+    assert origin.trust.value == "trusted_user_relay"
     assert not origin.blocks_unmentioned_managed_sender
 
 
@@ -132,8 +128,7 @@ def test_router_notice_stays_internal_chatter() -> None:
     )
 
     assert origin.intent == TurnIntent.ROUTER_NOTICE
-    assert origin.trust == TurnTrust.TRUSTED_INTERNAL
-    assert origin.author_id is None
+    assert origin.trust.value == "trusted_internal"
     assert origin.blocks_unmentioned_managed_sender
 
 

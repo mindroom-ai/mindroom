@@ -18,6 +18,7 @@ from tests.conftest import (
     delivered_matrix_event,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -335,6 +336,14 @@ class TestBotIntegration:
                 thread_id="$thread123",
                 thread_history=[],
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$msg123",
+                    thread_id="$thread123",
+                    prompt="Hello bot",
+                    user_id="@user:localhost",
+                    agent_name="test_agent",
+                ),
             )
 
         # Should have used streaming since user is online
@@ -397,6 +406,14 @@ class TestBotIntegration:
             thread_id="$thread123",
             thread_history=[],
             user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$msg123",
+                thread_id="$thread123",
+                prompt="Hello bot",
+                user_id="@user:localhost",
+                agent_name="test_agent",
+            ),
         )
 
         # Should have used non-streaming since user is offline

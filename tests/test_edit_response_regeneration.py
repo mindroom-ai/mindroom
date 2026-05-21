@@ -50,6 +50,7 @@ from tests.conftest import (
     replace_turn_controller_deps,
     replace_turn_policy_deps,
     replace_turn_store_deps,
+    request_envelope,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -3117,6 +3118,13 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             thread_id=None,
             thread_history=[],
             user_id="@user:example.com",
+            response_envelope=request_envelope(
+                room_id="!test:example.com",
+                reply_to_event_id="$primary:example.com",
+                prompt="primary",
+                user_id="@user:example.com",
+                agent_name=bot.agent_name,
+            ),
             matrix_run_metadata={
                 "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
                 "matrix_source_event_prompts": {
@@ -3531,6 +3539,13 @@ async def test_handle_message_edit_prefers_persisted_response_event_id_after_res
             thread_id=None,
             thread_history=[],
             user_id="@user:example.com",
+            response_envelope=request_envelope(
+                room_id="!test:example.com",
+                reply_to_event_id="$original:example.com",
+                prompt="original",
+                user_id="@user:example.com",
+                agent_name=bot.agent_name,
+            ),
             matrix_run_metadata={
                 "matrix_source_event_ids": ["$original:example.com"],
                 "matrix_source_event_prompts": {

@@ -68,6 +68,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_send_response_mock,
     make_matrix_client_mock,
+    message_origin,
     prepared_dispatch_result,
     replace_turn_controller_deps,
     runtime_paths_for,
@@ -364,6 +365,7 @@ def _prepared_dispatch(
             agent_name="test_agent",
             source_kind=source_kind,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
+            origin=message_origin(sender_id=requester_user_id, requester_id=requester_user_id, source_kind=source_kind),
         ),
     )
 

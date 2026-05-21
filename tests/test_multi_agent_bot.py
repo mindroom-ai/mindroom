@@ -147,11 +147,13 @@ from tests.conftest import (
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
+    message_origin,
     patch_response_runner_module,
     prepared_dispatch_result,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     replace_turn_controller_deps,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -401,7 +403,7 @@ def _response_request(
     user_id: str | None = "@user:localhost",
     media: MediaInputs | None = None,
     attachment_ids: Sequence[str] | None = None,
-    response_envelope: MessageEnvelope | None = None,
+    response_envelope: MessageEnvelope,
     correlation_id: str | None = None,
     target: MessageTarget | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
@@ -690,6 +692,7 @@ def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> M
         mentioned_agents=(),
         agent_name="calculator",
         source_kind="message",
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 
@@ -2361,6 +2364,12 @@ class TestAgentBot:
                     reply_to_event_id="$event123",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="Please send an update",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2409,6 +2418,12 @@ class TestAgentBot:
                     reply_to_event_id="$event123",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="Please send an update",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2466,6 +2481,12 @@ class TestAgentBot:
                         reply_to_event_id="$event456",
                         thread_history=[],
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event456",
+                            prompt="Please reply in thread",
+                            user_id="@user:localhost",
+                        ),
                     ),
                 )
 
@@ -2521,6 +2542,13 @@ class TestAgentBot:
                     thread_history=[],
                     user_id="@user:localhost",
                     target=target,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$reply_plain:localhost",
+                        prompt="Continue",
+                        user_id="@user:localhost",
+                        target=target,
+                    ),
                 ),
             )
 
@@ -2572,6 +2600,13 @@ class TestAgentBot:
                     thread_history=[],
                     user_id="@user:localhost",
                     target=target,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$thread_root:localhost",
+                        prompt="Continue",
+                        user_id="@user:localhost",
+                        target=target,
+                    ),
                 ),
             )
 
@@ -2622,6 +2657,12 @@ class TestAgentBot:
                         reply_to_event_id="$event456",
                         thread_history=[],
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event456",
+                            prompt="Hello",
+                            user_id="@user:localhost",
+                        ),
                     ),
                 )
 
@@ -2663,6 +2704,13 @@ class TestAgentBot:
                     thread_history=[],
                     user_id="@user:localhost",
                     attachment_ids=attachment_ids,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="Please inspect attachments",
+                        user_id="@user:localhost",
+                        attachment_ids=tuple(attachment_ids),
+                    ),
                 ),
             )
 
@@ -2727,6 +2775,13 @@ class TestAgentBot:
                     thread_history=[],
                     user_id="@user:localhost",
                     attachment_ids=attachment_ids,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event456",
+                        prompt="Please inspect attachments",
+                        user_id="@user:localhost",
+                        attachment_ids=tuple(attachment_ids),
+                    ),
                 ),
             )
 
@@ -2816,6 +2871,12 @@ class TestAgentBot:
                     reply_to_event_id="$event789",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event789",
+                        prompt="Hello",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2880,6 +2941,12 @@ class TestAgentBot:
                     reply_to_event_id="$event_cancel",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event_cancel",
+                        prompt="Cancel me",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2935,6 +3002,12 @@ class TestAgentBot:
                     reply_to_event_id="$event-error",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event-error",
+                        prompt="Please continue",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -3044,6 +3117,12 @@ class TestAgentBot:
                         reply_to_event_id="$event123",
                         thread_history=[],
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event123",
+                            prompt="Please continue",
+                            user_id="@user:localhost",
+                        ),
                     ),
                 )
 
@@ -3175,6 +3254,12 @@ class TestAgentBot:
                             reply_to_event_id="$event456",
                             thread_history=[],
                             user_id="@user:localhost",
+                            response_envelope=request_envelope(
+                                room_id="!test:localhost",
+                                reply_to_event_id="$event456",
+                                prompt="Please continue",
+                                user_id="@user:localhost",
+                            ),
                         ),
                     )
 
@@ -3468,6 +3553,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=mock_agent_user.agent_name,
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
         history = ThreadHistoryResult([], is_full_history=True)
 
@@ -3659,6 +3745,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert captured_member_ids == [[current_member.full_id]]
@@ -4182,6 +4276,13 @@ class TestAgentBot:
                 thread_history=[],
                 requester_user_id="@user:localhost",
                 payload=DispatchPayload(prompt="team prompt"),
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$team-root",
+                    prompt="team prompt",
+                    user_id="@user:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -5051,6 +5152,12 @@ class TestAgentBot:
                     reply_to_event_id="$event",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Summarize README",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -5151,6 +5258,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="What time is it?",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5264,6 +5379,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="What time is it?",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5349,6 +5472,13 @@ class TestAgentBot:
                 thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Continue",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5453,6 +5583,14 @@ class TestAgentBot:
                     thread_id="$thread",
                     thread_history=stale_history,
                     user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Continue",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 )
 
         assert _handled_response_event_id(resolution) == "$response"
@@ -5518,6 +5656,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=mock_agent_user.agent_name,
             source_kind="message",
+            origin=message_origin(sender_id="@alice:localhost", requester_id="@alice:localhost", source_kind="message"),
         )
 
         with (
@@ -5643,6 +5782,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5813,6 +5960,13 @@ class TestAgentBot:
                 thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please answer",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert len(captured_outcomes) == 1
@@ -5867,6 +6021,13 @@ class TestAgentBot:
                 thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please answer",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert len(captured_outcomes) == 1
@@ -5930,6 +6091,14 @@ class TestAgentBot:
                     thread_id="$thread",
                     thread_history=[],
                     user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
             await started.wait()
@@ -6016,6 +6185,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -6119,6 +6296,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -6228,6 +6413,14 @@ class TestAgentBot:
                 thread_id="$thread",
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -9187,6 +9380,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
         with (
@@ -9276,6 +9470,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
         with (
@@ -9342,6 +9537,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
         with patch.object(bot._response_runner, "has_active_response_for_target", return_value=True):
@@ -9406,6 +9602,7 @@ class TestAgentBot:
             agent_name=bot.agent_name,
             source_kind="message",
             dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
 
         with (
@@ -9483,6 +9680,7 @@ class TestAgentBot:
             agent_name=bot.agent_name,
             source_kind="voice",
             dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="voice"),
         )
 
         with (
@@ -9580,6 +9778,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=ROUTER_AGENT_NAME,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
         event.body = "continue"
@@ -11039,6 +11238,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
 
         with (
@@ -11293,6 +11493,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
 
         with (
@@ -11379,6 +11580,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
 
         with (

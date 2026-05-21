@@ -15,7 +15,7 @@ from mindroom.dispatch_source import (
 )
 
 
-class SenderKind(StrEnum):
+class _SenderKind(StrEnum):
     """Transport-level sender category for one inbound turn."""
 
     USER = "user"
@@ -35,7 +35,7 @@ class TurnIntent(StrEnum):
     TRUSTED_INTERNAL_RELAY = "trusted_internal_relay"
 
 
-class TurnTrust(StrEnum):
+class _TurnTrust(StrEnum):
     """How much dispatch policy may trust one turn's internal metadata."""
 
     EXTERNAL = "external"
@@ -49,14 +49,13 @@ class TurnOrigin:
 
     transport_sender_id: str
     requester_id: str
-    author_id: str | None
     sender_entity_name: str | None
     requester_entity_name: str | None
-    sender_kind: SenderKind
-    requester_kind: SenderKind
+    sender_kind: _SenderKind
+    requester_kind: _SenderKind
     intent: TurnIntent
     source_kind: str
-    trust: TurnTrust
+    trust: _TurnTrust
 
     @property
     def is_automation(self) -> bool:
@@ -75,7 +74,7 @@ class TurnOrigin:
     @property
     def blocks_unmentioned_managed_sender(self) -> bool:
         """Return whether an unmentioned managed sender should be treated as chatter."""
-        return self.requester_kind == SenderKind.MANAGED_ENTITY and not self.may_dispatch_without_mention
+        return self.requester_kind == _SenderKind.MANAGED_ENTITY and not self.may_dispatch_without_mention
 
     @property
     def may_answer_interactive_prompt(self) -> bool:
@@ -94,8 +93,8 @@ def classify_turn_origin(
     trusted_user_relay: bool,
 ) -> TurnOrigin:
     """Return the canonical origin policy for one inbound turn."""
-    sender_kind = SenderKind.MANAGED_ENTITY if sender_entity_name is not None else SenderKind.USER
-    requester_kind = SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER
+    sender_kind = _SenderKind.MANAGED_ENTITY if sender_entity_name is not None else _SenderKind.USER
+    requester_kind = _SenderKind.MANAGED_ENTITY if requester_entity_name is not None else _SenderKind.USER
     trust = _turn_trust(
         sender_kind=sender_kind,
         original_sender=original_sender,
@@ -104,7 +103,6 @@ def classify_turn_origin(
     return TurnOrigin(
         transport_sender_id=transport_sender_id,
         requester_id=requester_id,
-        author_id=original_sender,
         sender_entity_name=sender_entity_name,
         requester_entity_name=requester_entity_name,
         sender_kind=sender_kind,
@@ -156,26 +154,26 @@ def original_sender_for_router_relay(
 
 def _turn_trust(
     *,
-    sender_kind: SenderKind,
+    sender_kind: _SenderKind,
     original_sender: str | None,
     trusted_user_relay: bool,
-) -> TurnTrust:
+) -> _TurnTrust:
     if trusted_user_relay and original_sender:
-        return TurnTrust.TRUSTED_USER_RELAY
-    if sender_kind == SenderKind.MANAGED_ENTITY:
-        return TurnTrust.TRUSTED_INTERNAL
-    return TurnTrust.EXTERNAL
+        return _TurnTrust.TRUSTED_USER_RELAY
+    if sender_kind == _SenderKind.MANAGED_ENTITY:
+        return _TurnTrust.TRUSTED_INTERNAL
+    return _TurnTrust.EXTERNAL
 
 
 def _turn_intent(
     *,
     sender_entity_name: str | None,
-    sender_kind: SenderKind,
+    sender_kind: _SenderKind,
     source_kind: str,
-    trust: TurnTrust,
+    trust: _TurnTrust,
 ) -> TurnIntent:
     intent: TurnIntent
-    if trust == TurnTrust.TRUSTED_USER_RELAY:
+    if trust == _TurnTrust.TRUSTED_USER_RELAY:
         if sender_entity_name == ROUTER_AGENT_NAME:
             intent = TurnIntent.ROUTER_HANDOFF
         else:
@@ -190,7 +188,7 @@ def _turn_intent(
         intent = TurnIntent.ROUTER_NOTICE
     elif source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
         intent = TurnIntent.TRUSTED_INTERNAL_RELAY
-    elif sender_kind == SenderKind.MANAGED_ENTITY:
+    elif sender_kind == _SenderKind.MANAGED_ENTITY:
         intent = TurnIntent.MANAGED_MESSAGE
     else:
         intent = TurnIntent.USER_MESSAGE

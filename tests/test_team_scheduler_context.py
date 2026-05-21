@@ -28,6 +28,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    message_origin,
     patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
@@ -58,6 +59,7 @@ def _response_envelope() -> MessageEnvelope:
         mentioned_agents=(),
         agent_name="general",
         source_kind="message",
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 

@@ -233,10 +233,16 @@ class MessageEnvelope:
     mentioned_agents: tuple[str, ...]
     agent_name: str
     source_kind: str
+    origin: TurnOrigin = field(kw_only=True)
     hook_source: str | None = None
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
-    origin: TurnOrigin | None = None
+
+    def __post_init__(self) -> None:
+        """Validate runtime invariants not enforced by dataclass typing."""
+        if self.origin is None:
+            message = "MessageEnvelope.origin is required"
+            raise TypeError(message)
 
 
 @dataclass(slots=True)

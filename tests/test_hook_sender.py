@@ -49,7 +49,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_origin import TurnIntent, TurnTrust
+from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
@@ -57,6 +57,7 @@ from tests.conftest import (
     delivered_matrix_event,
     dispatch_context_result,
     install_runtime_cache_support,
+    message_origin,
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
@@ -159,6 +160,7 @@ def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> Messa
             mentioned_agents=(),
             agent_name="code",
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
     )
 
@@ -193,6 +195,11 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
         source_kind="hook_dispatch",
         hook_source="origin-plugin:message:received",
         message_received_depth=1,
+        origin=message_origin(
+            sender_id="@mindroom_router:localhost",
+            requester_id="@user:localhost",
+            source_kind="hook_dispatch",
+        ),
     )
 
 
@@ -788,8 +795,7 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     assert dispatch.context is trusted_context
     assert dispatch.envelope.origin is not None
     assert dispatch.envelope.origin.intent == TurnIntent.ROUTER_HANDOFF
-    assert dispatch.envelope.origin.trust == TurnTrust.TRUSTED_USER_RELAY
-    assert dispatch.envelope.origin.author_id == "@user:localhost"
+    assert dispatch.envelope.origin.trust.value == "trusted_user_relay"
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(
         room,
         event,
@@ -1053,6 +1059,7 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         mentioned_agents=(),
         agent_name=bot.agent_name,
         source_kind="message",
+        origin=message_origin(sender_id=event.sender, requester_id="@user:localhost", source_kind="message"),
     )
     bot._conversation_resolver.build_message_envelope = MagicMock(return_value=expected)
 

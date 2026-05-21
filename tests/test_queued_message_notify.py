@@ -62,7 +62,9 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    message_origin,
     prepared_dispatch_result,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -153,6 +155,7 @@ def _envelope(
         agent_name="general",
         source_kind=source_kind,
         dispatch_policy_source_kind=dispatch_policy_source_kind,
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
     )
 
 
@@ -827,6 +830,13 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="hello",
+                    user_id="@user:localhost",
+                ),
             ),
         )
 
@@ -988,9 +998,9 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
         )
 
     def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:
-        response_envelope = kwargs["response_envelope"]
-        assert isinstance(response_envelope, MessageEnvelope)
-        observed_lifecycle_targets.append(response_envelope.target)
+        request = kwargs["request"]
+        assert isinstance(request, ResponseRequest)
+        observed_lifecycle_targets.append(request.response_envelope.target)
         return _NoopResponseLifecycle()
 
     with (
@@ -1203,6 +1213,13 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="hello",
+                    user_id="@user:localhost",
+                ),
                 requires_model_history_refresh=True,
             ),
         )

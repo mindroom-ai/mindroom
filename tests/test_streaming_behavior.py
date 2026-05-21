@@ -78,8 +78,10 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -2094,6 +2096,7 @@ class TestStreamingBehavior:
             mentioned_agents=(),
             agent_name="helper",
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
 
         async def record_send(
@@ -2250,6 +2253,12 @@ class TestStreamingBehavior:
                         thread_history=[],
                         prompt="Please check the docs",
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            prompt="Please check the docs",
+                            user_id="@user:localhost",
+                        ),
                         pipeline_timing=pipeline_timing,
                     ),
                 ),
@@ -2314,6 +2323,12 @@ class TestStreamingBehavior:
                     thread_history=[],
                     prompt="Please check the docs",
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Please check the docs",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -4105,6 +4120,7 @@ class TestStreamingBehavior:
             mentioned_agents=(),
             agent_name="helper",
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
         response_hooks = SimpleNamespace(
             apply_before_response=AsyncMock(
@@ -4211,6 +4227,7 @@ class TestStreamingBehavior:
             mentioned_agents=(),
             agent_name="helper",
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
         response_hooks = SimpleNamespace(
             apply_before_response=AsyncMock(),
@@ -4301,6 +4318,7 @@ class TestStreamingBehavior:
             mentioned_agents=(),
             agent_name="helper",
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         )
         raw_interactive = (
             "```interactive\n"

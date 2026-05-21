@@ -118,7 +118,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
-from tests.conftest import make_event_cache_mock, resolve_response_thread_root_for_test
+from tests.conftest import make_event_cache_mock, message_origin, request_envelope
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -420,9 +420,6 @@ def _build_response_runner(
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )
-    bot._conversation_resolver.resolve_response_thread_root = MagicMock(
-        side_effect=resolve_response_thread_root_for_test,
-    )
     bot._conversation_resolver.deps = SimpleNamespace(
         conversation_cache=SimpleNamespace(
             get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
@@ -626,6 +623,13 @@ def _response_request(
         thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        response_envelope=request_envelope(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            prompt=prompt,
+            user_id=user_id,
+        ),
         model_prompt=model_prompt,
         media=media,
         user_id=user_id,
@@ -701,6 +705,13 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
                     thread_id="$thread-root",
                     thread_history=(),
                     prompt="Hello",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$user_msg",
+                        thread_id="$thread-root",
+                        prompt="Hello",
+                        user_id="@alice:localhost",
+                    ),
                     user_id="@alice:localhost",
                     existing_event_id="$thinking",
                     existing_event_is_placeholder=True,
@@ -2008,6 +2019,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             mentioned_agents=(),
             agent_name="general",
             source_kind="message",
+            origin=message_origin(sender_id="@alice:localhost", requester_id="@alice:localhost", source_kind="message"),
         ),
         correlation_id="corr-stream-cancel",
     )
@@ -2095,6 +2107,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             mentioned_agents=(),
             agent_name="general",
             source_kind="message",
+            origin=message_origin(sender_id="@alice:localhost", requester_id="@alice:localhost", source_kind="message"),
         ),
         correlation_id="corr-stream-error",
     )

@@ -29,7 +29,6 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
@@ -38,6 +37,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_matrix_client_mock,
     make_visible_message,
+    message_origin,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -45,6 +45,8 @@ from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_n
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.turn_origin import TurnOrigin
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -188,18 +190,25 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
         requester_id: str | None = None,
         origin: TurnOrigin | None = None,
     ) -> MessageEnvelope:
+        resolved_requester_id = requester_id or sender_id
         return MessageEnvelope(
             source_event_id="$msg",
             room_id="!room:localhost",
             target=target,
-            requester_id=requester_id or sender_id,
+            requester_id=resolved_requester_id,
             sender_id=sender_id,
             body="follow up",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="research",
             source_kind="message",
-            origin=origin,
+            origin=origin
+            or message_origin(
+                sender_id=sender_id,
+                requester_id=resolved_requester_id,
+                sender_entity_name=entity_name_for_id(MatrixID.parse(sender_id), config, runtime_paths),
+                requester_entity_name=entity_name_for_id(MatrixID.parse(resolved_requester_id), config, runtime_paths),
+            ),
         )
 
     assert policy._should_queue_follow_up_in_active_response_thread(
@@ -220,17 +229,13 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
         source_envelope=envelope(
             ids["router"].full_id,
             requester_id="@human:localhost",
-            origin=TurnOrigin(
-                transport_sender_id=ids["router"].full_id,
+            origin=message_origin(
+                sender_id=ids["router"].full_id,
                 requester_id="@human:localhost",
-                author_id="@human:localhost",
                 sender_entity_name="router",
-                requester_entity_name=None,
-                sender_kind=SenderKind.MANAGED_ENTITY,
-                requester_kind=SenderKind.USER,
-                intent=TurnIntent.ROUTER_HANDOFF,
                 source_kind="trusted_internal_relay",
-                trust=TurnTrust.TRUSTED_USER_RELAY,
+                original_sender="@human:localhost",
+                trusted_user_relay=True,
             ),
         ),
         has_active_response_for_target=lambda _target: True,

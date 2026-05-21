@@ -30,6 +30,7 @@ from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDel
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
+from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -38,9 +39,11 @@ from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.message_target import MessageTarget
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
 from tests.identity_helpers import persist_entity_accounts
@@ -74,6 +77,7 @@ __all__ = [
     "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
+    "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
@@ -86,8 +90,8 @@ __all__ = [
     "replace_turn_controller_deps",
     "replace_turn_policy_deps",
     "replace_turn_store_deps",
+    "request_envelope",
     "requires_linux",
-    "resolve_response_thread_root_for_test",
     "runtime_paths_for",
     "sync_bot_runtime_state",
     "test_runtime_paths",
@@ -118,6 +122,58 @@ def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation
             degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
             thread_id=dispatch.target.resolved_thread_id,
         ),
+    )
+
+
+def message_origin(
+    *,
+    sender_id: str = "@user:localhost",
+    requester_id: str | None = None,
+    sender_entity_name: str | None = None,
+    requester_entity_name: str | None = None,
+    source_kind: str = "message",
+    original_sender: str | None = None,
+    trusted_user_relay: bool = False,
+) -> TurnOrigin:
+    """Build canonical origin metadata for manually constructed test envelopes."""
+    return classify_turn_origin(
+        transport_sender_id=sender_id,
+        requester_id=requester_id or sender_id,
+        sender_entity_name=sender_entity_name,
+        requester_entity_name=requester_entity_name,
+        source_kind=source_kind,
+        original_sender=original_sender,
+        trusted_user_relay=trusted_user_relay,
+    )
+
+
+def request_envelope(
+    *,
+    room_id: str = "!test:localhost",
+    reply_to_event_id: str = "$event",
+    thread_id: str | None = None,
+    prompt: str = "Hello",
+    user_id: str | None = "@user:localhost",
+    target: MessageTarget | None = None,
+    agent_name: str = "test_agent",
+    source_kind: str = "message",
+    attachment_ids: tuple[str, ...] = (),
+) -> MessageEnvelope:
+    """Build a canonical response envelope for direct ResponseRequest tests."""
+    resolved_user_id = user_id or "@user:localhost"
+    resolved_target = target or MessageTarget.resolve(room_id, thread_id, reply_to_event_id)
+    return MessageEnvelope(
+        source_event_id=reply_to_event_id,
+        room_id=room_id,
+        target=resolved_target,
+        requester_id=resolved_user_id,
+        sender_id=resolved_user_id,
+        body=prompt,
+        attachment_ids=attachment_ids,
+        mentioned_agents=(),
+        agent_name=agent_name,
+        source_kind=source_kind,
+        origin=message_origin(sender_id=resolved_user_id, requester_id=resolved_user_id, source_kind=source_kind),
     )
 
 
@@ -706,20 +762,6 @@ def make_visible_message(
         content=resolved_content or None,
         thread_id=thread_id,
     )
-
-
-def resolve_response_thread_root_for_test(
-    thread_id: str | None,
-    _reply_to_event_id: str | None,
-    *,
-    room_id: str,
-    response_envelope: object | None = None,
-) -> str | None:
-    """Resolve thread roots like the bot seam helpers used by response tests."""
-    del room_id
-    if response_envelope is not None:
-        return response_envelope.target.resolved_thread_id
-    return thread_id
 
 
 def unwrap_extracted_collaborator[T](collaborator: T) -> T:

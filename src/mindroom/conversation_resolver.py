@@ -338,23 +338,6 @@ class ConversationResolver:
             room_mode=effective_thread_mode == "room",
         )
 
-    def resolve_response_thread_root(
-        self,
-        thread_id: str | None,
-        reply_to_event_id: str | None,
-        *,
-        room_id: str,
-        response_envelope: MessageEnvelope | None = None,
-    ) -> str | None:
-        """Return the canonical thread root for outbound response delivery."""
-        if response_envelope is not None:
-            return response_envelope.target.resolved_thread_id
-        return self.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        ).resolved_thread_id
-
     def build_message_envelope(
         self,
         *,

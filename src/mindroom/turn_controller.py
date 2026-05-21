@@ -52,7 +52,12 @@ from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
-from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
+from mindroom.hooks import (
+    MessageEnvelope,
+    build_hook_matrix_admin,
+    hook_ingress_policy,
+    should_handle_interactive_text_response,
+)
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayload,
@@ -94,7 +99,11 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.timing import timing_scope as timing_scope_context
-from mindroom.turn_origin import original_sender_for_router_handoff, original_sender_for_router_relay
+from mindroom.turn_origin import (
+    classify_turn_origin,
+    original_sender_for_router_handoff,
+    original_sender_for_router_relay,
+)
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
@@ -107,7 +116,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
@@ -1088,7 +1096,6 @@ class TurnController:
             return None
 
         origin = envelope.origin
-        assert origin is not None
         sender_agent_name = origin.requester_entity_name
         blocks_unmentioned_managed_sender = origin.blocks_unmentioned_managed_sender
         if blocks_unmentioned_managed_sender and not context.am_i_mentioned:
@@ -1240,6 +1247,28 @@ class TurnController:
                 else ()
             ),
         )
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        response_envelope = MessageEnvelope(
+            source_event_id=selection.question_event_id,
+            room_id=room.room_id,
+            target=response_target,
+            requester_id=user_id,
+            sender_id=user_id,
+            body=f"The user selected: {selection.selected_value}",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=self.deps.agent_name,
+            source_kind="message",
+            origin=classify_turn_origin(
+                transport_sender_id=user_id,
+                requester_id=user_id,
+                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
+                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
+                source_kind="message",
+                original_sender=None,
+                trusted_user_relay=False,
+            ),
+        )
 
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
@@ -1251,6 +1280,7 @@ class TurnController:
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
                 user_id=user_id,
+                response_envelope=response_envelope,
                 target=response_target,
                 matrix_run_metadata=selection_matrix_run_metadata,
             ),

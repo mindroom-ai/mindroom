@@ -93,6 +93,7 @@ from tests.conftest import (
     install_generate_response_mock,
     make_event_cache_mock,
     make_matrix_client_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -9273,6 +9274,12 @@ class TestThreadingBehavior:
                     thread_id="$thread_root:localhost",
                     thread_history=degraded_history,
                     prompt="thread follow-up",
+                    response_envelope=request_envelope(
+                        room_id=room.room_id,
+                        reply_to_event_id=event.event_id,
+                        thread_id="$thread_root:localhost",
+                        prompt="thread follow-up",
+                    ),
                     requires_model_history_refresh=True,
                 ),
             )

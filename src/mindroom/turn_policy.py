@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, is_automation_source_kind
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
@@ -718,18 +718,9 @@ class TurnPolicy:
             return False
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         source_origin = source_envelope.origin
-        source_is_automation = (
-            not source_origin.may_answer_interactive_prompt
-            if source_origin is not None
-            else is_automation_source_kind(source_envelope.source_kind)
-        )
-        source_is_managed = (
-            source_origin.requester_entity_name is not None
-            if source_origin is not None
-            else registry.current_entity_name_for_user_id(source_envelope.sender_id) is not None
-        )
+        source_is_automation = not source_origin.may_answer_interactive_prompt
+        source_is_managed = source_origin.requester_entity_name is not None
         if source_is_automation or source_is_managed:
             return False
         policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind

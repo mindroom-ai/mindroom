@@ -735,30 +735,19 @@ class TestExtractMessageContextRoomMode:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         expected_target = MessageTarget.resolve("!room:localhost", "$thread123", "$event123")
         bot._conversation_resolver.build_message_target = MagicMock(return_value=expected_target)
-        bot._conversation_resolver.resolve_response_thread_root = MagicMock(return_value="$thread123")
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
         )
-        thread_root = bot._conversation_resolver.resolve_response_thread_root(
-            "$thread123",
-            "$event123",
-            room_id="!room:localhost",
-        )
 
         assert target is expected_target
-        assert thread_root == "$thread123"
+        assert target.resolved_thread_id == "$thread123"
         bot._conversation_resolver.build_message_target.assert_called_once_with(
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
-        )
-        bot._conversation_resolver.resolve_response_thread_root.assert_called_once_with(
-            "$thread123",
-            "$event123",
-            room_id="!room:localhost",
         )
 
     @pytest.mark.asyncio

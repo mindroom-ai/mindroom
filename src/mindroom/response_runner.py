@@ -22,7 +22,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
@@ -89,6 +88,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.history import CompactionOutcome, HistoryScope
+    from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -288,13 +288,13 @@ class ResponseRequest:
     thread_id: str | None
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
+    response_envelope: MessageEnvelope
     model_prompt: str | None = None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
-    response_envelope: MessageEnvelope | None = None
     correlation_id: str | None = None
     target: MessageTarget | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
@@ -512,7 +512,7 @@ class ResponseRunner:
         self,
         *,
         target: MessageTarget,
-        response_envelope: MessageEnvelope | None,
+        response_envelope: MessageEnvelope,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self._lifecycle_coordinator.reserve_waiting_human_message(
@@ -552,15 +552,7 @@ class ResponseRunner:
 
     def _resolve_request_target(self, request: ResponseRequest) -> MessageTarget:
         """Resolve the canonical response target for one request."""
-        return request.target or (
-            request.response_envelope.target
-            if request.response_envelope is not None
-            else self.deps.resolver.build_message_target(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-            )
-        )
+        return request.target or request.response_envelope.target
 
     def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return still-running response event IDs for one room."""
@@ -593,7 +585,7 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Return a prepared request constrained to the target that owns the lock."""
         response_envelope = request.response_envelope
-        if response_envelope is not None and response_envelope.target != resolved_target:
+        if response_envelope.target != resolved_target:
             response_envelope = replace(response_envelope, target=resolved_target)
         return replace(
             request,
@@ -715,34 +707,6 @@ class ResponseRunner:
             used_streaming=used_streaming,
         )
 
-    def _response_envelope_for_request(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        requester_id: str | None = None,
-        sender_id: str | None = None,
-    ) -> MessageEnvelope:
-        """Resolve the hook envelope for one response request."""
-        if request.response_envelope is not None:
-            return request.response_envelope
-        resolved_requester_id = (
-            requester_id if requester_id is not None else request.user_id or self.deps.matrix_full_id
-        )
-        resolved_sender_id = sender_id if sender_id is not None else request.user_id or self.deps.matrix_full_id
-        return MessageEnvelope(
-            source_event_id=request.reply_to_event_id,
-            room_id=request.room_id,
-            target=resolved_target,
-            requester_id=resolved_requester_id,
-            sender_id=resolved_sender_id,
-            body=request.prompt,
-            attachment_ids=tuple(request.attachment_ids or ()),
-            mentioned_agents=(),
-            agent_name=self.deps.agent_name,
-            source_kind="message",
-        )
-
     def _correlation_id_for_request(self, request: ResponseRequest) -> str:
         """Resolve the correlation id for one request."""
         return request.correlation_id or request.reply_to_event_id
@@ -752,17 +716,9 @@ class ResponseRunner:
         *,
         response_kind: str,
         request: ResponseRequest,
-        response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> ResponseLifecycle:
         """Build one lifecycle helper with the resolved shared response context."""
-        resolved_response_envelope = response_envelope
-        if resolved_response_envelope is None:
-            assert request.target is not None
-            resolved_response_envelope = self._response_envelope_for_request(
-                request,
-                resolved_target=request.target,
-            )
         return ResponseLifecycle(
             ResponseLifecycleDeps(
                 response_hooks=self.deps.delivery_gateway.deps.response_hooks,
@@ -770,7 +726,7 @@ class ResponseRunner:
             ),
             response_kind=response_kind,
             pipeline_timing=request.pipeline_timing,
-            response_envelope=resolved_response_envelope,
+            response_envelope=request.response_envelope,
             correlation_id=correlation_id or self._correlation_id_for_request(request),
         )
 
@@ -789,10 +745,6 @@ class ResponseRunner:
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
-            response_envelope=self._response_envelope_for_request(
-                request,
-                resolved_target=resolved_target,
-            ),
             correlation_id=self._correlation_id_for_request(request),
         )
         final_outcome = await lifecycle.finalize(
@@ -905,23 +857,19 @@ class ResponseRunner:
             target=resolved_target,
             include_context=include_matrix_prompt_context,
         )
-        resolved_request = replace(
-            request,
-            target=resolved_target,
-            thread_history=model_thread_history,
-            media=request.media or MediaInputs(),
+        resolved_request = self._request_with_locked_target(
+            replace(
+                request,
+                thread_history=model_thread_history,
+                media=request.media or MediaInputs(),
+            ),
+            resolved_target,
         )
-        resolved_response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=resolved_target,
-            requester_id=requester_user_id,
-            sender_id=requester_user_id,
-        )
+        resolved_response_envelope = resolved_request.response_envelope
         resolved_correlation_id = self._correlation_id_for_request(request)
         lifecycle = self._build_lifecycle(
             response_kind="team",
-            request=request,
-            response_envelope=resolved_response_envelope,
+            request=resolved_request,
             correlation_id=resolved_correlation_id,
         )
         delivery_target = (
@@ -1415,12 +1363,7 @@ class ResponseRunner:
             if request.target is not None
             else request.thread_id
             if request.existing_event_id and existing_event_uses_thread_id
-            else self.deps.resolver.resolve_response_thread_root(
-                request.thread_id,
-                request.reply_to_event_id,
-                room_id=request.room_id,
-                response_envelope=request.response_envelope,
-            )
+            else request.response_envelope.target.resolved_thread_id
         )
         resolved_target = resolved_target.with_thread_root(response_thread_id)
         media_inputs = request.media or MediaInputs()
@@ -1698,15 +1641,12 @@ class ResponseRunner:
         runtime = await self.prepare_non_streaming_runtime(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=runtime.resolved_target,
-        )
+        request = self._request_with_locked_target(request, runtime.resolved_target)
+        response_envelope = request.response_envelope
         correlation_id = self._correlation_id_for_request(request)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
-            response_envelope=response_envelope,
             correlation_id=correlation_id,
         )
         session_scope = self.deps.state_writer.history_scope()
@@ -1841,15 +1781,12 @@ class ResponseRunner:
         runtime = await self.prepare_streaming_runtime(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=runtime.resolved_target,
-        )
+        request = self._request_with_locked_target(request, runtime.resolved_target)
+        response_envelope = request.response_envelope
         correlation_id = self._correlation_id_for_request(request)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
-            response_envelope=response_envelope,
             correlation_id=correlation_id,
         )
         session_scope = self.deps.state_writer.history_scope()
@@ -2095,15 +2032,12 @@ class ResponseRunner:
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
         attempt_run_ids: list[str] = []
+        request = self._request_with_locked_target(request, resolved_target)
         resolved_correlation_id = self._correlation_id_for_request(request)
-        resolved_response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=resolved_target,
-        )
+        resolved_response_envelope = request.response_envelope
         lifecycle = self._build_lifecycle(
             response_kind="ai",
             request=request,
-            response_envelope=resolved_response_envelope,
             correlation_id=resolved_correlation_id,
         )
 

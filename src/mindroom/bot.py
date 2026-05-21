@@ -1663,7 +1663,7 @@ class AgentBot:
         *,
         target: MessageTarget | None = None,
         payload: DispatchPayload,
-        response_envelope: MessageEnvelope | None = None,
+        response_envelope: MessageEnvelope,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
         correlation_id: str | None = None,
         reason_prefix: str = "Team request",
@@ -1703,6 +1703,8 @@ class AgentBot:
         reply_to_event_id: str,
         thread_id: str | None,
         thread_history: Sequence[ResolvedVisibleMessage],
+        *,
+        response_envelope: MessageEnvelope,
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
         user_id: str | None = None,
@@ -1710,7 +1712,6 @@ class AgentBot:
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -1734,7 +1735,7 @@ class AgentBot:
             model_prompt: Optional model-facing prompt for the live request and persisted history.
             system_enrichment_items: Hook-provided transient system prompt fragments to
                 apply for this response.
-            response_envelope: Optional normalized inbound envelope for response hooks.
+            response_envelope: Normalized inbound envelope for response hooks.
             correlation_id: Optional request correlation ID propagated to hook logging.
             target: Optional canonical response target used for lifecycle locking and delivery.
             matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
@@ -1955,6 +1956,8 @@ class TeamBot(AgentBot):
         reply_to_event_id: str,
         thread_id: str | None,
         thread_history: Sequence[ResolvedVisibleMessage],
+        *,
+        response_envelope: MessageEnvelope,
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
         user_id: str | None = None,
@@ -1962,7 +1965,6 @@ class TeamBot(AgentBot):
         attachment_ids: list[str] | None = None,
         model_prompt: str | None = None,
         system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
         target: MessageTarget | None = None,
         matrix_run_metadata: dict[str, Any] | None = None,
@@ -2086,19 +2088,7 @@ class TeamBot(AgentBot):
             requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
             existing_event_is_placeholder=existing_event_is_placeholder,
-            response_envelope=response_envelope
-            or MessageEnvelope(
-                source_event_id=reply_to_event_id,
-                room_id=room_id,
-                target=resolved_target,
-                requester_id=user_id or self.matrix_id.full_id,
-                sender_id=user_id or self.matrix_id.full_id,
-                body=memory_prompt,
-                attachment_ids=tuple(attachment_ids or ()),
-                mentioned_agents=(),
-                agent_name=self.agent_name,
-                source_kind="message",
-            ),
+            response_envelope=response_envelope,
             system_enrichment_items=system_enrichment_items,
             correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",

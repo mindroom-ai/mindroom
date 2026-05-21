@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import pytest
+
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks.context import MessageEnvelope
 from mindroom.hooks.ingress import hook_ingress_policy, should_handle_interactive_text_response
 from mindroom.hooks.types import format_hook_source, split_hook_source
 from mindroom.message_target import MessageTarget
+from tests.conftest import message_origin
 
 
 def _envelope(
@@ -28,6 +33,7 @@ def _envelope(
         source_kind=source_kind,
         hook_source=hook_source,
         message_received_depth=message_received_depth,
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
     )
 
 
@@ -47,6 +53,38 @@ def test_hook_source_formatter_matches_ingress_parser() -> None:
 
     assert source == "origin-plugin:message:received"
     assert split_hook_source(source) == ("origin-plugin", "message:received")
+
+
+def test_message_envelope_requires_origin() -> None:
+    """Every envelope should carry canonical turn-origin policy."""
+    missing_origin_kwargs: dict[str, Any] = {
+        "source_event_id": "$event",
+        "room_id": "!room:localhost",
+        "target": MessageTarget.resolve("!room:localhost", None, "$event"),
+        "requester_id": "@user:localhost",
+        "sender_id": "@user:localhost",
+        "body": "hello",
+        "attachment_ids": (),
+        "mentioned_agents": (),
+        "agent_name": "code",
+        "source_kind": "message",
+    }
+    with pytest.raises(TypeError, match="origin"):
+        MessageEnvelope(**missing_origin_kwargs)
+    with pytest.raises(TypeError, match="origin"):
+        MessageEnvelope(
+            source_event_id="$event",
+            room_id="!room:localhost",
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="code",
+            source_kind="message",
+            origin=cast("Any", None),
+        )
 
 
 def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop() -> None:

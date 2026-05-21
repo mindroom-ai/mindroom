@@ -49,6 +49,8 @@ from tests.conftest import (
     bind_runtime_paths,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    message_origin,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -96,6 +98,7 @@ def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelo
         mentioned_agents=(),
         agent_name=agent_name,
         source_kind="message",
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 
@@ -116,7 +119,7 @@ def _response_hook_service(tmp_path: Path, registry: HookRegistry) -> tuple[Conf
 def _response_lifecycle(
     response_hooks: ResponseHookService,
     *,
-    response_envelope: MessageEnvelope | None = None,
+    response_envelope: MessageEnvelope,
     correlation_id: str,
 ) -> ResponseLifecycle:
     return ResponseLifecycle(
@@ -126,7 +129,7 @@ def _response_lifecycle(
         ),
         response_kind="ai",
         pipeline_timing=None,
-        response_envelope=response_envelope or _envelope(),
+        response_envelope=response_envelope,
         correlation_id=correlation_id,
     )
 
@@ -383,6 +386,13 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
                 thread_history=[],
                 prompt="   ",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    prompt="   ",
+                    user_id="@user:localhost",
+                    agent_name=bot.agent_name,
+                ),
             ),
             team_agents=[entity_ids(bot.config, runtime_paths_for(bot.config))["code"]],
             team_mode=bot.team_mode,
@@ -519,6 +529,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
 
     lifecycle = _response_lifecycle(
         response_hooks,
+        response_envelope=_envelope(),
         correlation_id="corr-suppressed-final",
     )
     finalized = await lifecycle.finalize(
@@ -570,6 +581,7 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
     _, response_hooks = _response_hook_service(tmp_path, registry)
     lifecycle = _response_lifecycle(
         response_hooks,
+        response_envelope=_envelope(),
         correlation_id=f"corr-late-{mode}",
     )
 
@@ -657,6 +669,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
 
     lifecycle = _response_lifecycle(
         response_hooks,
+        response_envelope=_envelope(),
         correlation_id="corr-delivery-failure",
     )
     finalized = await lifecycle.finalize(
@@ -733,6 +746,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
 
     lifecycle = _response_lifecycle(
         response_hooks,
+        response_envelope=_envelope(),
         correlation_id="corr-final-only-provider",
     )
 
@@ -806,6 +820,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
     assert outcome.final_visible_event_id == "$placeholder"
     lifecycle = _response_lifecycle(
         response_hooks,
+        response_envelope=_envelope(),
         correlation_id="corr-suppressed-cleanup-fail",
     )
     await lifecycle.finalize(
@@ -875,6 +890,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     assert outcome.final_visible_event_id == "$placeholder"
     lifecycle = _response_lifecycle(
         response_hooks,
+        response_envelope=_envelope(),
         correlation_id="corr-suppressed-cleanup-exception",
     )
     await lifecycle.finalize(
