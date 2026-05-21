@@ -2035,6 +2035,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.hooks.sender"
 depends_on = [
+    "mindroom.constants",
     "mindroom.hooks.types",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
@@ -2103,6 +2104,7 @@ depends_on = [
     "mindroom.attachment_media",
     "mindroom.attachments",
     "mindroom.coalescing",
+    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
