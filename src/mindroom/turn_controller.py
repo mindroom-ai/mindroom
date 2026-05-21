@@ -46,7 +46,7 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
-from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, is_automation_source_kind, is_voice_event
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
@@ -969,7 +969,12 @@ class TurnController:
             return None
 
         sender_agent_name = self._managed_entity_name_for_sender(requester_user_id)
-        if sender_agent_name and not context.am_i_mentioned and not ingress_policy.bypass_unmentioned_agent_gate:
+        if (
+            sender_agent_name
+            and envelope.source_kind != SCHEDULED_SOURCE_KIND
+            and not context.am_i_mentioned
+            and not ingress_policy.bypass_unmentioned_agent_gate
+        ):
             self.deps.logger.debug(
                 "ignore_unmentioned_agent_event",
                 agent=sender_agent_name,
@@ -1224,6 +1229,11 @@ class TurnController:
         )
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
+        if (
+            ORIGINAL_SENDER_KEY not in routed_extra_content
+            and self._managed_entity_name_for_sender(requester_user_id) is None
+        ):
+            routed_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
         routed_media_events = list(media_events or [])
         if not routed_media_events and is_matrix_media_dispatch_event(event):
             routed_media_events.append(event)
