@@ -258,12 +258,13 @@ cultures:
 
 ## Knowledge Bases Configuration
 
-Knowledge bases provide file-backed RAG context to agents:
+Knowledge bases provide file-backed semantic RAG or files-only context to agents:
 
 ```yaml
 knowledge_bases:
   engineering_docs:
     path: ./knowledge_docs  # Path to documents folder
+    mode: semantic  # "semantic" builds embeddings; "files" skips embeddings for direct file-tool access
     watch: false  # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000  # Characters per indexed chunk
     chunk_overlap: 0  # Overlap between adjacent chunks
@@ -280,6 +281,7 @@ knowledge_bases:
 ```
 
 Assign knowledge bases to agents via `knowledge_bases: [engineering_docs]` in the agent config.
+Use `mode: files` for sources that workspace-aware agents should inspect with file, shell, or coding tools instead of `search_knowledge_base`.
 
 ## Voice Configuration
 

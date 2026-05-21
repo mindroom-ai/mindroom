@@ -35,11 +35,13 @@ import {
   GitBranch,
   Plus,
   RefreshCw,
+  Search,
   Trash2,
   Upload,
 } from "lucide-react";
 
 type KnowledgeSourceType = "local" | "git";
+type KnowledgeAccessMode = "semantic" | "files";
 
 interface KnowledgeFile {
   name: string;
@@ -54,6 +56,7 @@ interface KnowledgeStatus {
   description?: string;
   folder_path: string;
   watch: boolean;
+  mode?: KnowledgeAccessMode;
   file_count: number;
   indexed_count: number;
   refreshing?: boolean;
@@ -88,6 +91,7 @@ const DEFAULT_CHUNK_SIZE = 5000;
 const DEFAULT_CHUNK_OVERLAP = 0;
 
 const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
+  mode: "semantic",
   description: "",
   path: "./knowledge_docs/default",
   watch: true,
@@ -264,6 +268,8 @@ export function Knowledge() {
   const [newBaseDescription, setNewBaseDescription] = useState("");
   const [newBaseSourceType, setNewBaseSourceType] =
     useState<KnowledgeSourceType>("local");
+  const [newBaseMode, setNewBaseMode] =
+    useState<KnowledgeAccessMode>("semantic");
   const [newBaseGitSettings, setNewBaseGitSettings] =
     useState<KnowledgeGitConfig>(() => defaultGitSettings());
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
@@ -294,6 +300,8 @@ export function Knowledge() {
     ? knowledgeBases[selectedBase]
     : undefined;
   const selectedBaseIsGitBacked = Boolean(selectedBaseConfig?.git);
+  const selectedBaseMode: KnowledgeAccessMode =
+    selectedBaseConfig?.mode ?? "semantic";
   const baseNames = useMemo(
     () => Object.keys(knowledgeBases).sort(),
     [knowledgeBases],
@@ -330,6 +338,7 @@ export function Knowledge() {
     );
     setSettings({
       description: selectedConfig.description ?? "",
+      mode: selectedConfig.mode ?? "semantic",
       path: selectedConfig.path,
       watch: selectedConfig.watch,
       ...chunking,
@@ -417,6 +426,7 @@ export function Knowledge() {
   const settingsSourceType: KnowledgeSourceType = settings.git
     ? "git"
     : "local";
+  const settingsMode: KnowledgeAccessMode = settings.mode ?? "semantic";
   const hasGitRepoUrlReplacement =
     settingsSourceType === "git" && gitRepoUrlReplacement.trim().length > 0;
   const canSaveSettings = isDirty || hasGitRepoUrlReplacement;
@@ -564,6 +574,7 @@ export function Knowledge() {
 
       const nextBaseConfig: KnowledgeBaseConfig = {
         description: newBaseDescription.trim(),
+        mode: newBaseMode,
         path: defaultPathForBase(baseName),
         watch: true,
         chunk_size: DEFAULT_CHUNK_SIZE,
@@ -593,6 +604,7 @@ export function Knowledge() {
       setNewBaseName("");
       setNewBaseDescription("");
       setNewBaseSourceType("local");
+      setNewBaseMode("semantic");
       setNewBaseGitSettings(defaultGitSettings());
       await loadData(baseName);
       toast({
@@ -619,6 +631,7 @@ export function Knowledge() {
     updateKnowledgeBase,
     loadData,
     newBaseName,
+    newBaseMode,
     newBaseSourceType,
     newBaseGitSettings,
     newBaseDescription,
@@ -949,6 +962,7 @@ export function Knowledge() {
                       const baseConfig = knowledgeBases[baseName];
                       const isActive = baseName === selectedBase;
                       const baseSourceType = sourceTypeForBase(baseConfig);
+                      const baseMode = baseConfig?.mode ?? "semantic";
                       return (
                         <button
                           key={baseName}
@@ -973,6 +987,13 @@ export function Knowledge() {
                               ) : (
                                 <Badge variant="outline">Local</Badge>
                               )}
+                              <Badge
+                                variant={
+                                  baseMode === "files" ? "secondary" : "outline"
+                                }
+                              >
+                                {baseMode === "files" ? "Files" : "Semantic"}
+                              </Badge>
                             </div>
                             {isActive && (
                               <Badge variant="default">Active</Badge>
@@ -998,9 +1019,11 @@ export function Knowledge() {
                                   defaultPathForBase(baseName)}
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
-                                {baseConfig?.watch
-                                  ? "Advisory refresh on access"
-                                  : "External edits need reindex"}
+                                {baseMode === "files"
+                                  ? "Agentic file access"
+                                  : baseConfig?.watch
+                                    ? "Advisory refresh on access"
+                                    : "External edits need reindex"}
                               </p>
                             </>
                           )}
@@ -1093,6 +1116,34 @@ export function Knowledge() {
                   >
                     <GitBranch className="h-4 w-4 mr-2" />
                     Git Repository
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Access Mode</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    variant={newBaseMode === "semantic" ? "default" : "outline"}
+                    aria-label="Create semantic search access"
+                    onClick={() => setNewBaseMode("semantic")}
+                    disabled={creatingBase || isDirty}
+                    className="justify-start"
+                  >
+                    <Search className="h-4 w-4 mr-2" />
+                    Semantic Search
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={newBaseMode === "files" ? "default" : "outline"}
+                    aria-label="Create files-only access"
+                    onClick={() => setNewBaseMode("files")}
+                    disabled={creatingBase || isDirty}
+                    className="justify-start"
+                  >
+                    <FolderOpen className="h-4 w-4 mr-2" />
+                    Files Only
                   </Button>
                 </div>
               </div>
@@ -1208,6 +1259,44 @@ export function Knowledge() {
                 </div>
 
                 <div className="space-y-2">
+                  <p className="text-sm font-medium">Access Mode</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <Button
+                      type="button"
+                      variant={
+                        settingsMode === "semantic" ? "default" : "outline"
+                      }
+                      aria-label="Settings semantic search access"
+                      onClick={() =>
+                        updateSettings({
+                          mode: "semantic",
+                          ...normalizeChunking(
+                            settings.chunk_size,
+                            settings.chunk_overlap,
+                          ),
+                        })
+                      }
+                      disabled={savingSettings}
+                      className="justify-start"
+                    >
+                      <Search className="h-4 w-4 mr-2" />
+                      Semantic Search
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={settingsMode === "files" ? "default" : "outline"}
+                      aria-label="Settings files-only access"
+                      onClick={() => updateSettings({ mode: "files" })}
+                      disabled={savingSettings}
+                      className="justify-start"
+                    >
+                      <FolderOpen className="h-4 w-4 mr-2" />
+                      Files Only
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
                   <label
                     className="text-sm font-medium"
                     htmlFor="knowledge-description"
@@ -1260,74 +1349,76 @@ export function Knowledge() {
                   </div>
                 ) : null}
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <label
-                      className="text-sm font-medium"
-                      htmlFor="knowledge-chunk-size"
-                    >
-                      Chunk Size (characters)
-                    </label>
-                    <Input
-                      id="knowledge-chunk-size"
-                      type="number"
-                      min={MIN_CHUNK_SIZE}
-                      value={settings.chunk_size ?? DEFAULT_CHUNK_SIZE}
-                      onChange={(event) => {
-                        const parsedValue = Number.parseInt(
-                          event.target.value,
-                          10,
-                        );
-                        updateSettings({
-                          chunk_size:
-                            Number.isNaN(parsedValue) ||
-                            parsedValue < MIN_CHUNK_SIZE
-                              ? MIN_CHUNK_SIZE
-                              : parsedValue,
-                        });
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Larger chunks reduce requests but increase per-request
-                      token load.
-                    </p>
-                  </div>
+                {settingsMode === "semantic" ? (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-chunk-size"
+                      >
+                        Chunk Size (characters)
+                      </label>
+                      <Input
+                        id="knowledge-chunk-size"
+                        type="number"
+                        min={MIN_CHUNK_SIZE}
+                        value={settings.chunk_size ?? DEFAULT_CHUNK_SIZE}
+                        onChange={(event) => {
+                          const parsedValue = Number.parseInt(
+                            event.target.value,
+                            10,
+                          );
+                          updateSettings({
+                            chunk_size:
+                              Number.isNaN(parsedValue) ||
+                              parsedValue < MIN_CHUNK_SIZE
+                                ? MIN_CHUNK_SIZE
+                                : parsedValue,
+                          });
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Larger chunks reduce requests but increase per-request
+                        token load.
+                      </p>
+                    </div>
 
-                  <div className="space-y-2">
-                    <label
-                      className="text-sm font-medium"
-                      htmlFor="knowledge-chunk-overlap"
-                    >
-                      Chunk Overlap (characters)
-                    </label>
-                    <Input
-                      id="knowledge-chunk-overlap"
-                      type="number"
-                      min={0}
-                      value={settings.chunk_overlap ?? DEFAULT_CHUNK_OVERLAP}
-                      onChange={(event) => {
-                        const parsedValue = Number.parseInt(
-                          event.target.value,
-                          10,
-                        );
-                        const nextChunkSize =
-                          settings.chunk_size ?? DEFAULT_CHUNK_SIZE;
-                        const normalizedValue = Number.isNaN(parsedValue)
-                          ? 0
-                          : Math.max(
-                              0,
-                              Math.min(parsedValue, nextChunkSize - 1),
-                            );
-                        updateSettings({
-                          chunk_overlap: normalizedValue,
-                        });
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Must stay lower than chunk size.
-                    </p>
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="knowledge-chunk-overlap"
+                      >
+                        Chunk Overlap (characters)
+                      </label>
+                      <Input
+                        id="knowledge-chunk-overlap"
+                        type="number"
+                        min={0}
+                        value={settings.chunk_overlap ?? DEFAULT_CHUNK_OVERLAP}
+                        onChange={(event) => {
+                          const parsedValue = Number.parseInt(
+                            event.target.value,
+                            10,
+                          );
+                          const nextChunkSize =
+                            settings.chunk_size ?? DEFAULT_CHUNK_SIZE;
+                          const normalizedValue = Number.isNaN(parsedValue)
+                            ? 0
+                            : Math.max(
+                                0,
+                                Math.min(parsedValue, nextChunkSize - 1),
+                              );
+                          updateSettings({
+                            chunk_overlap: normalizedValue,
+                          });
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Must stay lower than chunk size.
+                      </p>
+                    </div>
                   </div>
-                </div>
+                ) : null}
 
                 {settingsSourceType === "git" && settings.git ? (
                   <div className="space-y-4 rounded-md border p-3">
@@ -1581,9 +1672,22 @@ export function Knowledge() {
                   <Badge variant="outline">
                     Files: {status?.file_count ?? 0}
                   </Badge>
-                  <Badge variant="outline">
-                    Indexed: {status?.indexed_count ?? 0}
+                  <Badge
+                    variant={
+                      (status?.mode ?? settingsMode) === "files"
+                        ? "secondary"
+                        : "outline"
+                    }
+                  >
+                    {(status?.mode ?? settingsMode) === "files"
+                      ? "Files Only"
+                      : "Semantic Search"}
                   </Badge>
+                  {(status?.mode ?? settingsMode) === "semantic" ? (
+                    <Badge variant="outline">
+                      Indexed: {status?.indexed_count ?? 0}
+                    </Badge>
+                  ) : null}
                   <Badge variant="outline">
                     Total Size: {formatBytes(totalSize)}
                   </Badge>
@@ -1696,8 +1800,9 @@ export function Knowledge() {
                     <div>
                       <p className="font-medium">Repository-managed files</p>
                       <p className="text-sm text-muted-foreground">
-                        Update the configured repository, then reindex to sync
-                        and rebuild this base.
+                        Update the configured repository, then{" "}
+                        {selectedBaseMode === "files" ? "sync" : "reindex"} to
+                        refresh this base.
                       </p>
                     </div>
                     <Button
@@ -1711,7 +1816,13 @@ export function Knowledge() {
                           reindexing && "animate-spin",
                         )}
                       />
-                      {reindexing ? "Reindexing..." : "Reindex"}
+                      {reindexing
+                        ? selectedBaseMode === "files"
+                          ? "Syncing..."
+                          : "Reindexing..."
+                        : selectedBaseMode === "files"
+                          ? "Sync"
+                          : "Reindex"}
                     </Button>
                   </div>
                 </CardContent>
@@ -1745,7 +1856,9 @@ export function Knowledge() {
                         Drop files here or upload manually
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        Supported formats are auto-detected by agno readers.
+                        {selectedBaseMode === "files"
+                          ? "Agents can inspect these files from their workspace knowledge path."
+                          : "Supported formats are auto-detected by agno readers."}
                       </p>
                     </div>
                     <div className="flex gap-2">
@@ -1764,19 +1877,21 @@ export function Knowledge() {
                         <Upload className="h-4 w-4 mr-2" />
                         {uploading ? "Uploading..." : "Upload"}
                       </Button>
-                      <Button
-                        variant="outline"
-                        onClick={handleReindex}
-                        disabled={reindexing || isDirty}
-                      >
-                        <RefreshCw
-                          className={cn(
-                            "h-4 w-4 mr-2",
-                            reindexing && "animate-spin",
-                          )}
-                        />
-                        {reindexing ? "Reindexing..." : "Reindex"}
-                      </Button>
+                      {selectedBaseMode === "semantic" ? (
+                        <Button
+                          variant="outline"
+                          onClick={handleReindex}
+                          disabled={reindexing || isDirty}
+                        >
+                          <RefreshCw
+                            className={cn(
+                              "h-4 w-4 mr-2",
+                              reindexing && "animate-spin",
+                            )}
+                          />
+                          {reindexing ? "Reindexing..." : "Reindex"}
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                 </CardContent>

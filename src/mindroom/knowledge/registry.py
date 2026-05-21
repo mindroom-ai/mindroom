@@ -75,6 +75,7 @@ class PublishedIndexState:
 
     settings: tuple[str, ...]
     status: Literal["resetting", "indexing", "complete", "failed"]
+    index_kind: Literal["semantic", "files"] = "semantic"
     collection: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
@@ -276,10 +277,13 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
         indexed_count,
         source_signature,
     ) = fields
+    raw_index_kind = payload.get("index_kind")
+    index_kind: Literal["semantic", "files"] = "files" if raw_index_kind == "files" else "semantic"
 
     return PublishedIndexState(
         settings=settings,
         status=cast('Literal["resetting", "indexing", "complete", "failed"]', status),
+        index_kind=index_kind,
         collection=collection,
         last_published_at=last_published_at,
         published_revision=published_revision,
@@ -299,6 +303,7 @@ def save_published_index_state(metadata_path: Path, state: PublishedIndexState) 
         metadata_path,
         settings=state.settings,
         status=state.status,
+        index_kind=state.index_kind,
         collection=state.collection,
         last_published_at=state.last_published_at,
         published_revision=state.published_revision,
@@ -772,6 +777,8 @@ def _published_index_keys_for_shared_source(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[PublishedIndexKey, ...]:
+    if config.get_knowledge_base_config(base_id).mode != "semantic":
+        return ()
     key = resolve_published_index_key(
         base_id,
         config=config,
@@ -782,6 +789,8 @@ def _published_index_keys_for_shared_source(
     matching_keys = [key]
     for candidate_base_id in config.knowledge_bases:
         if candidate_base_id == base_id:
+            continue
+        if config.get_knowledge_base_config(candidate_base_id).mode != "semantic":
             continue
         try:
             candidate_key = resolve_published_index_key(

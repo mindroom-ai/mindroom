@@ -60,8 +60,10 @@ def parse_index_metadata_fields(
     collection = optional_metadata_str(payload.get("collection"))
     indexed_count = _coerce_nonnegative_metadata_int(payload.get("indexed_count"))
     source_signature = optional_metadata_str(payload.get("source_signature"))
+    index_kind = optional_metadata_str(payload.get("index_kind"))
+    complete_requires_collection = raw_status == "complete" and index_kind != "files"
     if (require_complete_fields_for_all_statuses or raw_status == "complete") and (
-        collection is None or indexed_count is None or source_signature is None
+        (complete_requires_collection and collection is None) or indexed_count is None or source_signature is None
     ):
         return None
 

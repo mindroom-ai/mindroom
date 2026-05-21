@@ -134,24 +134,26 @@ _FileSignature = tuple[int, int, str]
 _INDEXING_SETTINGS_BASE_ID_INDEX = 0
 _INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
 _INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
-INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 7
-_INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 7
-_INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 8
-_INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 9
+_INDEXING_SETTINGS_MODE_INDEX = 3
+INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 8
+_INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 8
+_INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 9
+_INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 10
 INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
     _INDEXING_SETTINGS_BASE_ID_INDEX,
     _INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
     _INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
+    _INDEXING_SETTINGS_MODE_INDEX,
     _INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
-    10,
     11,
     12,
     13,
     14,
     15,
     16,
+    17,
 )
-_INDEXING_SETTINGS_LAYOUT_LENGTH = 17
+_INDEXING_SETTINGS_LAYOUT_LENGTH = 18
 
 
 @runtime_checkable
@@ -292,6 +294,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         base_id,
         str(storage_path.resolve()),
         str(knowledge_path.resolve()),
+        base_config.mode,
         *effective_knowledge_embedder_signature(
             config.memory.embedder.provider,
             embedder_config.model,
@@ -313,6 +316,10 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         msg = "Knowledge indexing settings layout constants must match _indexing_settings_key"
         raise AssertionError(msg)
     return settings
+
+
+def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
+    return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
 def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
@@ -788,6 +795,10 @@ class KnowledgeManager:
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         persisted_state = self._load_persisted_index_state()
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            self._persisted_collection_missing_on_init = False
+            self._knowledge = Knowledge()
+            return
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
             persisted_state.collection
@@ -1536,6 +1547,9 @@ class KnowledgeManager:
 
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            return 0
+
         async with self._lock:
             self._last_refresh_error = None
             files = await asyncio.to_thread(self.list_files)

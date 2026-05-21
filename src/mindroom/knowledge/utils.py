@@ -357,6 +357,14 @@ def _schedule_refresh_for_availability(
     return availability
 
 
+def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
+    return tuple(
+        base_id
+        for base_id in config.get_agent_knowledge_base_ids(agent_name)
+        if config.get_knowledge_base_config(base_id).mode == "semantic"
+    )
+
+
 def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
@@ -396,7 +404,7 @@ def resolve_agent_knowledge_access(
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
-    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
     if not base_ids:
         return _KnowledgeResolution(knowledge=None)
 

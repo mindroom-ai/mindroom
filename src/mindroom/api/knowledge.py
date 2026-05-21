@@ -169,6 +169,8 @@ def _schedule_refreshes(
     request: Request,
 ) -> None:
     for base_id in dict.fromkeys(base_ids):
+        if config.get_knowledge_base_config(base_id).mode != "semantic":
+            continue
         _schedule_refresh(config, base_id, runtime_paths, request=request)
 
 
@@ -217,14 +219,22 @@ async def _mark_committed_mutation_and_schedule_refresh(
     reason: str,
 ) -> bool:
     base_ids_to_refresh = _same_source_base_ids(config, base_id, runtime_paths)
+    semantic_base_ids = tuple(
+        candidate_id
+        for candidate_id in base_ids_to_refresh
+        if config.get_knowledge_base_config(candidate_id).mode == "semantic"
+    )
+    if not semantic_base_ids:
+        return False
+
     try:
         affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
-            base_id,
+            semantic_base_ids[0],
             config=config,
             runtime_paths=runtime_paths,
             reason=reason,
         )
-        base_ids_to_refresh = (base_id, *affected_base_ids)
+        base_ids_to_refresh = (*semantic_base_ids, *affected_base_ids)
     finally:
         _schedule_refreshes(config, base_ids_to_refresh, runtime_paths, request=request)
     return cancelled_after_source_changed
@@ -235,6 +245,9 @@ def _index_status_sync(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeIndexStatus:
+    base_config = config.get_knowledge_base_config(base_id)
+    if base_config.mode == "files" and base_config.git is None:
+        return KnowledgeIndexStatus(availability=KnowledgeAvailability.READY)
     try:
         return get_knowledge_index_status(
             base_id,
@@ -534,6 +547,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_entry: dict[str, Any] = {
             "name": base_id,
             "description": base_config.description,
+            "mode": base_config.mode,
             "path": str(root),
             "watch": base_config.watch,
             "file_count": len(file_info.files),
@@ -675,6 +689,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "base_id": base_id,
         "description": base_config.description,
+        "mode": base_config.mode,
         "folder_path": str(root),
         "watch": base_config.watch,
         "file_count": len(file_info.files),

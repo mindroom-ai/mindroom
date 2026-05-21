@@ -133,7 +133,7 @@ class _VectorDb:
 
 
 class _Knowledge:
-    def __init__(self, vector_db: _VectorDb) -> None:
+    def __init__(self, vector_db: _VectorDb | None = None) -> None:
         self.vector_db = vector_db
 
     def insert(
@@ -224,6 +224,7 @@ def _config(
     agent_bases: list[str],
     git_configs: dict[str, KnowledgeGitConfig] | None = None,
     watch: bool = False,
+    modes: dict[str, str] | None = None,
 ) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
@@ -235,6 +236,7 @@ def _config(
                     path=str(path),
                     watch=watch,
                     git=(git_configs or {}).get(base_id),
+                    mode=(modes or {}).get(base_id, "semantic"),
                 )
                 for base_id, path in bases.items()
             },
@@ -363,6 +365,38 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     assert scheduler.schedule_refresh.call_args.kwargs["config"] is config
 
 
+def test_file_mode_knowledge_skips_semantic_lookup_and_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-only knowledge should not look up vectors or schedule embedding refreshes."""
+    config = _config(
+        tmp_path,
+        bases={"docs": tmp_path / "docs"},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    get_published_index = MagicMock(side_effect=AssertionError("semantic index lookup should be skipped"))
+    monkeypatch.setattr(knowledge_utils, "get_published_index", get_published_index)
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
+
+    resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths_for(config),
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    assert resolution.missing == ()
+    assert resolution.unavailable == {}
+    get_published_index.assert_not_called()
+    scheduler.is_refreshing.assert_not_called()
+    scheduler.schedule_refresh.assert_not_called()
+
+
 def test_initializing_knowledge_skips_duplicate_initial_load_when_scheduler_is_active(tmp_path: Path) -> None:
     """An active scheduler refresh is enough for initializing knowledge."""
     config = _config(
@@ -406,6 +440,34 @@ def test_refresh_scheduler_module_exports_one_concrete_scheduler_name() -> None:
     assert not hasattr(knowledge_refresh_scheduler, "StandaloneKnowledgeRefreshScheduler")
     assert not hasattr(knowledge_refresh_scheduler, "OrchestratorKnowledgeRefreshScheduler")
     assert not hasattr(knowledge_refresh_scheduler, "PerBindingKnowledgeRefreshScheduler")
+
+
+@pytest.mark.asyncio
+async def test_file_mode_refresh_publishes_source_metadata_without_vector_collection(tmp_path: Path) -> None:
+    """Refreshing file-only knowledge should avoid Chroma collections and embedders."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+
+    assert result.indexed_count == 0
+    assert result.index_published is False
+    assert result.availability is KnowledgeAvailability.READY
+    assert state is not None
+    assert state.status == "complete"
+    assert state.collection is None
+    assert state.indexed_count == 0
+    assert _VectorDb.collections == {}
 
 
 def test_failed_notice_without_index_says_unavailable() -> None:
@@ -1424,6 +1486,41 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_state is not None
     assert knowledge_registry.published_index_refresh_state(beta_state) == "stale"
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_skips_file_mode_duplicate_physical_sources(tmp_path: Path) -> None:
+    """File-mode aliases do not maintain semantic indexes that need stale marking."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared source old", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"alpha": docs_path, "beta": docs_path},
+        agent_bases=["alpha", "beta"],
+        modes={"alpha": "semantic", "beta": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
+    beta_metadata_path = published_index_metadata_path(beta_key)
+    assert load_published_index_state(beta_metadata_path) is not None
+
+    doc.write_text("shared source new", encoding="utf-8")
+    marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
+        "alpha",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    beta_state = load_published_index_state(beta_metadata_path)
+
+    assert marked_base_ids == ("alpha",)
+    assert beta_state is not None
+    assert beta_state.status == "complete"
+    assert beta_state.collection is None
+    assert knowledge_registry.published_index_refresh_state(beta_state) == "none"
 
 
 @pytest.mark.asyncio

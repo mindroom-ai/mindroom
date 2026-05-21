@@ -143,7 +143,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
+| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`. Semantic bases add indexed RAG search, and file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -160,6 +160,7 @@ agents:
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
+See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
 Per-agent values override them.

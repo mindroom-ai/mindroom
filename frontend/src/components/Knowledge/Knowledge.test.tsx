@@ -28,6 +28,7 @@ type KnowledgeApiPayloads = {
     folder_path: string;
     watch: boolean;
     file_count: number;
+    mode?: "semantic" | "files";
     indexed_count: number;
     refreshing?: boolean;
     refresh_state?: "none" | "stale" | "refreshing" | "refresh_failed";
@@ -498,6 +499,49 @@ describe("Knowledge", () => {
         expect.objectContaining({
           description:
             "Product requirements, roadmap notes, and user-facing decisions.",
+        }),
+      );
+    });
+  });
+
+  it("creates a files-only knowledge base", async () => {
+    mockStore({});
+    setKnowledgeApiMock({
+      file_docs: {
+        status: {
+          base_id: "file_docs",
+          folder_path: "./knowledge_docs/file_docs",
+          watch: true,
+          mode: "files",
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "file_docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+
+    fireEvent.change(screen.getByLabelText("Base Name"), {
+      target: { value: "file_docs" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create files-only access" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add Base" }));
+
+    await waitFor(() => {
+      expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
+        "file_docs",
+        expect.objectContaining({
+          mode: "files",
+          path: "./knowledge_docs/file_docs",
         }),
       );
     });

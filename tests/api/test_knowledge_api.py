@@ -43,12 +43,14 @@ def _knowledge_config(
     duplicate_source_base: bool = False,
     git: bool = False,
     description: str = "",
+    mode: str = "semantic",
 ) -> Config:
     knowledge_bases = {
         "research": KnowledgeBaseConfig(
             description=description,
             path=str(path),
             watch=False,
+            mode=mode,
             git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git") if git else None,
         ),
     }
@@ -205,6 +207,31 @@ def test_knowledge_status_and_list_include_configured_description(tmp_path: Path
     assert list_response.status_code == 200
     assert status_response.json()["description"] == "Research briefs, experiment notes, and decision records."
     assert list_response.json()["bases"][0]["description"] == "Research briefs, experiment notes, and decision records."
+
+
+def test_file_mode_status_and_list_report_files_mode_without_initializing_index(tmp_path: Path) -> None:
+    """File-only bases should be visible in the API without semantic index work."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    config = _knowledge_config(docs, mode="files")
+    _publish_committed_runtime_config(client.app, config)
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        status_response = client.get("/api/knowledge/bases/research/status")
+        list_response = client.get("/api/knowledge/bases")
+
+    assert status_response.status_code == 200
+    assert list_response.status_code == 200
+    status_payload = status_response.json()
+    list_payload = list_response.json()["bases"][0]
+    assert status_payload["mode"] == "files"
+    assert list_payload["mode"] == "files"
+    assert status_payload["file_count"] == 1
+    assert status_payload["indexed_count"] == 0
+    assert status_payload["refresh_state"] == "none"
+    refresh.assert_not_awaited()
 
 
 def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: Path) -> None:

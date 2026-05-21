@@ -90,12 +90,13 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 ### Knowledge
 
-Manage file-backed RAG knowledge bases:
+Manage file-backed semantic or files-only knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `description`, `path`, and refresh-on-access `watch` settings
+- **Create/edit/delete knowledge bases** with `description`, `mode`, `path`, and refresh-on-access `watch` settings
+- **Choose semantic search or files-only access** depending on whether a base should build embeddings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
-- **Reindex** a knowledge base on demand
+- **Reindex or sync** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
 

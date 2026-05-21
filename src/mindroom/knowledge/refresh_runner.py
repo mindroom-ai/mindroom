@@ -519,6 +519,14 @@ async def _refresh_knowledge_binding_locked(
     base_id = key.base_id
     manager: KnowledgeManager | None = None
     try:
+        if config.get_knowledge_base_config(base_id).mode == "files":
+            return await _refresh_file_mode_binding_locked(
+                key,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            )
+
         binding = resolve_knowledge_binding(
             base_id,
             config,
@@ -562,6 +570,68 @@ async def _refresh_knowledge_binding_locked(
         indexed_count=indexed_count,
         config=config,
         runtime_paths=runtime_paths,
+    )
+
+
+async def _refresh_file_mode_binding_locked(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> KnowledgeRefreshResult:
+    """Refresh source metadata for a file-only base without building vectors."""
+    binding = resolve_knowledge_binding(
+        key.base_id,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        create=True,
+    )
+    manager = KnowledgeManager(
+        base_id=key.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    if manager._git_config() is not None:
+        await manager.sync_git_source()
+
+    source_signature = await asyncio.to_thread(
+        knowledge_source_signature,
+        manager.config,
+        manager.base_id,
+        manager._knowledge_source_path(),
+        tracked_relative_paths=manager._git_tracked_relative_paths,
+    )
+    now = datetime.now(tz=UTC).isoformat()
+    await asyncio.to_thread(
+        save_published_index_state,
+        published_index_metadata_path(key),
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            index_kind="files",
+            collection=None,
+            last_published_at=now,
+            published_revision=manager._git_last_successful_commit,
+            indexed_count=0,
+            source_signature=source_signature,
+            refresh_job="idle",
+            reason=None,
+            last_error=None,
+            updated_at=now,
+            last_refresh_at=now,
+        ),
+    )
+    return KnowledgeRefreshResult(
+        key=key,
+        indexed_count=0,
+        index_published=False,
+        availability=KnowledgeAvailability.READY,
+        last_error=None,
     )
 
 
@@ -757,6 +827,7 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
     return (
         state.settings,
         state.status,
+        state.index_kind,
         state.collection,
         state.last_published_at,
         state.published_revision,
