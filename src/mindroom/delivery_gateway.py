@@ -9,6 +9,7 @@ from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom import constants, interactive
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -550,7 +551,7 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         if request.skip_mentions:
-            content["com.mindroom.skip_mentions"] = True
+            content[SKIP_MENTIONS_KEY] = True
         delivered = await send_message_result(client, resolved_target.room_id, content, config=config)
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
@@ -916,7 +917,7 @@ class DeliveryGateway:
             extra_content={
                 "msgtype": "m.notice",
                 constants.COMPACTION_NOTICE_CONTENT_KEY: notice_metadata,
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
             },
         )
         delivered = await send_message_result(self._client(), target.room_id, content, config=self.deps.runtime.config)
@@ -1015,7 +1016,7 @@ class DeliveryGateway:
             extra_content={
                 "msgtype": "m.notice",
                 constants.COMPACTION_NOTICE_CONTENT_KEY: metadata,
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
             },
         )
         delivered = await edit_message_result(
@@ -1052,9 +1053,7 @@ class DeliveryGateway:
         )
         return await send_streaming_response(
             client,
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.target.resolved_thread_id,
+            request.target,
             config,
             self.deps.runtime_paths,
             request.response_stream,
@@ -1063,8 +1062,6 @@ class DeliveryGateway:
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
-            target=request.target,
-            room_mode=request.target.is_room_mode,
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,

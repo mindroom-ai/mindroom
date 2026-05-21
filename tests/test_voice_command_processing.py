@@ -18,9 +18,12 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -207,7 +210,13 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     event.body = "🎤 !schedule daily"
     event.event_id = "test_event"
     event.server_timestamp = 1234567890
-    event.source = {"content": {"body": "🎤 !schedule daily", ORIGINAL_SENDER_KEY: "@alice:example.com"}}
+    event.source = {
+        "content": {
+            "body": "🎤 !schedule daily",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        },
+    }
 
     with (
         patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
@@ -320,6 +329,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
                 },
                 "url": "mxc://server/sidecar-relay",
                 ORIGINAL_SENDER_KEY: "@alice:example.com",
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
             },
         },
     )
@@ -511,7 +521,9 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
 
     mock_interactive.assert_awaited_once()
     bot._send_response.assert_awaited_once()
-    assert bot._send_response.await_args.args[2] == "❌ Unknown command. Try !help for available commands."
+    assert bot._send_response.await_args.kwargs["response_text"] == (
+        "❌ Unknown command. Try !help for available commands."
+    )
 
 
 @pytest.mark.asyncio
@@ -611,6 +623,7 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
     assert prepared.text == "🎤 turn on the lights"
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert prepared.source["content"][ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert prepared.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert prepared.source["content"][ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in prepared.source["content"]
     attachment = load_attachment(tmp_path, expected_attachment_id)
@@ -637,7 +650,7 @@ async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(t
                 ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
                 ORIGINAL_SENDER_KEY: "@spoofed:example.com",
                 VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         },
@@ -663,9 +676,10 @@ async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(t
     content = prepared.source["content"]
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert content[SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert content[ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in content
-    assert "com.mindroom.skip_mentions" not in content
+    assert SKIP_MENTIONS_KEY not in content
     assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
 
 
@@ -700,6 +714,7 @@ async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_pat
     assert prepared.text == f"{VOICE_PREFIX}[Attached voice message]"
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert prepared.source["content"][ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert prepared.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
     assert prepared.source["content"][ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert prepared.source["content"]["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
@@ -817,7 +832,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     expected_attachment_id = _attachment_id_for_event("$voice_event")
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
@@ -970,6 +985,11 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
     assert request.target.resolved_thread_id == "$voice_event"
     assert request.skip_mentions is True
+    assert request.extra_content is not None
+    assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in request.extra_content
 
 
 @pytest.mark.asyncio
@@ -1053,13 +1073,40 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert echo_request.target.reply_to_event_id == "$voice_event"
     assert echo_request.response_text == f"{VOICE_PREFIX}summarize this audio"
     assert echo_request.skip_mentions is True
-    assert echo_request.extra_content is None
+    assert echo_request.extra_content is not None
+    assert echo_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert echo_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert echo_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in echo_request.extra_content
     assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
     assert handoff_request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_marks_raw_audio_fallback(tmp_path) -> None:  # noqa: ANN001
+    """Visible router voice echoes should preserve the raw-audio fallback marker."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        await bot._on_media_message(room, event)
+
+    bot._delivery_gateway.send_text.assert_called_once()
+    request = bot._delivery_gateway.send_text.call_args.args[0]
+    assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert request.extra_content is not None
+    assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 
 @pytest.mark.asyncio
@@ -1217,6 +1264,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     assert request.response_text == "@home could you help with this?"
     assert request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
     turn_store.record_turn.assert_called_once_with(
@@ -1297,7 +1345,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
     assert bots[0]._generate_response.await_count == 0
     assert bots[1]._generate_response.await_count == 1
     call_kwargs = bots[1]._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
 
@@ -1372,6 +1420,6 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
     assert bots[0]._generate_response.await_count == 0
     assert bots[1]._generate_response.await_count == 1
     call_kwargs = bots[1]._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]

@@ -19,8 +19,9 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
@@ -29,7 +30,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
-from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -37,6 +38,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_matrix_client_mock,
     make_visible_message,
+    message_origin,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -45,10 +47,49 @@ from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_n
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.turn_origin import TurnOrigin
+
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for routing regression tests."""
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
+
+
+def _policy_dispatch(
+    *,
+    agent_name: str,
+    room_id: str,
+    context: MessageContext,
+    requester_user_id: str,
+    body: str,
+    source_event_id: str = "$event",
+) -> PreparedDispatch:
+    """Build a complete prepared dispatch for direct turn-policy tests."""
+    target = MessageTarget.resolve(room_id, context.thread_id, source_event_id)
+    envelope = MessageEnvelope(
+        source_event_id=source_event_id,
+        room_id=room_id,
+        target=target,
+        requester_id=requester_user_id,
+        sender_id=requester_user_id,
+        body=body,
+        attachment_ids=(),
+        mentioned_agents=tuple(context.mentioned_agents),
+        agent_name=agent_name,
+        source_kind="message",
+        origin=message_origin(
+            sender_id=requester_user_id,
+            requester_id=requester_user_id,
+            source_kind="message",
+        ),
+    )
+    return PreparedDispatch(
+        requester_user_id=requester_user_id,
+        context=context,
+        target=target,
+        correlation_id=source_event_id,
+        envelope=envelope,
+    )
 
 
 def setup_test_bot(
@@ -181,18 +222,31 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
     )
     target = MessageTarget.resolve("!room:localhost", "$thread", "$msg")
 
-    def envelope(sender_id: str) -> MessageEnvelope:
+    def envelope(
+        sender_id: str,
+        *,
+        requester_id: str | None = None,
+        origin: TurnOrigin | None = None,
+    ) -> MessageEnvelope:
+        resolved_requester_id = requester_id or sender_id
         return MessageEnvelope(
             source_event_id="$msg",
             room_id="!room:localhost",
             target=target,
-            requester_id=sender_id,
+            requester_id=resolved_requester_id,
             sender_id=sender_id,
             body="follow up",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="research",
-            source_kind="message",
+            source_kind=origin.source_kind if origin is not None else "message",
+            origin=origin
+            or message_origin(
+                sender_id=sender_id,
+                requester_id=resolved_requester_id,
+                sender_entity_name=entity_name_for_id(MatrixID.parse(sender_id), config, runtime_paths),
+                requester_entity_name=entity_name_for_id(MatrixID.parse(resolved_requester_id), config, runtime_paths),
+            ),
         )
 
     assert policy._should_queue_follow_up_in_active_response_thread(
@@ -205,6 +259,23 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
         context=context,
         target=target,
         source_envelope=envelope("@actual_news:localhost"),
+        has_active_response_for_target=lambda _target: True,
+    )
+    assert policy._should_queue_follow_up_in_active_response_thread(
+        context=context,
+        target=target,
+        source_envelope=envelope(
+            ids["router"].full_id,
+            requester_id="@human:localhost",
+            origin=message_origin(
+                sender_id=ids["router"].full_id,
+                requester_id="@human:localhost",
+                sender_entity_name="router",
+                source_kind="trusted_internal_relay",
+                original_sender="@human:localhost",
+                trusted_user_relay=True,
+            ),
+        ),
         has_active_response_for_target=lambda _target: True,
     )
 
@@ -538,6 +609,7 @@ class TestRoutingRegression:
             [],
             None,
             requester_user_id="@bob:localhost",
+            extra_content={ORIGINAL_SENDER_KEY: "@stale:localhost"},
         )
 
         mock_suggest_responder.assert_not_awaited()
@@ -546,6 +618,7 @@ class TestRoutingRegression:
         assert content["body"] == "@mindroom_news_oldns:localhost could you help with this?"
         assert content["m.mentions"]["user_ids"] == ["@mindroom_news_oldns:localhost"]
         assert content[ORIGINAL_SENDER_KEY] == "@bob:localhost"
+        assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -627,8 +700,10 @@ class TestRoutingRegression:
         assert content["m.mentions"]["user_ids"] == [ids["beta"].full_id]
         if expected_original_sender is None:
             assert ORIGINAL_SENDER_KEY not in content
+            assert SOURCE_KIND_KEY not in content
         else:
             assert content[ORIGINAL_SENDER_KEY] == expected_original_sender
+            assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")
@@ -703,12 +778,13 @@ class TestRoutingRegression:
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert "couldn't determine which agent or team should help" in content["body"]
         assert ORIGINAL_SENDER_KEY not in content
+        assert SOURCE_KIND_KEY not in content
 
-    def test_router_original_sender_metadata_requires_routable_mention(
+    def test_router_original_sender_metadata_requires_canonical_relay_source_kind(
         self,
         tmp_path: Path,
     ) -> None:
-        """Router relays only honor provenance when the body targets a configured responder."""
+        """Router relays only honor provenance when canonical relay metadata is present."""
         test_room_id = "!router-mentions:localhost"
         test_config = _runtime_bound_config(
             Config(
@@ -739,10 +815,18 @@ class TestRoutingRegression:
 
         router_sender = ids["router"].full_id
 
-        def requester_for(content: dict[str, object]) -> str:
+        def requester_for(
+            content: dict[str, object],
+            *,
+            original_sender: str = "@stale:localhost",
+            source_kind: str | None = None,
+        ) -> str:
+            content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
+            if source_kind is not None:
+                content_with_metadata[SOURCE_KIND_KEY] = source_kind
             return router_bot._turn_controller._requester_user_id(
                 sender=router_sender,
-                source={"content": {ORIGINAL_SENDER_KEY: "@stale:localhost", **content}},
+                source={"content": content_with_metadata},
             )
 
         untrusted_contents: list[dict[str, object]] = [
@@ -758,7 +842,16 @@ class TestRoutingRegression:
             {"body": "Beta could help", "m.mentions": {"user_ids": [ids["beta"].full_id]}},
         ]
         for content in trusted_contents:
-            assert requester_for(content) == "@stale:localhost"
+            assert requester_for(content) == router_sender
+            assert requester_for(content, source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND) == "@stale:localhost"
+            assert (
+                requester_for(
+                    content,
+                    original_sender=ids["router"].full_id,
+                    source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                )
+                == router_sender
+            )
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")
@@ -918,11 +1011,17 @@ class TestRoutingRegression:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_agent_respond,
         ):
             action = await alpha_bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(
+                    agent_name=alpha_bot.agent_name,
+                    room_id=room.room_id,
+                    context=context,
+                    requester_user_id="@user:localhost",
+                    body="can anyone help?",
+                ),
                 room,
-                "@user:localhost",
                 "can anyone help?",
                 False,
+                has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -994,11 +1093,17 @@ class TestRoutingRegression:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(
+                agent_name=bot.agent_name,
+                room_id=room.room_id,
+                context=context,
+                requester_user_id="@user:localhost",
+                body="ops, help",
+            ),
             room,
-            "@user:localhost",
             "ops, help",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "reject"

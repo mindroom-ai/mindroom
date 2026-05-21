@@ -16,6 +16,7 @@ from mindroom import inbound_turn_normalizer
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.matrix.users import AgentMatrixUser
@@ -142,8 +143,9 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice123"
-    assert call_kwargs["thread_id"] == "$voice123"
+    response_target = call_kwargs["response_envelope"].target
+    assert response_target.reply_to_event_id == "$voice123"
+    assert response_target.resolved_thread_id == "$voice123"
     assert call_kwargs["prompt"].startswith("🎤 what is the weather")
 
 
@@ -195,8 +197,9 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice456"
-    assert call_kwargs["thread_id"] == "$thread_root"
+    response_target = call_kwargs["response_envelope"].target
+    assert response_target.reply_to_event_id == "$voice456"
+    assert response_target.resolved_thread_id == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 show me the forecast")
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice456"))
     assert attachment is not None
@@ -249,8 +252,9 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice789"
-    assert call_kwargs["thread_id"] == "$thread_root"
+    response_target = call_kwargs["response_envelope"].target
+    assert response_target.reply_to_event_id == "$voice789"
+    assert response_target.resolved_thread_id == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 continue the same thread")
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice789"))
     assert attachment is not None
@@ -369,7 +373,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 continue",
-            source={"content": {"body": "🎤 continue", "com.mindroom.source_kind": "voice"}},
+            source={"content": {"body": "🎤 continue", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=voice_event.server_timestamp,
             source_kind_override="voice",
         ),
@@ -436,7 +440,7 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
         sender=voice_event.sender,
         event_id=voice_event.event_id,
         body="🎤 continue somewhere else",
-        source={"content": {"body": "🎤 continue somewhere else", "com.mindroom.source_kind": "voice"}},
+        source={"content": {"body": "🎤 continue somewhere else", SOURCE_KIND_KEY: "voice"}},
         server_timestamp=voice_event.server_timestamp,
         source_kind_override="voice",
     )
@@ -528,7 +532,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             sender=voice_event.sender,
             event_id=voice_event.event_id,
             body="🎤 room mode follow-up",
-            source={"content": {"body": "🎤 room mode follow-up", "com.mindroom.source_kind": "voice"}},
+            source={"content": {"body": "🎤 room mode follow-up", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=voice_event.server_timestamp,
             source_kind_override="voice",
         ),

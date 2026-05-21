@@ -25,6 +25,7 @@ from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
 from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
@@ -1425,9 +1426,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 
     response_task = asyncio.create_task(
         bot._response_runner.run_cancellable_response(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             response_function=response_function,
             thinking_message="Thinking...",
         ),
@@ -2640,9 +2639,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
     task = asyncio.create_task(
         bot._response_runner.run_cancellable_response(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             response_function=response_function,
             thinking_message="Thinking...",
         ),
@@ -2692,9 +2689,7 @@ async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
         assert message_id is None
 
     await bot._response_runner.run_cancellable_response(
-        room_id="!room:localhost",
-        reply_to_event_id="$reply",
-        thread_id=None,
+        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         response_function=response_function,
     )
 
@@ -2723,27 +2718,18 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
     captured_send: dict[str, object] = {}
 
     async def fake_send_response(
-        room_id: str,
-        reply_to_event_id: str | None,
+        *,
+        target: object,
         response_text: str,
-        thread_id: str | None,
-        reply_to_event: object | None = None,
         skip_mentions: bool = False,
         tool_trace: list[object] | None = None,
         extra_content: dict[str, object] | None = None,
-        thread_mode_override: str | None = None,
-        target: object | None = None,
     ) -> str:
-        captured_send["room_id"] = room_id
-        captured_send["reply_to_event_id"] = reply_to_event_id
         captured_send["response_text"] = response_text
-        captured_send["thread_id"] = thread_id
-        captured_send["reply_to_event"] = reply_to_event
+        captured_send["target"] = target
         captured_send["skip_mentions"] = skip_mentions
         captured_send["tool_trace"] = tool_trace
         captured_send["extra_content"] = extra_content
-        captured_send["thread_mode_override"] = thread_mode_override
-        captured_send["target"] = target
         return "$thinking"
 
     bot._send_response = AsyncMock(side_effect=fake_send_response)
@@ -2753,9 +2739,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         assert message_id == "$thinking"
 
     await bot._response_runner.run_cancellable_response(
-        room_id="!room:localhost",
-        reply_to_event_id="$reply",
-        thread_id=None,
+        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         response_function=response_function,
         thinking_message="Thinking...",
     )

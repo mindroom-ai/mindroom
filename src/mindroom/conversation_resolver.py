@@ -10,8 +10,9 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND, source_kind_from_content
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
@@ -35,6 +36,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
+from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -48,30 +50,27 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
 
-_SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
-
-
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
     """Return whether mentions in this message should be ignored."""
     content = event_source.get("content", {})
     if not isinstance(content, dict):
         return False
-    if bool(content.get(_SKIP_MENTIONS_KEY, False)):
+    if bool(content.get(SKIP_MENTIONS_KEY, False)):
         return True
 
     new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get(_SKIP_MENTIONS_KEY, False))
+    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY, False))
 
 
 def _with_skip_mentions_metadata(content: dict[str, Any], skip_mentions: bool) -> dict[str, Any]:
-    content[_SKIP_MENTIONS_KEY] = skip_mentions
+    content[SKIP_MENTIONS_KEY] = skip_mentions
     new_content = content.get("m.new_content")
     if isinstance(new_content, dict):
         visible_content = dict(new_content)
         if skip_mentions:
-            visible_content[_SKIP_MENTIONS_KEY] = True
+            visible_content[SKIP_MENTIONS_KEY] = True
         else:
-            visible_content.pop(_SKIP_MENTIONS_KEY, None)
+            visible_content.pop(SKIP_MENTIONS_KEY, None)
         content["m.new_content"] = visible_content
     return content
 
@@ -263,22 +262,22 @@ class ConversationResolver:
         registry = entity_identity_registry(config, self.deps.runtime_paths)
         source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
         if resolved_source_kind is None and isinstance(content, dict):
-            source_kind_override = content.get("com.mindroom.source_kind")
-            if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
+            source_kind_override = source_kind_from_content(content)
+            if source_kind_override is not None and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
             if is_audio_message_event(event):
-                resolved_source_kind = "voice"
+                resolved_source_kind = VOICE_SOURCE_KIND
             elif is_image_message_event(event):
-                resolved_source_kind = "image"
+                resolved_source_kind = IMAGE_SOURCE_KIND
             else:
-                resolved_source_kind = "message"
+                resolved_source_kind = MESSAGE_SOURCE_KIND
 
         resolved_hook_source: str | None = hook_source
         resolved_message_received_depth = message_received_depth or 0
         if isinstance(content, dict) and source_kind_sender_is_trusted:
             if resolved_hook_source is None:
-                hook_source_override = content.get("com.mindroom.hook_source")
+                hook_source_override = content.get(HOOK_SOURCE_KEY)
                 if isinstance(hook_source_override, str) and hook_source_override:
                     resolved_hook_source = hook_source_override
             if resolved_message_received_depth <= 0:
@@ -286,6 +285,33 @@ class ConversationResolver:
                 if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
                     resolved_message_received_depth = depth_override
         return resolved_source_kind, resolved_hook_source, resolved_message_received_depth
+
+    def _turn_origin_for_event(
+        self,
+        *,
+        event: DispatchEvent,
+        requester_user_id: str,
+        source_kind: str,
+        original_sender: str | None,
+        trusted_user_relay: bool,
+    ) -> TurnOrigin:
+        """Build canonical origin metadata for one inbound event envelope."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        trusted_human_relay = (
+            trusted_user_relay
+            and original_sender is not None
+            and original_sender != ""
+            and registry.current_entity_name_for_user_id(original_sender) is None
+        )
+        return classify_turn_origin(
+            transport_sender_id=event.sender,
+            requester_id=requester_user_id,
+            sender_entity_name=registry.current_entity_name_for_user_id(event.sender),
+            requester_entity_name=registry.current_entity_name_for_user_id(requester_user_id),
+            source_kind=source_kind,
+            original_sender=original_sender,
+            trusted_user_relay=trusted_human_relay,
+        )
 
     def build_message_target(
         self,
@@ -316,23 +342,6 @@ class ConversationResolver:
             room_mode=effective_thread_mode == "room",
         )
 
-    def resolve_response_thread_root(
-        self,
-        thread_id: str | None,
-        reply_to_event_id: str | None,
-        *,
-        room_id: str,
-        response_envelope: MessageEnvelope | None = None,
-    ) -> str | None:
-        """Return the canonical thread root for outbound response delivery."""
-        if response_envelope is not None:
-            return response_envelope.target.resolved_thread_id
-        return self.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        ).resolved_thread_id
-
     def build_message_envelope(
         self,
         *,
@@ -340,7 +349,7 @@ class ConversationResolver:
         event: DispatchEvent,
         requester_user_id: str,
         context: MessageContext,
-        target: MessageTarget | None = None,
+        target: MessageTarget,
         attachment_ids: list[str] | None = None,
         agent_name: str | None = None,
         body: str | None = None,
@@ -348,6 +357,8 @@ class ConversationResolver:
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int | None = None,
+        original_sender: str | None = None,
+        trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -359,18 +370,12 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
         )
-        resolved_target = target or self.build_message_target(
-            room_id=room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
         registry = entity_identity_registry(config, self.deps.runtime_paths)
 
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
-            target=resolved_target,
+            target=target,
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,
@@ -386,6 +391,13 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
+            origin=self._turn_origin_for_event(
+                event=event,
+                requester_user_id=requester_user_id,
+                source_kind=resolved_source_kind,
+                original_sender=original_sender,
+                trusted_user_relay=trusted_user_relay,
+            ),
         )
 
     def build_ingress_envelope(
@@ -394,7 +406,7 @@ class ConversationResolver:
         room_id: str,
         event: DispatchEvent,
         requester_user_id: str,
-        thread_id: str | None = None,
+        target: MessageTarget,
         attachment_ids: list[str] | None = None,
         agent_name: str | None = None,
         body: str | None = None,
@@ -402,6 +414,8 @@ class ConversationResolver:
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int | None = None,
+        original_sender: str | None = None,
+        trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
         """Build one lightweight ingress envelope without extracting thread context."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -415,12 +429,7 @@ class ConversationResolver:
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
-            target=self.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            ),
+            target=target,
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,
@@ -433,6 +442,13 @@ class ConversationResolver:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
+            origin=self._turn_origin_for_event(
+                event=event,
+                requester_user_id=requester_user_id,
+                source_kind=resolved_source_kind,
+                original_sender=original_sender,
+                trusted_user_relay=trusted_user_relay,
+            ),
         )
 
     async def coalescing_thread_id(

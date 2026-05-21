@@ -40,7 +40,6 @@ from mindroom.approval_manager import (
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -52,6 +51,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -66,6 +66,12 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome
@@ -146,11 +152,13 @@ from tests.conftest import (
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
     make_matrix_client_mock,
+    message_origin,
     patch_response_runner_module,
     prepared_dispatch_result,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     replace_turn_controller_deps,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -358,6 +366,40 @@ def _matrix_room(
     return room
 
 
+def _policy_dispatch(
+    bot: AgentBot | TeamBot,
+    room: nio.MatrixRoom,
+    context: MessageContext,
+    requester_user_id: str,
+    body: str,
+    *,
+    source_event_id: str = "$event",
+    source_kind: str = MESSAGE_SOURCE_KIND,
+) -> PreparedDispatch:
+    """Build the complete prepared dispatch required by turn-policy tests."""
+    target = MessageTarget.resolve(room.room_id, context.thread_id, source_event_id)
+    envelope = MessageEnvelope(
+        source_event_id=source_event_id,
+        room_id=room.room_id,
+        target=target,
+        requester_id=requester_user_id,
+        sender_id=requester_user_id,
+        body=body,
+        attachment_ids=(),
+        mentioned_agents=tuple(context.mentioned_agents),
+        agent_name=bot.agent_name,
+        source_kind=source_kind,
+        origin=message_origin(sender_id=requester_user_id, requester_id=requester_user_id, source_kind=source_kind),
+    )
+    return PreparedDispatch(
+        requester_user_id=requester_user_id,
+        context=context,
+        target=target,
+        correlation_id=source_event_id,
+        envelope=envelope,
+    )
+
+
 def _agent_response_handled_turn(
     *,
     agent_name: str,
@@ -400,17 +442,21 @@ def _response_request(
     user_id: str | None = "@user:localhost",
     media: MediaInputs | None = None,
     attachment_ids: Sequence[str] | None = None,
-    response_envelope: MessageEnvelope | None = None,
+    response_envelope: MessageEnvelope,
     correlation_id: str | None = None,
-    target: MessageTarget | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
+    target = response_envelope.target
+    if (
+        room_id != target.room_id
+        or reply_to_event_id != target.reply_to_event_id
+        or thread_id != target.source_thread_id
+    ):
+        msg = "Test response envelope target does not match the source response coordinates"
+        raise ValueError(msg)
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=thread_history,
         prompt=prompt,
         model_prompt=model_prompt,
@@ -421,7 +467,6 @@ def _response_request(
         attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
         response_envelope=response_envelope,
         correlation_id=correlation_id,
-        target=target,
         matrix_run_metadata=matrix_run_metadata,
         system_enrichment_items=system_enrichment_items,
     )
@@ -676,19 +721,32 @@ def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     )
 
 
-def _hook_envelope(*, body: str = "hello", source_event_id: str = "$event") -> MessageEnvelope:
+def _hook_envelope(
+    *,
+    body: str = "hello",
+    source_event_id: str = "$event",
+    room_id: str = "!test:localhost",
+    thread_id: str | None = None,
+    target: MessageTarget | None = None,
+) -> MessageEnvelope:
     """Create a minimal response envelope for hook-aware bot tests."""
+    resolved_target = target or MessageTarget.resolve(room_id, thread_id, source_event_id)
     return MessageEnvelope(
         source_event_id=source_event_id,
-        room_id="!test:localhost",
-        target=MessageTarget.resolve("!test:localhost", None, source_event_id),
+        room_id=resolved_target.room_id,
+        target=resolved_target,
         requester_id="@user:localhost",
         sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="calculator",
-        source_kind="message",
+        source_kind=MESSAGE_SOURCE_KIND,
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
     )
 
 
@@ -2360,6 +2418,12 @@ class TestAgentBot:
                     reply_to_event_id="$event123",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="Please send an update",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2408,6 +2472,12 @@ class TestAgentBot:
                     reply_to_event_id="$event123",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="Please send an update",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2465,6 +2535,12 @@ class TestAgentBot:
                         reply_to_event_id="$event456",
                         thread_history=[],
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event456",
+                            prompt="Please reply in thread",
+                            user_id="@user:localhost",
+                        ),
                     ),
                 )
 
@@ -2519,7 +2595,13 @@ class TestAgentBot:
                     reply_to_event_id="$reply_plain:localhost",
                     thread_history=[],
                     user_id="@user:localhost",
-                    target=target,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$reply_plain:localhost",
+                        prompt="Continue",
+                        user_id="@user:localhost",
+                        target=target,
+                    ),
                 ),
             )
 
@@ -2570,7 +2652,13 @@ class TestAgentBot:
                     reply_to_event_id="$thread_root:localhost",
                     thread_history=[],
                     user_id="@user:localhost",
-                    target=target,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$thread_root:localhost",
+                        prompt="Continue",
+                        user_id="@user:localhost",
+                        target=target,
+                    ),
                 ),
             )
 
@@ -2621,6 +2709,12 @@ class TestAgentBot:
                         reply_to_event_id="$event456",
                         thread_history=[],
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event456",
+                            prompt="Hello",
+                            user_id="@user:localhost",
+                        ),
                     ),
                 )
 
@@ -2662,6 +2756,13 @@ class TestAgentBot:
                     thread_history=[],
                     user_id="@user:localhost",
                     attachment_ids=attachment_ids,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="Please inspect attachments",
+                        user_id="@user:localhost",
+                        attachment_ids=tuple(attachment_ids),
+                    ),
                 ),
             )
 
@@ -2696,7 +2797,7 @@ class TestAgentBot:
             return _gen()
 
         async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            stream = args[6]  # response_stream positional arg
+            stream = args[4]
             async for _ in stream:
                 pass
             return StreamTransportOutcome(
@@ -2726,6 +2827,13 @@ class TestAgentBot:
                     thread_history=[],
                     user_id="@user:localhost",
                     attachment_ids=attachment_ids,
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event456",
+                        prompt="Please inspect attachments",
+                        user_id="@user:localhost",
+                        attachment_ids=tuple(attachment_ids),
+                    ),
                 ),
             )
 
@@ -2787,7 +2895,7 @@ class TestAgentBot:
             return _gen()
 
         async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            stream = args[6]
+            stream = args[4]
             async for _ in stream:
                 pass
             return StreamTransportOutcome(
@@ -2815,6 +2923,12 @@ class TestAgentBot:
                     reply_to_event_id="$event789",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event789",
+                        prompt="Hello",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2850,7 +2964,7 @@ class TestAgentBot:
 
         async def _consuming_send_streaming(*args: object, **kwargs: object) -> StreamTransportOutcome:
             captured_extra_content_ref[0] = kwargs.get("extra_content")
-            stream = args[6]
+            stream = args[4]
             try:
                 async for _ in stream:
                     pass
@@ -2879,6 +2993,12 @@ class TestAgentBot:
                     reply_to_event_id="$event_cancel",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event_cancel",
+                        prompt="Cancel me",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2934,6 +3054,12 @@ class TestAgentBot:
                     reply_to_event_id="$event-error",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event-error",
+                        prompt="Please continue",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -3043,6 +3169,12 @@ class TestAgentBot:
                         reply_to_event_id="$event123",
                         thread_history=[],
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event123",
+                            prompt="Please continue",
+                            user_id="@user:localhost",
+                        ),
                     ),
                 )
 
@@ -3174,6 +3306,12 @@ class TestAgentBot:
                             reply_to_event_id="$event456",
                             thread_history=[],
                             user_id="@user:localhost",
+                            response_envelope=request_envelope(
+                                room_id="!test:localhost",
+                                reply_to_event_id="$event456",
+                                prompt="Please continue",
+                                user_id="@user:localhost",
+                            ),
                         ),
                     )
 
@@ -3235,9 +3373,6 @@ class TestAgentBot:
             ),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$team-root",
-                thread_id=None,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
                 thread_history=[],
@@ -3287,9 +3422,6 @@ class TestAgentBot:
             ),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$team-root",
-                thread_id=None,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
                 thread_history=[],
@@ -3337,9 +3469,6 @@ class TestAgentBot:
             ),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$team-root",
-                thread_id=None,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
                 thread_history=[],
@@ -3400,9 +3529,6 @@ class TestAgentBot:
             ),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$team-root",
-                thread_id=None,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
                 thread_history=[],
@@ -3466,7 +3592,12 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=mock_agent_user.agent_name,
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         history = ThreadHistoryResult([], is_full_history=True)
 
@@ -3488,9 +3619,6 @@ class TestAgentBot:
             ),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$reply_plain:localhost",
-                thread_id="$raw_thread:localhost",
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
                 thread_history=[],
@@ -3558,15 +3686,12 @@ class TestAgentBot:
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
         ):
             delivery_resolution = await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Team, summarize this thread",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=[],
                 existing_event_id="$existing",
                 existing_event_is_placeholder=True,
                 user_id="@alice:localhost",
-                response_envelope=_hook_envelope(body="hello", source_event_id="$event"),
+                response_envelope=_hook_envelope(body="hello", source_event_id="$event", thread_id="$thread"),
                 correlation_id="corr-nonteam-fallback",
             )
 
@@ -3652,12 +3777,17 @@ class TestAgentBot:
             patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
         ):
             result = await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Team, summarize this thread",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert captured_member_ids == [[current_member.full_id]]
@@ -4014,14 +4144,16 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
-                thread_start_root_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                    thread_start_root_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-visible-cancel-note",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
@@ -4173,14 +4305,18 @@ class TestAgentBot:
             patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$team-root",
-                thread_id=None,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
                 thread_history=[],
                 requester_user_id="@user:localhost",
                 payload=DispatchPayload(prompt="team prompt"),
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$team-root",
+                    prompt="team prompt",
+                    user_id="@user:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert _handled_response_event_id(resolution) == "$team"
@@ -5050,6 +5186,12 @@ class TestAgentBot:
                     reply_to_event_id="$event",
                     thread_history=[],
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Summarize README",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -5144,12 +5286,17 @@ class TestAgentBot:
             mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
 
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="What time is it?",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="What time is it?",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5257,12 +5404,17 @@ class TestAgentBot:
             mock_datetime.fromtimestamp.side_effect = lambda seconds, tz: datetime.fromtimestamp(seconds, tz)
 
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="What time is it?",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="What time is it?",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5342,12 +5494,16 @@ class TestAgentBot:
             ),
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Continue",
-                reply_to_event_id="$event",
-                thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Continue",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5446,12 +5602,17 @@ class TestAgentBot:
         ):
             async with bot._conversation_resolver.turn_thread_cache_scope():
                 resolution = await bot._generate_response(
-                    room_id="!test:localhost",
                     prompt="Continue",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
                     thread_history=stale_history,
                     user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Continue",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 )
 
         assert _handled_response_event_id(resolution) == "$response"
@@ -5516,7 +5677,12 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=mock_agent_user.agent_name,
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         with (
@@ -5546,10 +5712,7 @@ class TestAgentBot:
             patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(side_effect=record_send)),
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Continue",
-                reply_to_event_id="$reply_plain:localhost",
-                thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
                 response_envelope=envelope,
@@ -5636,12 +5799,17 @@ class TestAgentBot:
             ) as mock_thread_summary,
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Summarize this thread",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -5745,13 +5913,9 @@ class TestAgentBot:
             ) as mock_send_compaction_lifecycle_start,
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Start a thread here",
-                reply_to_event_id=root_event_id,
-                thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
-                target=resolved_target,
                 response_envelope=response_envelope,
             )
 
@@ -5806,12 +5970,16 @@ class TestAgentBot:
             apply_post_response_effects=AsyncMock(side_effect=fake_apply_post_response_effects),
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Please answer",
-                reply_to_event_id="$event",
-                thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please answer",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert len(captured_outcomes) == 1
@@ -5830,7 +5998,7 @@ class TestAgentBot:
             yield "friendly-error"
 
         async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = cast("AsyncGenerator[object, None]", args[6])
+            response_stream = cast("AsyncGenerator[object, None]", args[4])
             body_parts = [str(chunk) async for chunk in response_stream]
             return _stream_outcome("$response", "".join(body_parts))
 
@@ -5860,12 +6028,16 @@ class TestAgentBot:
             ),
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Please answer",
-                reply_to_event_id="$event",
-                thread_id=None,
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please answer",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         assert len(captured_outcomes) == 1
@@ -5923,12 +6095,17 @@ class TestAgentBot:
         ):
             task = asyncio.create_task(
                 bot._generate_response(
-                    room_id="!test:localhost",
                     prompt="Summarize this thread",
-                    reply_to_event_id="$event",
-                    thread_id="$thread",
                     thread_history=[],
                     user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
                 ),
             )
             await started.wait()
@@ -6009,12 +6186,17 @@ class TestAgentBot:
             pytest.raises(RuntimeError, match="boom"),
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Team, summarize this thread",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -6112,12 +6294,17 @@ class TestAgentBot:
             patch("mindroom.bot.store_conversation_memory", side_effect=fake_store_conversation_memory),
         ):
             await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Team, summarize this thread",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=thread_history,
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -6221,12 +6408,17 @@ class TestAgentBot:
             ) as mock_thread_summary,
         ):
             resolution = await bot._generate_response(
-                room_id="!test:localhost",
                 prompt="Team, summarize this thread",
-                reply_to_event_id="$event",
-                thread_id="$thread",
                 thread_history=[],
                 user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Team, summarize this thread",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
             )
 
         if scheduled_tasks:
@@ -6323,9 +6515,6 @@ class TestAgentBot:
             ) as mock_send_streaming_response,
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread_root",
                 payload=DispatchPayload(prompt="Continue"),
                 team_agents=[bot.matrix_id],
                 team_mode="coordinate",
@@ -6333,7 +6522,7 @@ class TestAgentBot:
                 requester_user_id="@alice:localhost",
                 existing_event_id="$placeholder",
                 existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
+                response_envelope=_hook_envelope(body="Continue", source_event_id="$event", thread_id="$thread_root"),
                 correlation_id="corr-team-stream",
             )
 
@@ -6404,9 +6593,6 @@ class TestAgentBot:
             ),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread_root",
                 payload=DispatchPayload(prompt="Continue"),
                 team_agents=[bot.matrix_id],
                 team_mode="coordinate",
@@ -6414,7 +6600,11 @@ class TestAgentBot:
                 requester_user_id="@alice:localhost",
                 existing_event_id="$placeholder",
                 existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
+                response_envelope=_hook_envelope(
+                    body="Continue",
+                    source_event_id="$event",
+                    thread_id="$thread_root",
+                ),
                 correlation_id="corr-team-stream-suppress",
             )
 
@@ -6452,9 +6642,6 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
         ):
             resolution = await bot._generate_team_response_helper(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread_root",
                 payload=DispatchPayload(prompt="Continue"),
                 team_agents=[bot.matrix_id],
                 team_mode="coordinate",
@@ -6462,7 +6649,11 @@ class TestAgentBot:
                 requester_user_id="@alice:localhost",
                 existing_event_id="$placeholder",
                 existing_event_is_placeholder=True,
-                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
+                response_envelope=_hook_envelope(
+                    body="Continue",
+                    source_event_id="$event",
+                    thread_id="$thread_root",
+                ),
                 correlation_id="corr-team-suppress",
             )
 
@@ -6948,18 +7139,16 @@ class TestAgentBot:
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
-        assert generate_kwargs["room_id"] == "!test:localhost"
+        response_target = generate_kwargs["response_envelope"].target
+        assert response_target.room_id == "!test:localhost"
         assert "Available attachment IDs" not in generate_kwargs["prompt"]
         assert generate_kwargs["model_prompt"] is not None
         assert "Available attachment IDs" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
-        assert generate_kwargs["reply_to_event_id"] == "$img_event"
-        assert generate_kwargs["thread_id"] is None
+        assert response_target.reply_to_event_id == "$img_event"
+        assert response_target.resolved_thread_id == "$img_event"
         assert generate_kwargs["thread_history"] == []
-        assert generate_kwargs["target"].source_thread_id is None
-        assert generate_kwargs["target"].resolved_thread_id == "$img_event"
-        assert generate_kwargs["response_envelope"].target.source_thread_id is None
-        assert generate_kwargs["response_envelope"].target.resolved_thread_id == "$img_event"
+        assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         media = generate_kwargs["media"]
         assert list(media.images) == [image]
@@ -7269,9 +7458,9 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve("!test:localhost", None, "$event"),
+            target=(dispatch_target := MessageTarget.resolve("!test:localhost", None, "$event")),
             correlation_id="corr-1",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
         registry_stub = MagicMock()
         registry_stub.has_hooks.return_value = True
@@ -7425,14 +7614,12 @@ class TestAgentBot:
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
         attachment_id = _attachment_id_for_event("$file_event")
-        assert generate_kwargs["room_id"] == "!test:localhost"
-        assert generate_kwargs["reply_to_event_id"] == "$file_event"
-        assert generate_kwargs["thread_id"] is None
+        response_target = generate_kwargs["response_envelope"].target
+        assert response_target.room_id == "!test:localhost"
+        assert response_target.reply_to_event_id == "$file_event"
+        assert response_target.resolved_thread_id == "$file_event"
         assert generate_kwargs["thread_history"] == []
-        assert generate_kwargs["target"].source_thread_id is None
-        assert generate_kwargs["target"].resolved_thread_id == "$file_event"
-        assert generate_kwargs["response_envelope"].target.source_thread_id is None
-        assert generate_kwargs["response_envelope"].target.resolved_thread_id == "$file_event"
+        assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
         assert "Available attachment IDs" not in generate_kwargs["prompt"]
@@ -7628,8 +7815,8 @@ class TestAgentBot:
             ),
         )
 
-        async def fake_send_response(*, room_id: str, **_: object) -> str:
-            assert room_id in bot.client.rooms
+        async def fake_send_response(*, target: MessageTarget, **_: object) -> str:
+            assert target.room_id in bot.client.rooms
             return "$welcome"
 
         bot._send_response = AsyncMock(side_effect=fake_send_response)
@@ -8457,11 +8644,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                "@user:localhost",
                 "help me",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8513,11 +8700,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                "@alice:localhost",
                 "calculator and general, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8569,11 +8756,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
-                "@user:localhost",
                 "general and research, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8626,11 +8813,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8684,11 +8871,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
-                "@alice:localhost",
                 "calculator and general, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -8736,11 +8923,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.decide_team_formation", new=AsyncMock(return_value=TeamResolution.none())):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
-                "@bob:localhost",
                 "can someone help?",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -8781,11 +8968,11 @@ class TestAgentBot:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
-            "@bob:localhost",
             "calculator, help",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "skip"
@@ -8844,11 +9031,11 @@ class TestAgentBot:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
-            "@bob:localhost",
             "ops, help",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "skip"
@@ -8920,11 +9107,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -8998,11 +9185,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -9053,11 +9240,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
-                "@user:localhost",
                 "alpha and calculator, help",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "reject"
@@ -9107,11 +9294,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
-                "@user:localhost",
                 "help me",
                 True,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -9186,6 +9373,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
         with (
@@ -9201,13 +9389,16 @@ class TestAgentBot:
             ) as mock_has_active_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "stop if you see this",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9275,6 +9466,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
         with (
@@ -9282,13 +9474,16 @@ class TestAgentBot:
             patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "continue",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9341,17 +9536,21 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
         with patch.object(bot._response_runner, "has_active_response_for_target", return_value=True):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "continue",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9403,8 +9602,13 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="message",
-            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            source_kind=MESSAGE_SOURCE_KIND,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         with (
@@ -9420,13 +9624,16 @@ class TestAgentBot:
             ) as mock_has_active_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "stop if you see this",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
@@ -9480,8 +9687,13 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="voice",
-            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            source_kind=VOICE_SOURCE_KIND,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=VOICE_SOURCE_KIND,
+            ),
         )
 
         with (
@@ -9497,18 +9709,21 @@ class TestAgentBot:
             ) as mock_has_active_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                PreparedDispatch(
+                    requester_user_id="@user:localhost",
+                    context=context,
+                    target=target,
+                    correlation_id="$followup",
+                    envelope=envelope,
+                ),
                 room,
-                "@user:localhost",
                 "stop if you see this",
                 False,
-                target=target,
-                source_envelope=envelope,
                 has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
-        assert envelope.source_kind == "voice"
+        assert envelope.source_kind == VOICE_SOURCE_KIND
         mock_should_respond.assert_called_once()
         mock_has_active_response.assert_not_called()
 
@@ -9579,6 +9794,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=ROUTER_AGENT_NAME,
             source_kind="live",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
         event.body = "continue"
@@ -9754,11 +9970,11 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
         ):
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
-                "@bas:localhost",
                 "I fixed two issues",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -9820,11 +10036,11 @@ class TestAgentBot:
         )
 
         action = await bot._turn_policy.resolve_response_action(
-            context,
+            _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
-            "@bas:localhost",
             "Follow-up",
             False,
+            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
         )
 
         assert action.kind == "individual"
@@ -9886,11 +10102,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                "@bas:localhost",
                 "Follow-up",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "skip"
@@ -9951,11 +10167,11 @@ class TestAgentBot:
 
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
             action = await bot._turn_policy.resolve_response_action(
-                context,
+                _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
-                "@bas:localhost",
                 "Follow-up",
                 False,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -10022,9 +10238,9 @@ class TestAgentBot:
         dispatch = PreparedDispatch(
             requester_user_id="@bas:localhost",
             context=context,
-            target=MessageTarget.resolve(room.room_id, "$thread", event.event_id),
+            target=(dispatch_target := MessageTarget.resolve(room.room_id, "$thread", event.event_id)),
             correlation_id="corr-degraded-router-policy",
-            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id),
+            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 
         plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
@@ -10092,9 +10308,9 @@ class TestAgentBot:
         dispatch = PreparedDispatch(
             requester_user_id="@bas:localhost",
             context=context,
-            target=MessageTarget.resolve(room.room_id, "$thread", event.event_id),
+            target=(dispatch_target := MessageTarget.resolve(room.room_id, "$thread", event.event_id)),
             correlation_id="corr-partial-router-policy",
-            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id),
+            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 
         plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
@@ -10132,14 +10348,16 @@ class TestAgentBot:
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
-                thread_start_root_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                    thread_start_root_event_id=event.event_id,
+                )
             ),
             correlation_id="$event",
-            envelope=_hook_envelope(body="help me", source_event_id="$event"),
+            envelope=_hook_envelope(body="help me", source_event_id="$event", target=dispatch_target),
         )
         action = ResponseAction(
             kind="reject",
@@ -10206,13 +10424,15 @@ class TestAgentBot:
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="$event",
-            envelope=_hook_envelope(body="help me", source_event_id="$event"),
+            envelope=_hook_envelope(body="help me", source_event_id="$event", target=dispatch_target),
         )
         action = ResponseAction(
             kind="reject",
@@ -10411,13 +10631,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=True,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread_root",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-hydrate-dispatch",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
         _set_turn_store_tracker(bot, MagicMock())
         snapshot_history = list(dispatch.context.thread_history)
@@ -10561,13 +10783,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=True,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread_root",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-no-action",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         async def fake_plan(
@@ -10642,13 +10866,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=True,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread_root",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-command-bypass",
-            envelope=_hook_envelope(body="!help", source_event_id="$command"),
+            envelope=_hook_envelope(body="!help", source_event_id="$command", target=dispatch_target),
         )
 
         with (
@@ -10784,13 +11010,15 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=True,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread_root",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-visible-echo",
-            envelope=_hook_envelope(body="hello", source_event_id="$text"),
+            envelope=_hook_envelope(body="hello", source_event_id="$text", target=dispatch_target),
         )
 
         with (
@@ -10865,14 +11093,16 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
-                thread_start_root_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                    thread_start_root_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-router-coalesced",
-            envelope=_hook_envelope(body="hello", source_event_id="$text"),
+            envelope=_hook_envelope(body="hello", source_event_id="$text", target=dispatch_target),
         )
         coalesced_turn = HandledTurnState.create(
             ["$voice", "$text"],
@@ -10969,6 +11199,7 @@ class TestAgentBot:
                     "msgtype": "m.text",
                     "body": "@mindroom_calculator:localhost could you help with this?",
                     ORIGINAL_SENDER_KEY: "@user:localhost",
+                    SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 },
             },
         )
@@ -10977,7 +11208,12 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
-            await bot._turn_controller._enqueue_for_dispatch(event, room, source_kind="message")
+            await bot._turn_controller._enqueue_for_dispatch(
+                event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            )
 
         mock_dispatch.assert_not_awaited()
         mock_start.assert_awaited_once()
@@ -10985,7 +11221,7 @@ class TestAgentBot:
         assert key == (room.room_id, None, "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
-        assert pending_event.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+        assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_gate_bypass(
@@ -11037,7 +11273,12 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         with (
@@ -11055,7 +11296,7 @@ class TestAgentBot:
                 return_value=envelope,
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11093,8 +11334,8 @@ class TestAgentBot:
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
-        assert pending_event.source_kind == "message"
-        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -11126,7 +11367,7 @@ class TestAgentBot:
                 "content": {
                     "msgtype": "m.text",
                     "body": f"@mindroom_calculator:localhost {source_kind} says hello",
-                    "com.mindroom.source_kind": source_kind,
+                    SOURCE_KIND_KEY: source_kind,
                     ORIGINAL_SENDER_KEY: "@user:localhost",
                 },
             },
@@ -11150,7 +11391,7 @@ class TestAgentBot:
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11186,7 +11427,7 @@ class TestAgentBot:
             sender="@user:localhost",
             event_id="$voice-followup",
             body="please stop",
-            source={"content": {"msgtype": "m.text", "body": "please stop", "com.mindroom.source_kind": "voice"}},
+            source={"content": {"msgtype": "m.text", "body": "please stop", SOURCE_KIND_KEY: "voice"}},
             server_timestamp=1234567890,
             source_kind_override="voice",
         )
@@ -11224,14 +11465,14 @@ class TestAgentBot:
         reserved_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert reserved_target.resolved_thread_id == "$thread_root"
         reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
-        assert reserved_envelope.source_kind == "voice"
+        assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
-        assert pending_event.source_kind == "voice"
-        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.source_kind == VOICE_SOURCE_KIND
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -11291,7 +11532,12 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         with (
@@ -11301,7 +11547,7 @@ class TestAgentBot:
             ),
             patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11322,7 +11568,7 @@ class TestAgentBot:
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
-        assert pending_event.source_kind == "message"
+        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_reserves_active_thread_follow_up(
@@ -11377,7 +11623,12 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         with (
@@ -11387,7 +11638,7 @@ class TestAgentBot:
             ),
             patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
-            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -11419,8 +11670,8 @@ class TestAgentBot:
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
-        assert pending_event.source_kind == "message"
-        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.source_kind == MESSAGE_SOURCE_KIND
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -11464,13 +11715,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread_root",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread_root",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-team-dispatch",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
         action = ResponseAction(
             kind="team",
@@ -11552,13 +11805,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-individual-dispatch",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         mock_send_response = AsyncMock()
@@ -11803,13 +12058,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-payload-error-1",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         failure_message = "setup failed"
@@ -11875,13 +12132,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-payload-error-2",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         failure_message = "setup failed"
@@ -11937,13 +12196,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-post-lock-failure",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
@@ -12023,7 +12284,7 @@ class TestAgentBot:
             ),
             target=stable_target,
             correlation_id="corr-post-lock-target-failure",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=stable_target),
         )
 
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
@@ -12092,13 +12353,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-suppress-cleanup-failed",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
@@ -12345,13 +12608,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-suppress-cleanup-complete",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
@@ -12418,13 +12683,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-latency-log",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         monotonic_values = itertools.count(start=10.0, step=0.1)
@@ -12498,13 +12765,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-latency-order",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         mock_generate_response = AsyncMock(return_value="$response")
@@ -12575,13 +12844,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-payload-builder-timing",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         mock_generate_response = AsyncMock(return_value="$response")
@@ -12647,13 +12918,15 @@ class TestAgentBot:
                 has_non_agent_mentions=False,
                 requires_model_history_refresh=False,
             ),
-            target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$thread",
-                reply_to_event_id=event.event_id,
+            target=(
+                dispatch_target := MessageTarget.resolve(
+                    room_id=room.room_id,
+                    thread_id="$thread",
+                    reply_to_event_id=event.event_id,
+                )
             ),
             correlation_id="corr-payload-builder-failure-timing",
-            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+            envelope=_hook_envelope(body="hello", source_event_id="$event", target=dispatch_target),
         )
 
         install_generate_response_mock(bot, AsyncMock(return_value="$response"))

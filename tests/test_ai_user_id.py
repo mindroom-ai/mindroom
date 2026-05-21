@@ -64,6 +64,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -118,7 +119,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
-from tests.conftest import make_event_cache_mock, resolve_response_thread_root_for_test
+from tests.conftest import make_event_cache_mock, message_origin, request_envelope
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -420,9 +421,6 @@ def _build_response_runner(
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )
-    bot._conversation_resolver.resolve_response_thread_root = MagicMock(
-        side_effect=resolve_response_thread_root_for_test,
-    )
     bot._conversation_resolver.deps = SimpleNamespace(
         conversation_cache=SimpleNamespace(
             get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
@@ -621,11 +619,15 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        response_envelope=request_envelope(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            prompt=prompt,
+            user_id=user_id,
+        ),
         model_prompt=model_prompt,
         media=media,
         user_id=user_id,
@@ -696,11 +698,15 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             await coordinator.process_and_respond(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$user_msg",
-                    thread_id="$thread-root",
                     thread_history=(),
                     prompt="Hello",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$user_msg",
+                        thread_id="$thread-root",
+                        prompt="Hello",
+                        user_id="@alice:localhost",
+                    ),
                     user_id="@alice:localhost",
                     existing_event_id="$thinking",
                     existing_event_is_placeholder=True,
@@ -1061,10 +1067,7 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
 
     lifecycle = coordinator._build_lifecycle(
         response_kind="ai",
-        request=replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            target=target,
-        ),
+        request=_response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
     )
     watch = lifecycle.setup_session_watch(
         tool_context=tool_context,
@@ -2007,7 +2010,12 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         ),
         correlation_id="corr-stream-cancel",
     )
@@ -2094,7 +2102,12 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         ),
         correlation_id="corr-stream-error",
     )
@@ -2186,9 +2199,11 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
 
         mock_ai.side_effect = fake_ai_response
 
+        target = MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg")
+        base_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread")
         request = replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
-            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+            base_request,
+            response_envelope=replace(base_request.response_envelope, target=target),
         )
         await coordinator.process_and_respond(request)
 
@@ -2221,9 +2236,11 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
 
         mock_stream.side_effect = fake_stream_agent_response
 
+        target = MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg")
+        base_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread")
         request = replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
-            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+            base_request,
+            response_envelope=replace(base_request.response_envelope, target=target),
         )
         await coordinator.process_and_respond_streaming(request)
 

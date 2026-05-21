@@ -145,12 +145,9 @@ def _streaming_response(
 ) -> StreamingResponse:
     """Construct a streaming response with the explicit runtime bound to the test config."""
     return StreamingResponse(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
+        target=MessageTarget.resolve(room_id, thread_id, reply_to_event_id, room_mode=room_mode),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        room_mode=room_mode,
         latest_thread_event_id=latest_thread_event_id,
     )
 
@@ -735,30 +732,19 @@ class TestExtractMessageContextRoomMode:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         expected_target = MessageTarget.resolve("!room:localhost", "$thread123", "$event123")
         bot._conversation_resolver.build_message_target = MagicMock(return_value=expected_target)
-        bot._conversation_resolver.resolve_response_thread_root = MagicMock(return_value="$thread123")
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
         )
-        thread_root = bot._conversation_resolver.resolve_response_thread_root(
-            "$thread123",
-            "$event123",
-            room_id="!room:localhost",
-        )
 
         assert target is expected_target
-        assert thread_root == "$thread123"
+        assert target.resolved_thread_id == "$thread123"
         bot._conversation_resolver.build_message_target.assert_called_once_with(
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
-        )
-        bot._conversation_resolver.resolve_response_thread_root.assert_called_once_with(
-            "$thread123",
-            "$event123",
-            room_id="!room:localhost",
         )
 
     @pytest.mark.asyncio
@@ -1077,11 +1063,14 @@ class TestSendResponseRoomMode:
             return delivered_matrix_event("$response_event", content)
 
         with patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send):
-            event_id = await bot._send_response(
+            target = bot._conversation_resolver.build_message_target(
                 room_id="!room:localhost",
-                reply_to_event_id="$event123",
-                response_text="Hello!",
                 thread_id=None,
+                reply_to_event_id="$event123",
+            )
+            event_id = await bot._send_response(
+                target=target,
+                response_text="Hello!",
             )
 
         assert event_id == "$response_event"
@@ -1213,13 +1202,10 @@ class TestSendStreamingResponseRoomMode:
         ):
             await send_streaming_response(
                 client,
-                "!room:localhost",
-                "$event123",
-                "$thread123",
+                MessageTarget.resolve("!room:localhost", "$thread123", "$event123", room_mode=True),
                 config,
                 runtime_paths_for(config),
                 empty_stream(),
-                room_mode=True,
             )
 
         assert captured["m.relates_to"] == {
@@ -1291,10 +1277,11 @@ class TestCommandThreadContextRoomMode:
                 event=event,
                 requester_user_id="@user:localhost",
                 command=command,
+                target=MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True),
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
-        assert bot._send_response.await_args.args[3] is None
+        assert bot._send_response.await_args.kwargs["target"].resolved_thread_id is None
 
     @pytest.mark.asyncio
     async def test_router_command_uses_stable_dispatch_target_without_deriving_context(
@@ -1356,7 +1343,7 @@ class TestCommandThreadContextRoomMode:
 
         resolve_target.assert_not_awaited()
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
-        assert bot._send_response.await_args.args[3] == "$stable_thread"
+        assert bot._send_response.await_args.kwargs["target"].resolved_thread_id == "$stable_thread"
 
 
 class TestExtractedModuleLoggerRebinding:

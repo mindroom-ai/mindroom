@@ -31,6 +31,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
     patch_response_runner_module,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -268,12 +269,16 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
             nio.RoomSendResponse.from_dict({"event_id": "$edit"}, "!room:localhost"),
         ]
         await bot._generate_response(
-            room_id="!room:localhost",
             prompt="@team remember this",
-            reply_to_event_id="$evt1",
-            thread_id=None,
             thread_history=thread_history,
             user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id="!room:localhost",
+                reply_to_event_id="$evt1",
+                prompt="@team remember this",
+                user_id="@user:localhost",
+                agent_name=bot.agent_name,
+            ),
         )
 
     if scheduled_tasks:
@@ -323,13 +328,17 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         ),
     ) as mock_edit:
         resolution = await bot._generate_response(
-            room_id="!room:localhost",
             prompt="@t1 please retry",
-            reply_to_event_id="$evt1",
-            thread_id=None,
             thread_history=[],
             existing_event_id="$existing_response",
             user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id="!room:localhost",
+                reply_to_event_id="$evt1",
+                prompt="@t1 please retry",
+                user_id="@user:localhost",
+                agent_name=bot.agent_name,
+            ),
         )
 
     assert resolution == "$existing_response"

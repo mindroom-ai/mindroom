@@ -11,9 +11,13 @@ from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.media import (
     MatrixMediaDispatchEvent,
     extract_media_caption,
@@ -156,7 +160,7 @@ def _collect_batch_mentions_and_formatted_bodies(
         formatted_body = content.get("formatted_body")
         if isinstance(formatted_body, str) and formatted_body:
             formatted_parts.append(formatted_body)
-        if pending_event.trust_internal_payload_metadata and content.get("com.mindroom.skip_mentions") is True:
+        if pending_event.trust_internal_payload_metadata and content.get(SKIP_MENTIONS_KEY) is True:
             skip_mentions = True
     if not inspected_content:
         return None, None, None
@@ -217,7 +221,7 @@ def payload_metadata_from_source(
         raw_audio_fallback=raw_audio_fallback is True,
         mentioned_user_ids=mentioned_user_ids,
         formatted_bodies=formatted_bodies,
-        skip_mentions=content.get("com.mindroom.skip_mentions") is True,
+        skip_mentions=content.get(SKIP_MENTIONS_KEY) is True,
     )
 
 
@@ -264,9 +268,9 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
-        "com.mindroom.hook_source",
-        "com.mindroom.skip_mentions",
-        "com.mindroom.source_kind",
+        HOOK_SOURCE_KEY,
+        SKIP_MENTIONS_KEY,
+        SOURCE_KIND_KEY,
     },
 )
 
@@ -294,7 +298,7 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
 
 
 def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
-    if source_kind in {"message", event.source_kind_override}:
+    if source_kind in {MESSAGE_SOURCE_KIND, event.source_kind_override}:
         return event
     return replace(event, source_kind_override=source_kind)
 

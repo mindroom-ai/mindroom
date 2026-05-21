@@ -16,9 +16,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
@@ -49,6 +50,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
@@ -56,6 +58,7 @@ from tests.conftest import (
     delivered_matrix_event,
     dispatch_context_result,
     install_runtime_cache_support,
+    message_origin,
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
     replace_turn_policy_deps,
@@ -158,6 +161,7 @@ def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> Messa
             mentioned_agents=(),
             agent_name="code",
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
     )
 
@@ -192,6 +196,11 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
         source_kind="hook_dispatch",
         hook_source="origin-plugin:message:received",
         message_received_depth=1,
+        origin=message_origin(
+            sender_id="@mindroom_router:localhost",
+            requester_id="@user:localhost",
+            source_kind="hook_dispatch",
+        ),
     )
 
 
@@ -580,7 +589,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         )
 
     assert event_id == "$hook-event"
-    assert captured_content["com.mindroom.source_kind"] == "hook"
+    assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "plugin:event"
     assert captured_content["custom"] == "value"
     assert isinstance(captured_content["m.relates_to"], dict)
@@ -639,7 +648,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
             "content": {
                 "msgtype": "m.text",
                 "body": "automation",
-                "com.mindroom.source_kind": "hook",
+                SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -751,6 +760,7 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
                 "msgtype": "m.text",
                 "body": "@mindroom_code:localhost please check this thread",
                 ORIGINAL_SENDER_KEY: "@user:localhost",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 "m.relates_to": {
                     "event_id": "$thread-root",
                     "rel_type": "m.thread",
@@ -785,6 +795,9 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     assert dispatch is not None
     dispatch = dispatch.dispatch
     assert dispatch.context is trusted_context
+    assert dispatch.envelope.origin is not None
+    assert dispatch.envelope.origin.intent == TurnIntent.ROUTER_HANDOFF
+    assert dispatch.envelope.origin.trust.value == "trusted_user_relay"
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(
         room,
         event,
@@ -877,7 +890,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
             "content": {
                 "msgtype": "m.text",
                 "body": "@mindroom_code:localhost automation",
-                "com.mindroom.source_kind": "hook",
+                SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -999,7 +1012,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
             "content": {
                 "msgtype": "m.text",
                 "body": "pretend automation",
-                "com.mindroom.source_kind": "hook",
+                SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
             },
         },
@@ -1037,10 +1050,11 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         source={"content": {"body": "hello", "msgtype": "m.text"}},
     )
     context = _dispatch_context(bot)
+    target = MessageTarget.resolve("!room:localhost", None, event.event_id)
     expected = MessageEnvelope(
         source_event_id=event.event_id,
         room_id="!room:localhost",
-        target=MessageTarget.resolve("!room:localhost", None, event.event_id),
+        target=target,
         requester_id="@user:localhost",
         sender_id=event.sender,
         body=event.body,
@@ -1048,6 +1062,7 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         mentioned_agents=(),
         agent_name=bot.agent_name,
         source_kind="message",
+        origin=message_origin(sender_id=event.sender, requester_id="@user:localhost", source_kind="message"),
     )
     bot._conversation_resolver.build_message_envelope = MagicMock(return_value=expected)
 
@@ -1056,6 +1071,7 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         event=event,
         requester_user_id="@user:localhost",
         context=context,
+        target=target,
     )
 
     assert envelope is expected
@@ -1064,6 +1080,7 @@ def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path)
         event=event,
         requester_user_id="@user:localhost",
         context=context,
+        target=target,
     )
 
 
@@ -1257,7 +1274,7 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
-    assert captured_content["com.mindroom.source_kind"] == "hook"
+    assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "hook-plugin:agent:started"
 
 
@@ -1293,7 +1310,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
     with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
-    assert captured_content["com.mindroom.source_kind"] == "hook_dispatch"
+    assert captured_content[SOURCE_KIND_KEY] == "hook_dispatch"
     expected_requester = mindroom_user_id(bot.config, bot.runtime_paths)
     if expected_requester is None:
         assert ORIGINAL_SENDER_KEY not in captured_content
@@ -1314,7 +1331,7 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
             "content": {
                 "msgtype": "m.text",
                 "body": "restart notification",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "restart-notify:bot:ready",
             },
         },
@@ -1362,7 +1379,7 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
             "content": {
                 "msgtype": "m.text",
                 "body": "restart notification",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "restart-notify:bot:ready",
             },
         },
@@ -1416,7 +1433,7 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
             "content": {
                 "msgtype": "m.text",
                 "body": "restart notification",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -1479,7 +1496,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
             "content": {
                 "msgtype": "m.text",
                 "body": "restart notification",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "other-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
@@ -1539,7 +1556,7 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
             "content": {
                 "msgtype": "m.text",
                 "body": "follow-up automation",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:before_response",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
@@ -1572,7 +1589,7 @@ async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(
             "content": {
                 "msgtype": "m.text",
                 "body": "!help",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -1604,7 +1621,7 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
             "content": {
                 "msgtype": "m.text",
                 "body": "1",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:before_response",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
@@ -1648,7 +1665,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
             "content": {
                 "msgtype": "m.text",
                 "body": "1",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:bot:ready",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -1693,7 +1710,7 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
             "content": {
                 "msgtype": "m.text",
                 "body": "@mindroom_code:localhost restart notification",
-                "com.mindroom.source_kind": "hook",
+                SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "restart-notify:bot:ready",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -1754,7 +1771,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             "content": {
                 "msgtype": "m.text",
                 "body": "1",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:bot:ready",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -1828,7 +1845,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             "content": {
                 "msgtype": "m.text",
                 "body": "follow-up",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:before_response",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
@@ -1872,7 +1889,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
             "content": {
                 "msgtype": "m.text",
                 "body": "@mindroom_code:localhost follow up",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:bot:ready",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
@@ -1907,7 +1924,7 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
             "content": {
                 "msgtype": "m.text",
                 "body": "follow-up automation",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "origin-plugin:message:before_response",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
@@ -1939,7 +1956,7 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
             "content": {
                 "msgtype": "m.text",
                 "body": "plain hook message",
-                "com.mindroom.source_kind": "hook",
+                SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "some-plugin:message:received",
             },
         },
@@ -1982,7 +1999,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
             "content": {
                 "msgtype": "m.text",
                 "body": "restart notification",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "hook-plugin:agent:started",
             },
         },
@@ -2037,7 +2054,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
             "content": {
                 "msgtype": "m.text",
                 "body": "restart notification",
-                "com.mindroom.source_kind": "hook_dispatch",
+                SOURCE_KIND_KEY: "hook_dispatch",
                 "com.mindroom.hook_source": "hook-plugin:agent:started",
                 ORIGINAL_SENDER_KEY: "@unauthorized:localhost",
             },

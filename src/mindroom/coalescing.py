@@ -24,8 +24,11 @@ from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
+    IMAGE_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
     is_voice_event,
 )
 from .logging_config import get_logger
@@ -35,8 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 __all__ = [
-    "COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP",
-    "COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY",
     "CoalescingGate",
     "GatePhase",
     "is_coalescing_exempt_source_kind",
@@ -45,15 +46,13 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
-        COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-        COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
 logger = get_logger(__name__)
@@ -130,9 +129,9 @@ def _is_command_event(
     """Return whether a dispatch event should bypass coalescing as a command."""
     if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
         return False
-    if fallback_source_kind == "voice" or is_voice_event(event):
+    if fallback_source_kind == VOICE_SOURCE_KIND or is_voice_event(event):
         return False
-    if _effective_source_kind(event, fallback_source_kind) in {"image", "media"}:
+    if _effective_source_kind(event, fallback_source_kind) in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}:
         return False
     return command_parser.parse(event.body) is not None
 
@@ -298,7 +297,7 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
-        if pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
+        if pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
             return _QueueKind.BYPASS
         if any(item.requires_solo_batch for item in pending_event.dispatch_metadata):
             return _QueueKind.BYPASS

@@ -16,6 +16,7 @@ from .dispatch_handoff import (
     event_content_dict,
     is_media_dispatch_event,
 )
+from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
     import nio
@@ -96,7 +97,11 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
     return original_sender, raw_audio_fallback
 
 
-_SOURCE_KIND_PRIORITY: dict[str, int] = {"voice": 0, "image": 1, "media": 2}
+_SOURCE_KIND_PRIORITY: dict[str, int] = {
+    VOICE_SOURCE_KIND: 0,
+    IMAGE_SOURCE_KIND: 1,
+    MEDIA_SOURCE_KIND: 2,
+}
 
 
 def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
