@@ -226,6 +226,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         room,
         selection=selection,
         user_id="@user:localhost",
+        source_event_id="$selection:localhost",
     )
 
     generate_response_mock.assert_awaited_once()

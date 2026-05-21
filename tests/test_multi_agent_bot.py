@@ -11208,7 +11208,12 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
         ):
-            await bot._turn_controller._enqueue_for_dispatch(event, room, source_kind=MESSAGE_SOURCE_KIND)
+            await bot._turn_controller._enqueue_for_dispatch(
+                event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            )
 
         mock_dispatch.assert_not_awaited()
         mock_start.assert_awaited_once()

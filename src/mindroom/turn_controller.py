@@ -854,10 +854,10 @@ class TurnController:
         room: nio.MatrixRoom,
         *,
         source_kind: str,
+        requester_user_id: str,
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int = 0,
-        requester_user_id: str | None = None,
         coalescing_key: CoalescingKey | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         trust_internal_payload_metadata: bool | None = None,
@@ -868,10 +868,6 @@ class TurnController:
             dispatch_timing.mark("gate_enter")
         enqueue_start = time.monotonic()
         timing_scope = event_timing_scope(event.event_id)
-        effective_requester_user_id = requester_user_id or self._requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
         source_kind_allows_relay_detection = source_kind in {
             "",
             MESSAGE_SOURCE_KIND,
@@ -887,7 +883,7 @@ class TurnController:
             else trust_internal_payload_metadata
         )
         coalescing_key_start = time.monotonic()
-        resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id)
+        resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, requester_user_id)
         emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch.coalescing_key",
             coalescing_key_start,
@@ -1211,7 +1207,7 @@ class TurnController:
         *,
         selection: interactive.InteractiveSelection,
         user_id: str,
-        source_event_id: str | None = None,
+        source_event_id: str,
     ) -> None:
         """Execute one validated interactive selection through the normal response path."""
         thread_history = (
@@ -1258,15 +1254,11 @@ class TurnController:
         )
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
             selection_handled_turn,
-            additional_source_event_ids=(
-                (source_event_id,)
-                if source_event_id is not None and source_event_id != selection.question_event_id
-                else ()
-            ),
+            additional_source_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
         )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         response_envelope = MessageEnvelope(
-            source_event_id=source_event_id or selection.question_event_id,
+            source_event_id=source_event_id,
             room_id=room.room_id,
             target=response_target,
             requester_id=user_id,
@@ -1302,7 +1294,7 @@ class TurnController:
             self._mark_source_events_responded(
                 selection_handled_turn.with_response_event_id(response_event_id),
             )
-            if source_event_id is not None and source_event_id != selection.question_event_id:
+            if source_event_id != selection.question_event_id:
                 self._mark_source_events_responded(
                     self.deps.turn_store.attach_response_context(
                         HandledTurnState.from_source_event_id(
