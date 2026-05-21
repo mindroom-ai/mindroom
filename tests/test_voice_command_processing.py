@@ -12,6 +12,7 @@ from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
+from mindroom.coalescing import COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -970,6 +971,10 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
     assert request.target.resolved_thread_id == "$voice_event"
     assert request.skip_mentions is True
+    assert request.extra_content == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        "com.mindroom.source_kind": COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+    }
 
 
 @pytest.mark.asyncio
@@ -1053,7 +1058,10 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert echo_request.target.reply_to_event_id == "$voice_event"
     assert echo_request.response_text == f"{VOICE_PREFIX}summarize this audio"
     assert echo_request.skip_mentions is True
-    assert echo_request.extra_content is None
+    assert echo_request.extra_content == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        "com.mindroom.source_kind": COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+    }
     assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
     assert handoff_request.extra_content == {

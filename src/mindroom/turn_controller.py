@@ -905,7 +905,7 @@ class TurnController:
         text: str,
         thread_id: str | None,
     ) -> str | None:
-        """Optionally post a display-only router echo for normalized audio."""
+        """Optionally post a visible router echo for normalized audio."""
         if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
             return None
 
@@ -924,6 +924,10 @@ class TurnController:
                 target=target,
                 response_text=text,
                 skip_mentions=True,
+                extra_content={
+                    ORIGINAL_SENDER_KEY: event.sender,
+                    "com.mindroom.source_kind": COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+                },
             ),
         )
         if visible_echo_event_id is not None:
