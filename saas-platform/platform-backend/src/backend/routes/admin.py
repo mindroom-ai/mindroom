@@ -22,7 +22,7 @@ from backend.models import (
     SyncResult,
     UpdateAccountStatusResponse,
 )
-from backend.pricing import load_pricing_config_model
+from backend.pricing import PRICING_CONFIG_MODEL
 from backend.routes.provisioner import (
     provision_instance,
     restart_instance_provisioner,
@@ -56,9 +56,8 @@ def audit_log_entry(
 
 def _monthly_plan_prices_usd() -> dict[str, int]:
     """Return configured monthly prices in dollars for automatic MRR estimates."""
-    pricing = load_pricing_config_model()
     prices: dict[str, int] = {}
-    for tier, plan in pricing.plans.items():
+    for tier, plan in PRICING_CONFIG_MODEL.plans.items():
         if isinstance(plan.price_monthly, int):
             prices[tier] = plan.price_monthly // 100
         else:

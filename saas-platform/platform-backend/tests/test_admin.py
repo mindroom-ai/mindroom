@@ -1,11 +1,9 @@
 """Comprehensive HTTP API tests for admin endpoints."""
 
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -417,17 +415,15 @@ class TestAdminEndpoints:
         mock_supabase: MagicMock,
         mock_verify_admin: Mock,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ):
         """Test admin dashboard metrics."""
         from backend import pricing
+        from backend.routes import admin
 
         pricing_config = pricing.load_pricing_config()
         pricing_config["plans"]["byok"]["price_monthly"] = 3100
         pricing_config["plans"]["pro"]["price_monthly"] = 9700
-        pricing_path = tmp_path / "pricing-config.yaml"
-        pricing_path.write_text(yaml.safe_dump(pricing_config), encoding="utf-8")
-        monkeypatch.setattr(pricing, "config_path", pricing_path)
+        monkeypatch.setattr(admin, "PRICING_CONFIG_MODEL", pricing.PricingConfig(**pricing_config))
 
         # Setup mock queries for each specific table call
         # Mock accounts query
