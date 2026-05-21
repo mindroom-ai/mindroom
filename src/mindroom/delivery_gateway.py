@@ -1052,9 +1052,7 @@ class DeliveryGateway:
         )
         return await send_streaming_response(
             client,
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.target.resolved_thread_id,
+            request.target,
             config,
             self.deps.runtime_paths,
             request.response_stream,
@@ -1063,8 +1061,6 @@ class DeliveryGateway:
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
-            target=request.target,
-            room_mode=request.target.is_room_mode,
             extra_content=request.extra_content,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,

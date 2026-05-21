@@ -788,6 +788,7 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
+HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"

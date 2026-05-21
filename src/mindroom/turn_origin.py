@@ -31,8 +31,8 @@ class TurnIntent(StrEnum):
     ROUTER_NOTICE = "router_notice"
     SCHEDULED_FIRE = "scheduled_fire"
     HOOK_MESSAGE = "hook_message"
-    HOOK_DISPATCH = "hook_dispatch"
-    TRUSTED_INTERNAL_RELAY = "trusted_internal_relay"
+    HOOK_DISPATCH = HOOK_DISPATCH_SOURCE_KIND
+    TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
 
 class _TurnTrust(StrEnum):

@@ -128,9 +128,6 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
         response_envelope=request_envelope(

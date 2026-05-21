@@ -64,6 +64,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -618,9 +619,6 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
         response_envelope=request_envelope(
@@ -700,9 +698,6 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             await coordinator.process_and_respond(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$user_msg",
-                    thread_id="$thread-root",
                     thread_history=(),
                     prompt="Hello",
                     response_envelope=request_envelope(
@@ -2015,8 +2010,12 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind="message",
-            origin=message_origin(sender_id="@alice:localhost", requester_id="@alice:localhost", source_kind="message"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         ),
         correlation_id="corr-stream-cancel",
     )
@@ -2103,8 +2102,12 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind="message",
-            origin=message_origin(sender_id="@alice:localhost", requester_id="@alice:localhost", source_kind="message"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         ),
         correlation_id="corr-stream-error",
     )

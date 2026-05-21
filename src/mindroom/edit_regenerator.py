@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
@@ -35,10 +36,7 @@ class _GenerateResponse(Protocol):
     async def __call__(
         self,
         *,
-        room_id: str,
         prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
         thread_history: Sequence[ResolvedVisibleMessage],
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
@@ -90,10 +88,10 @@ class EditRegenerator:
         context: MessageContext,
         room: nio.MatrixRoom,
         *,
-        conversation_target: MessageTarget | None,
+        conversation_target: MessageTarget,
     ) -> MessageContext:
-        """Return edit context, reusing the recorded thread root when available."""
-        if conversation_target is None or conversation_target.resolved_thread_id is None:
+        """Return edit context aligned with the recorded thread root."""
+        if conversation_target.resolved_thread_id is None:
             return context
         if context.thread_id == conversation_target.resolved_thread_id:
             return context
@@ -150,24 +148,31 @@ class EditRegenerator:
             )
             return
         turn_record = loaded_turn.record
+        if (
+            turn_record.conversation_target is None
+            or turn_record.history_scope is None
+            or turn_record.response_owner is None
+        ):
+            self._logger().warning(
+                "Skipping edited turn regeneration without persisted response context",
+                original_event_id=original_event_id,
+                has_conversation_target=turn_record.conversation_target is not None,
+                has_history_scope=turn_record.history_scope is not None,
+                has_response_owner=turn_record.response_owner is not None,
+            )
+            return
         context = await self.edit_regeneration_context(
             context,
             room,
             conversation_target=turn_record.conversation_target,
         )
-        if loaded_turn.response_owner_missing:
-            turn_record = replace(turn_record, response_owner=self.deps.agent_name)
         response_event_id = turn_record.response_event_id
         if response_event_id is None:
             self._logger().debug("missing_previous_response_for_edit", event_id=original_event_id)
             return
-        regeneration_target = turn_record.conversation_target or self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=turn_record.anchor_event_id,
-        )
-        regeneration_history_scope = turn_record.history_scope or self.deps.turn_store.response_history_scope()
-        regeneration_response_owner = turn_record.response_owner or self.deps.agent_name
+        regeneration_target = turn_record.conversation_target
+        regeneration_history_scope = turn_record.history_scope
+        regeneration_response_owner = turn_record.response_owner
         if regeneration_response_owner != self.deps.agent_name:
             self._logger().debug(
                 "Ignoring edited message for turn owned by another entity",
@@ -175,12 +180,7 @@ class EditRegenerator:
                 response_owner=regeneration_response_owner,
             )
             return
-        needs_turn_record_backfill = (
-            loaded_turn.requires_backfill
-            or loaded_turn.response_owner_missing
-            or turn_record.history_scope is None
-            or turn_record.conversation_target is None
-        )
+        needs_turn_record_backfill = loaded_turn.requires_backfill
         coalesced_source_event_prompts = turn_record.source_event_prompts
 
         self._logger().info(
@@ -267,7 +267,7 @@ class EditRegenerator:
             context=context,
             target=regeneration_target,
             body=edited_content,
-            source_kind="edit",
+            source_kind=EDIT_SOURCE_KIND,
         )
         ingress_policy = hook_ingress_policy(envelope)
         if await self.deps.ingress_hook_runner.emit_message_received_hooks(
@@ -279,10 +279,7 @@ class EditRegenerator:
             return
 
         regenerated_event_id = await self.deps.generate_response(
-            room_id=room.room_id,
             prompt=regeneration_prompt,
-            reply_to_event_id=regeneration_turn_record.anchor_event_id,
-            thread_id=regeneration_target.resolved_thread_id,
             thread_history=context.thread_history,
             existing_event_id=response_event_id,
             existing_event_is_placeholder=False,
@@ -295,9 +292,6 @@ class EditRegenerator:
                     loaded_turn,
                     record=regeneration_turn_record,
                 ),
-                room=room,
-                thread_id=context.thread_id,
-                original_event_id=original_event_id,
                 requester_user_id=requester_user_id,
             ),
         )

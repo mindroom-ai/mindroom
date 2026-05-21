@@ -283,9 +283,6 @@ def prepare_memory_and_model_context(
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
 
-    room_id: str
-    reply_to_event_id: str
-    thread_id: str | None
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
@@ -303,6 +300,21 @@ class ResponseRequest:
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+
+    @property
+    def room_id(self) -> str:
+        """Return the canonical response room."""
+        return self.response_envelope.target.room_id
+
+    @property
+    def reply_to_event_id(self) -> str | None:
+        """Return the canonical event this response answers."""
+        return self.response_envelope.target.reply_to_event_id
+
+    @property
+    def thread_id(self) -> str | None:
+        """Return the canonical resolved response thread root."""
+        return self.response_envelope.target.resolved_thread_id
 
 
 class PostLockRequestPreparationError(RuntimeError):
@@ -405,7 +417,7 @@ class ResponseRunner:
         self,
         *,
         user_message: str,
-        reply_to_event_id: str,
+        reply_to_event_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
@@ -584,7 +596,6 @@ class ResponseRunner:
             response_envelope = replace(response_envelope, target=resolved_target)
         return replace(
             request,
-            thread_id=resolved_target.resolved_thread_id,
             response_envelope=response_envelope,
         )
 
@@ -703,7 +714,7 @@ class ResponseRunner:
 
     def _correlation_id_for_request(self, request: ResponseRequest) -> str:
         """Resolve the correlation id for one request."""
-        return request.correlation_id or request.reply_to_event_id
+        return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
 
     def _build_lifecycle(
         self,

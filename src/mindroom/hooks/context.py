@@ -243,6 +243,15 @@ class MessageEnvelope:
         if self.origin is None:
             message = "MessageEnvelope.origin is required"
             raise TypeError(message)
+        if self.room_id != self.target.room_id:
+            message = "MessageEnvelope.room_id must match MessageEnvelope.target.room_id"
+            raise ValueError(message)
+        if self.sender_id != self.origin.transport_sender_id:
+            message = "MessageEnvelope.sender_id must match MessageEnvelope.origin.transport_sender_id"
+            raise ValueError(message)
+        if self.requester_id != self.origin.requester_id:
+            message = "MessageEnvelope.requester_id must match MessageEnvelope.origin.requester_id"
+            raise ValueError(message)
 
 
 @dataclass(slots=True)

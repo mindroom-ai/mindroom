@@ -130,10 +130,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         thread_id = user_message_id
 
         resolution = await bot._generate_response(
-            room_id=room_id,
             prompt="Test prompt",
-            reply_to_event_id=user_message_id,
-            thread_id=thread_id,
             thread_history=[],
             user_id="@user:localhost",
             response_envelope=request_envelope(
@@ -236,10 +233,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         user_message_id = "$user_thread_start"
         thread_id = user_message_id
         resolution = await bot._generate_response(
-            room_id=room_id,
             prompt="Test prompt",
-            reply_to_event_id=user_message_id,
-            thread_id=thread_id,
             thread_history=[],
             user_id="@user:localhost",
             response_envelope=request_envelope(
@@ -330,10 +324,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
 
         room_id = "!test:localhost"
         resolution = await bot._generate_response(
-            room_id=room_id,
             prompt="Test prompt",
-            reply_to_event_id="$some_message",
-            thread_id=None,
             thread_history=[],
             user_id="@user:localhost",
             response_envelope=request_envelope(

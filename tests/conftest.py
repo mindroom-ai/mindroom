@@ -944,37 +944,27 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
-    """Route visible delivery through one legacy-style send-response mock."""
+    """Route visible delivery through one target-explicit send-response mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
 
     async def _send_text(request: SendTextRequest) -> str | None:
         return await send_response(
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.response_text,
-            request.target.resolved_thread_id,
-            reply_to_event=None,
+            target=request.target,
+            response_text=request.response_text,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=None,
-            target=request.target,
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
 
     async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         event_id = await send_response(
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.response_text,
-            request.target.resolved_thread_id,
-            reply_to_event=None,
+            target=request.target,
+            response_text=request.response_text,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=None,
-            target=request.target,
         )
         delivery_kind = "edited" if request.existing_event_id is not None else "sent"
         if event_id is None:
@@ -1006,7 +996,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
 
 
 def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock) -> None:
-    """Route response execution through one legacy-style generate-response mock."""
+    """Route response execution through one envelope-explicit generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
 
     def _resolved_event_id_from_test_result(
@@ -1024,10 +1014,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
                 raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         result = await generate_response(
-            room_id=request.room_id,
             prompt=request.prompt,
-            reply_to_event_id=request.reply_to_event_id,
-            thread_id=request.thread_id,
             thread_history=request.thread_history,
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
@@ -1047,7 +1034,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
 
 
 def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
-    """Route Matrix edits through one legacy-style edit-message mock."""
+    """Route Matrix edits through one argument-expanded edit-message mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
 
     async def _edit_text(request: EditTextRequest) -> bool:

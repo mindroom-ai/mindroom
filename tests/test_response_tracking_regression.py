@@ -225,7 +225,7 @@ class TestResponseTrackingRegression:
             await drain_coalescing(bot)
 
         bot._send_response.assert_awaited_once()
-        assert "❌ Unknown command" in bot._send_response.await_args.args[2]
+        assert "❌ Unknown command" in bot._send_response.await_args.kwargs["response_text"]
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371

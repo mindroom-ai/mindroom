@@ -207,9 +207,10 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         mock_send_streaming_response.assert_awaited_once()
         send_args = mock_send_streaming_response.await_args.args
-        assert send_args[1] == test_room_id
-        assert send_args[2] == "$test_event:localhost"
-        assert send_args[3] == "$thread_root:localhost"
+        target = send_args[1]
+        assert target.room_id == test_room_id
+        assert target.reply_to_event_id == "$test_event:localhost"
+        assert target.resolved_thread_id == "$thread_root:localhost"
 
 
 @pytest.mark.asyncio

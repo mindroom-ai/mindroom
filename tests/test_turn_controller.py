@@ -103,10 +103,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     captured_envelope: MessageEnvelope | None = None
 
     async def generate_response(
-        room_id: str,
         prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
         thread_history: list[object],
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
@@ -122,14 +119,13 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         nonlocal captured_envelope
         assert response_envelope is not None
         captured_envelope = response_envelope
-        assert room_id == room.room_id
         assert prompt == "The user selected: Option 1"
-        assert reply_to_event_id == selection.question_event_id
-        assert thread_id == selection.thread_id
+        assert response_envelope.target.room_id == room.room_id
+        assert response_envelope.target.reply_to_event_id == selection.question_event_id
+        assert response_envelope.target.resolved_thread_id == selection.thread_id
         assert thread_history == []
         assert existing_event_id == "$ack:localhost"
         assert existing_event_is_placeholder is True
-        assert response_envelope.target.reply_to_event_id == selection.question_event_id
 
         async def response_stream() -> AsyncIterator[str]:
             yield "Processed selection"
@@ -140,15 +136,12 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         ) as mock_edit:
             outcome = await send_streaming_response(
                 client=bot.client,
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
+                target=response_envelope.target,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 response_stream=response_stream(),
                 existing_event_id=existing_event_id,
                 adopt_existing_placeholder=existing_event_is_placeholder,
-                target=response_envelope.target,
             )
 
         mock_edit.assert_awaited()

@@ -407,7 +407,7 @@ class TestDMIntegration:
             # Verify the bot decided to respond even though not configured for the room
             bot._generate_response.assert_called_once()
             call_args = bot._generate_response.call_args
-            assert call_args.kwargs["room_id"] == "!dm:localhost"
+            assert call_args.kwargs["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args.kwargs["prompt"] == "Hello researcher, can you help?"
 
     async def test_agent_processes_dm_messages_when_not_configured_for_room(self, tmp_path: Path) -> None:
@@ -500,5 +500,5 @@ class TestDMIntegration:
             # Verify the bot decided to respond in the DM room
             bot._generate_response.assert_called_once()
             call_args = bot._generate_response.call_args
-            assert call_args[1]["room_id"] == "!dm:localhost"
+            assert call_args[1]["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args[1]["prompt"] == "Hello agent!"

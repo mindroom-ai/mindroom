@@ -10,8 +10,9 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, SOURCE_KIND_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
@@ -269,17 +270,17 @@ class ConversationResolver:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
             if is_audio_message_event(event):
-                resolved_source_kind = "voice"
+                resolved_source_kind = VOICE_SOURCE_KIND
             elif is_image_message_event(event):
-                resolved_source_kind = "image"
+                resolved_source_kind = IMAGE_SOURCE_KIND
             else:
-                resolved_source_kind = "message"
+                resolved_source_kind = MESSAGE_SOURCE_KIND
 
         resolved_hook_source: str | None = hook_source
         resolved_message_received_depth = message_received_depth or 0
         if isinstance(content, dict) and source_kind_sender_is_trusted:
             if resolved_hook_source is None:
-                hook_source_override = content.get("com.mindroom.hook_source")
+                hook_source_override = content.get(HOOK_SOURCE_KEY)
                 if isinstance(hook_source_override, str) and hook_source_override:
                     resolved_hook_source = hook_source_override
             if resolved_message_received_depth <= 0:
@@ -402,7 +403,7 @@ class ConversationResolver:
         room_id: str,
         event: DispatchEvent,
         requester_user_id: str,
-        thread_id: str | None = None,
+        target: MessageTarget,
         attachment_ids: list[str] | None = None,
         agent_name: str | None = None,
         body: str | None = None,
@@ -425,12 +426,7 @@ class ConversationResolver:
         return MessageEnvelope(
             source_event_id=event.event_id,
             room_id=room_id,
-            target=self.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            ),
+            target=target,
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,

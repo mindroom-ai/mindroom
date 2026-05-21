@@ -17,6 +17,7 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
@@ -39,7 +40,7 @@ _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
-        "com.mindroom.hook_source",
+        HOOK_SOURCE_KEY,
         "com.mindroom.skip_mentions",
         SOURCE_KIND_KEY,
         ATTACHMENT_IDS_KEY,

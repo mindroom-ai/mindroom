@@ -513,7 +513,9 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
 
     mock_interactive.assert_awaited_once()
     bot._send_response.assert_awaited_once()
-    assert bot._send_response.await_args.args[2] == "❌ Unknown command. Try !help for available commands."
+    assert bot._send_response.await_args.kwargs["response_text"] == (
+        "❌ Unknown command. Try !help for available commands."
+    )
 
 
 @pytest.mark.asyncio
@@ -819,7 +821,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
     expected_attachment_id = _attachment_id_for_event("$voice_event")
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
@@ -1330,7 +1332,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
     assert bots[0]._generate_response.await_count == 0
     assert bots[1]._generate_response.await_count == 1
     call_kwargs = bots[1]._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
 
@@ -1405,6 +1407,6 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
     assert bots[0]._generate_response.await_count == 0
     assert bots[1]._generate_response.await_count == 1
     call_kwargs = bots[1]._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]

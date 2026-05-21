@@ -18,6 +18,7 @@ from mindroom.attachments import (
 )
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
 from mindroom.matrix.image_handler import download_image
@@ -186,11 +187,11 @@ class InboundTurnNormalizer:
                         **prepared_voice.source,
                         "content": {
                             **prepared_voice.source.get("content", {}),
-                            SOURCE_KIND_KEY: "voice",
+                            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
                         },
                     },
                     server_timestamp=request.event.server_timestamp,
-                    source_kind_override="voice",
+                    source_kind_override=VOICE_SOURCE_KIND,
                 ),
                 effective_thread_id=effective_thread_id,
             )

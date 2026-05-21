@@ -11,10 +11,12 @@ from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.media import (
     MatrixMediaDispatchEvent,
     extract_media_caption,
@@ -265,7 +267,7 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
-        "com.mindroom.hook_source",
+        HOOK_SOURCE_KEY,
         "com.mindroom.skip_mentions",
         SOURCE_KIND_KEY,
     },
@@ -295,7 +297,7 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
 
 
 def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
-    if source_kind in {"message", event.source_kind_override}:
+    if source_kind in {MESSAGE_SOURCE_KIND, event.source_kind_override}:
         return event
     return replace(event, source_kind_override=source_kind)
 

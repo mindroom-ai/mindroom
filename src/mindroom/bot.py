@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
@@ -328,6 +328,19 @@ class AgentBot:
         )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
+
+        async def send_room_lifecycle_response(
+            *,
+            target: MessageTarget,
+            response_text: str,
+            skip_mentions: bool = False,
+        ) -> str | None:
+            return await self._send_response(
+                target=target,
+                response_text=response_text,
+                skip_mentions=skip_mentions,
+            )
+
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
                 agent_name=self.agent_name,
@@ -336,7 +349,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
-                send_response=lambda *args, **kwargs: self._send_response(*args, **kwargs),
+                send_response=send_room_lifecycle_response,
                 on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
             ),
         )
@@ -1585,7 +1598,11 @@ class AgentBot:
                 self.runtime_paths,
             ).current_entity_name_for_user_id(event.sender)
             tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
-            if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
+            if (
+                not sender_agent_name
+                and tracked_target is not None
+                and await self.stop_manager.handle_stop_reaction(event.reacts_to)
+            ):
                 self.logger.info(
                     "Stop requested for message",
                     message_id=event.reacts_to,
@@ -1597,10 +1614,8 @@ class AgentBot:
                     notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
                 )
                 await self._send_response(
-                    room.room_id,
-                    event.reacts_to,
-                    _STOPPING_RESPONSE_TEXT,
-                    tracked_target.resolved_thread_id if tracked_target is not None else None,
+                    target=tracked_target,
+                    response_text=_STOPPING_RESPONSE_TEXT,
                 )
                 return
 
@@ -1651,9 +1666,6 @@ class AgentBot:
 
     async def _generate_team_response_helper(
         self,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
         team_agents: list[MatrixID],
         team_mode: str,
         thread_history: Sequence[ResolvedVisibleMessage],
@@ -1672,9 +1684,6 @@ class AgentBot:
         """Generate a team response (shared between preformed teams and TeamBot)."""
         return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
                 thread_history=thread_history,
                 prompt=payload.prompt,
                 model_prompt=payload.model_prompt,
@@ -1696,10 +1705,7 @@ class AgentBot:
 
     async def _generate_response(
         self,
-        room_id: str,
         prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
         response_envelope: MessageEnvelope,
@@ -1717,10 +1723,7 @@ class AgentBot:
         """Generate and send/edit a response using AI.
 
         Args:
-            room_id: The room to send the response to
             prompt: The prompt to send to the AI
-            reply_to_event_id: The event to reply to
-            thread_id: Thread ID if in a thread
             thread_history: Thread history for context
             existing_event_id: If provided, edit this message instead of sending a new one
                              (used for placeholders and interactive acknowledgments)
@@ -1745,9 +1748,6 @@ class AgentBot:
         """
         return await self._response_runner.generate_response(
             ResponseRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
                 thread_history=thread_history,
                 prompt=prompt,
                 model_prompt=model_prompt,
@@ -1766,28 +1766,17 @@ class AgentBot:
 
     async def _send_response(
         self,
-        room_id: str,
-        reply_to_event_id: str | None,
+        *,
+        target: MessageTarget,
         response_text: str,
-        thread_id: str | None,
-        reply_to_event: nio.RoomMessageText | None = None,
         skip_mentions: bool = False,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, Any] | None = None,
-        thread_mode_override: Literal["thread", "room"] | None = None,
-        target: MessageTarget | None = None,
     ) -> _MatrixEventId | None:
         """Send a response message to a room."""
-        resolved_target = target or self._conversation_resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            event_source=reply_to_event.source if reply_to_event is not None else None,
-            thread_mode_override=thread_mode_override,
-        )
         return await self._delivery_gateway.send_text(
             SendTextRequest(
-                target=resolved_target,
+                target=target,
                 response_text=response_text,
                 skip_mentions=skip_mentions,
                 tool_trace=tool_trace,
@@ -1946,10 +1935,7 @@ class TeamBot(AgentBot):
 
     async def _generate_response(
         self,
-        room_id: str,
         prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
         response_envelope: MessageEnvelope,
@@ -1965,12 +1951,10 @@ class TeamBot(AgentBot):
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
+        target = response_envelope.target
         if not prompt.strip():
             return await self._response_runner.generate_response_for_empty_prompt(
                 ResponseRequest(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    thread_id=thread_id,
                     thread_history=thread_history,
                     prompt=prompt,
                     model_prompt=model_prompt,
@@ -2013,31 +1997,28 @@ class TeamBot(AgentBot):
             response_event_id: str | None
             if existing_event_id:
                 edited = await self._edit_message(
-                    room_id=room_id,
+                    room_id=target.room_id,
                     event_id=existing_event_id,
                     new_text=team_resolution.reason,
-                    thread_id=thread_id,
+                    thread_id=target.resolved_thread_id,
                 )
                 response_event_id = existing_event_id if edited else None
             else:
                 response_event_id = await self._send_response(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
+                    target=response_envelope.target,
                     response_text=team_resolution.reason,
-                    thread_id=thread_id,
                 )
             return response_event_id
         assert team_resolution.mode is not None
 
-        resolved_target = response_envelope.target
         registry = entity_identity_registry(self.config, self.runtime_paths)
         agent_names = [
             registry.current_entity_name_for_user_id(mid.full_id, include_router=False) or mid.username
             for mid in team_resolution.eligible_members
         ]
-        session_id = resolved_target.session_id
+        session_id = target.session_id
         execution_identity = self._tool_runtime_support.build_execution_identity(
-            target=resolved_target,
+            target=target,
             user_id=user_id,
             session_id=session_id,
         )
@@ -2061,9 +2042,6 @@ class TeamBot(AgentBot):
         media_inputs = media or MediaInputs()
 
         return await self._generate_team_response_helper(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
             payload=DispatchPayload(
                 prompt=memory_prompt,
                 model_prompt=model_prompt_text,
@@ -2078,7 +2056,7 @@ class TeamBot(AgentBot):
             existing_event_is_placeholder=existing_event_is_placeholder,
             response_envelope=response_envelope,
             system_enrichment_items=system_enrichment_items,
-            correlation_id=correlation_id or reply_to_event_id,
+            correlation_id=correlation_id or target.reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
             matrix_run_metadata=matrix_run_metadata,
             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,

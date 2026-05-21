@@ -81,6 +81,12 @@ class PreparedDispatch:
     correlation_id: str
     envelope: MessageEnvelope
 
+    def __post_init__(self) -> None:
+        """Require the prepared envelope and dispatch target to describe the same delivery."""
+        if self.envelope.target != self.target:
+            msg = "Prepared dispatch envelope target must match the resolved dispatch target"
+            raise ValueError(msg)
+
 
 @dataclass(frozen=True)
 class _DispatchPlan:

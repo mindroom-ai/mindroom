@@ -7,10 +7,11 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from mindroom.constants import SOURCE_KIND_KEY
 
-_MESSAGE_SOURCE_KIND = "message"
-_VOICE_SOURCE_KIND = "voice"
-_IMAGE_SOURCE_KIND = "image"
-_MEDIA_SOURCE_KIND = "media"
+MESSAGE_SOURCE_KIND = "message"
+VOICE_SOURCE_KIND = "voice"
+IMAGE_SOURCE_KIND = "image"
+MEDIA_SOURCE_KIND = "media"
+EDIT_SOURCE_KIND = "edit"
 SCHEDULED_SOURCE_KIND = "scheduled"
 HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
@@ -95,4 +96,4 @@ def is_voice_event(
             sender_is_trusted=sender_is_trusted,
         )
     )
-    return source_kind == _VOICE_SOURCE_KIND
+    return source_kind == VOICE_SOURCE_KIND

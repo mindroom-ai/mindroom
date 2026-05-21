@@ -219,7 +219,7 @@ class TestBotScheduleCommands:
             # Verify response was sent
             mock_agent_bot._send_response.assert_called_once()
             call_args = mock_agent_bot._send_response.call_args
-            assert "✅ Scheduled: 5 minutes from now" in call_args[0][2]
+            assert "✅ Scheduled: 5 minutes from now" in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
     async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
@@ -321,7 +321,7 @@ class TestBotScheduleCommands:
 
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
-        assert "✅ Cancelled 3 scheduled task(s)" in call_args[0][2]
+        assert "✅ Cancelled 3 scheduled task(s)" in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
     async def test_handle_edit_schedule_command(self, mock_agent_bot: AgentBot) -> None:
@@ -361,7 +361,7 @@ class TestBotScheduleCommands:
 
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
-        assert "✅ Updated task `task123`." in call_args[0][2]
+        assert "✅ Updated task `task123`." in call_args.kwargs["response_text"]
 
     @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
@@ -387,7 +387,7 @@ class TestBotScheduleCommands:
         # Should successfully schedule the task (auto-creates thread)
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
-        assert "✅" in call_args[0][2] or "Task ID" in call_args[0][2]
+        assert "✅" in call_args.kwargs["response_text"] or "Task ID" in call_args.kwargs["response_text"]
         target = call_args[1].get("target")
         assert target is not None
         assert target.room_id == room.room_id
@@ -853,7 +853,9 @@ class TestCommandHandling:
                 await drain_coalescing(bot)
 
             bot._send_response.assert_called_once()
-            assert bot._send_response.await_args.args[2] == "❌ Unknown command. Try !help for available commands."
+            assert bot._send_response.await_args.kwargs["response_text"] == (
+                "❌ Unknown command. Try !help for available commands."
+            )
 
     @pytest.mark.asyncio
     async def test_non_router_agent_responds_to_non_commands(self) -> None:

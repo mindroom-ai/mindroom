@@ -7591,12 +7591,15 @@ class TestThreadingBehavior:
             bot._generate_response.assert_called_once()
 
             # Now simulate the response being sent
+            target = bot._conversation_resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
             await bot._send_response(
-                room.room_id,
-                event.event_id,
-                "I can help you with that!",
-                None,
-                reply_to_event=event,
+                target=target,
+                response_text="I can help you with that!",
             )
 
         # Check the final response content.
@@ -9269,9 +9272,6 @@ class TestThreadingBehavior:
         ) as mock_fetch_thread_history:
             request = await bot._response_runner._refresh_model_history_after_lock(
                 ResponseRequest(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id="$thread_root:localhost",
                     thread_history=degraded_history,
                     prompt="thread follow-up",
                     response_envelope=request_envelope(
@@ -10015,11 +10015,15 @@ class TestThreadingBehavior:
             bot._generate_response.assert_called_once()
 
             # Now simulate the response being sent
+            target = bot._conversation_resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id="$thread_root:localhost",
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
             await bot._send_response(
-                room.room_id,
-                event.event_id,
-                "I can help with that complex question!",
-                "$thread_root:localhost",
+                target=target,
+                response_text="I can help with that complex question!",
             )
 
         # Check the final response content.

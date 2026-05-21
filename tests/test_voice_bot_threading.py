@@ -143,8 +143,9 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice123"
-    assert call_kwargs["thread_id"] == "$voice123"
+    response_target = call_kwargs["response_envelope"].target
+    assert response_target.reply_to_event_id == "$voice123"
+    assert response_target.resolved_thread_id == "$voice123"
     assert call_kwargs["prompt"].startswith("🎤 what is the weather")
 
 
@@ -196,8 +197,9 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice456"
-    assert call_kwargs["thread_id"] == "$thread_root"
+    response_target = call_kwargs["response_envelope"].target
+    assert response_target.reply_to_event_id == "$voice456"
+    assert response_target.resolved_thread_id == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 show me the forecast")
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice456"))
     assert attachment is not None
@@ -250,8 +252,9 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
-    assert call_kwargs["reply_to_event_id"] == "$voice789"
-    assert call_kwargs["thread_id"] == "$thread_root"
+    response_target = call_kwargs["response_envelope"].target
+    assert response_target.reply_to_event_id == "$voice789"
+    assert response_target.resolved_thread_id == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 continue the same thread")
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice789"))
     assert attachment is not None

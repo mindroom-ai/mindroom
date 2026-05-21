@@ -24,8 +24,11 @@ from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
+    IMAGE_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
     is_voice_event,
 )
 from .logging_config import get_logger
@@ -130,9 +133,9 @@ def _is_command_event(
     """Return whether a dispatch event should bypass coalescing as a command."""
     if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
         return False
-    if fallback_source_kind == "voice" or is_voice_event(event):
+    if fallback_source_kind == VOICE_SOURCE_KIND or is_voice_event(event):
         return False
-    if _effective_source_kind(event, fallback_source_kind) in {"image", "media"}:
+    if _effective_source_kind(event, fallback_source_kind) in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}:
         return False
     return command_parser.parse(event.body) is not None
 

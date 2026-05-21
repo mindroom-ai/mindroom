@@ -21,8 +21,10 @@ from mindroom.delivery_gateway import (
     FinalizeStreamedResponseRequest,
     ResponseHookService,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnRecord
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -97,8 +99,12 @@ def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelo
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind="message",
-        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
+        source_kind=MESSAGE_SOURCE_KIND,
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
     )
 
 
@@ -380,9 +386,6 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
     ):
         outcome = await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 thread_history=[],
                 prompt="   ",
                 user_id="@user:localhost",
@@ -412,6 +415,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         source_event_ids=("$original",),
         response_event_id="$response",
         response_owner="team_bot",
+        history_scope=HistoryScope(kind="team", scope_id="team_bot"),
         conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
     )
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_team_bot:localhost")
@@ -457,8 +461,6 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
             "load_turn",
             return_value=_LoadedTurnRecord(
                 record=turn_record,
-                recorded_turn_context_available=True,
-                response_owner_missing=False,
                 requires_backfill=False,
             ),
         ),
