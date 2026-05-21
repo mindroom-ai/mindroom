@@ -302,6 +302,7 @@ describe('InstanceCard', () => {
       expect(openButton).toBeInTheDocument()
       expect(openButton).toHaveAttribute('href', mockInstance.frontend_url)
       expect(openButton).toHaveAttribute('target', '_blank')
+      expect(openButton).toHaveClass('w-full')
     })
 
     it('should show Open Chat Interface button for running instances', () => {
@@ -314,6 +315,16 @@ describe('InstanceCard', () => {
         'https://chat.mindroom.chat/login/https%3A%2F%2Fcustomer.matrix.mindroom.chat/'
       )
       expect(openButton).toHaveAttribute('target', '_blank')
+      expect(openButton).toHaveClass('w-full')
+    })
+
+    it('should keep the MindRoom action full-width when chat is unavailable', () => {
+      render(<InstanceCard instance={{ ...mockInstance, matrix_server_url: null }} />)
+
+      const openButton = screen.getByRole('link', { name: /Open MindRoom/i })
+      expect(openButton).toHaveClass('w-full')
+      expect(openButton.parentElement).not.toHaveClass('sm:grid-cols-2')
+      expect(screen.queryByRole('link', { name: /Open Chat Interface/i })).not.toBeInTheDocument()
     })
 
     it('should not show Open MindRoom button for non-running instances', () => {

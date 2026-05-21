@@ -112,10 +112,10 @@ class TestPricingConfig:
             assert plan.stripe_price_id_monthly.startswith("price_")
             assert plan.stripe_price_id_yearly is not None
             assert plan.stripe_price_id_yearly.startswith("price_")
-
-        byok = model.plans["byok"]
-        assert byok.stripe_price_id_monthly_live == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
-        assert byok.stripe_price_id_yearly_live == "price_1TZQJK3GVsrZHuzXuazROiIy"
+            assert plan.stripe_price_id_monthly_live is not None
+            assert plan.stripe_price_id_monthly_live.startswith("price_")
+            assert plan.stripe_price_id_yearly_live is not None
+            assert plan.stripe_price_id_yearly_live.startswith("price_")
 
         # Free and Enterprise should not have Stripe IDs
         assert model.plans["free"].stripe_price_id_monthly is None
@@ -199,14 +199,13 @@ class TestPricingHelperFunctions:
 
     def test_get_live_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting live Stripe price IDs in live mode."""
+        config = load_pricing_config_model()
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_mock")
 
-        assert get_stripe_price_id("byok", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
-        assert get_stripe_price_id("byok", "yearly") == "price_1TZQJK3GVsrZHuzXuazROiIy"
-        assert get_stripe_price_id("hobby", "monthly") == "price_1TZRzu3GVsrZHuzXUXJEQ6Ng"
-        assert get_stripe_price_id("hobby", "yearly") == "price_1TZRzu3GVsrZHuzX77678390"
-        assert get_stripe_price_id("pro", "monthly") == "price_1TZRzv3GVsrZHuzXFRd9cUgz"
-        assert get_stripe_price_id("pro", "yearly") == "price_1TZRzv3GVsrZHuzXrXOhvBy0"
+        for plan_key in ("byok", "hobby", "pro"):
+            plan = config.plans[plan_key]
+            assert get_stripe_price_id(plan_key, "monthly") == plan.stripe_price_id_monthly_live
+            assert get_stripe_price_id(plan_key, "yearly") == plan.stripe_price_id_yearly_live
 
     def test_publishable_key_does_not_determine_stripe_price_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Server-side Stripe price IDs must match the server-side secret key."""
@@ -236,15 +235,21 @@ class TestPricingHelperFunctions:
 
     def test_get_stripe_price_match_uses_configured_test_and_live_ids(self) -> None:
         """Configured Stripe price IDs map back to canonical plan metadata."""
-        test_match = get_stripe_price_match("price_1TZQNK3GVsrZHuzX6EWO8kgD")
-        assert test_match is not None
-        assert test_match.tier == "byok"
-        assert test_match.billing_cycle == "monthly"
+        config = load_pricing_config_model()
 
-        live_match = get_stripe_price_match("price_1TZQJK3GVsrZHuzXuazROiIy")
-        assert live_match is not None
-        assert live_match.tier == "byok"
-        assert live_match.billing_cycle == "yearly"
+        for plan_key in ("byok", "hobby", "pro"):
+            plan = config.plans[plan_key]
+            price_ids = (
+                (plan.stripe_price_id_monthly, "monthly"),
+                (plan.stripe_price_id_monthly_live, "monthly"),
+                (plan.stripe_price_id_yearly, "yearly"),
+                (plan.stripe_price_id_yearly_live, "yearly"),
+            )
+            for price_id, billing_cycle in price_ids:
+                match = get_stripe_price_match(price_id)
+                assert match is not None
+                assert match.tier == plan_key
+                assert match.billing_cycle == billing_cycle
 
         assert get_stripe_price_match("price_unknown") is None
 
