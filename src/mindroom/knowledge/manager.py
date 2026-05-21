@@ -398,6 +398,10 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         )
         chunk_size = str(base_config.chunk_size)
         chunk_overlap = str(base_config.chunk_overlap)
+        include_extensions = (
+            str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else ""
+        )
+        exclude_extensions = str(tuple(base_config.exclude_extensions))
     else:
         embedder_provider = ""
         embedder_model = ""
@@ -405,6 +409,8 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         embedder_dimensions = ""
         chunk_size = ""
         chunk_overlap = ""
+        include_extensions = ""
+        exclude_extensions = ""
     return IndexingSettings(
         base_id=base_id,
         storage_root=str(storage_path.resolve()),
@@ -422,10 +428,8 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         git_skip_hidden=str(git_config.skip_hidden) if git_config is not None else "",
         git_include_patterns=str(tuple(git_config.include_patterns)) if git_config is not None else "",
         git_exclude_patterns=str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
-        include_extensions=str(tuple(base_config.include_extensions))
-        if base_config.include_extensions is not None
-        else "",
-        exclude_extensions=str(tuple(base_config.exclude_extensions)),
+        include_extensions=include_extensions,
+        exclude_extensions=exclude_extensions,
     )
 
 

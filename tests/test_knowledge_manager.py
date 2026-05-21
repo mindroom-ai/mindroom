@@ -499,6 +499,38 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
     embedder_factory.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete(tmp_path: Path) -> None:
+    """Cancellation recovery should not require vector state for file-only metadata."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    await knowledge_refresh_runner._reconcile_cancelled_refresh(
+        key,
+        initial_state=None,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    state = load_published_index_state(published_index_metadata_path(key))
+
+    assert state is not None
+    assert state.status == "complete"
+    assert state.index_kind == "files"
+    assert state.collection is None
+    assert published_index_refresh_state(state) == "none"
+    assert state.reason is None
+
+
 def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
     """File-only metadata should cover every managed file agents can inspect."""
     docs_path = tmp_path / "docs"
@@ -2068,7 +2100,7 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
 
 
 def test_file_mode_indexing_settings_ignore_semantic_only_settings(tmp_path: Path) -> None:
-    """File-only metadata compatibility should not depend on embedders or chunking."""
+    """File-only metadata compatibility should not depend on semantic scan settings."""
     docs_path = tmp_path / "docs"
     config = _config(
         tmp_path,
@@ -2085,6 +2117,14 @@ def test_file_mode_indexing_settings_ignore_semantic_only_settings(tmp_path: Pat
     assert key.indexing_settings.embedder_dimensions == ""
     assert key.indexing_settings.chunk_size == ""
     assert key.indexing_settings.chunk_overlap == ""
+    assert key.indexing_settings.include_extensions == ""
+    assert key.indexing_settings.exclude_extensions == ""
+
+    config.knowledge_bases["docs"].include_extensions = [".md"]
+    config.knowledge_bases["docs"].exclude_extensions = [".png"]
+    changed_key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    assert changed_key.indexing_settings == key.indexing_settings
 
 
 @pytest.mark.asyncio

@@ -891,8 +891,13 @@ async def _reconcile_cancelled_refresh(
         and state.status == "complete"
         and published_index_settings_compatible(state.settings, key.indexing_settings)
         and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
-        and await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
+        if state.index_kind == "files":
+            await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
+            return
+        if not await asyncio.to_thread(published_index_collection_exists_for_state, key, state):
+            await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
+            return
         index = publish_knowledge_index_from_state(
             key,
             state=state,
