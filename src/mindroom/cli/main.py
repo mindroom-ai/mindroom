@@ -88,6 +88,12 @@ def run(
         case_sensitive=False,
         envvar="LOG_LEVEL",
     ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults storage beside the selected config unless --storage-path is set.",
+    ),
     storage_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--storage-path",
@@ -121,6 +127,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
+            config_path=config_path,
             storage_path=storage_path,
             api=api,
             api_port=api_port,
@@ -155,6 +162,7 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
 async def _run(
     log_level: str,
+    config_path: Path | None,
     storage_path: Path | None,
     *,
     api: bool,
@@ -164,7 +172,7 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(storage_path=storage_path)
+    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
