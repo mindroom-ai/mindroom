@@ -19,6 +19,7 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -544,6 +545,7 @@ class TestRoutingRegression:
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_news_oldns:localhost could you help with this?"
         assert content["m.mentions"]["user_ids"] == ["@mindroom_news_oldns:localhost"]
+        assert content[ORIGINAL_SENDER_KEY] == "@bob:localhost"
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")
@@ -631,6 +633,7 @@ class TestRoutingRegression:
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == f"{ids['alpha'].full_id} could you help with this?"
         assert content["m.mentions"]["user_ids"] == [ids["alpha"].full_id]
+        assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
 
     @pytest.mark.asyncio
     async def test_direct_response_candidates_filter_configured_room_by_live_state(

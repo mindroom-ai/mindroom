@@ -17,6 +17,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import DispatchIngressMetadata
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -1108,6 +1111,77 @@ class TestCommandHandling:
         # Verify it was caught early by the agent message check
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
         assert "ignore_unmentioned_agent_event" in debug_calls
+
+    @pytest.mark.asyncio
+    async def test_scheduled_agent_event_with_router_requester_reaches_dispatch_policy(self) -> None:
+        """A deferred scheduled task authored by an agent may carry Router as requester."""
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="General Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        config = _runtime_bound_config(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent")},
+                router=RouterConfig(model="default"),
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
+            wrap_extracted_collaborators(bot)
+            bot.client = AsyncMock()
+            bot.client.user_id = "@mindroom_general:localhost"
+            sync_bot_runtime_state(bot)
+            bot.logger = MagicMock()
+            _sync_turn_policy_runtime(bot)
+
+            mock_context = _message_context(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread123",
+            )
+            bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+                return_value=dispatch_context_result(mock_context),
+            )
+
+            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "event_id": "$scheduled_task",
+                    "sender": "@mindroom_general:localhost",
+                    "origin_server_ts": 1234567890,
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "⏰ [Automated Task]\nCheck the workloop status",
+                        "com.mindroom.source_kind": SCHEDULED_SOURCE_KIND,
+                        ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
+                    },
+                },
+            )
+
+            result = await bot._turn_controller._prepare_dispatch(
+                room,
+                event,
+                "@mindroom_router:localhost",
+                event_label="message",
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+                ingress_metadata=DispatchIngressMetadata(source_kind=SCHEDULED_SOURCE_KIND),
+            )
+
+        assert result is not None
+        assert result.dispatch.requester_user_id == "@mindroom_router:localhost"
+        assert result.dispatch.envelope.source_kind == SCHEDULED_SOURCE_KIND
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        assert "ignore_unmentioned_agent_event" not in debug_calls
 
     @pytest.mark.asyncio
     async def test_router_error_prevents_team_formation(self) -> None:
