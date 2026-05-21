@@ -1184,7 +1184,14 @@ class TestCommandHandling:
         assert "ignore_unmentioned_agent_event" not in debug_calls
 
     @pytest.mark.asyncio
-    async def test_router_error_prevents_team_formation(self) -> None:
+    @pytest.mark.parametrize(
+        "content_extra",
+        [
+            pytest.param({}, id="plain"),
+            pytest.param({ORIGINAL_SENDER_KEY: "@user:localhost"}, id="with-original-sender"),
+        ],
+    )
+    async def test_router_error_prevents_team_formation(self, content_extra: dict[str, object]) -> None:
         """Test that RouterAgent error messages don't trigger team formation."""
         # This tests the scenario where multiple agents were mentioned earlier in thread
         # but RouterAgent sends an error without mentions - no team should form
@@ -1273,6 +1280,7 @@ class TestCommandHandling:
                 "content": {
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request",
+                    **content_extra,
                 },
             },
         )

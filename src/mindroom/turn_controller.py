@@ -28,6 +28,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
@@ -231,12 +232,24 @@ class TurnController:
         """Return the effective requester for reply-permission checks."""
         source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
         content = source_dict.get("content") if source_dict is not None else None
-        if (
-            sender == self.deps.matrix_id.full_id
-            and isinstance(content, dict)
-            and isinstance(content.get(ORIGINAL_SENDER_KEY), str)
-        ):
-            return content[ORIGINAL_SENDER_KEY]
+        if isinstance(content, dict):
+            original_sender = content.get(ORIGINAL_SENDER_KEY)
+            if not isinstance(original_sender, str):
+                return get_effective_sender_id_for_reply_permissions(
+                    sender,
+                    source_dict,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                )
+            raw_source_kind = content.get("com.mindroom.source_kind")
+            source_kind = raw_source_kind if isinstance(raw_source_kind, str) else None
+            if original_sender and self._should_trust_original_sender_metadata(
+                sender=sender,
+                content=content,
+                source_kind=source_kind,
+            ):
+                return original_sender
+            return sender
         return get_effective_sender_id_for_reply_permissions(
             sender,
             source_dict,
@@ -252,6 +265,53 @@ class TurnController:
         """Return the configured entity alias for an exact current Matrix user ID."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         return registry.current_entity_name_for_user_id(sender_id, include_router=include_router)
+
+    def _router_relay_mentions_routable_entity(self, content: dict[str, Any]) -> bool:
+        """Return whether router-authored message content appears to point at a responder."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+
+        mentions = content.get("m.mentions")
+        if isinstance(mentions, dict):
+            user_ids = mentions.get("user_ids")
+            if isinstance(user_ids, list) and any(
+                isinstance(user_id, str)
+                and registry.current_entity_name_for_user_id(user_id, include_router=False) is not None
+                for user_id in user_ids
+            ):
+                return True
+
+        body = content.get("body")
+        if not isinstance(body, str):
+            return False
+        if body.lstrip().startswith("@"):
+            return True
+        return any(
+            name != ROUTER_AGENT_NAME and matrix_id.full_id in body for name, matrix_id in registry.current_ids.items()
+        )
+
+    def _should_trust_original_sender_metadata(
+        self,
+        *,
+        sender: str,
+        content: dict[str, Any],
+        source_kind: str | None,
+    ) -> bool:
+        """Return whether original-sender metadata represents a trusted relay for this event."""
+        sender_is_own_entity = sender == self.deps.matrix_id.full_id
+        sender_agent_name = self._managed_entity_name_for_sender(sender)
+        if sender_agent_name is None and not sender_is_own_entity:
+            return False
+        sender_is_router = sender_agent_name == ROUTER_AGENT_NAME or (
+            sender_is_own_entity and self.deps.agent_name == ROUTER_AGENT_NAME
+        )
+        body = content.get("body")
+        if sender_is_router and isinstance(body, str) and body.startswith(VOICE_PREFIX):
+            return True
+        if sender_is_router and "io.mindroom.long_text" in content:
+            return True
+        if sender_is_router and source_kind in {None, "", "message"}:
+            return self._router_relay_mentions_routable_entity(content)
+        return True
 
     def _should_trust_internal_payload_metadata(self, event: DispatchEvent) -> bool:
         """Return whether internal payload keys on one event should be treated as authoritative."""
@@ -273,7 +333,15 @@ class TurnController:
         if source_kind not in {None, "", "message", COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY}:
             return False
         original_sender = content.get(ORIGINAL_SENDER_KEY)
-        return isinstance(original_sender, str) and bool(original_sender)
+        return (
+            isinstance(original_sender, str)
+            and bool(original_sender)
+            and self._should_trust_original_sender_metadata(
+                sender=event.sender,
+                content=content,
+                source_kind=source_kind,
+            )
+        )
 
     def _is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one trusted internal relay originated from the router."""
@@ -971,6 +1039,7 @@ class TurnController:
         sender_agent_name = self._managed_entity_name_for_sender(requester_user_id)
         if (
             sender_agent_name
+            # Plain hook sends follow normal mention routing; hook_dispatch bypasses via ingress_policy.
             and envelope.source_kind != SCHEDULED_SOURCE_KIND
             and not context.am_i_mentioned
             and not ingress_policy.bypass_unmentioned_agent_gate
@@ -1230,7 +1299,8 @@ class TurnController:
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
         if (
-            ORIGINAL_SENDER_KEY not in routed_extra_content
+            suggested_entity
+            and ORIGINAL_SENDER_KEY not in routed_extra_content
             and self._managed_entity_name_for_sender(requester_user_id) is None
         ):
             routed_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id

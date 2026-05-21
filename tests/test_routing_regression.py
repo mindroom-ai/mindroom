@@ -632,6 +632,75 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")
+    async def test_router_relay_failure_does_not_stamp_original_sender(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Router failure notices are not trusted handoffs to another responder."""
+        test_room_id = "!router-failure:localhost"
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(test_config)
+        ids = entity_ids(test_config, runtime_paths)
+        router_bot = setup_test_bot(
+            AgentMatrixUser(
+                agent_name="router",
+                password=TEST_PASSWORD,
+                display_name="RouterAgent",
+                user_id=ids["router"].full_id,
+            ),
+            tmp_path,
+            test_room_id,
+            config=test_config,
+        )
+
+        mock_suggest_responder.return_value = None
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        mock_send_response.event_id = "$router_failure_response"
+        router_bot.client.room_send.return_value = mock_send_response
+
+        mock_room = MagicMock()
+        mock_room.room_id = test_room_id
+        mock_room.users = {
+            ids["router"].full_id: MagicMock(),
+            ids["alpha"].full_id: MagicMock(),
+            ids["beta"].full_id: MagicMock(),
+        }
+        message_event = MagicMock(spec=nio.RoomMessageText)
+        message_event.sender = "@user:localhost"
+        message_event.body = "Please route this"
+        message_event.event_id = "$router_failure_message"
+        message_event.server_timestamp = 1000
+        message_event.source = {"content": {"body": "Please route this"}}
+
+        await router_bot._turn_controller._execute_router_relay(
+            mock_room,
+            message_event,
+            [],
+            None,
+            requester_user_id="@user:localhost",
+        )
+
+        router_bot.client.room_send.assert_awaited_once()
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert "couldn't determine which agent or team should help" in content["body"]
+        assert ORIGINAL_SENDER_KEY not in content
+
+    @pytest.mark.asyncio
+    @patch("mindroom.turn_controller.suggest_responder_for_message")
     async def test_router_relay_filters_configured_room_candidates_by_live_state(
         self,
         mock_suggest_responder: AsyncMock,
