@@ -274,7 +274,6 @@ class TestProvisionerEndpoints:
             PLATFORM_DOMAIN="mindroom.test",
             SUPABASE_URL="https://supabase.test",
             SUPABASE_ANON_KEY="test-anon-key",
-            OPENAI_API_KEY="test-openai",
         ):
             yield
 
@@ -354,6 +353,76 @@ class TestProvisionerEndpoints:
         secret_data = apply_secret.call_args.args[2]
         assert secret_data["openrouter_key"] == ""
         create_key.assert_not_called()
+
+    def test_byok_provisioning_does_not_inject_shared_platform_provider_keys(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """BYOK tenants should not receive shared platform model-provider keys."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+
+        with patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret:
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "byok"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openai_key"] == ""
+        assert secret_data["anthropic_key"] == ""
+        assert secret_data["google_key"] == ""
+        assert secret_data["deepseek_key"] == ""
+
+    def test_hobby_provisioning_only_injects_limited_openrouter_provider_key(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Included-budget tenants should not receive shared direct provider keys."""
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+        mock_supabase.table().update().eq().execute.return_value = Mock()
+        created_key = CreatedOpenRouterKey(
+            key="sk-or-v1-hobby-customer",
+            hash="hobby_hash",
+            label="MindRoom hobby instance 123",
+            limit_usd=15,
+            limit_reset="monthly",
+        )
+
+        with (
+            patch("backend.routes.provisioner.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management", create=True),
+            patch("backend.routes.provisioner.create_openrouter_key", return_value=created_key, create=True),
+            patch("backend.routes.provisioner._apply_instance_secret", new_callable=AsyncMock) as apply_secret,
+        ):
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "hobby"},
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        secret_data = apply_secret.call_args.args[2]
+        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+        assert secret_data["openai_key"] == ""
+        assert secret_data["anthropic_key"] == ""
+        assert secret_data["google_key"] == ""
+        assert secret_data["deepseek_key"] == ""
 
     def test_hobby_provisioning_creates_monthly_limited_openrouter_key(
         self,

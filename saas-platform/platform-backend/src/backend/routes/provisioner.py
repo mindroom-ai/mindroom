@@ -17,9 +17,6 @@ from uuid import UUID
 
 import anyio
 from backend.config import (
-    ANTHROPIC_API_KEY,
-    DEEPSEEK_API_KEY,
-    GOOGLE_API_KEY,
     INSTANCE_BASE_DOMAIN,
     INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
     INSTANCE_IMAGE_PULL_SECRET_NAMES,
@@ -46,7 +43,6 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
     INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
-    OPENAI_API_KEY,
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
@@ -630,12 +626,13 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             existing_instance_row=existing_instance_row,
             namespace=namespace,
         )
+        # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
         instance_secret_data = {
-            "openai_key": OPENAI_API_KEY or "",
-            "anthropic_key": ANTHROPIC_API_KEY or "",
+            "openai_key": "",
+            "anthropic_key": "",
             "openrouter_key": openrouter_key,
-            "google_key": GOOGLE_API_KEY or "",
-            "deepseek_key": DEEPSEEK_API_KEY or "",
+            "google_key": "",
+            "deepseek_key": "",
             "supabase_service_key": SUPABASE_SERVICE_KEY or "",
             "sandbox_proxy_token": sandbox_proxy_token,
             "credentials_encryption_key": credentials_encryption_key,
