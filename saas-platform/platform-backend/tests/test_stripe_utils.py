@@ -37,7 +37,7 @@ class TestStripeDebugUtils:
         products = stripe.Product.list(limit=100)
 
         # Find MindRoom products
-        mindroom_products = [p for p in products.data if p.metadata.get("platform") == "mindroom"]
+        mindroom_products = [p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"]
 
         # Should have at least one MindRoom product
         assert len(mindroom_products) > 0, "No MindRoom products found in Stripe"
@@ -46,7 +46,7 @@ class TestStripeDebugUtils:
         product = mindroom_products[0]
         assert product.name == "MindRoom Subscription", f"Product name mismatch: {product.name}"
         assert product.active, "MindRoom product is not active"
-        assert product.metadata.get("platform") == "mindroom", "Missing platform metadata"
+        assert product.metadata["platform"] == "mindroom", "Missing platform metadata"
 
     def _check_price(self, plan_name: str, price_id: str | None, yaml_price: int, billing_cycle: str) -> str | None:
         """Check a single price against Stripe. Returns error message if mismatch."""

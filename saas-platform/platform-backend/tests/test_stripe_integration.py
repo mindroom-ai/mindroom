@@ -48,14 +48,14 @@ class TestStripeIntegration:
         """Test that MindRoom product exists in Stripe."""
         products = stripe.Product.list(limit=100)
 
-        mindroom_products = [p for p in products.data if p.metadata.get("platform") == "mindroom"]
+        mindroom_products = [p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"]
 
         assert len(mindroom_products) > 0, "No MindRoom product found in Stripe"
 
         # Verify product details
         product = mindroom_products[0]
         assert product.name == "MindRoom Subscription"
-        assert product.metadata.get("platform") == "mindroom"
+        assert product.metadata["platform"] == "mindroom"
 
     @pytest.mark.skipif(not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials")
     def test_all_configured_prices_exist(self) -> None:

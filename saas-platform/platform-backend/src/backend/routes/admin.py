@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from backend.config import PROVISIONER_API_KEY, logger
+from backend.config import PROVISIONER_API_KEY, logger, stripe
 from pydantic import BaseModel
 from backend.deps import ensure_supabase, limiter, verify_admin
 from backend.utils.audit import create_audit_log
@@ -588,11 +588,6 @@ async def admin_delete_account_complete(
     # 3. Cancel any active Stripe subscriptions
     if account.get("stripe_customer_id"):
         try:
-            import stripe
-            from backend.config import STRIPE_API_KEY
-
-            stripe.api_key = STRIPE_API_KEY
-
             # List and cancel all subscriptions for this customer
             subscriptions = stripe.Subscription.list(customer=account["stripe_customer_id"], status="active")
             for subscription in subscriptions.data:

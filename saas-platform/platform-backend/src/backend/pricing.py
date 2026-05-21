@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -52,6 +53,8 @@ class Plan(BaseModel):
     limits: PlanLimits
     stripe_price_id_monthly: str | None = None
     stripe_price_id_yearly: str | None = None
+    stripe_price_id_monthly_live: str | None = None
+    stripe_price_id_yearly_live: str | None = None
     recommended: bool = False
     price_model: Literal["per_user"] | None = None
 
@@ -128,6 +131,24 @@ def load_pricing_config_model() -> PricingConfig:
     return PricingConfig(**config_dict)
 
 
+def _stripe_mode() -> Literal["test", "live"]:
+    publishable_key = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+    if publishable_key.startswith("pk_live_"):
+        return "live"
+
+    secret_key = os.getenv("STRIPE_SECRET_KEY", "")
+    if secret_key.startswith(("sk_live_", "rk_live_")):
+        return "live"
+
+    secret_file = os.getenv("STRIPE_SECRET_KEY_FILE", "")
+    if secret_file:
+        path = Path(secret_file)
+        if path.exists() and path.read_text(encoding="utf-8").strip().startswith(("sk_live_", "rk_live_")):
+            return "live"
+
+    return "test"
+
+
 def get_stripe_price_id(plan: str, billing_cycle: str = "monthly") -> str | None:
     """Get Stripe price ID for a specific plan and billing cycle.
 
@@ -145,6 +166,12 @@ def get_stripe_price_id(plan: str, billing_cycle: str = "monthly") -> str | None
     if not plan_obj:
         return None
 
+    mode = _stripe_mode()
+
+    if billing_cycle == "monthly" and mode == "live":
+        return plan_obj.stripe_price_id_monthly_live
+    if billing_cycle == "yearly" and mode == "live":
+        return plan_obj.stripe_price_id_yearly_live
     if billing_cycle == "monthly":
         return plan_obj.stripe_price_id_monthly
     if billing_cycle == "yearly":

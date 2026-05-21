@@ -36,6 +36,8 @@ plans:
     description: Perfect for individuals
     stripe_price_id_monthly: price_1S6FvF3GVsrZHuzXrDZ5H7EW
     stripe_price_id_yearly: price_1S6FvF3GVsrZHuzXDjv76gwE
+    stripe_price_id_monthly_live: price_1TZQHw3GVsrZHuzXeXWd2f3Z
+    stripe_price_id_yearly_live: price_1TZQJK3GVsrZHuzXuazROiIy
     recommended: true
     features:
     - 100 AI Agents
@@ -67,6 +69,8 @@ plans:
     description: For teams and businesses
     stripe_price_id_monthly: price_1S6FvG3GVsrZHuzXBwljASJB
     stripe_price_id_yearly: price_1S6FvG3GVsrZHuzXQV9y2VEo
+    stripe_price_id_monthly_live: price_1TZQJL3GVsrZHuzXSzAgw8U4
+    stripe_price_id_yearly_live: price_1TZQJL3GVsrZHuzXO0WBASeh
     features:
     - Unlimited AI Agents
     - Unlimited messages

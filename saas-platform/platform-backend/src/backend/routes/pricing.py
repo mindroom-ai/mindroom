@@ -53,9 +53,8 @@ async def get_pricing_config() -> dict[str, Any]:
             "features": plan_data.features,
             "limits": plan_data.limits.model_dump(),
             "recommended": plan_data.recommended,
-            # Include Stripe price IDs if available
-            "stripe_price_id_monthly": plan_data.stripe_price_id_monthly,
-            "stripe_price_id_yearly": plan_data.stripe_price_id_yearly,
+            "stripe_price_id_monthly": get_stripe_price_id(plan_key, "monthly"),
+            "stripe_price_id_yearly": get_stripe_price_id(plan_key, "yearly"),
         }
 
     return config

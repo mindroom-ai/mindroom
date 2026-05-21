@@ -86,11 +86,15 @@ class TestPricingConfig:
         starter = model.plans["starter"]
         assert starter.stripe_price_id_monthly == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
         assert starter.stripe_price_id_yearly == "price_1S6FvF3GVsrZHuzXDjv76gwE"
+        assert starter.stripe_price_id_monthly_live == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
+        assert starter.stripe_price_id_yearly_live == "price_1TZQJK3GVsrZHuzXuazROiIy"
 
         # Professional plan IDs
         professional = model.plans["professional"]
         assert professional.stripe_price_id_monthly == "price_1S6FvG3GVsrZHuzXBwljASJB"
         assert professional.stripe_price_id_yearly == "price_1S6FvG3GVsrZHuzXQV9y2VEo"
+        assert professional.stripe_price_id_monthly_live == "price_1TZQJL3GVsrZHuzXSzAgw8U4"
+        assert professional.stripe_price_id_yearly_live == "price_1TZQJL3GVsrZHuzXO0WBASeh"
 
         # Free and Enterprise should not have Stripe IDs
         assert model.plans["free"].stripe_price_id_monthly is None
@@ -149,8 +153,10 @@ class TestPricingConfig:
 class TestPricingHelperFunctions:
     """Test pricing helper functions."""
 
-    def test_get_stripe_price_id(self) -> None:
+    def test_get_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting Stripe price IDs."""
+        monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_test_mock")
+
         # Starter monthly
         assert get_stripe_price_id("starter", "monthly") == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
 
@@ -172,6 +178,15 @@ class TestPricingHelperFunctions:
 
         # Invalid billing cycle
         assert get_stripe_price_id("starter", "weekly") is None
+
+    def test_get_live_stripe_price_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test getting live Stripe price IDs in live mode."""
+        monkeypatch.setenv("STRIPE_PUBLISHABLE_KEY", "pk_live_mock")
+
+        assert get_stripe_price_id("starter", "monthly") == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
+        assert get_stripe_price_id("starter", "yearly") == "price_1TZQJK3GVsrZHuzXuazROiIy"
+        assert get_stripe_price_id("professional", "monthly") == "price_1TZQJL3GVsrZHuzXSzAgw8U4"
+        assert get_stripe_price_id("professional", "yearly") == "price_1TZQJL3GVsrZHuzXO0WBASeh"
 
     def test_get_plan_details(self) -> None:
         """Test getting plan details."""
@@ -306,3 +321,4 @@ class TestPricingIntegration:
         assert get_stripe_price_id("starter", "monthly") == starter_monthly_id
         assert config_model.plans["starter"].stripe_price_id_monthly == starter_monthly_id
         assert yaml_data["plans"]["starter"]["stripe_price_id_monthly"] == starter_monthly_id
+        assert yaml_data["plans"]["starter"]["stripe_price_id_monthly_live"] == "price_1TZQHw3GVsrZHuzXeXWd2f3Z"
