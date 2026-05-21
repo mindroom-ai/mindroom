@@ -611,6 +611,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_tags"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.subagents"
 depends_on = [
     "mindroom.agent_descriptions",
@@ -619,6 +628,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.responder_availability",
+    "mindroom.thread_tags",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
 ]
@@ -1447,7 +1457,9 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
-depends_on = []
+depends_on = [
+    "mindroom.thread_tags",
+]
 visibility = [
     "mindroom.api.matrix_operations",
     "mindroom.bot",
@@ -1540,9 +1552,17 @@ depends_on = [
 visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
+    "mindroom.custom_tools.thread_tags",
+    "mindroom.thread_tags",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
+]
+
+[[modules]]
+path = "mindroom.thread_tags"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
 ]
 
 [[modules]]
@@ -2584,6 +2604,7 @@ expose = [
     "fetch_thread_event_sources_via_room_messages",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",

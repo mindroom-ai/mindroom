@@ -75,6 +75,9 @@ Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use 
 Both can be combined.
 Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
 `thread_tags.list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+`include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+The response includes `include_untagged: bool` and `truncated: bool`, and callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.

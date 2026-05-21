@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -13,19 +12,17 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import ordered_custom_tool_payload
 from mindroom.matrix.client_thread_history import RoomThreadsPageError
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
-    get_thread_tags,
     list_tagged_threads,
     normalize_tag_name,
     remove_thread_tag,
     set_thread_tag,
-    thread_tags_match_filters,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -63,13 +60,7 @@ class ThreadTagsTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        return custom_tool_payload("thread_tags", status, **kwargs)
-
-    @staticmethod
-    def _ordered_payload(status: str, **kwargs: object) -> str:
-        payload: dict[str, object] = {"status": status, "tool": "thread_tags"}
-        payload.update(kwargs)
-        return json.dumps(payload, sort_keys=False)
+        return ordered_custom_tool_payload("thread_tags", status, **kwargs)
 
     @classmethod
     def _context_error(cls) -> str:
@@ -317,8 +308,12 @@ class ThreadTagsTools(Toolkit):
             Defaults to False.
 
         Returns:
-          Returns a JSON object with `room_id`, `room_wide`, `threads` (mapping of
-          thread_id -> tag dict), and, when `include_untagged=True`,
+          Thread-specific queries return a JSON object with `room_id`,
+          `thread_id`, and `tags`.
+
+          Room-wide queries return a JSON object with `room_id`, `room_wide`,
+          and `threads` (mapping of thread_id -> tag dict). On success with
+          `include_untagged=True`, the payload also includes
           `include_untagged: bool` and `truncated: bool`.
         """
         context = get_tool_runtime_context()
@@ -370,27 +365,15 @@ class ThreadTagsTools(Toolkit):
             allow_context_fallback=room_id is None and not include_untagged,
         )
         if effective_thread_id is None:
-            room_wide_tag = (
-                normalized_tag if normalized_include_tag is None and normalized_exclude_tag is None else None
-            )
             try:
-                if include_untagged:
-                    listing: ThreadTagsListing = await list_tagged_threads(
-                        context.client,
-                        resolved_room_id,
-                        tag=normalized_tag,
-                        include_tag=normalized_include_tag,
-                        exclude_tag=normalized_exclude_tag,
-                        include_untagged=True,
-                    )
-                else:
-                    listing = await list_tagged_threads(
-                        context.client,
-                        resolved_room_id,
-                        tag=room_wide_tag,
-                    )
-                threads = listing.tag_state
-                truncated = listing.truncated
+                listing: ThreadTagsListing = await list_tagged_threads(
+                    context.client,
+                    resolved_room_id,
+                    tag=normalized_tag,
+                    include_tag=normalized_include_tag,
+                    exclude_tag=normalized_exclude_tag,
+                    include_untagged=include_untagged,
+                )
             except RoomThreadsPageError as exc:
                 error_payload: dict[str, object] = {
                     "action": "list",
@@ -419,39 +402,22 @@ class ThreadTagsTools(Toolkit):
 
             serialized_threads = {
                 thread_root_id: _serialized_tags_for_output(state.tags, tag=normalized_tag)
-                for thread_root_id, state in threads.items()
-                if include_untagged
-                or thread_tags_match_filters(
-                    state.tags,
-                    tag=None if room_wide_tag is not None else normalized_tag,
-                    include_tag=normalized_include_tag,
-                    exclude_tag=normalized_exclude_tag,
-                )
+                for thread_root_id, state in listing.tag_state.items()
+            }
+            payload_fields: dict[str, object] = {
+                "action": "list",
+                "room_id": resolved_room_id,
+                "room_wide": True,
+                "tag": normalized_tag,
+                "include_tag": normalized_include_tag,
+                "exclude_tag": normalized_exclude_tag,
+                "threads": serialized_threads,
             }
             if include_untagged:
-                return self._ordered_payload(
-                    "ok",
-                    action="list",
-                    room_id=resolved_room_id,
-                    room_wide=True,
-                    tag=normalized_tag,
-                    include_tag=normalized_include_tag,
-                    exclude_tag=normalized_exclude_tag,
-                    include_untagged=True,
-                    truncated=truncated,
-                    threads=serialized_threads,
-                )
+                payload_fields["include_untagged"] = True
+                payload_fields["truncated"] = listing.truncated
 
-            return self._payload(
-                "ok",
-                action="list",
-                room_id=resolved_room_id,
-                room_wide=True,
-                tag=normalized_tag,
-                include_tag=normalized_include_tag,
-                exclude_tag=normalized_exclude_tag,
-                threads=serialized_threads,
-            )
+            return self._payload("ok", **payload_fields)
 
         thread_target = await resolve_canonical_tool_thread_target(
             context,
@@ -480,10 +446,12 @@ class ThreadTagsTools(Toolkit):
         normalized_thread_id = thread_target.canonical_thread_id
 
         try:
-            state = await get_thread_tags(
+            listing = await list_tagged_threads(
                 context.client,
                 resolved_room_id,
-                normalized_thread_id,
+                tag=normalized_tag,
+                include_tag=normalized_include_tag,
+                exclude_tag=normalized_exclude_tag,
             )
         except ThreadTagsError as exc:
             return self._payload(
@@ -498,12 +466,8 @@ class ThreadTagsTools(Toolkit):
             )
 
         tags = {}
-        if state is not None and thread_tags_match_filters(
-            state.tags,
-            tag=normalized_tag,
-            include_tag=normalized_include_tag,
-            exclude_tag=normalized_exclude_tag,
-        ):
+        state = listing.tag_state.get(normalized_thread_id)
+        if state is not None:
             tags = _serialized_tags_for_output(state.tags, tag=normalized_tag)
 
         return self._payload(

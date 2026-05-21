@@ -16,7 +16,7 @@ from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
     ThreadTagsListing,
-    get_thread_tags,
+    _get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
     set_thread_tag,
@@ -961,7 +961,7 @@ async def test_get_thread_tags_parses_valid_state() -> None:
         ),
     )
 
-    state = await get_thread_tags(
+    state = await _get_thread_tags(
         client,
         "!room:localhost",
         "$thread-root:localhost",
@@ -1009,7 +1009,7 @@ async def test_get_thread_tags_returns_none_for_missing_empty_and_malformed(resp
     client = AsyncMock()
     client.room_get_state.return_value = response
 
-    state = await get_thread_tags(
+    state = await _get_thread_tags(
         client,
         "!room:localhost",
         "$thread-root:localhost",
@@ -1055,7 +1055,7 @@ async def test_get_thread_tags_drops_malformed_tags_and_preserves_valid_siblings
         ),
     )
 
-    state = await get_thread_tags(
+    state = await _get_thread_tags(
         client,
         "!room:localhost",
         "$thread-root:localhost",
@@ -1083,7 +1083,7 @@ async def test_get_thread_tags_ignores_malformed_per_tag_overlay_and_keeps_legac
         ),
     )
 
-    state = await get_thread_tags(
+    state = await _get_thread_tags(
         client,
         "!room:localhost",
         "$thread-root:localhost",
@@ -1692,7 +1692,7 @@ async def test_get_thread_tags_raises_for_non_missing_state_fetch_error() -> Non
     client.room_get_state.return_value = object()
 
     with pytest.raises(ThreadTagsError, match="Failed to fetch room state for thread tags"):
-        await get_thread_tags(
+        await _get_thread_tags(
             client,
             "!room:localhost",
             "$thread-root:localhost",

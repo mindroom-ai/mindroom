@@ -510,9 +510,6 @@ def _thread_tags_match_filters(
     return exclude_tag is None or exclude_tag not in tags
 
 
-thread_tags_match_filters = _thread_tags_match_filters
-
-
 async def _put_thread_tag_state(
     client: nio.AsyncClient,
     room_id: str,
@@ -719,7 +716,7 @@ async def _assert_thread_tags_write_allowed(
     )
 
 
-async def get_thread_tags(
+async def _get_thread_tags(
     client: nio.AsyncClient,
     room_id: str,
     thread_root_id: str,
@@ -788,7 +785,7 @@ async def set_thread_tag(
             error_prefix="Failed to write thread tags state",
         )
 
-        verified_state = await get_thread_tags(
+        verified_state = await _get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
@@ -831,7 +828,7 @@ async def remove_thread_tag(
 
     remove_written = False
     for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
-        existing_state = await get_thread_tags(
+        existing_state = await _get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
@@ -857,7 +854,7 @@ async def remove_thread_tag(
         )
         remove_written = True
 
-        verified_state = await get_thread_tags(
+        verified_state = await _get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,

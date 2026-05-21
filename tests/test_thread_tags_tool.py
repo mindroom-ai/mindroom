@@ -360,9 +360,13 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
-            new=AsyncMock(return_value=_state("$ctx-thread:localhost", resolved=_record(note="done"))),
-        ) as mock_get,
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value=_listing(
+                    {"$ctx-thread:localhost": _state("$ctx-thread:localhost", resolved=_record(note="done"))},
+                ),
+            ),
+        ) as mock_list,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.list_thread_tags())
@@ -377,10 +381,12 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         "$ctx-thread:localhost",
         conversation_cache=context.conversation_cache,
     )
-    mock_get.assert_awaited_once_with(
+    mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
-        "$ctx-thread:localhost",
+        tag=None,
+        include_tag=None,
+        exclude_tag=None,
     )
 
 
@@ -396,9 +402,13 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
             new=AsyncMock(return_value="$explicit-thread:localhost"),
         ) as mock_normalize,
         patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
-            new=AsyncMock(return_value=_state("$explicit-thread:localhost", resolved=_record(note="done"))),
-        ) as mock_get,
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                return_value=_listing(
+                    {"$explicit-thread:localhost": _state("$explicit-thread:localhost", resolved=_record(note="done"))},
+                ),
+            ),
+        ) as mock_list,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.list_thread_tags(thread_id="$explicit-event:localhost"))
@@ -412,10 +422,12 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         "$explicit-event:localhost",
         conversation_cache=context.conversation_cache,
     )
-    mock_get.assert_awaited_once_with(
+    mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
-        "$explicit-thread:localhost",
+        tag=None,
+        include_tag=None,
+        exclude_tag=None,
     )
 
 
@@ -639,6 +651,9 @@ async def test_list_thread_tags_uses_room_wide_listing_without_thread_context() 
         context.client,
         context.room_id,
         tag=None,
+        include_tag=None,
+        exclude_tag=None,
+        include_untagged=False,
     )
 
 
@@ -679,6 +694,9 @@ async def test_list_thread_tags_lists_room_wide_when_no_thread_is_available() ->
         context.client,
         context.room_id,
         tag="blocked",
+        include_tag=None,
+        exclude_tag=None,
+        include_untagged=False,
     )
 
 
@@ -697,10 +715,6 @@ async def test_list_thread_tags_room_wide_filters_by_include_tag_only() -> None:
                         "$thread-one:localhost": _state(
                             "$thread-one:localhost",
                             blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                        ),
-                        "$thread-two:localhost": _state(
-                            "$thread-two:localhost",
-                            resolved=_record(note="done"),
                         ),
                         "$thread-three:localhost": _state(
                             "$thread-three:localhost",
@@ -726,6 +740,9 @@ async def test_list_thread_tags_room_wide_filters_by_include_tag_only() -> None:
         context.client,
         context.room_id,
         tag=None,
+        include_tag="blocked",
+        exclude_tag=None,
+        include_untagged=False,
     )
 
 
@@ -741,17 +758,9 @@ async def test_list_thread_tags_room_wide_requires_tag_and_include_tag_together(
             new=AsyncMock(
                 return_value=_listing(
                     {
-                        "$thread-one:localhost": _state(
-                            "$thread-one:localhost",
-                            blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                        ),
                         "$thread-two:localhost": _state(
                             "$thread-two:localhost",
                             blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                            waiting=_record(data={"waiting_on": ["@owner:localhost"]}),
-                        ),
-                        "$thread-three:localhost": _state(
-                            "$thread-three:localhost",
                             waiting=_record(data={"waiting_on": ["@owner:localhost"]}),
                         ),
                     },
@@ -771,7 +780,10 @@ async def test_list_thread_tags_room_wide_requires_tag_and_include_tag_together(
     mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
-        tag=None,
+        tag="blocked",
+        include_tag="waiting",
+        exclude_tag=None,
+        include_untagged=False,
     )
 
 
@@ -791,15 +803,6 @@ async def test_list_thread_tags_room_wide_requires_tag_without_excluded_tag() ->
                             "$thread-one:localhost",
                             blocked=_record(data={"blocked_by": ["$other:localhost"]}),
                         ),
-                        "$thread-two:localhost": _state(
-                            "$thread-two:localhost",
-                            blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                            resolved=_record(note="done"),
-                        ),
-                        "$thread-three:localhost": _state(
-                            "$thread-three:localhost",
-                            waiting=_record(data={"waiting_on": ["@owner:localhost"]}),
-                        ),
                     },
                 ),
             ),
@@ -817,7 +820,10 @@ async def test_list_thread_tags_room_wide_requires_tag_without_excluded_tag() ->
     mock_list.assert_awaited_once_with(
         context.client,
         context.room_id,
-        tag=None,
+        tag="blocked",
+        include_tag=None,
+        exclude_tag="resolved",
+        include_untagged=False,
     )
 
 
@@ -831,18 +837,7 @@ async def test_list_thread_tags_room_wide_returns_empty_when_include_tag_matches
         patch(
             "mindroom.custom_tools.thread_tags.list_tagged_threads",
             new=AsyncMock(
-                return_value=_listing(
-                    {
-                        "$thread-one:localhost": _state(
-                            "$thread-one:localhost",
-                            blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                        ),
-                        "$thread-two:localhost": _state(
-                            "$thread-two:localhost",
-                            resolved=_record(note="done"),
-                        ),
-                    },
-                ),
+                return_value=_listing({}),
             ),
         ) as mock_list,
         tool_runtime_context(context),
@@ -857,6 +852,9 @@ async def test_list_thread_tags_room_wide_returns_empty_when_include_tag_matches
         context.client,
         context.room_id,
         tag=None,
+        include_tag="nonexistent",
+        exclude_tag=None,
+        include_untagged=False,
     )
 
 
@@ -870,19 +868,7 @@ async def test_list_thread_tags_room_wide_returns_empty_when_exclude_tag_filters
         patch(
             "mindroom.custom_tools.thread_tags.list_tagged_threads",
             new=AsyncMock(
-                return_value=_listing(
-                    {
-                        "$thread-one:localhost": _state(
-                            "$thread-one:localhost",
-                            blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                            resolved=_record(note="done"),
-                        ),
-                        "$thread-two:localhost": _state(
-                            "$thread-two:localhost",
-                            resolved=_record(note="done"),
-                        ),
-                    },
-                ),
+                return_value=_listing({}),
             ),
         ) as mock_list,
         tool_runtime_context(context),
@@ -897,6 +883,9 @@ async def test_list_thread_tags_room_wide_returns_empty_when_exclude_tag_filters
         context.client,
         context.room_id,
         tag=None,
+        include_tag=None,
+        exclude_tag="resolved",
+        include_untagged=False,
     )
 
 
@@ -916,11 +905,6 @@ async def test_list_thread_tags_room_wide_normalizes_mixed_case_include_and_excl
                             "$thread-one:localhost",
                             blocked=_record(data={"blocked_by": ["$other:localhost"]}),
                         ),
-                        "$thread-two:localhost": _state(
-                            "$thread-two:localhost",
-                            blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                            resolved=_record(note="done"),
-                        ),
                     },
                 ),
             ),
@@ -938,6 +922,9 @@ async def test_list_thread_tags_room_wide_normalizes_mixed_case_include_and_excl
         context.client,
         context.room_id,
         tag=None,
+        include_tag="blocked",
+        exclude_tag="resolved",
+        include_untagged=False,
     )
 
 
@@ -952,10 +939,6 @@ async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_fro
             "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
             new=AsyncMock(),
         ) as mock_normalize,
-        patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
-            new=AsyncMock(),
-        ) as mock_get,
         patch(
             "mindroom.custom_tools.thread_tags.list_tagged_threads",
             new=AsyncMock(
@@ -982,9 +965,11 @@ async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_fro
         context.client,
         context.room_id,
         tag="blocked",
+        include_tag=None,
+        exclude_tag=None,
+        include_untagged=False,
     )
     mock_normalize.assert_not_awaited()
-    mock_get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1109,7 +1094,6 @@ async def test_list_thread_tags_include_untagged_suppresses_in_thread_context_fa
             "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
             new=AsyncMock(),
         ) as mock_normalize,
-        patch("mindroom.custom_tools.thread_tags.get_thread_tags", new=AsyncMock()) as mock_get,
         patch(
             "mindroom.custom_tools.thread_tags.list_tagged_threads",
             new=AsyncMock(return_value=listing),
@@ -1130,7 +1114,6 @@ async def test_list_thread_tags_include_untagged_suppresses_in_thread_context_fa
         include_untagged=True,
     )
     mock_normalize.assert_not_awaited()
-    mock_get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1234,7 +1217,7 @@ def test_list_thread_tags_schema_exposes_include_untagged_parameter() -> None:
 
 @pytest.mark.asyncio
 async def test_list_thread_tags_filters_thread_specific_payload() -> None:
-    """Thread-specific listing should support a tag filter without a second read."""
+    """Thread-specific listing should support a tag filter through the shared helper."""
     tool = ThreadTagsTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
 
@@ -1244,15 +1227,19 @@ async def test_list_thread_tags_filters_thread_specific_payload() -> None:
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
             new=AsyncMock(
-                return_value=_state(
-                    "$ctx-thread:localhost",
-                    resolved=_record(),
-                    blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                return_value=_listing(
+                    {
+                        "$ctx-thread:localhost": _state(
+                            "$ctx-thread:localhost",
+                            resolved=_record(),
+                            blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                        ),
+                    },
                 ),
             ),
-        ),
+        ) as mock_list,
         tool_runtime_context(context),
     ):
         payload = json.loads(await tool.list_thread_tags(tag="blocked"))
@@ -1261,6 +1248,13 @@ async def test_list_thread_tags_filters_thread_specific_payload() -> None:
     assert payload["tags"]["blocked"]["data"] == {"blocked_by": ["$other:localhost"]}
     assert payload["tags"]["blocked"]["set_by"] == "@user:localhost"
     assert datetime.fromisoformat(payload["tags"]["blocked"]["set_at"]).tzinfo is not None
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag="blocked",
+        include_tag=None,
+        exclude_tag=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -1275,13 +1269,22 @@ async def test_list_thread_tags_thread_specific_include_exclude_filters() -> Non
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
-            "mindroom.custom_tools.thread_tags.get_thread_tags",
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
             new=AsyncMock(
-                return_value=_state(
-                    "$ctx-thread:localhost",
-                    resolved=_record(),
-                    blocked=_record(data={"blocked_by": ["$other:localhost"]}),
-                ),
+                side_effect=[
+                    _listing(
+                        {
+                            "$ctx-thread:localhost": _state(
+                                "$ctx-thread:localhost",
+                                resolved=_record(),
+                                blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+                            ),
+                        },
+                    ),
+                    _listing({}),
+                    _listing({}),
+                    _listing({}),
+                ],
             ),
         ),
         tool_runtime_context(context),
