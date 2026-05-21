@@ -25,7 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Hashable, Mapping
 
     from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, tuple[object, ...] | None], float] = {}
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, Hashable | None], float] = {}
 _EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 
@@ -122,19 +122,15 @@ def _lookup_knowledge_for_base(
         return None
 
 
-def _settings_fingerprint(settings: Mapping[str, str] | None) -> tuple[object, ...] | None:
-    return tuple(sorted(settings.items())) if settings is not None else None
-
-
 def _refresh_schedule_due(
     key: KnowledgeRefreshTarget,
     availability: KnowledgeAvailability,
     *,
-    settings_fingerprint: tuple[object, ...] | None = None,
+    settings: Hashable | None = None,
     cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     now = time.monotonic()
-    cache_key = (key, availability, settings_fingerprint)
+    cache_key = (key, availability, settings)
     last_scheduled_at = _refresh_scheduled_at.get(cache_key)
     if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
         return False
@@ -252,17 +248,16 @@ def _embedded_userinfo_fingerprint(repo_url: str) -> str:
     return hmac.new(_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()
 
 
-def _refresh_retry_settings_fingerprint(
+def _refresh_retry_settings(
     lookup: PublishedIndexResolution,
     config: Config,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
-) -> tuple[object, ...] | None:
-    settings_fingerprint = tuple(sorted(lookup.key.indexing_settings.items()))
+) -> Hashable | None:
     if availability is KnowledgeAvailability.CONFIG_MISMATCH:
-        return settings_fingerprint
+        return lookup.key.indexing_settings
     if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return (*settings_fingerprint, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
+        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
     return None
 
 
@@ -311,7 +306,7 @@ def _schedule_refresh_for_availability(
             else _refresh_schedule_due(
                 refresh_target,
                 KnowledgeAvailability.READY,
-                settings_fingerprint=_settings_fingerprint(lookup.key.indexing_settings),
+                settings=lookup.key.indexing_settings,
                 cooldown_seconds=_schedule_refresh_on_access_cooldown_seconds(lookup, config),
             )
         )
@@ -334,7 +329,7 @@ def _schedule_refresh_for_availability(
         if not scheduler_is_refreshing and _refresh_schedule_due(
             refresh_target,
             availability,
-            settings_fingerprint=_settings_fingerprint(lookup.key.indexing_settings),
+            settings=lookup.key.indexing_settings,
         ):
             refresh_scheduler.schedule_refresh(
                 base_id,
@@ -350,7 +345,7 @@ def _schedule_refresh_for_availability(
     ) and _refresh_schedule_due(
         refresh_target,
         availability,
-        settings_fingerprint=_refresh_retry_settings_fingerprint(lookup, config, runtime_paths, availability),
+        settings=_refresh_retry_settings(lookup, config, runtime_paths, availability),
         cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     ):
         refresh_scheduler.schedule_refresh(

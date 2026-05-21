@@ -131,48 +131,128 @@ _TEXT_LIKE_EXTENSIONS = {
     ".proto",
 }
 _FileSignature = tuple[int, int, str]
-_INDEXING_SETTING_BASE_ID = "base_id"
-_INDEXING_SETTING_STORAGE_ROOT = "storage_root"
-_INDEXING_SETTING_KNOWLEDGE_PATH = "knowledge_path"
-_INDEXING_SETTING_MODE = "mode"
-_INDEXING_SETTING_EMBEDDER_PROVIDER = "embedder_provider"
-_INDEXING_SETTING_EMBEDDER_MODEL = "embedder_model"
-_INDEXING_SETTING_EMBEDDER_HOST = "embedder_host"
-_INDEXING_SETTING_EMBEDDER_DIMENSIONS = "embedder_dimensions"
-_INDEXING_SETTING_CHUNK_SIZE = "chunk_size"
-_INDEXING_SETTING_CHUNK_OVERLAP = "chunk_overlap"
-_INDEXING_SETTING_REPO_IDENTITY = "repo_identity"
-_INDEXING_SETTING_GIT_BRANCH = "git_branch"
-_INDEXING_SETTING_GIT_LFS = "git_lfs"
-_INDEXING_SETTING_GIT_SKIP_HIDDEN = "git_skip_hidden"
-_INDEXING_SETTING_GIT_INCLUDE_PATTERNS = "git_include_patterns"
-_INDEXING_SETTING_GIT_EXCLUDE_PATTERNS = "git_exclude_patterns"
-_INDEXING_SETTING_INCLUDE_EXTENSIONS = "include_extensions"
-_INDEXING_SETTING_EXCLUDE_EXTENSIONS = "exclude_extensions"
-INDEXING_SETTINGS_QUERY_COMPATIBLE_KEYS = (
-    _INDEXING_SETTING_BASE_ID,
-    _INDEXING_SETTING_STORAGE_ROOT,
-    _INDEXING_SETTING_KNOWLEDGE_PATH,
-    _INDEXING_SETTING_MODE,
-    _INDEXING_SETTING_EMBEDDER_PROVIDER,
-    _INDEXING_SETTING_EMBEDDER_MODEL,
-    _INDEXING_SETTING_EMBEDDER_HOST,
-    _INDEXING_SETTING_EMBEDDER_DIMENSIONS,
-)
-INDEXING_SETTINGS_CORPUS_COMPATIBLE_KEYS = (
-    _INDEXING_SETTING_BASE_ID,
-    _INDEXING_SETTING_STORAGE_ROOT,
-    _INDEXING_SETTING_KNOWLEDGE_PATH,
-    _INDEXING_SETTING_MODE,
-    _INDEXING_SETTING_REPO_IDENTITY,
-    _INDEXING_SETTING_GIT_BRANCH,
-    _INDEXING_SETTING_GIT_LFS,
-    _INDEXING_SETTING_GIT_SKIP_HIDDEN,
-    _INDEXING_SETTING_GIT_INCLUDE_PATTERNS,
-    _INDEXING_SETTING_GIT_EXCLUDE_PATTERNS,
-    _INDEXING_SETTING_INCLUDE_EXTENSIONS,
-    _INDEXING_SETTING_EXCLUDE_EXTENSIONS,
-)
+
+
+@dataclass(frozen=True)
+class IndexingSettings:
+    """Typed schema for settings that determine knowledge index compatibility."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+    mode: str
+    embedder_provider: str
+    embedder_model: str
+    embedder_host: str
+    embedder_dimensions: str
+    chunk_size: str
+    chunk_overlap: str
+    repo_identity: str
+    git_branch: str
+    git_lfs: str
+    git_skip_hidden: str
+    git_include_patterns: str
+    git_exclude_patterns: str
+    include_extensions: str
+    exclude_extensions: str
+
+    @classmethod
+    def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
+        """Build typed settings from the persisted JSON object."""
+        if set(settings) != {
+            "base_id",
+            "storage_root",
+            "knowledge_path",
+            "mode",
+            "embedder_provider",
+            "embedder_model",
+            "embedder_host",
+            "embedder_dimensions",
+            "chunk_size",
+            "chunk_overlap",
+            "repo_identity",
+            "git_branch",
+            "git_lfs",
+            "git_skip_hidden",
+            "git_include_patterns",
+            "git_exclude_patterns",
+            "include_extensions",
+            "exclude_extensions",
+        }:
+            return None
+        return cls(
+            base_id=settings["base_id"],
+            storage_root=settings["storage_root"],
+            knowledge_path=settings["knowledge_path"],
+            mode=settings["mode"],
+            embedder_provider=settings["embedder_provider"],
+            embedder_model=settings["embedder_model"],
+            embedder_host=settings["embedder_host"],
+            embedder_dimensions=settings["embedder_dimensions"],
+            chunk_size=settings["chunk_size"],
+            chunk_overlap=settings["chunk_overlap"],
+            repo_identity=settings["repo_identity"],
+            git_branch=settings["git_branch"],
+            git_lfs=settings["git_lfs"],
+            git_skip_hidden=settings["git_skip_hidden"],
+            git_include_patterns=settings["git_include_patterns"],
+            git_exclude_patterns=settings["git_exclude_patterns"],
+            include_extensions=settings["include_extensions"],
+            exclude_extensions=settings["exclude_extensions"],
+        )
+
+    def to_metadata(self) -> dict[str, str]:
+        """Return the JSON object persisted in index metadata."""
+        return {
+            "base_id": self.base_id,
+            "storage_root": self.storage_root,
+            "knowledge_path": self.knowledge_path,
+            "mode": self.mode,
+            "embedder_provider": self.embedder_provider,
+            "embedder_model": self.embedder_model,
+            "embedder_host": self.embedder_host,
+            "embedder_dimensions": self.embedder_dimensions,
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+            "repo_identity": self.repo_identity,
+            "git_branch": self.git_branch,
+            "git_lfs": self.git_lfs,
+            "git_skip_hidden": self.git_skip_hidden,
+            "git_include_patterns": self.git_include_patterns,
+            "git_exclude_patterns": self.git_exclude_patterns,
+            "include_extensions": self.include_extensions,
+            "exclude_extensions": self.exclude_extensions,
+        }
+
+    def query_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str]:
+        """Return fields that must match for safe vector queries."""
+        return (
+            self.base_id,
+            self.storage_root,
+            self.knowledge_path,
+            self.mode,
+            self.embedder_provider,
+            self.embedder_model,
+            self.embedder_host,
+            self.embedder_dimensions,
+        )
+
+    def corpus_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str]:
+        """Return fields that must match for safe source-corpus reuse."""
+        return (
+            self.base_id,
+            self.storage_root,
+            self.knowledge_path,
+            self.mode,
+            self.repo_identity,
+            self.git_branch,
+            self.git_lfs,
+            self.git_skip_hidden,
+            self.git_include_patterns,
+            self.git_exclude_patterns,
+            self.include_extensions,
+            self.exclude_extensions,
+        )
 
 
 @runtime_checkable
@@ -217,7 +297,7 @@ class _CollectionExistenceEmbedder(Embedder):
 
 @dataclass(frozen=True)
 class _PersistedIndexState:
-    settings: dict[str, str]
+    settings: IndexingSettings
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
     last_published_at: str | None = None
@@ -305,7 +385,7 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
 
 
-def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> dict[str, str]:
+def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
     embedder_config = config.memory.embedder.config
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
@@ -315,34 +395,28 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         host=embedder_config.host,
         dimensions=embedder_config.dimensions,
     )
-    return {
-        _INDEXING_SETTING_BASE_ID: base_id,
-        _INDEXING_SETTING_STORAGE_ROOT: str(storage_path.resolve()),
-        _INDEXING_SETTING_KNOWLEDGE_PATH: str(knowledge_path.resolve()),
-        _INDEXING_SETTING_MODE: base_config.mode,
-        _INDEXING_SETTING_EMBEDDER_PROVIDER: embedder_provider,
-        _INDEXING_SETTING_EMBEDDER_MODEL: embedder_model,
-        _INDEXING_SETTING_EMBEDDER_HOST: embedder_host,
-        _INDEXING_SETTING_EMBEDDER_DIMENSIONS: embedder_dimensions,
-        _INDEXING_SETTING_CHUNK_SIZE: str(base_config.chunk_size),
-        _INDEXING_SETTING_CHUNK_OVERLAP: str(base_config.chunk_overlap),
-        _INDEXING_SETTING_REPO_IDENTITY: credential_free_url_identity(git_config.repo_url)
-        if git_config is not None
-        else "",
-        _INDEXING_SETTING_GIT_BRANCH: git_config.branch if git_config is not None else "",
-        _INDEXING_SETTING_GIT_LFS: str(git_config.lfs) if git_config is not None else "",
-        _INDEXING_SETTING_GIT_SKIP_HIDDEN: str(git_config.skip_hidden) if git_config is not None else "",
-        _INDEXING_SETTING_GIT_INCLUDE_PATTERNS: str(tuple(git_config.include_patterns))
-        if git_config is not None
-        else "",
-        _INDEXING_SETTING_GIT_EXCLUDE_PATTERNS: str(tuple(git_config.exclude_patterns))
-        if git_config is not None
-        else "",
-        _INDEXING_SETTING_INCLUDE_EXTENSIONS: str(tuple(base_config.include_extensions))
+    return IndexingSettings(
+        base_id=base_id,
+        storage_root=str(storage_path.resolve()),
+        knowledge_path=str(knowledge_path.resolve()),
+        mode=base_config.mode,
+        embedder_provider=embedder_provider,
+        embedder_model=embedder_model,
+        embedder_host=embedder_host,
+        embedder_dimensions=embedder_dimensions,
+        chunk_size=str(base_config.chunk_size),
+        chunk_overlap=str(base_config.chunk_overlap),
+        repo_identity=credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
+        git_branch=git_config.branch if git_config is not None else "",
+        git_lfs=str(git_config.lfs) if git_config is not None else "",
+        git_skip_hidden=str(git_config.skip_hidden) if git_config is not None else "",
+        git_include_patterns=str(tuple(git_config.include_patterns)) if git_config is not None else "",
+        git_exclude_patterns=str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
+        include_extensions=str(tuple(base_config.include_extensions))
         if base_config.include_extensions is not None
         else "",
-        _INDEXING_SETTING_EXCLUDE_EXTENSIONS: str(tuple(base_config.exclude_extensions)),
-    }
+        exclude_extensions=str(tuple(base_config.exclude_extensions)),
+    )
 
 
 def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
@@ -784,7 +858,7 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    _indexing_settings: dict[str, str] = field(init=False)
+    _indexing_settings: IndexingSettings = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
@@ -898,8 +972,11 @@ class KnowledgeManager:
             indexed_count,
             source_signature,
         ) = fields
+        indexing_settings = IndexingSettings.from_metadata(settings)
+        if indexing_settings is None:
+            return None
         return _PersistedIndexState(
-            settings,
+            indexing_settings,
             cast('Literal["resetting", "indexing", "complete"]', status),
             collection=collection,
             last_published_at=last_published_at,
@@ -912,7 +989,7 @@ class KnowledgeManager:
         self,
         status: Literal["resetting", "indexing", "complete"],
         *,
-        settings: Mapping[str, str] | None = None,
+        settings: IndexingSettings | None = None,
         collection: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,
@@ -921,7 +998,7 @@ class KnowledgeManager:
     ) -> None:
         write_index_metadata_payload(
             self._indexing_settings_path,
-            settings=settings or self._indexing_settings,
+            settings=(settings or self._indexing_settings).to_metadata(),
             status=status,
             collection=collection,
             last_published_at=last_published_at,

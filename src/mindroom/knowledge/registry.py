@@ -8,7 +8,7 @@ importing this module directly.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
@@ -25,7 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from agno.knowledge.knowledge import Knowledge
 
@@ -49,14 +49,7 @@ class PublishedIndexKey:
     base_id: str
     storage_root: str
     knowledge_path: str
-    indexing_settings: dict[str, str] = field(compare=False, hash=False)
-    _indexing_settings_fingerprint: tuple[tuple[str, str], ...] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Copy settings and derive a hashable key fingerprint."""
-        settings = dict(self.indexing_settings)
-        object.__setattr__(self, "indexing_settings", settings)
-        object.__setattr__(self, "_indexing_settings_fingerprint", tuple(sorted(settings.items())))
+    indexing_settings: manager_module.IndexingSettings
 
 
 @dataclass(frozen=True)
@@ -80,7 +73,7 @@ class KnowledgeSourceRoot:
 class PublishedIndexState:
     """Persisted state for the published knowledge index."""
 
-    settings: dict[str, str]
+    settings: manager_module.IndexingSettings
     status: Literal["resetting", "indexing", "complete", "failed"]
     index_kind: Literal["semantic", "files"] = "semantic"
     collection: str | None = None
@@ -93,10 +86,6 @@ class PublishedIndexState:
     last_error: str | None = None
     updated_at: str | None = None
     last_refresh_at: str | None = None
-
-    def __post_init__(self) -> None:
-        """Copy settings so callers cannot mutate state through their original dict."""
-        object.__setattr__(self, "settings", dict(self.settings))
 
 
 @dataclass(frozen=True)
@@ -288,11 +277,14 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
         indexed_count,
         source_signature,
     ) = fields
+    indexing_settings = manager_module.IndexingSettings.from_metadata(settings)
+    if indexing_settings is None:
+        return None
     raw_index_kind = payload.get("index_kind")
     index_kind: Literal["semantic", "files"] = "files" if raw_index_kind == "files" else "semantic"
 
     return PublishedIndexState(
-        settings=settings,
+        settings=indexing_settings,
         status=cast('Literal["resetting", "indexing", "complete", "failed"]', status),
         index_kind=index_kind,
         collection=collection,
@@ -312,7 +304,7 @@ def save_published_index_state(metadata_path: Path, state: PublishedIndexState) 
     """Atomically persist published index metadata."""
     write_index_metadata_payload(
         metadata_path,
-        settings=state.settings,
+        settings=state.settings.to_metadata(),
         status=state.status,
         index_kind=state.index_kind,
         collection=state.collection,
@@ -494,38 +486,32 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
 
 
 def _indexing_settings_query_compatible(
-    published_settings: Mapping[str, str],
-    current_settings: Mapping[str, str],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether current queries can use a collection from published settings."""
-    return all(
-        published_settings.get(key) == current_settings.get(key)
-        for key in manager_module.INDEXING_SETTINGS_QUERY_COMPATIBLE_KEYS
-    )
+    return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
 
 
 def _indexing_settings_corpus_compatible(
-    published_settings: Mapping[str, str],
-    current_settings: Mapping[str, str],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether published content is safe for the current corpus config."""
-    return all(
-        published_settings.get(key) == current_settings.get(key)
-        for key in manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_KEYS
-    )
+    return published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
 
 
 def indexing_settings_metadata_equal(
-    published_settings: Mapping[str, str],
-    current_settings: Mapping[str, str],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether persisted metadata exactly matches current indexing settings."""
-    return dict(published_settings) == dict(current_settings)
+    return published_settings == current_settings
 
 
 def published_index_settings_compatible(
-    published_settings: Mapping[str, str],
-    current_settings: Mapping[str, str],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether a published index can be queried under the current config."""
     return _indexing_settings_query_compatible(
