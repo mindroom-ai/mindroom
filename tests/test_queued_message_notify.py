@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import FinalDeliveryRequest
+    from mindroom.turn_origin import TurnOrigin
 
 
 class _ReservationLike(Protocol):
@@ -138,6 +139,9 @@ def _envelope(
     dispatch_policy_source_kind: str | None = None,
     source_event_id: str = "$event",
     target: MessageTarget | None = None,
+    requester_id: str = "@user:localhost",
+    sender_id: str = "@user:localhost",
+    origin: TurnOrigin | None = None,
 ) -> MessageEnvelope:
     target = target or MessageTarget.resolve(
         room_id="!room:localhost",
@@ -148,15 +152,15 @@ def _envelope(
         source_event_id=source_event_id,
         room_id="!room:localhost",
         target=target,
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
+        requester_id=requester_id,
+        sender_id=sender_id,
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
         source_kind=source_kind,
         dispatch_policy_source_kind=dispatch_policy_source_kind,
-        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
+        origin=origin or message_origin(sender_id=sender_id, requester_id=requester_id, source_kind=source_kind),
     )
 
 
@@ -1902,6 +1906,37 @@ def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
         reservation.consume()
         reservation.consume()
         reservation.cancel()
+        assert queued_signal.pending_human_messages == 0
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert not queued_signal.is_set()
+
+
+def test_managed_message_does_not_reserve_queued_human_notice(tmp_path: Path) -> None:
+    """Managed chatter should not count as a queued human follow-up."""
+    bot = _bot(tmp_path)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(
+        source_event_id="$event",
+        target=target,
+        sender_id="@mindroom_general:localhost",
+        requester_id="@mindroom_general:localhost",
+        origin=message_origin(
+            sender_id="@mindroom_general:localhost",
+            requester_id="@mindroom_general:localhost",
+            sender_entity_name="general",
+            requester_entity_name="general",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is None
         assert queued_signal.pending_human_messages == 0
     finally:
         queued_signal.finish_response_turn()

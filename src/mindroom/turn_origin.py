@@ -11,11 +11,10 @@ from mindroom.dispatch_source import (
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    is_automation_source_kind,
 )
 
 
-class _SenderKind(StrEnum):
+class SenderKind(StrEnum):
     """Transport-level sender category for one inbound turn."""
 
     USER = "user"
@@ -35,7 +34,7 @@ class TurnIntent(StrEnum):
     TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
 
-class _TurnTrust(StrEnum):
+class TurnTrust(StrEnum):
     """How much dispatch policy may trust one turn's internal metadata."""
 
     EXTERNAL = "external"
@@ -51,16 +50,11 @@ class TurnOrigin:
     requester_id: str
     sender_entity_name: str | None
     requester_entity_name: str | None
-    sender_kind: _SenderKind
-    requester_kind: _SenderKind
+    sender_kind: SenderKind
+    requester_kind: SenderKind
     intent: TurnIntent
     source_kind: str
-    trust: _TurnTrust
-
-    @property
-    def is_automation(self) -> bool:
-        """Return whether the turn is synthetic automation."""
-        return is_automation_source_kind(self.source_kind)
+    trust: TurnTrust
 
     @property
     def may_dispatch_without_mention(self) -> bool:
@@ -74,12 +68,16 @@ class TurnOrigin:
     @property
     def blocks_unmentioned_managed_sender(self) -> bool:
         """Return whether an unmentioned managed sender should be treated as chatter."""
-        return self.requester_kind == _SenderKind.MANAGED_ENTITY and not self.may_dispatch_without_mention
+        return self.requester_kind == SenderKind.MANAGED_ENTITY and not self.may_dispatch_without_mention
 
     @property
     def may_answer_interactive_prompt(self) -> bool:
-        """Return whether the turn may be handled as a human interactive response."""
-        return not self.is_automation
+        """Return whether a human-requested turn may answer an interactive prompt."""
+        return self.requester_kind == SenderKind.USER and self.intent in {
+            TurnIntent.USER_MESSAGE,
+            TurnIntent.ROUTER_HANDOFF,
+            TurnIntent.TRUSTED_INTERNAL_RELAY,
+        }
 
 
 def classify_turn_origin(
@@ -93,8 +91,8 @@ def classify_turn_origin(
     trusted_user_relay: bool,
 ) -> TurnOrigin:
     """Return the canonical origin policy for one inbound turn."""
-    sender_kind = _SenderKind.MANAGED_ENTITY if sender_entity_name is not None else _SenderKind.USER
-    requester_kind = _SenderKind.MANAGED_ENTITY if requester_entity_name is not None else _SenderKind.USER
+    sender_kind = SenderKind.MANAGED_ENTITY if sender_entity_name is not None else SenderKind.USER
+    requester_kind = SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER
     trust = _turn_trust(
         sender_kind=sender_kind,
         original_sender=original_sender,
@@ -154,26 +152,26 @@ def original_sender_for_router_relay(
 
 def _turn_trust(
     *,
-    sender_kind: _SenderKind,
+    sender_kind: SenderKind,
     original_sender: str | None,
     trusted_user_relay: bool,
-) -> _TurnTrust:
+) -> TurnTrust:
     if trusted_user_relay and original_sender:
-        return _TurnTrust.TRUSTED_USER_RELAY
-    if sender_kind == _SenderKind.MANAGED_ENTITY:
-        return _TurnTrust.TRUSTED_INTERNAL
-    return _TurnTrust.EXTERNAL
+        return TurnTrust.TRUSTED_USER_RELAY
+    if sender_kind == SenderKind.MANAGED_ENTITY:
+        return TurnTrust.TRUSTED_INTERNAL
+    return TurnTrust.EXTERNAL
 
 
 def _turn_intent(
     *,
     sender_entity_name: str | None,
-    sender_kind: _SenderKind,
+    sender_kind: SenderKind,
     source_kind: str,
-    trust: _TurnTrust,
+    trust: TurnTrust,
 ) -> TurnIntent:
     intent: TurnIntent
-    if trust == _TurnTrust.TRUSTED_USER_RELAY:
+    if trust == TurnTrust.TRUSTED_USER_RELAY:
         if sender_entity_name == ROUTER_AGENT_NAME:
             intent = TurnIntent.ROUTER_HANDOFF
         else:
@@ -188,7 +186,7 @@ def _turn_intent(
         intent = TurnIntent.ROUTER_NOTICE
     elif source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
         intent = TurnIntent.TRUSTED_INTERNAL_RELAY
-    elif sender_kind == _SenderKind.MANAGED_ENTITY:
+    elif sender_kind == SenderKind.MANAGED_ENTITY:
         intent = TurnIntent.MANAGED_MESSAGE
     else:
         intent = TurnIntent.USER_MESSAGE

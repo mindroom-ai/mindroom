@@ -32,6 +32,23 @@ def test_managed_sender_message_is_chatter_that_requires_mention() -> None:
     assert origin.trust.value == "trusted_internal"
     assert origin.blocks_unmentioned_managed_sender
     assert not origin.may_dispatch_without_mention
+    assert not origin.may_answer_interactive_prompt
+
+
+def test_managed_message_with_human_requester_cannot_answer_interactive_prompt() -> None:
+    """Managed-message intent is never a human prompt answer."""
+    origin = classify_turn_origin(
+        transport_sender_id="@mindroom_general:localhost",
+        requester_id="@human:localhost",
+        sender_entity_name="general",
+        requester_entity_name=None,
+        source_kind="message",
+        original_sender=None,
+        trusted_user_relay=False,
+    )
+
+    assert origin.intent == TurnIntent.MANAGED_MESSAGE
+    assert not origin.may_answer_interactive_prompt
 
 
 def test_scheduled_managed_sender_bypasses_agent_chatter_gate() -> None:
@@ -113,6 +130,7 @@ def test_router_handoff_is_trusted_user_relay() -> None:
     assert origin.intent == TurnIntent.ROUTER_HANDOFF
     assert origin.trust.value == "trusted_user_relay"
     assert not origin.blocks_unmentioned_managed_sender
+    assert origin.may_answer_interactive_prompt
 
 
 def test_router_notice_stays_internal_chatter() -> None:
@@ -130,6 +148,24 @@ def test_router_notice_stays_internal_chatter() -> None:
     assert origin.intent == TurnIntent.ROUTER_NOTICE
     assert origin.trust.value == "trusted_internal"
     assert origin.blocks_unmentioned_managed_sender
+    assert not origin.may_answer_interactive_prompt
+
+
+def test_human_requested_messages_answer_interactive_prompts() -> None:
+    """Human-requested non-automation turns may answer prompts."""
+    origin = classify_turn_origin(
+        transport_sender_id="@human:localhost",
+        requester_id="@human:localhost",
+        sender_entity_name=None,
+        requester_entity_name=None,
+        source_kind="message",
+        original_sender=None,
+        trusted_user_relay=False,
+    )
+
+    assert origin.intent == TurnIntent.USER_MESSAGE
+    assert origin.trust.value == "external"
+    assert origin.may_answer_interactive_prompt
 
 
 def test_router_handoff_original_sender_only_for_human_targeted_handoff() -> None:

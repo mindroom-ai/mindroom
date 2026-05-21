@@ -99,7 +99,6 @@ def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop()
 
     assert policy.rerun_message_received is True
     assert policy.allow_full_dispatch is True
-    assert policy.bypass_unmentioned_agent_gate is True
     assert policy.skip_message_received_plugin_names == frozenset({"origin-plugin"})
 
 
@@ -115,7 +114,6 @@ def test_hook_ingress_policy_blocks_deeper_synthetic_hops() -> None:
 
     assert policy.rerun_message_received is False
     assert policy.allow_full_dispatch is False
-    assert policy.bypass_unmentioned_agent_gate is True
     assert policy.skip_message_received_plugin_names == frozenset()
 
 

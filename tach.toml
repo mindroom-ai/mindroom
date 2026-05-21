@@ -2923,11 +2923,15 @@ expose = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "ScheduleFiredContext",
+    "SenderKind",
     "SessionHookContext",
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
+    "TurnIntent",
+    "TurnOrigin",
+    "TurnTrust",
     "build_hook_message_sender",
     "build_hook_matrix_admin",
     "build_hook_room_state_putter",
@@ -2948,7 +2952,6 @@ expose = [
     "render_system_enrichment_block",
     "send_and_track_message",
     "send_hook_message",
-    "should_handle_interactive_text_response",
     "validate_event_name",
 ]
 from = ["mindroom.hooks"]

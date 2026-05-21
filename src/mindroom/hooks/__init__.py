@@ -10,6 +10,7 @@ from mindroom.dispatch_source import (
     is_automation_source_kind,
     is_voice_event,
 )
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from .context import (
     AfterResponseContext,
@@ -135,10 +136,14 @@ __all__ = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "ScheduleFiredContext",
+    "SenderKind",
     "SessionHookContext",
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "TurnIntent",
+    "TurnOrigin",
+    "TurnTrust",
     "build_hook_matrix_admin",
     "build_hook_message_sender",
     "build_hook_room_state_putter",

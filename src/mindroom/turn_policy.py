@@ -720,10 +720,7 @@ class TurnPolicy:
             return False
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        source_origin = source_envelope.origin
-        source_is_automation = not source_origin.may_answer_interactive_prompt
-        source_is_managed = source_origin.requester_entity_name is not None
-        if source_is_automation or source_is_managed:
+        if not source_envelope.origin.may_answer_interactive_prompt:
             return False
         policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind
         if policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
