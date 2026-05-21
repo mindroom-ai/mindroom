@@ -1479,6 +1479,16 @@ class TestVersionAndHelp:
 class TestRunApiFlags:
     """Tests for --api/--no-api, --api-port, --api-host flags."""
 
+    @staticmethod
+    def _write_minimal_config(path: Path) -> None:
+        path.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+
     def test_run_help_shows_api_flags(self) -> None:
         """Run --help lists the new API server flags."""
         result = runner.invoke(app, ["run", "--help"])
@@ -1553,13 +1563,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "selected"
         cfg = config_dir / "config.yaml"
         config_dir.mkdir()
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-            encoding="utf-8",
-        )
+        self._write_minimal_config(cfg)
         monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(ambient_config))
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
@@ -1587,13 +1591,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "selected"
         cfg = config_dir / "config.yaml"
         config_dir.mkdir()
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-            encoding="utf-8",
-        )
+        self._write_minimal_config(cfg)
 
         async def _fake_main(**kwargs: object) -> None:
             runtime_paths = kwargs["runtime_paths"]
@@ -1648,12 +1646,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "profile"
         config_dir.mkdir()
         cfg = config_dir / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        self._write_minimal_config(cfg)
         storage_root = tmp_path / "explicit-storage"
 
         async def _fake_main(**kwargs: object) -> None:

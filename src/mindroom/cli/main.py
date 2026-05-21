@@ -172,7 +172,7 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
