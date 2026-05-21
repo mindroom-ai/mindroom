@@ -120,6 +120,9 @@ Start MindRoom with your configuration.
 │                                          ERROR)                                        │
 │                                          [env var: LOG_LEVEL]                          │
 │                                          [default: INFO]                               │
+│ --config        -c              PATH     Use this config file path. Defaults storage   │
+│                                          beside the selected config unless             │
+│                                          --storage-path is set.                        │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │ --api               --no-api             Start the bundled dashboard/API server        │
