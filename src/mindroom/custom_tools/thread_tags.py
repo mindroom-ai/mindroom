@@ -377,6 +377,7 @@ class ThreadTagsTools(Toolkit):
             except RoomThreadsPageError as exc:
                 error_payload: dict[str, object] = {
                     "action": "list",
+                    "message": exc.response,
                     "response": exc.response,
                     "room_id": resolved_room_id,
                     "tag": normalized_tag,

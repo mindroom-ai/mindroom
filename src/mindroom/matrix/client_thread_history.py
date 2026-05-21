@@ -1185,7 +1185,15 @@ async def enumerate_room_thread_root_ids(
             page_token=page_token,
         )
         if not thread_roots:
-            break
+            if next_token is None:
+                break
+            if next_token in seen_next_tokens:
+                truncated = True
+                break
+
+            seen_next_tokens.add(next_token)
+            page_token = next_token
+            continue
 
         new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
             thread_roots,

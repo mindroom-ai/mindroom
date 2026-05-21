@@ -1173,6 +1173,7 @@ async def test_list_thread_tags_include_untagged_surfaces_enumeration_error_fiel
     assert payload["status"] == "error"
     assert payload["action"] == "list"
     assert payload["room_id"] == context.room_id
+    assert payload["message"] == "rate limited"
     assert payload["response"] == "rate limited"
     assert payload["errcode"] == "M_LIMIT_EXCEEDED"
     assert payload["retry_after_ms"] == 250

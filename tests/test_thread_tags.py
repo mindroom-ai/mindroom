@@ -1291,6 +1291,28 @@ async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_skips_empty_page_with_next_token() -> None:
+    """Room thread enumeration should keep following cursors through empty pages."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([], "next_token_1"),
+                ([_thread_root_event("$root_A"), _thread_root_event("$root_B")], None),
+            ],
+        ),
+    ) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$root_A", "$root_B"]
+    assert truncated is False
+    assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
+    assert mock_get_page.await_args_list[1].kwargs["page_token"] == "next_token_1"  # noqa: S105
+
+
+@pytest.mark.asyncio
 async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_truncated() -> None:
     """Exact cap completion should not report truncation without a continuation token."""
     client = AsyncMock()
