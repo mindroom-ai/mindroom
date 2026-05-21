@@ -9,6 +9,9 @@ plans:
     price_monthly: 0
     price_yearly: 0
     description: Get started with basic features
+    included_ai_budget_usd: 0
+    requires_customer_provider_keys: true
+    resource_profile: small
     features:
     - 1 AI Agent
     - 100 messages per day
@@ -29,21 +32,23 @@ plans:
       custom_development: false
       on_premise: false
       dedicated_infrastructure: false
-  starter:
-    name: Starter
+  byok:
+    name: Bring Your Own Keys
     price_monthly: 1000
     price_yearly: 9600
-    description: Perfect for individuals
-    stripe_price_id_monthly: price_1S6FvF3GVsrZHuzXrDZ5H7EW
-    stripe_price_id_yearly: price_1S6FvF3GVsrZHuzXDjv76gwE
+    description: Hosted MindRoom for customers who provide their own model keys
+    stripe_price_id_monthly: price_1TZQNK3GVsrZHuzX6EWO8kgD
+    stripe_price_id_yearly: price_1TZQNK3GVsrZHuzXqbwHwhph
     stripe_price_id_monthly_live: price_1TZQHw3GVsrZHuzXeXWd2f3Z
     stripe_price_id_yearly_live: price_1TZQJK3GVsrZHuzXuazROiIy
-    recommended: true
+    included_ai_budget_usd: 0
+    requires_customer_provider_keys: true
+    resource_profile: small
     features:
     - 100 AI Agents
     - Unlimited messages
     - 5GB storage
-    - Email support
+    - Bring your own model provider keys
     - All integrations
     - Custom workflows
     - Analytics dashboard
@@ -61,36 +66,69 @@ plans:
       custom_development: false
       on_premise: false
       dedicated_infrastructure: false
-  professional:
-    name: Professional
-    price_monthly: 800
-    price_yearly: 7680
-    price_model: per_user
-    description: For teams and businesses
-    stripe_price_id_monthly: price_1S6FvG3GVsrZHuzXBwljASJB
-    stripe_price_id_yearly: price_1S6FvG3GVsrZHuzXQV9y2VEo
-    stripe_price_id_monthly_live: price_1TZQJL3GVsrZHuzXSzAgw8U4
-    stripe_price_id_yearly_live: price_1TZQJL3GVsrZHuzXO0WBASeh
+  hobby:
+    name: Hobby
+    price_monthly: 2000
+    price_yearly: 19200
+    description: Hosted MindRoom with included monthly AI usage
+    stripe_price_id_monthly: price_1TZQNL3GVsrZHuzXR6EQuT9v
+    stripe_price_id_yearly: price_1TZQNL3GVsrZHuzXiSmtuLKu
+    included_ai_budget_usd: 15
+    requires_customer_provider_keys: false
+    resource_profile: small
+    recommended: true
+    features:
+    - 100 AI Agents
+    - Unlimited messages
+    - 5GB storage
+    - $15 included monthly AI usage
+    - All integrations
+    - Custom workflows
+    - Analytics dashboard
+    limits:
+      max_agents: 100
+      max_messages_per_day: unlimited
+      storage_gb: 5
+      support: Email
+      integrations: All integrations
+      workflows: true
+      analytics: advanced
+      sla: false
+      training: false
+      sso: false
+      custom_development: false
+      on_premise: false
+      dedicated_infrastructure: false
+  pro:
+    name: Pro
+    price_monthly: 20000
+    price_yearly: 192000
+    description: Larger hosted MindRoom workspace with a higher included AI budget
+    stripe_price_id_monthly: price_1TZQNM3GVsrZHuzXzhGy4cW8
+    stripe_price_id_yearly: price_1TZQNM3GVsrZHuzXI0JGgiEo
+    included_ai_budget_usd: 150
+    requires_customer_provider_keys: false
+    resource_profile: pro
     features:
     - Unlimited AI Agents
     - Unlimited messages
-    - 10GB storage per user
+    - 25GB storage
+    - $150 included monthly AI usage
     - Priority support
     - Advanced analytics
-    - SSO & SAML
+    - Larger hosted resource profile
     - SLA guarantee
-    - Team training
     limits:
       max_agents: unlimited
       max_messages_per_day: unlimited
-      storage_gb: 10
+      storage_gb: 25
       support: Priority support
       integrations: All integrations + custom
       workflows: true
       analytics: advanced
       sla: true
-      training: true
-      sso: true
+      training: false
+      sso: false
       custom_development: false
       on_premise: false
       dedicated_infrastructure: false
@@ -99,6 +137,9 @@ plans:
     price_monthly: custom
     price_yearly: custom
     description: Tailored for large organizations
+    included_ai_budget_usd: 0
+    requires_customer_provider_keys: false
+    resource_profile: pro
     features:
     - Unlimited everything
     - Custom limits
@@ -126,7 +167,8 @@ trial:
   enabled: true
   days: 3
   applicable_plans:
-  - starter
-  - professional
+  - byok
+  - hobby
+  - pro
 discounts:
   annual_percentage: 20

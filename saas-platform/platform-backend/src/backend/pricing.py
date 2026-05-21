@@ -57,6 +57,9 @@ class Plan(BaseModel):
     stripe_price_id_yearly_live: str | None = None
     recommended: bool = False
     price_model: Literal["per_user"] | None = None
+    included_ai_budget_usd: int = 0
+    requires_customer_provider_keys: bool = False
+    resource_profile: Literal["small", "pro"] = "small"
 
 
 class Trial(BaseModel):

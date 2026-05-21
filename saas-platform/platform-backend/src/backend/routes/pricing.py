@@ -53,6 +53,9 @@ async def get_pricing_config() -> dict[str, Any]:
             "features": plan_data.features,
             "limits": plan_data.limits.model_dump(),
             "recommended": plan_data.recommended,
+            "included_ai_budget_usd": plan_data.included_ai_budget_usd,
+            "requires_customer_provider_keys": plan_data.requires_customer_provider_keys,
+            "resource_profile": plan_data.resource_profile,
             "stripe_price_id_monthly": get_stripe_price_id(plan_key, "monthly"),
             "stripe_price_id_yearly": get_stripe_price_id(plan_key, "yearly"),
         }
