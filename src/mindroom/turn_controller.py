@@ -73,6 +73,7 @@ from mindroom.matrix.media import (
     is_image_message_event,
     is_matrix_media_dispatch_event,
 )
+from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
@@ -283,10 +284,13 @@ class TurnController:
         body = content.get("body")
         if not isinstance(body, str):
             return False
-        if body.lstrip().startswith("@"):
-            return True
         return any(
-            name != ROUTER_AGENT_NAME and matrix_id.full_id in body for name, matrix_id in registry.current_ids.items()
+            registry.current_entity_name_for_user_id(user_id, include_router=False) is not None
+            for user_id in resolve_mentioned_user_ids_from_text(
+                body,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            )
         )
 
     def _should_trust_original_sender_metadata(

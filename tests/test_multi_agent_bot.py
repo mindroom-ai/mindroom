@@ -10967,7 +10967,7 @@ class TestAgentBot:
                 "origin_server_ts": 1234567890,
                 "content": {
                     "msgtype": "m.text",
-                    "body": "@mindroom_code:localhost could you help with this?",
+                    "body": "@mindroom_calculator:localhost could you help with this?",
                     ORIGINAL_SENDER_KEY: "@user:localhost",
                 },
             },

@@ -684,7 +684,12 @@ class TestRoutingRegression:
         message_event.body = "Please route this"
         message_event.event_id = "$router_failure_message"
         message_event.server_timestamp = 1000
-        message_event.source = {"content": {"body": "Please route this"}}
+        message_event.source = {
+            "content": {
+                "body": "Please route this",
+                ORIGINAL_SENDER_KEY: "@stale:localhost",
+            },
+        }
 
         await router_bot._turn_controller._execute_router_relay(
             mock_room,
@@ -698,6 +703,62 @@ class TestRoutingRegression:
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert "couldn't determine which agent or team should help" in content["body"]
         assert ORIGINAL_SENDER_KEY not in content
+
+    def test_router_original_sender_metadata_requires_routable_mention(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router relays only honor provenance when the body targets a configured responder."""
+        test_room_id = "!router-mentions:localhost"
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=[test_room_id]),
+                    "beta": AgentConfig(display_name="BetaAgent", rooms=[test_room_id]),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(test_config)
+        ids = entity_ids(test_config, runtime_paths)
+        router_bot = setup_test_bot(
+            AgentMatrixUser(
+                agent_name="router",
+                password=TEST_PASSWORD,
+                display_name="RouterAgent",
+                user_id=ids["router"].full_id,
+            ),
+            tmp_path,
+            test_room_id,
+            config=test_config,
+        )
+
+        router_sender = ids["router"].full_id
+
+        def requester_for(content: dict[str, object]) -> str:
+            return router_bot._turn_controller._requester_user_id(
+                sender=router_sender,
+                source={"content": {ORIGINAL_SENDER_KEY: "@stale:localhost", **content}},
+            )
+
+        untrusted_contents: list[dict[str, object]] = [
+            {"body": "@alice Sorry, I could not route this request."},
+            {"body": "No configured target", "m.mentions": {"user_ids": ["@alice:localhost"]}},
+        ]
+        for content in untrusted_contents:
+            assert requester_for(content) == router_sender
+
+        trusted_contents: list[dict[str, object]] = [
+            {"body": "@alpha could you help with this?"},
+            {"body": f"{ids['beta'].full_id} could you help with this?"},
+            {"body": "Beta could help", "m.mentions": {"user_ids": [ids["beta"].full_id]}},
+        ]
+        for content in trusted_contents:
+            assert requester_for(content) == "@stale:localhost"
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")
