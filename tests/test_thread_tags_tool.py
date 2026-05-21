@@ -14,7 +14,8 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
-from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
+from mindroom.matrix.client_thread_history import RoomThreadsPageError
+from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsListing, ThreadTagsState
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -979,6 +980,205 @@ async def test_list_thread_tags_room_wide_returns_error_on_room_state_failure() 
     assert payload["action"] == "list"
     assert payload["room_id"] == context.room_id
     assert payload["message"] == "room state forbidden"
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_include_untagged_headline_query_from_runtime_context() -> None:
+    """The unresolved-threads query should return tagged-not-resolved and untagged roots."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+    listing = ThreadTagsListing(
+        tag_state={
+            "$blocked-thread:localhost": _state(
+                "$blocked-thread:localhost",
+                blocked=_record(data={"blocked_by": ["$other:localhost"]}),
+            ),
+            "$untagged-thread:localhost": _state("$untagged-thread:localhost"),
+        },
+        include_untagged=True,
+        truncated=False,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value=listing),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved", include_untagged=True))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert payload["include_untagged"] is True
+    assert payload["truncated"] is False
+    assert list(payload["threads"]) == ["$blocked-thread:localhost", "$untagged-thread:localhost"]
+    assert payload["threads"]["$untagged-thread:localhost"] == {}
+    assert payload["tag_state"] == payload["threads"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+        include_tag=None,
+        exclude_tag="resolved",
+        include_untagged=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_rejects_thread_id_with_include_untagged() -> None:
+    """Explicit thread targets are incompatible with include_untagged room-wide enumeration."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None)
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await tool.list_thread_tags(thread_id="$thread:localhost", include_untagged=True),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "list"
+    assert payload["thread_id"] == "$thread:localhost"
+    assert payload["message"] == "`include_untagged=True` is only valid for room-wide queries; do not pass `thread_id`."
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_include_untagged_suppresses_in_thread_context_fallback() -> None:
+    """include_untagged should force room-wide listing even inside an active thread."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+    listing = ThreadTagsListing(
+        tag_state={"$untagged-thread:localhost": _state("$untagged-thread:localhost")},
+        include_untagged=True,
+        truncated=False,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(),
+        ) as mock_normalize,
+        patch("mindroom.custom_tools.thread_tags.get_thread_tags", new=AsyncMock()) as mock_get,
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value=listing),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(include_untagged=True))
+
+    assert payload["status"] == "ok"
+    assert payload["room_wide"] is True
+    assert list(payload["threads"]) == ["$untagged-thread:localhost"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag=None,
+        include_tag=None,
+        exclude_tag=None,
+        include_untagged=True,
+    )
+    mock_normalize.assert_not_awaited()
+    mock_get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_include_untagged_tag_filter_excludes_untagged_threads() -> None:
+    """tag= should not return synthesized untagged entries in include_untagged mode."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None)
+    listing = ThreadTagsListing(
+        tag_state={"$resolved-thread:localhost": _state("$resolved-thread:localhost", resolved=_record())},
+        include_untagged=True,
+        truncated=False,
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(return_value=listing),
+        ) as mock_list,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(tag="resolved", include_untagged=True))
+
+    assert payload["status"] == "ok"
+    assert list(payload["threads"]) == ["$resolved-thread:localhost"]
+    assert "resolved" in payload["threads"]["$resolved-thread:localhost"]
+    mock_list.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        tag="resolved",
+        include_tag=None,
+        exclude_tag=None,
+        include_untagged=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_include_untagged_surfaces_enumeration_error_fields() -> None:
+    """Room thread enumeration failures should preserve structured error details."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_tags.list_tagged_threads",
+            new=AsyncMock(
+                side_effect=RoomThreadsPageError(
+                    response="rate limited",
+                    errcode="M_LIMIT_EXCEEDED",
+                    retry_after_ms=250,
+                ),
+            ),
+        ),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved", include_untagged=True))
+
+    assert payload["status"] == "error"
+    assert payload["action"] == "list"
+    assert payload["room_id"] == context.room_id
+    assert payload["response"] == "rate limited"
+    assert payload["errcode"] == "M_LIMIT_EXCEEDED"
+    assert payload["retry_after_ms"] == 250
+    assert payload["include_untagged"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_thread_tags_include_untagged_returns_truncated_flag() -> None:
+    """Cap-hit listings should expose truncated=True in the tool payload."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id=None)
+    listing = ThreadTagsListing(
+        tag_state={"$thread:localhost": _state("$thread:localhost")},
+        include_untagged=True,
+        truncated=True,
+    )
+
+    with (
+        patch("mindroom.custom_tools.thread_tags.list_tagged_threads", new=AsyncMock(return_value=listing)),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.list_thread_tags(include_untagged=True))
+
+    assert payload["status"] == "ok"
+    assert payload["include_untagged"] is True
+    assert payload["truncated"] is True
+    assert payload["threads"]["$thread:localhost"] == {}
+
+
+def test_list_thread_tags_schema_exposes_include_untagged_parameter() -> None:
+    """The Agno-visible schema should expose include_untagged to models."""
+    function = ThreadTagsTools().async_functions["list_thread_tags"]
+    function.process_entrypoint(strict=False)
+
+    schema = function.parameters["properties"]["include_untagged"]
+
+    assert schema["type"] == "boolean"
+    assert "include_untagged" not in function.parameters["required"]
+    assert "enumerate every thread root" in schema["description"]
+    assert "Defaults to False" in schema["description"]
 
 
 @pytest.mark.asyncio

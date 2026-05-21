@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 import math
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+from mindroom.matrix.client_thread_history import RoomThreadsPageError, enumerate_room_thread_root_ids
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
+    ThreadTagsListing,
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
@@ -39,6 +41,19 @@ def _message_event_response(
             "origin_server_ts": 1,
             "room_id": room_id,
             "type": event_type,
+        },
+    )
+
+
+def _thread_root_event(event_id: str) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
         },
     )
 
@@ -1137,6 +1152,230 @@ async def test_list_tagged_threads_filters_non_matching_events_and_supports_tag_
 
     assert set(all_threads) == {"$thread-one:localhost", "$thread-two:localhost"}
     assert set(resolved_threads) == {"$thread-one:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_list_tagged_threads_default_does_not_enumerate_room_threads() -> None:
+    """Default room-wide listing should not call the /threads enumeration helper."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-one:localhost", "resolved"),
+    )
+
+    with patch("mindroom.thread_tags.enumerate_room_thread_root_ids", new=AsyncMock()) as mock_enumerate:
+        threads = await list_tagged_threads(client, "!room:localhost", include_untagged=False)
+
+    assert list(threads) == ["$thread-one:localhost"]
+    mock_enumerate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_tagged_threads_include_untagged_unions_tag_state_with_room_threads() -> None:
+    """Including untagged threads should preserve /threads order and synthesize empty tags."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-two:localhost", "resolved"),
+        _thread_tag_state_event("$thread-four:localhost", "blocked"),
+    )
+
+    with patch(
+        "mindroom.thread_tags.enumerate_room_thread_root_ids",
+        new=AsyncMock(
+            return_value=(
+                [
+                    "$thread-one:localhost",
+                    "$thread-two:localhost",
+                    "$thread-three:localhost",
+                    "$thread-four:localhost",
+                    "$thread-five:localhost",
+                ],
+                False,
+            ),
+        ),
+    ):
+        listing = await list_tagged_threads(client, "!room:localhost", include_untagged=True)
+
+    assert isinstance(listing, ThreadTagsListing)
+    assert list(listing.tag_state) == [
+        "$thread-one:localhost",
+        "$thread-two:localhost",
+        "$thread-three:localhost",
+        "$thread-four:localhost",
+        "$thread-five:localhost",
+    ]
+    assert listing.tag_state["$thread-one:localhost"].tags == {}
+    assert listing.tag_state["$thread-three:localhost"].tags == {}
+    assert listing.tag_state["$thread-five:localhost"].tags == {}
+    assert set(listing.tag_state["$thread-two:localhost"].tags) == {"resolved"}
+    assert set(listing.tag_state["$thread-four:localhost"].tags) == {"blocked"}
+    assert listing.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_list_tagged_threads_include_untagged_appends_tagged_state_only_threads() -> None:
+    """Tagged state for roots absent from /threads should be preserved at the end."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-two:localhost", "resolved"),
+        _thread_tag_state_event("$thread-x:localhost", "blocked"),
+    )
+
+    with patch(
+        "mindroom.thread_tags.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=(["$thread-one:localhost", "$thread-two:localhost"], False)),
+    ):
+        listing = await list_tagged_threads(client, "!room:localhost", include_untagged=True)
+
+    assert isinstance(listing, ThreadTagsListing)
+    assert list(listing.tag_state) == ["$thread-one:localhost", "$thread-two:localhost", "$thread-x:localhost"]
+    assert listing.tag_state["$thread-one:localhost"].tags == {}
+    assert set(listing.tag_state["$thread-x:localhost"].tags) == {"blocked"}
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
+    """Room thread enumeration should follow pagination to completion."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([_thread_root_event("$thread-one:localhost")], "A"),
+                ([_thread_root_event("$thread-two:localhost")], "B"),
+                ([_thread_root_event("$thread-three:localhost")], None),
+            ],
+        ),
+    ) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$thread-one:localhost", "$thread-two:localhost", "$thread-three:localhost"]
+    assert truncated is False
+    assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
+    assert mock_get_page.await_args_list[1].kwargs["page_token"] == "A"  # noqa: S105
+    assert mock_get_page.await_args_list[2].kwargs["page_token"] == "B"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_truncates_at_cap() -> None:
+    """Room thread enumeration should stop at the hard root cap."""
+    client = AsyncMock()
+    pages = []
+    for page_index in range(25):
+        roots = [_thread_root_event(f"$thread-{page_index * 100 + root_index}:localhost") for root_index in range(100)]
+        pages.append((roots, f"token-{page_index}"))
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(side_effect=pages),
+    ) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert len(thread_root_ids) == 2000
+    assert thread_root_ids[0] == "$thread-0:localhost"
+    assert thread_root_ids[-1] == "$thread-1999:localhost"
+    assert truncated is True
+    assert mock_get_page.await_count == 20
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_repeated_token_guard_truncates() -> None:
+    """Room thread enumeration should stop when the homeserver repeats a cursor."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([_thread_root_event("$thread-one:localhost")], "A"),
+                ([_thread_root_event("$thread-two:localhost")], "A"),
+            ],
+        ),
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$thread-one:localhost", "$thread-two:localhost"]
+    assert truncated is True
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_zero_new_roots_guard_truncates() -> None:
+    """Room thread enumeration should stop when a non-empty page only repeats roots."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            side_effect=[
+                ([_thread_root_event("$thread-one:localhost")], "A"),
+                ([_thread_root_event("$thread-one:localhost")], "B"),
+            ],
+        ),
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$thread-one:localhost"]
+    assert truncated is True
+
+
+@pytest.mark.asyncio
+async def test_list_tagged_threads_include_untagged_propagates_room_threads_page_error() -> None:
+    """Room-wide include-untagged listing should preserve /threads error details."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response()
+    error = RoomThreadsPageError(response="rate limited", errcode="M_LIMIT_EXCEEDED", retry_after_ms=250)
+
+    with (
+        patch(
+            "mindroom.matrix.client_thread_history.get_room_threads_page",
+            new=AsyncMock(side_effect=error),
+        ),
+        pytest.raises(RoomThreadsPageError) as exc_info,
+    ):
+        await list_tagged_threads(client, "!room:localhost", include_untagged=True)
+
+    assert exc_info.value.response == "rate limited"
+    assert exc_info.value.errcode == "M_LIMIT_EXCEEDED"
+    assert exc_info.value.retry_after_ms == 250
+
+
+@pytest.mark.asyncio
+async def test_list_tagged_threads_include_untagged_filter_semantics_on_synthesized_entries() -> None:
+    """Tag and include_tag should exclude untagged entries while exclude_tag keeps them."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$resolved-thread:localhost", "resolved"),
+    )
+
+    with patch(
+        "mindroom.thread_tags.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=(["$untagged-thread:localhost", "$resolved-thread:localhost"], False)),
+    ):
+        unresolved_listing = await list_tagged_threads(
+            client,
+            "!room:localhost",
+            exclude_tag="resolved",
+            include_untagged=True,
+        )
+        include_listing = await list_tagged_threads(
+            client,
+            "!room:localhost",
+            include_tag="resolved",
+            include_untagged=True,
+        )
+        tag_listing = await list_tagged_threads(
+            client,
+            "!room:localhost",
+            tag="resolved",
+            include_untagged=True,
+        )
+
+    assert isinstance(unresolved_listing, ThreadTagsListing)
+    assert isinstance(include_listing, ThreadTagsListing)
+    assert isinstance(tag_listing, ThreadTagsListing)
+    assert list(unresolved_listing.tag_state) == ["$untagged-thread:localhost"]
+    assert list(include_listing.tag_state) == ["$resolved-thread:localhost"]
+    assert list(tag_listing.tag_state) == ["$resolved-thread:localhost"]
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
+_MAX_ENUMERATED_THREAD_ROOTS = 2000
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -1137,9 +1138,57 @@ async def get_room_threads_page(
     return response.thread_roots, response.next_batch
 
 
+async def enumerate_room_thread_root_ids(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    max_thread_roots: int = _MAX_ENUMERATED_THREAD_ROOTS,
+    page_size: int = 100,
+) -> tuple[list[str], bool]:
+    """Return unique room thread-root IDs in /threads order."""
+    thread_root_ids: list[str] = []
+    seen_thread_root_ids: set[str] = set()
+    seen_next_tokens: set[str] = set()
+    page_token: str | None = None
+
+    while len(thread_root_ids) < max_thread_roots:
+        thread_roots, next_token = await get_room_threads_page(
+            client,
+            room_id,
+            limit=page_size,
+            page_token=page_token,
+        )
+        if not thread_roots:
+            return thread_root_ids, False
+
+        new_root_count = 0
+        for thread_root in thread_roots:
+            thread_root_id = thread_root.event_id
+            if thread_root_id in seen_thread_root_ids:
+                continue
+            seen_thread_root_ids.add(thread_root_id)
+            thread_root_ids.append(thread_root_id)
+            new_root_count += 1
+            if len(thread_root_ids) >= max_thread_roots:
+                return thread_root_ids, True
+
+        if new_root_count == 0:
+            return thread_root_ids, True
+        if next_token is None:
+            return thread_root_ids, False
+        if next_token in seen_next_tokens:
+            return thread_root_ids, True
+
+        seen_next_tokens.add(next_token)
+        page_token = next_token
+
+    return thread_root_ids, True
+
+
 __all__ = [
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_event_sources_via_room_messages",

@@ -108,6 +108,7 @@ agents:
 tag_thread("blocked")
 untag_thread("blocked")
 list_thread_tags(thread_id="$threadRootEvent")
+list_thread_tags(exclude_tag="resolved", include_untagged=True)
 ```
 
 ### Notes
@@ -115,6 +116,7 @@ list_thread_tags(thread_id="$threadRootEvent")
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
+- `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
 
 ## [`thread_summary`]
 
