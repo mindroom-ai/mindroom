@@ -208,10 +208,9 @@ export function InstanceCard({
 
   const frontendHost = getHostname(instance.frontend_url)
   const backendHost = getHostname(instance.backend_url)
-  const cinnyLoginUrl = instance.matrix_server_url
+  const chatInterfaceUrl = instance.matrix_server_url
     ? buildCinnyLoginUrl(instance.matrix_server_url)
     : null
-  const chatInterfaceUrl = cinnyLoginUrl || instance.matrix_server_url
   const lastSynced = instance.kubernetes_synced_at
     ? formatRelativeTime(instance.kubernetes_synced_at)
     : null
