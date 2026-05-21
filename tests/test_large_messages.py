@@ -11,6 +11,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
@@ -776,7 +777,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
         "msgtype": "m.text",
         SOURCE_KIND_KEY: source_kind,
         "com.mindroom.hook_source": "message_received",
-        "com.mindroom.skip_mentions": True,
+        SKIP_MENTIONS_KEY: True,
         "formatted_body": '<a href="https://matrix.to/#/@mindroom_agent:localhost">agent</a>',
         "m.mentions": {"user_ids": ["@mindroom_agent:localhost"]},
         ATTACHMENT_IDS_KEY: ["att-sidecar"],
@@ -802,7 +803,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     assert resolved["body"] == content["body"]
     assert resolved["content"][SOURCE_KIND_KEY] == source_kind
     assert resolved["content"]["com.mindroom.hook_source"] == "message_received"
-    assert resolved["content"]["com.mindroom.skip_mentions"] is True
+    assert resolved["content"][SKIP_MENTIONS_KEY] is True
     assert resolved["content"]["formatted_body"] == content["formatted_body"]
     assert resolved["content"]["m.mentions"] == content["m.mentions"]
     assert resolved["content"][ATTACHMENT_IDS_KEY] == ["att-sidecar"]

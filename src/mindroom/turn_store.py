@@ -13,7 +13,11 @@ from agno.run.team import TeamRunOutput
 from mindroom import constants
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    HandledTurnRecord,
+    HandledTurnState,
+)
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
@@ -37,12 +41,15 @@ class _LoadedTurnRecord:
 
 @dataclass(frozen=True)
 class _PersistedTurnMetadata:
-    """Run metadata needed to rebuild a coalesced turn after a partial ledger write."""
+    """Run metadata needed to rebuild a turn after a partial ledger write."""
 
     anchor_event_id: str
     source_event_ids: tuple[str, ...]
     response_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
+    response_owner: str | None = None
+    history_scope: HistoryScope | None = None
+    conversation_target: MessageTarget | None = None
 
     @property
     def is_coalesced(self) -> bool:
@@ -174,14 +181,18 @@ class TurnStore:
         handled_turn: HandledTurnState,
     ) -> dict[str, Any] | None:
         """Build persisted run metadata for one handled turn."""
-        if not handled_turn.is_coalesced:
-            return None
-        metadata: dict[str, Any] = {
-            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(handled_turn.source_event_ids),
-        }
+        metadata: dict[str, Any] = {}
+        if handled_turn.is_coalesced:
+            metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = list(handled_turn.source_event_ids)
         if handled_turn.source_event_prompts:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(handled_turn.source_event_prompts)
-        return metadata
+        if handled_turn.response_owner is not None:
+            metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = handled_turn.response_owner
+        if handled_turn.history_scope is not None:
+            metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = handled_turn.history_scope.to_metadata()
+        if handled_turn.conversation_target is not None:
+            metadata[constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY] = handled_turn.conversation_target.to_metadata()
+        return metadata or None
 
     def load_turn(
         self,
@@ -211,6 +222,9 @@ class TurnStore:
                 source_event_ids=persisted_turn_metadata.source_event_ids,
                 response_event_id=persisted_turn_metadata.response_event_id,
                 source_event_prompts=persisted_turn_metadata.source_event_prompts,
+                response_owner=persisted_turn_metadata.response_owner,
+                history_scope=persisted_turn_metadata.history_scope,
+                conversation_target=persisted_turn_metadata.conversation_target,
             )
         if persisted_turn_metadata is None:
             return _LoadedTurnRecord(
@@ -225,6 +239,9 @@ class TurnStore:
             anchor_event_id=persisted_turn_metadata.anchor_event_id,
             response_event_id=persisted_turn_metadata.response_event_id or turn_record.response_event_id,
             source_event_prompts=merged_prompt_map,
+            response_owner=turn_record.response_owner or persisted_turn_metadata.response_owner,
+            history_scope=turn_record.history_scope or persisted_turn_metadata.history_scope,
+            conversation_target=turn_record.conversation_target or persisted_turn_metadata.conversation_target,
         )
         return _LoadedTurnRecord(
             record=merged_turn_record,
@@ -244,24 +261,31 @@ class TurnStore:
         )
 
     def _persisted_turn_metadata_for_run(self, metadata: dict[str, Any]) -> _PersistedTurnMetadata | None:
-        """Parse persisted run metadata needed for coalesced edit regeneration."""
+        """Parse persisted run metadata needed for edit regeneration."""
         anchor_event_id = metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY)
         if not isinstance(anchor_event_id, str) or not anchor_event_id:
             return None
         raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_prompt_map = metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
         raw_response_event_id = metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+        raw_response_owner = metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)
         response_event_id = raw_response_event_id if isinstance(raw_response_event_id, str) else None
-        handled_turn = HandledTurnState.create(
+        handled_turn = HandledTurnState.from_persisted_metadata(
             _normalized_matrix_source_event_ids_or_anchor(raw_source_event_ids, anchor_event_id=anchor_event_id),
             response_event_id=response_event_id,
             source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
+            response_owner=raw_response_owner if isinstance(raw_response_owner, str) else None,
+            history_scope_metadata=metadata.get(constants.MATRIX_HISTORY_SCOPE_METADATA_KEY),
+            conversation_target_metadata=metadata.get(constants.MATRIX_CONVERSATION_TARGET_METADATA_KEY),
         )
         return _PersistedTurnMetadata(
             anchor_event_id=anchor_event_id,
             source_event_ids=handled_turn.source_event_ids,
             response_event_id=handled_turn.response_event_id,
             source_event_prompts=handled_turn.source_event_prompts,
+            response_owner=handled_turn.response_owner,
+            history_scope=handled_turn.history_scope,
+            conversation_target=handled_turn.conversation_target,
         )
 
     def _latest_matching_persisted_turn_metadata(

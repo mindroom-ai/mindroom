@@ -19,6 +19,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
@@ -759,6 +760,7 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
                 "msgtype": "m.text",
                 "body": "@mindroom_code:localhost please check this thread",
                 ORIGINAL_SENDER_KEY: "@user:localhost",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 "m.relates_to": {
                     "event_id": "$thread-root",
                     "rel_type": "m.thread",

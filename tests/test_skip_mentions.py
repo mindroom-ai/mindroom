@@ -14,6 +14,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -51,7 +52,7 @@ def test_should_skip_mentions_with_metadata() -> None:
     event_source = {
         "content": {
             "body": "✅ Scheduled task. @email_agent will be mentioned",
-            "com.mindroom.skip_mentions": True,
+            SKIP_MENTIONS_KEY: True,
         },
     }
     assert _should_skip_mentions(event_source) is True
@@ -73,7 +74,7 @@ def test_should_skip_mentions_explicit_false() -> None:
     event_source = {
         "content": {
             "body": "Message with explicit false @email_agent",
-            "com.mindroom.skip_mentions": False,
+            SKIP_MENTIONS_KEY: False,
         },
     }
     assert _should_skip_mentions(event_source) is False
@@ -159,7 +160,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
             # Check that send_message was called with content that has skip_mentions
             mock_send.assert_called_once()
             sent_content = mock_send.call_args[0][2]  # Third argument is content
-            assert sent_content.get("com.mindroom.skip_mentions") is True
+            assert sent_content.get(SKIP_MENTIONS_KEY) is True
 
 
 @pytest.mark.asyncio
@@ -176,7 +177,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
             "content": {
                 "body": "✅ Scheduled task. @email_agent will handle it",
                 "msgtype": "m.text",
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
                 "m.mentions": {
                     "user_ids": ["@mindroom_email_agent:localhost"],
                 },

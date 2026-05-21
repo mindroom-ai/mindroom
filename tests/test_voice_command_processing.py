@@ -12,17 +12,18 @@ from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
-from mindroom.coalescing import COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -209,7 +210,13 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     event.body = "🎤 !schedule daily"
     event.event_id = "test_event"
     event.server_timestamp = 1234567890
-    event.source = {"content": {"body": "🎤 !schedule daily", ORIGINAL_SENDER_KEY: "@alice:example.com"}}
+    event.source = {
+        "content": {
+            "body": "🎤 !schedule daily",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        },
+    }
 
     with (
         patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
@@ -322,6 +329,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
                 },
                 "url": "mxc://server/sidecar-relay",
                 ORIGINAL_SENDER_KEY: "@alice:example.com",
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
             },
         },
     )
@@ -615,6 +623,7 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
     assert prepared.text == "🎤 turn on the lights"
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert prepared.source["content"][ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert prepared.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert prepared.source["content"][ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in prepared.source["content"]
     attachment = load_attachment(tmp_path, expected_attachment_id)
@@ -641,7 +650,7 @@ async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(t
                 ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
                 ORIGINAL_SENDER_KEY: "@spoofed:example.com",
                 VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         },
@@ -667,9 +676,10 @@ async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(t
     content = prepared.source["content"]
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert content[SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert content[ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in content
-    assert "com.mindroom.skip_mentions" not in content
+    assert SKIP_MENTIONS_KEY not in content
     assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
 
 
@@ -704,6 +714,7 @@ async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_pat
     assert prepared.text == f"{VOICE_PREFIX}[Attached voice message]"
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert prepared.source["content"][ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert prepared.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
     assert prepared.source["content"][ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert prepared.source["content"]["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
@@ -976,7 +987,7 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
     assert request.skip_mentions is True
     assert request.extra_content is not None
     assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert request.extra_content[SOURCE_KIND_KEY] == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+    assert request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in request.extra_content
 
@@ -1064,13 +1075,14 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     assert echo_request.skip_mentions is True
     assert echo_request.extra_content is not None
     assert echo_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert echo_request.extra_content[SOURCE_KIND_KEY] == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+    assert echo_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert echo_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
     assert VOICE_RAW_AUDIO_FALLBACK_KEY not in echo_request.extra_content
     assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
     assert handoff_request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
 
@@ -1092,7 +1104,7 @@ async def test_router_visible_voice_echo_marks_raw_audio_fallback(tmp_path) -> N
     assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
     assert request.extra_content is not None
     assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert request.extra_content[SOURCE_KIND_KEY] == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+    assert request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
     assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
@@ -1252,6 +1264,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     assert request.response_text == "@home could you help with this?"
     assert request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
     }
     turn_store.record_turn.assert_called_once_with(

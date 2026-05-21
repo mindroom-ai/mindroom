@@ -15,7 +15,6 @@ from pydantic import ValidationError
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
-    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     CoalescingGate,
     GatePhase,
     is_coalescing_exempt_source_kind,
@@ -29,6 +28,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
@@ -41,6 +41,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -1497,13 +1498,13 @@ async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_
             event=event,
             room=room,
             source_kind="voice",
-            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
     )
     await _wait_for(lambda: len(calls) == 1)
 
     assert calls[0].source_kind == "voice"
-    assert calls[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     dispatch_event = _build_batch_dispatch_event(calls[0])
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override == "voice"
@@ -1512,7 +1513,7 @@ async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "spoofed_source_kind",
-    [COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, "hook", "hook_dispatch", "voice"],
+    [ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, "hook", "hook_dispatch", "voice"],
 )
 async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
     tmp_path: Path,
@@ -3700,7 +3701,7 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
                 event=event,
                 room=room,
                 source_kind="message",
-                dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             ),
         ],
     )
@@ -3708,7 +3709,7 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
     dispatch_event = _build_batch_dispatch_event(batch)
 
     assert handoff.ingress.source_kind == "message"
-    assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override is None
 
@@ -3725,7 +3726,7 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
                 event=event,
                 room=room,
                 source_kind="message",
-                dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             ),
         ],
     )
@@ -3733,7 +3734,7 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
     dispatch_event = _build_batch_dispatch_event(batch)
 
     assert handoff.ingress.source_kind == "message"
-    assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert handoff.ingress.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert isinstance(dispatch_event, nio.RoomMessageText)
 
 
@@ -4251,7 +4252,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
         body="!schedule tomorrow at 9am turn off the lights",
         thread_id="$thread",
         source_kind="voice",
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     )
 
     plan_mock = AsyncMock(return_value=_respond_dispatch_plan())
@@ -4487,14 +4488,14 @@ async def test_gate_final_envelope_preserves_active_voice_source_and_policy(tmp_
             (
                 voice_event,
                 "voice",
-                COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                 {},
             ),
         ],
     )
 
     assert [envelope.source_kind for envelope in envelopes] == ["voice"]
-    assert envelopes[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert envelopes[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert media_batches == [[]]
 
 
@@ -4532,11 +4533,11 @@ async def test_gate_final_envelope_preserves_active_text_source_and_policy(tmp_p
     envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
         bot,
         room,
-        [(event, "message", COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, {})],
+        [(event, "message", ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, {})],
     )
 
     assert [envelope.source_kind for envelope in envelopes] == ["message"]
-    assert envelopes[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert envelopes[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 
 
 @pytest.mark.asyncio
@@ -4554,7 +4555,7 @@ async def test_gate_final_envelope_preserves_active_and_normal_media_sources(tmp
             (
                 image_event,
                 "image",
-                COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                 {},
             ),
             (
@@ -4567,7 +4568,7 @@ async def test_gate_final_envelope_preserves_active_and_normal_media_sources(tmp
     )
 
     assert [envelope.source_kind for envelope in envelopes] == ["image", "media"]
-    assert envelopes[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert envelopes[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
     assert envelopes[1].dispatch_policy_source_kind is None
     assert [[event.event_id for event in media_batch] for media_batch in media_batches] == [
         ["$image-active"],
@@ -4828,7 +4829,7 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
     content[ATTACHMENT_IDS_KEY] = ["spoofed-attachment"]
     content[ORIGINAL_SENDER_KEY] = "@spoofed:localhost"
     content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-    content["com.mindroom.skip_mentions"] = True
+    content[SKIP_MENTIONS_KEY] = True
     content["com.mindroom.hook_source"] = "spoofed:message_received"
     content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 2
     captured_extra_content: list[object] = []
@@ -4862,7 +4863,7 @@ async def test_untrusted_nested_skip_mentions_does_not_suppress_visible_mentions
         "msgtype": "m.text",
         "body": "@test_agent edited",
         "m.mentions": {"user_ids": ["@mindroom_test_agent:localhost"]},
-        "com.mindroom.skip_mentions": True,
+        SKIP_MENTIONS_KEY: True,
     }
     captured_extra_content: list[object] = []
 
@@ -4895,7 +4896,7 @@ async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_enve
     second_content[ATTACHMENT_IDS_KEY] = ["spoofed-attachment"]
     second_content[ORIGINAL_SENDER_KEY] = "@spoofed:localhost"
     second_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-    second_content["com.mindroom.skip_mentions"] = True
+    second_content[SKIP_MENTIONS_KEY] = True
     captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
@@ -4934,7 +4935,7 @@ async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_truste
                 ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
                 ORIGINAL_SENDER_KEY: "@spoofed:localhost",
                 VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
             },
         },
         server_timestamp=1000,
@@ -5028,7 +5029,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
         ORIGINAL_SENDER_KEY: "@spoofed:localhost",
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-        "com.mindroom.skip_mentions": True,
+        SKIP_MENTIONS_KEY: True,
     }
     response = MagicMock(spec=nio.DownloadResponse)
     response.body = json.dumps(hydrated_content).encode("utf-8")

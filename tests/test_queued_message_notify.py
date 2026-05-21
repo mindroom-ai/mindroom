@@ -28,7 +28,6 @@ from mindroom.ai_runtime import (
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 from mindroom.coalescing_batch import PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -36,7 +35,14 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
@@ -203,7 +209,7 @@ def _reserved_follow_up_case(
 ) -> SimpleNamespace:
     target = MessageTarget.resolve(room.room_id, "$thread", event_id)
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id=event_id,
         target=target,
     )
@@ -251,6 +257,43 @@ def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispa
             requires_solo_batch=True,
         ),
     )
+
+
+def test_response_lifecycle_rejects_mismatched_reservation_target(tmp_path: Path) -> None:
+    """Queued notices should use the envelope's canonical lifecycle target."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    envelope = _envelope()
+    mismatched_target = MessageTarget.resolve("!other:localhost", None, "$event")
+
+    with pytest.raises(ValueError, match=r"MessageEnvelope\.target"):
+        lifecycle.reserve_waiting_human_message(
+            target=mismatched_target,
+            response_envelope=envelope,
+        )
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_rejects_mismatched_locked_response_target(tmp_path: Path) -> None:
+    """Response locking should use the envelope's canonical lifecycle target."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    envelope = _envelope()
+    mismatched_target = MessageTarget.resolve("!other:localhost", None, "$event")
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        return "$response"
+
+    with pytest.raises(ValueError, match=r"MessageEnvelope\.target"):
+        await lifecycle.run_locked_response(
+            target=mismatched_target,
+            response_envelope=envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=locked_operation,
+        )
 
 
 def _notice_count(messages: list[Message]) -> int:
@@ -638,10 +681,34 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: Path) -> None:
-    """Scheduled or hook-originated turns should not interrupt the active turn."""
+@pytest.mark.parametrize(
+    "response_envelope",
+    [
+        pytest.param(_envelope(source_kind=SCHEDULED_SOURCE_KIND), id="scheduled"),
+        pytest.param(_envelope(source_kind=HOOK_SOURCE_KIND), id="hook"),
+        pytest.param(_envelope(source_kind=HOOK_DISPATCH_SOURCE_KIND), id="hook-dispatch"),
+        pytest.param(
+            _envelope(
+                sender_id="@mindroom_router:localhost",
+                requester_id="@mindroom_router:localhost",
+                origin=message_origin(
+                    sender_id="@mindroom_router:localhost",
+                    requester_id="@mindroom_router:localhost",
+                    sender_entity_name="router",
+                    requester_entity_name="router",
+                    source_kind=MESSAGE_SOURCE_KIND,
+                ),
+            ),
+            id="router-notice",
+        ),
+    ],
+)
+async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
+    tmp_path: Path,
+    response_envelope: MessageEnvelope,
+) -> None:
+    """Automation and router-authored notices should not interrupt the active turn."""
     bot = _bot(tmp_path)
-    response_envelope = _envelope(source_kind=SCHEDULED_SOURCE_KIND)
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._turn_controller.deps.response_runner)
     lifecycle = coordinator._lifecycle_coordinator
@@ -667,6 +734,55 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
                 await asyncio.wait_for(queued_signal.wait(), timeout=0.05)
             lifecycle_lock.release()
             await task
+    finally:
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp_path: Path) -> None:
+    """A trusted router relay carrying a human requester should notify the active turn."""
+    bot = _bot(tmp_path)
+    response_envelope = _envelope(
+        sender_id="@mindroom_router:localhost",
+        requester_id="@user:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        origin=message_origin(
+            sender_id="@mindroom_router:localhost",
+            requester_id="@user:localhost",
+            sender_entity_name="router",
+            requester_entity_name=None,
+            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            original_sender="@user:localhost",
+            trusted_user_relay=True,
+        ),
+    )
+    response_target = response_envelope.target
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    await lifecycle_lock.acquire()
+
+    try:
+        with patch.object(
+            ResponseRunner,
+            "generate_response_locked",
+            new=AsyncMock(return_value="$response"),
+        ):
+            task = asyncio.create_task(
+                bot._generate_response(
+                    prompt="hello",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=response_envelope,
+                ),
+            )
+            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            lifecycle_lock.release()
+            assert await task == "$response"
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
@@ -1427,7 +1543,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$command")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$command",
         target=target,
     )
@@ -1487,7 +1603,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$older")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$older",
         target=target,
     )
@@ -1720,7 +1836,7 @@ async def test_reserved_follow_up_cleanup_when_text_normalization_raises(tmp_pat
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$normalize")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$normalize",
         target=target,
     )
@@ -1760,7 +1876,7 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$prepare")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$prepare",
         target=target,
     )
@@ -1802,7 +1918,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$handoff")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$handoff",
         target=target,
     )
@@ -1821,7 +1937,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
                     event=event,
                     room=room,
                     source_kind=MESSAGE_SOURCE_KIND,
-                    dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                     dispatch_metadata=_queued_notice_metadata(reservation),
                 ),
             ],
@@ -1891,7 +2007,7 @@ def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
     bot = _bot(tmp_path)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$event",
         target=target,
     )
@@ -1950,7 +2066,7 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
     bot = _bot(tmp_path)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$event",
         target=target,
     )
@@ -1999,7 +2115,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$reserved")
     envelope = _envelope(
-        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         source_event_id="$reserved",
         target=target,
     )
@@ -2018,7 +2134,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
                         event=_prepared_text_event(event_id="$reserved"),
                         room=room,
                         source_kind=MESSAGE_SOURCE_KIND,
-                        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
                         dispatch_metadata=_queued_notice_metadata(reservation),
                     ),
                     PendingEvent(

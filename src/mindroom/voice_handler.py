@@ -17,8 +17,15 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
@@ -234,7 +241,10 @@ async def prepare_voice_message(
         or f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     )
 
-    extra_content: dict[str, Any] = {ORIGINAL_SENDER_KEY: event.sender}
+    extra_content: dict[str, Any] = {
+        ORIGINAL_SENDER_KEY: event.sender,
+        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+    }
     if attachment_id is not None:
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
     if normalized.transcribed_message is None:

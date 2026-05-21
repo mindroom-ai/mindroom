@@ -246,13 +246,8 @@ class EditRegenerator:
             regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
         else:
             regeneration_prompt = edited_content
-        regeneration_metadata_turn = (
-            regeneration_handled_turn
-            if regeneration_turn_record.is_coalesced
-            else HandledTurnState.from_source_event_id(regeneration_turn_record.anchor_event_id)
-        )
         regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
-            regeneration_metadata_turn,
+            regeneration_handled_turn,
             additional_source_event_ids=(
                 (original_event_id,)
                 if not regeneration_turn_record.is_coalesced

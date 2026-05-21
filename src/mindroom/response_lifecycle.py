@@ -161,6 +161,13 @@ class ResponseLifecycleCoordinator:
         """Return whether one queued ingress should interrupt the active turn."""
         return response_envelope.origin.may_answer_interactive_prompt
 
+    def _assert_target_matches_envelope(self, target: MessageTarget, response_envelope: MessageEnvelope) -> None:
+        """Require lifecycle callers to use the envelope's canonical response target."""
+        if self._thread_key(target) == self._thread_key(response_envelope.target):
+            return
+        msg = "Response lifecycle target must match MessageEnvelope.target"
+        raise ValueError(msg)
+
     def reserve_waiting_human_message(
         self,
         *,
@@ -168,6 +175,7 @@ class ResponseLifecycleCoordinator:
         response_envelope: MessageEnvelope,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up."""
+        self._assert_target_matches_envelope(target, response_envelope)
         if not self._should_signal_queued_message(response_envelope):
             return None
         thread_key = self._thread_key(target)
@@ -217,6 +225,7 @@ class ResponseLifecycleCoordinator:
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
+        self._assert_target_matches_envelope(target, response_envelope)
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         notice = self._begin_response_turn_notice(

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 
 from mindroom.config.matrix import ignore_unverified_devices_for_config
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.custom_tools.attachments import resolve_send_attachments, send_attachment_paths, send_context_attachments
 from mindroom.interactive import (
@@ -83,7 +83,7 @@ class MatrixMessageOperations:
         )
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
-            extra_content["com.mindroom.skip_mentions"] = True
+            extra_content[SKIP_MENTIONS_KEY] = True
         elif context.requester_id != context.client.user_id:
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
         if message_extras:

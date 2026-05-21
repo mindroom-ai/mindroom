@@ -87,6 +87,28 @@ def test_message_envelope_requires_origin() -> None:
         )
 
 
+def test_message_envelope_source_kind_must_match_origin() -> None:
+    """Envelope source kind and origin policy should stay one value."""
+    with pytest.raises(ValueError, match="source_kind"):
+        MessageEnvelope(
+            source_event_id="$event",
+            room_id="!room:localhost",
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="code",
+            source_kind="message",
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind="hook",
+            ),
+        )
+
+
 def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop() -> None:
     """First-hop message:received relays should rerun ingress once and skip the origin plugin."""
     policy = hook_ingress_policy(

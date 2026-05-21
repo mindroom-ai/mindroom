@@ -26,7 +26,14 @@ from mindroom.agents import remove_run_by_event_id
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
-from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import (
+    MATRIX_CONVERSATION_TARGET_METADATA_KEY,
+    MATRIX_HISTORY_SCOPE_METADATA_KEY,
+    MATRIX_RESPONSE_OWNER_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    ROUTER_AGENT_NAME,
+    resolve_runtime_paths,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
@@ -36,6 +43,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_runner import ResponseRequest
 from mindroom.thread_utils import create_session_id
 from tests.conftest import (
     bind_runtime_paths,
@@ -185,6 +193,20 @@ def _agent_history_scope(agent_name: str) -> HistoryScope:
 def _team_history_scope(team_name: str) -> HistoryScope:
     """Return the persisted team history scope used in edit-regeneration tests."""
     return HistoryScope(kind="team", scope_id=team_name)
+
+
+def _run_response_context_metadata(
+    *,
+    response_owner: str,
+    history_scope: HistoryScope,
+    conversation_target: MessageTarget,
+) -> dict[str, object]:
+    """Return response context expected in persisted Matrix run metadata."""
+    return {
+        MATRIX_RESPONSE_OWNER_METADATA_KEY: response_owner,
+        MATRIX_HISTORY_SCOPE_METADATA_KEY: history_scope.to_metadata(),
+        MATRIX_CONVERSATION_TARGET_METADATA_KEY: conversation_target.to_metadata(),
+    }
 
 
 def _team_test_config(tmp_path: Path) -> Config:
@@ -1396,6 +1418,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            **_run_response_context_metadata(
+                response_owner="test_agent",
+                history_scope=_agent_history_scope("test_agent"),
+                conversation_target=stored_target,
+            ),
         }
         assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
         assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
@@ -1921,6 +1948,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            **_run_response_context_metadata(
+                response_owner="test_agent",
+                history_scope=_agent_history_scope("test_agent"),
+                conversation_target=stored_target,
+            ),
         }
         assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
         assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
@@ -2354,6 +2386,11 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             "$first:example.com": "updated first",
             "$anchor:example.com": "anchor",
         },
+        **_run_response_context_metadata(
+            response_owner="test_agent",
+            history_scope=_agent_history_scope("test_agent"),
+            conversation_target=MessageTarget.resolve("!test:example.com", None, "$anchor:example.com"),
+        ),
     }
     assert _response_event_id(bot, "$first:example.com") == "$partial-response:example.com"
     assert _response_event_id(bot, "$anchor:example.com") == "$partial-response:example.com"
@@ -2626,6 +2663,11 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$selection:example.com"
     assert call_kwargs["matrix_run_metadata"] == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+        **_run_response_context_metadata(
+            response_owner="test_agent",
+            history_scope=_agent_history_scope("test_agent"),
+            conversation_target=MessageTarget.resolve("!test:example.com", None, "$selection:example.com"),
+        ),
     }
 
 
@@ -2961,10 +3003,10 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_skips_missing_ledger_row_from_persisted_run_metadata(
+async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_run_metadata(
     tmp_path: Path,
 ) -> None:
-    """Edit regeneration requires the explicit handled-turn ledger context."""
+    """Persisted run response context should recover the current-runtime ledger crash window."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3028,8 +3070,12 @@ async def test_handle_message_edit_skips_missing_ledger_row_from_persisted_run_m
 
     session_id = create_session_id("!test:example.com", None)
     storage = _FakeAgentStorage(session=None)
+    conversation_target = MessageTarget.resolve("!test:example.com", None, "$primary:example.com")
+    history_scope = _agent_history_scope("test_agent")
 
-    async def process_and_respond(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+    async def process_and_respond(*args: object, **kwargs: object) -> FinalDeliveryOutcome:
+        request = args[0]
+        assert isinstance(request, ResponseRequest)
         storage.session = AgentSession(
             session_id=session_id,
             runs=[
@@ -3038,11 +3084,7 @@ async def test_handle_message_edit_skips_missing_ledger_row_from_persisted_run_m
                     session_id=session_id,
                     metadata={
                         "matrix_event_id": "$primary:example.com",
-                        "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
-                        "matrix_source_event_prompts": {
-                            "$first:example.com": "first",
-                            "$primary:example.com": "primary",
-                        },
+                        **(request.matrix_run_metadata or {}),
                     },
                 ),
             ],
@@ -3077,6 +3119,7 @@ async def test_handle_message_edit_skips_missing_ledger_row_from_persisted_run_m
                 reply_to_event_id="$primary:example.com",
                 prompt="primary",
                 user_id="@user:example.com",
+                target=conversation_target,
                 agent_name=bot.agent_name,
             ),
             matrix_run_metadata={
@@ -3085,6 +3128,11 @@ async def test_handle_message_edit_skips_missing_ledger_row_from_persisted_run_m
                     "$first:example.com": "first",
                     "$primary:example.com": "primary",
                 },
+                **_run_response_context_metadata(
+                    response_owner=bot.agent_name,
+                    history_scope=history_scope,
+                    conversation_target=conversation_target,
+                ),
             },
         )
 
@@ -3125,11 +3173,32 @@ async def test_handle_message_edit_skips_missing_ledger_row_from_persisted_run_m
             requester_user_id=edit_event.sender,
         )
 
-        mock_generate_response.assert_not_awaited()
-        assert _response_event_id(bot, "$first:example.com") is None
-        assert _response_event_id(bot, "$primary:example.com") is None
+        mock_generate_response.assert_awaited_once()
+        call_kwargs = mock_generate_response.call_args.kwargs
+        assert call_kwargs["prompt"] == (
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+        )
+        assert call_kwargs["response_envelope"].target == conversation_target
+        assert call_kwargs["matrix_run_metadata"] == {
+            "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
+            "matrix_source_event_prompts": {
+                "$first:example.com": "updated first",
+                "$primary:example.com": "primary",
+            },
+            **_run_response_context_metadata(
+                response_owner=bot.agent_name,
+                history_scope=history_scope,
+                conversation_target=conversation_target,
+            ),
+        }
+        assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
+        assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
         turn_record = bot._turn_store.get_turn_record("$primary:example.com")
-        assert turn_record is None
+        assert turn_record is not None
+        assert turn_record.conversation_target == conversation_target
+        assert turn_record.history_scope == history_scope
+        assert turn_record.response_owner == bot.agent_name
 
 
 @pytest.mark.asyncio
@@ -3899,6 +3968,15 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
     assert request.existing_event_id == "$ack:example.com"
     assert request.matrix_run_metadata == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+        **_run_response_context_metadata(
+            response_owner="test_agent",
+            history_scope=_agent_history_scope("test_agent"),
+            conversation_target=MessageTarget.resolve(
+                "!test:example.com",
+                "$thread:example.com",
+                "$question:example.com",
+            ),
+        ),
     }
     assert bot._turn_store.is_handled("$question:example.com")
     assert _response_event_id(bot, "$question:example.com") == "$response:example.com"

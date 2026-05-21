@@ -40,7 +40,6 @@ from mindroom.approval_manager import (
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -67,7 +66,12 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.dispatch_handoff import PreparedTextEvent
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome
@@ -9599,7 +9603,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind=MESSAGE_SOURCE_KIND,
-            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",
@@ -9684,7 +9688,7 @@ class TestAgentBot:
             mentioned_agents=(),
             agent_name=bot.agent_name,
             source_kind=VOICE_SOURCE_KIND,
-            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",
@@ -11195,6 +11199,7 @@ class TestAgentBot:
                     "msgtype": "m.text",
                     "body": "@mindroom_calculator:localhost could you help with this?",
                     ORIGINAL_SENDER_KEY: "@user:localhost",
+                    SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 },
             },
         )
@@ -11211,7 +11216,7 @@ class TestAgentBot:
         assert key == (room.room_id, None, "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
-        assert pending_event.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+        assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_gate_bypass(
@@ -11325,7 +11330,7 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -11462,7 +11467,7 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -11661,7 +11666,7 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
-        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"

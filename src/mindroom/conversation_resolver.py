@@ -10,9 +10,9 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SOURCE_KIND_KEY
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
-from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND, source_kind_from_content
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
@@ -50,30 +50,27 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
 
 
-_SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
-
-
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
     """Return whether mentions in this message should be ignored."""
     content = event_source.get("content", {})
     if not isinstance(content, dict):
         return False
-    if bool(content.get(_SKIP_MENTIONS_KEY, False)):
+    if bool(content.get(SKIP_MENTIONS_KEY, False)):
         return True
 
     new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get(_SKIP_MENTIONS_KEY, False))
+    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY, False))
 
 
 def _with_skip_mentions_metadata(content: dict[str, Any], skip_mentions: bool) -> dict[str, Any]:
-    content[_SKIP_MENTIONS_KEY] = skip_mentions
+    content[SKIP_MENTIONS_KEY] = skip_mentions
     new_content = content.get("m.new_content")
     if isinstance(new_content, dict):
         visible_content = dict(new_content)
         if skip_mentions:
-            visible_content[_SKIP_MENTIONS_KEY] = True
+            visible_content[SKIP_MENTIONS_KEY] = True
         else:
-            visible_content.pop(_SKIP_MENTIONS_KEY, None)
+            visible_content.pop(SKIP_MENTIONS_KEY, None)
         content["m.new_content"] = visible_content
     return content
 
@@ -265,8 +262,8 @@ class ConversationResolver:
         registry = entity_identity_registry(config, self.deps.runtime_paths)
         source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
         if resolved_source_kind is None and isinstance(content, dict):
-            source_kind_override = content.get(SOURCE_KIND_KEY)
-            if isinstance(source_kind_override, str) and source_kind_override and source_kind_sender_is_trusted:
+            source_kind_override = source_kind_from_content(content)
+            if source_kind_override is not None and source_kind_sender_is_trusted:
                 resolved_source_kind = source_kind_override
         if resolved_source_kind is None:
             if is_audio_message_event(event):
@@ -300,6 +297,12 @@ class ConversationResolver:
     ) -> TurnOrigin:
         """Build canonical origin metadata for one inbound event envelope."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        trusted_human_relay = (
+            trusted_user_relay
+            and original_sender is not None
+            and original_sender != ""
+            and registry.current_entity_name_for_user_id(original_sender) is None
+        )
         return classify_turn_origin(
             transport_sender_id=event.sender,
             requester_id=requester_user_id,
@@ -307,7 +310,7 @@ class ConversationResolver:
             requester_entity_name=registry.current_entity_name_for_user_id(requester_user_id),
             source_kind=source_kind,
             original_sender=original_sender,
-            trusted_user_relay=trusted_user_relay,
+            trusted_user_relay=trusted_human_relay,
         )
 
     def build_message_target(

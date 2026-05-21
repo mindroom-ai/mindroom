@@ -18,7 +18,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -1301,13 +1301,16 @@ class TestCommandHandling:
         )
 
         with (
-            patch("mindroom.bot.interactive") as mock_interactive,
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new=AsyncMock(return_value=None),
+            ) as mock_interactive,
             patch("mindroom.response_runner.team_response") as mock_team,
         ):
-            mock_interactive.handle_text_response = AsyncMock(return_value=None)
-
             await bot._on_message(room, event)
             await drain_coalescing(bot)
+
+        mock_interactive.assert_not_awaited()
 
         # Verify news agent did NOT form a team or respond
         bot._generate_response.assert_not_called()
@@ -1428,11 +1431,14 @@ class TestCommandHandling:
             },
         )
 
-        with patch("mindroom.bot.interactive") as mock_interactive:
-            mock_interactive.handle_text_response = AsyncMock(return_value=None)
-
+        with patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new=AsyncMock(return_value=None),
+        ) as mock_interactive:
             await bot._on_message(room, event)
             await drain_coalescing(bot)
+
+        mock_interactive.assert_not_awaited()
 
         # Verify finance agent did NOT respond to router's error
         bot._generate_response.assert_not_called()
@@ -2123,6 +2129,7 @@ class TestRouterSkipsSingleAgent:
                     "msgtype": "m.text",
                     "body": f"{VOICE_PREFIX}What's the weather today?",
                     ORIGINAL_SENDER_KEY: "@user:localhost",
+                    SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
                 },
             },
         )

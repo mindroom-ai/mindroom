@@ -19,8 +19,9 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
@@ -238,7 +239,7 @@ def test_active_response_follow_up_uses_actual_managed_sender_ids(tmp_path: Path
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="research",
-            source_kind="message",
+            source_kind=origin.source_kind if origin is not None else "message",
             origin=origin
             or message_origin(
                 sender_id=sender_id,
@@ -617,6 +618,7 @@ class TestRoutingRegression:
         assert content["body"] == "@mindroom_news_oldns:localhost could you help with this?"
         assert content["m.mentions"]["user_ids"] == ["@mindroom_news_oldns:localhost"]
         assert content[ORIGINAL_SENDER_KEY] == "@bob:localhost"
+        assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -698,8 +700,10 @@ class TestRoutingRegression:
         assert content["m.mentions"]["user_ids"] == [ids["beta"].full_id]
         if expected_original_sender is None:
             assert ORIGINAL_SENDER_KEY not in content
+            assert SOURCE_KIND_KEY not in content
         else:
             assert content[ORIGINAL_SENDER_KEY] == expected_original_sender
+            assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")
@@ -774,12 +778,13 @@ class TestRoutingRegression:
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert "couldn't determine which agent or team should help" in content["body"]
         assert ORIGINAL_SENDER_KEY not in content
+        assert SOURCE_KIND_KEY not in content
 
-    def test_router_original_sender_metadata_requires_routable_mention(
+    def test_router_original_sender_metadata_requires_canonical_relay_source_kind(
         self,
         tmp_path: Path,
     ) -> None:
-        """Router relays only honor provenance when the body targets a configured responder."""
+        """Router relays only honor provenance when canonical relay metadata is present."""
         test_room_id = "!router-mentions:localhost"
         test_config = _runtime_bound_config(
             Config(
@@ -810,10 +815,18 @@ class TestRoutingRegression:
 
         router_sender = ids["router"].full_id
 
-        def requester_for(content: dict[str, object]) -> str:
+        def requester_for(
+            content: dict[str, object],
+            *,
+            original_sender: str = "@stale:localhost",
+            source_kind: str | None = None,
+        ) -> str:
+            content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
+            if source_kind is not None:
+                content_with_metadata[SOURCE_KIND_KEY] = source_kind
             return router_bot._turn_controller._requester_user_id(
                 sender=router_sender,
-                source={"content": {ORIGINAL_SENDER_KEY: "@stale:localhost", **content}},
+                source={"content": content_with_metadata},
             )
 
         untrusted_contents: list[dict[str, object]] = [
@@ -829,7 +842,16 @@ class TestRoutingRegression:
             {"body": "Beta could help", "m.mentions": {"user_ids": [ids["beta"].full_id]}},
         ]
         for content in trusted_contents:
-            assert requester_for(content) == "@stale:localhost"
+            assert requester_for(content) == router_sender
+            assert requester_for(content, source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND) == "@stale:localhost"
+            assert (
+                requester_for(
+                    content,
+                    original_sender=ids["router"].full_id,
+                    source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                )
+                == router_sender
+            )
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_responder_for_message")

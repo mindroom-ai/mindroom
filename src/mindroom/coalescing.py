@@ -38,8 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 __all__ = [
-    "COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP",
-    "COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY",
     "CoalescingGate",
     "GatePhase",
     "is_coalescing_exempt_source_kind",
@@ -48,15 +46,13 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
-        COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-        COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
 logger = get_logger(__name__)
@@ -301,7 +297,7 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
-        if pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
+        if pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
             return _QueueKind.BYPASS
         if any(item.requires_solo_batch for item in pending_event.dispatch_metadata):
             return _QueueKind.BYPASS

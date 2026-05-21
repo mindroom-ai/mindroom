@@ -252,6 +252,9 @@ class MessageEnvelope:
         if self.requester_id != self.origin.requester_id:
             message = "MessageEnvelope.requester_id must match MessageEnvelope.origin.requester_id"
             raise ValueError(message)
+        if self.source_kind != self.origin.source_kind:
+            message = "MessageEnvelope.source_kind must match MessageEnvelope.origin.source_kind"
+            raise ValueError(message)
 
 
 @dataclass(slots=True)

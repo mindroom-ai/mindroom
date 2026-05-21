@@ -19,6 +19,7 @@ from mindroom.constants import (
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -41,7 +42,7 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
         HOOK_SOURCE_KEY,
-        "com.mindroom.skip_mentions",
+        SKIP_MENTIONS_KEY,
         SOURCE_KIND_KEY,
         ATTACHMENT_IDS_KEY,
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
