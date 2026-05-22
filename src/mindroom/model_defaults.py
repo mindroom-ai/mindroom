@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = (
+    "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
     "CODEX_GPT",
     "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
@@ -73,6 +74,7 @@ CODEX_GPT = "gpt-5.5"
 _OPENAI_GPT = "gpt-5.5"
 OPENAI_GPT_MINI = "gpt-5.4-mini"
 OPENAI_GPT_NANO = "gpt-5.4-nano"
+AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
 GOOGLE_AVATAR_PROMPT = "gemini-3.1-flash-lite-preview"
 GOOGLE_AVATAR_IMAGE = "gemini-3.1-flash-image-preview"
@@ -124,6 +126,7 @@ DEEPSEEK_REASONER = "deepseek-reasoner"
 CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
+        "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT, 258_000),
         "codex": ModelPreset("codex", CODEX_GPT, 258_000),
         "llama_cpp": ModelPreset("openai", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),

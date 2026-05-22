@@ -215,6 +215,9 @@ Use `--provider` to select a different provider preset:
 # Use Anthropic Claude
 uvx mindroom config init --provider anthropic
 
+# Use Azure OpenAI
+uvx mindroom config init --provider azure
+
 # Use Codex CLI ChatGPT subscription auth
 uvx mindroom config init --provider codex
 
@@ -231,6 +234,9 @@ uvx mindroom config init --provider vertexai_claude
 Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
 Use `--provider` for the model provider.
 Run `codex login` before starting MindRoom when using `--provider codex`.
+
+`--provider azure` uses Azure OpenAI through your deployment name.
+Set `models.default.id` to the Azure deployment name you created.
 
 `--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
 Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
@@ -250,6 +256,7 @@ $EDITOR ~/.mindroom/.env
 For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
+- `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI subscription auth: run `codex login`.
@@ -867,6 +874,9 @@ Set the API key for each provider you use in `config.yaml`:
 | Variable | Provider |
 |----------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
+| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API version |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
@@ -1009,10 +1019,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -1094,7 +1104,7 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
 Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
@@ -2039,6 +2049,7 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
 - `google` or `gemini` - Google Gemini models
@@ -2081,6 +2092,12 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+
+  # Azure OpenAI
+  azure:
+    provider: azure
+    id: your-azure-openai-deployment
+    context_window: 258000
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -2165,6 +2182,23 @@ Live testing against the Codex subscription endpoint reported `cached_tokens` on
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 
+## Azure OpenAI
+
+Use `provider: azure` when your model is deployed through Azure OpenAI.
+The `id` field should be your Azure OpenAI deployment name, not necessarily the upstream model name.
+MindRoom reads Azure OpenAI credentials and endpoint values from the config-adjacent `.env` file or exported environment.
+
+```yaml
+models:
+  default:
+    provider: azure
+    id: your-azure-openai-deployment
+    context_window: 258000
+```
+
+Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
+For starter config generation, use `mindroom config init --provider azure`.
+
 ## Context Window
 
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
@@ -2211,6 +2245,9 @@ API keys are read from environment variables:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+AZURE_OPENAI_API_VERSION=2024-10-21
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...

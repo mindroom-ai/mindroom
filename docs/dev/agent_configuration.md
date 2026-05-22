@@ -70,6 +70,7 @@ Each model entry supports these fields:
 ### Supported Providers
 
 - **anthropic** - Claude models (requires `ANTHROPIC_API_KEY`)
+- **azure** - Azure OpenAI deployments (requires `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT`)
 - **openai** - OpenAI and OpenAI-compatible models (requires `OPENAI_API_KEY`)
 - **ollama** - Local models via Ollama (requires `OLLAMA_HOST`, defaults to `http://localhost:11434`)
 - **openrouter** - Access multiple models through OpenRouter (requires `OPENROUTER_API_KEY`)

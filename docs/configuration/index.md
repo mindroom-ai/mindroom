@@ -84,6 +84,9 @@ Set the API key for each provider you use in `config.yaml`:
 | Variable | Provider |
 |----------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
+| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API version |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
@@ -226,10 +229,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -311,7 +314,7 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
 Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.

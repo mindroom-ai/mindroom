@@ -633,6 +633,7 @@ class TestConfigInit:
         assert result.exit_code == 0
 
         output = normalize_console_output(result.output)
+        assert "azure" in output
         assert "--matrix-server" in output
         assert "self-hosted" in output
         assert "mindroom.chat" in output
@@ -947,6 +948,28 @@ class TestConfigInit:
         assert config["models"]["default"]["provider"] == "openrouter"
         assert config["models"]["default"]["id"] == "anthropic/claude-sonnet-4.6"
         assert config["models"]["default"]["context_window"] == 1_000_000
+
+    def test_init_azure_preset_uses_azure_openai_models(self, tmp_path: Path) -> None:
+        """Config init --provider azure uses Azure OpenAI deployment defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "azure"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "azure"
+        assert config["models"]["default"]["id"] == "your-azure-openai-deployment"
+        assert config["models"]["default"]["context_window"] == 258_000
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "AZURE_OPENAI_API_KEY=your-azure-openai-key-here" in env_content
+        assert "AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com" in env_content
+        assert "AZURE_OPENAI_API_VERSION=2024-10-21" in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+
+        output = normalize_console_output(result.output)
+        assert "Azure OpenAI" in output
+        assert "deployment" in output
 
     def test_provider_env_template_uses_canonical_provider_env_key(
         self,
@@ -1321,7 +1344,7 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "No config found" in result.output
         assert "mindroom config init" in result.output
-        provider_guidance = "mindroom config init --provider {openrouter,ollama,openai,codex,claude"
+        provider_guidance = "mindroom config init --provider {openrouter,ollama,openai,azure,codex,claude"
         assert provider_guidance in result.output
         mock_main.assert_not_awaited()
         assert not cfg.exists()

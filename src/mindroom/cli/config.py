@@ -63,6 +63,7 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
 _MatrixServerPreset = Literal["self-hosted", "mindroom.chat"]
 _ProviderPreset = Literal[
     "anthropic",
+    "azure",
     "codex",
     "llama_cpp",
     "ollama",
@@ -76,6 +77,9 @@ _LLAMA_CPP_BASE_URL = LLAMA_CPP_BASE_URL_DEFAULT
 _LLAMA_CPP_API_KEY = LLAMA_CPP_API_KEY_DEFAULT
 _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "anthropic": "anthropic",
+    "azure": "azure",
+    "azure_openai": "azure",
+    "azure-openai": "azure",
     "claude": "anthropic",
     "codex": "codex",
     "llama.cpp": "llama_cpp",
@@ -102,7 +106,7 @@ _MATRIX_SERVER_HELP = (
     "Matrix defaults: self-hosted = configure your own homeserver; mindroom.chat = hosted Matrix pairing defaults."
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
-_PROVIDER_CHOICES_TEXT = "anthropic, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
+_PROVIDER_CHOICES_TEXT = "anthropic, azure, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
   ignore_unverified_devices: false"""
@@ -236,12 +240,14 @@ def _should_replace_env_file(env_path: Path, *, force: bool) -> bool:
 def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _ProviderPreset) -> str:
     """Return the env setup hint shown after `mindroom config init`."""
     hosted_hints: dict[_ProviderPreset, str] = {
+        "azure": "Set your Azure OpenAI key/endpoint and confirm the config model deployment name",
         "codex": "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
         "vertexai_claude": "Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)",
         "ollama": "Start Ollama and pull the local models (Matrix homeserver is prefilled)",
         "llama_cpp": "Start llama.cpp server with the local model (Matrix homeserver is prefilled)",
     }
     standalone_hints: dict[_ProviderPreset, str] = {
+        "azure": "Set your Matrix homeserver, Azure OpenAI key/endpoint, and config model deployment name",
         "codex": "Set your Matrix homeserver and run `codex login` before starting MindRoom",
         "vertexai_claude": "Set your Matrix homeserver, Vertex AI project/region, and Google auth",
         "ollama": "Set your Matrix homeserver, start Ollama, and pull the local models",
@@ -654,11 +660,18 @@ def _find_missing_env_keys(
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
-    from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY  # noqa: PLC0415
+    from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
+        if provider == "azure":
+            missing.extend(
+                (provider, env_key)
+                for env_key in (AZURE_OPENAI_ENV_BY_KEY["api_key"], AZURE_OPENAI_ENV_BY_KEY["endpoint"])
+                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
+            )
+            continue
         if provider == "vertexai_claude":
             missing.extend(
                 (provider, env_key)
@@ -724,7 +737,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/azure/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
@@ -1026,6 +1039,16 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
         # Authenticate with Google Application Default Credentials before running:
         # gcloud auth application-default login
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+        """).rstrip()
+
+    if provider_preset == "azure":
+        return textwrap.dedent("""\
+        # Azure OpenAI configuration
+        AZURE_OPENAI_API_KEY=your-azure-openai-key-here
+        AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+        AZURE_OPENAI_API_VERSION=2024-10-21
+
+        # In config.yaml, set models.default.id to your Azure OpenAI deployment name.
         """).rstrip()
 
     if provider_preset == "ollama":
