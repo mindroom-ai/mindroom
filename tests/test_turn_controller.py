@@ -15,7 +15,12 @@ from mindroom.coalescing import CoalescingGate
 from mindroom.coalescing_batch import CoalescedBatch, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -28,7 +33,6 @@ from mindroom.dispatch_source import (
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
-from mindroom.turn_controller import _VISIBLE_ROUTER_VOICE_ECHO_KEY
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -180,6 +184,76 @@ async def test_active_thread_voice_stays_normal_and_coalesces(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_active_thread_voice_coalesces_while_prior_dispatch_is_in_flight(tmp_path: Path) -> None:
+    """Voice follow-ups queued during an in-flight dispatch should flush as one batch."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+    first_dispatch_started = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+        if batch.source_event_ids == ["$prior"]:
+            first_dispatch_started.set()
+            await release_first_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    key = (room.room_id, "$thread:localhost", "@user:localhost")
+    await gate.enqueue(
+        key,
+        PendingEvent(
+            event=_prepared_text_event(event_id="$prior", body="prior message", source_kind=MESSAGE_SOURCE_KIND),
+            room=room,
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
+    )
+    await asyncio.wait_for(first_dispatch_started.wait(), timeout=1.0)
+
+    voice_events = [
+        _prepared_text_event(event_id="$voice-1", body="first transcription", source_kind=VOICE_SOURCE_KIND),
+        _prepared_text_event(event_id="$voice-2", body="second transcription", source_kind=VOICE_SOURCE_KIND),
+    ]
+    for event in voice_events:
+        target = bot._turn_controller.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id="$thread:localhost",
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = bot._turn_controller.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id="@user:localhost",
+            target=target,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+        await bot._turn_controller._enqueue_prepared_text_for_dispatch(
+            room=room,
+            prepared_event=event,
+            dispatch_event=event,
+            envelope=envelope,
+            coalescing_thread_id="$thread:localhost",
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+
+    release_first_dispatch.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$prior"], ["$voice-1", "$voice-2"]]
+    assert [pending.dispatch_policy_source_kind for pending in batches[1].pending_events] == [None, None]
+    assert "first transcription" in batches[1].prompt
+    assert "second transcription" in batches[1].prompt
+
+
+@pytest.mark.asyncio
 async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None:
     """Router voice echoes should be marked handled without dispatching to agents."""
     bot = _make_general_bot(tmp_path)
@@ -203,15 +277,22 @@ async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         content_overrides={
             ORIGINAL_SENDER_KEY: "@user:localhost",
-            _VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         },
     )
 
-    with patch(
-        "mindroom.turn_controller.interactive.handle_text_response",
-        new_callable=AsyncMock,
-        return_value=None,
-    ) as mock_interactive:
+    with (
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_interactive,
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$should-not-resolve"),
+        ) as mock_coalescing_thread_id,
+    ):
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=echo_event,
@@ -223,8 +304,56 @@ async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None
     await gate.drain_all()
 
     mock_interactive.assert_not_awaited()
+    mock_coalescing_thread_id.assert_not_awaited()
     assert batches == []
     assert bot._turn_store.is_handled("$voice-echo")
+
+
+@pytest.mark.asyncio
+async def test_voice_coalescing_forged_visible_router_voice_echo_marker_still_dispatches(tmp_path: Path) -> None:
+    """Human-authored marker content should not be trusted as a display-only echo."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    forged_event = _prepared_text_event(
+        event_id="$forged-voice-echo",
+        body="@general this should still dispatch",
+        content_overrides={
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+    )
+
+    with patch(
+        "mindroom.turn_controller.interactive.handle_text_response",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=forged_event,
+            dispatch_event=forged_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$forged-voice-echo"]]
+    assert batches[0].source_kind == MESSAGE_SOURCE_KIND
+    assert not bot._turn_store.is_handled("$forged-voice-echo")
 
 
 @pytest.mark.asyncio

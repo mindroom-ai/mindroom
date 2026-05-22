@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -36,6 +37,9 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+
+if TYPE_CHECKING:
+    from mindroom.coalescing_batch import PendingEvent
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -464,10 +468,12 @@ async def test_voice_message_keeps_normal_dispatch_when_stt_thread_changes(
     pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
     post_stt_signal = lifecycle._get_or_create_queued_signal(post_stt_target)
 
-    async def capture_enqueue(*_args: object, **kwargs: object) -> None:
+    enqueued_events: list[tuple[tuple[str, str | None, str], PendingEvent]] = []
+
+    async def capture_gate_enqueue(key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
         assert pre_stt_signal.pending_human_messages == 0
         assert post_stt_signal.pending_human_messages == 0
-        assert kwargs["queued_notice_reservation"] is None
+        enqueued_events.append((key, pending_event))
 
     pre_stt_signal.begin_response_turn()
     post_stt_signal.begin_response_turn()
@@ -484,7 +490,16 @@ async def test_voice_message_keeps_normal_dispatch_when_stt_thread_changes(
                 new=AsyncMock(return_value=normalized_voice),
             ),
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
-            patch.object(bot._turn_controller, "_enqueue_for_dispatch", new=AsyncMock(side_effect=capture_enqueue)),
+            patch.object(
+                bot._turn_controller.deps.response_runner,
+                "reserve_waiting_human_message",
+                new=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(
+                bot._turn_controller.deps.coalescing_gate,
+                "enqueue",
+                new=AsyncMock(side_effect=capture_gate_enqueue),
+            ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             await bot._on_media_message(room, voice_event)
@@ -496,6 +511,13 @@ async def test_voice_message_keeps_normal_dispatch_when_stt_thread_changes(
     assert post_stt_signal.pending_human_messages == 0
     assert not pre_stt_signal.is_set()
     assert not post_stt_signal.is_set()
+    mock_reserve_waiting_human_message.assert_not_called()
+    assert len(enqueued_events) == 1
+    key, pending_event = enqueued_events[0]
+    assert key == (room.room_id, "$post_stt_thread", voice_event.sender)
+    assert pending_event.event is normalized_event
+    assert pending_event.source_kind == "voice"
+    assert pending_event.dispatch_metadata == ()
 
 
 @pytest.mark.asyncio
@@ -552,9 +574,11 @@ async def test_room_mode_voice_stays_normal_until_queued_dispatch_owns_it(
         await allow_prepare.wait()
         return normalized_voice
 
-    async def capture_enqueue(*_args: object, **kwargs: object) -> None:
+    enqueued_events: list[tuple[tuple[str, str | None, str], PendingEvent]] = []
+
+    async def capture_gate_enqueue(key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
         assert queued_signal.pending_human_messages == 0
-        assert kwargs["queued_notice_reservation"] is None
+        enqueued_events.append((key, pending_event))
 
     queued_signal.begin_response_turn()
     task: asyncio.Task[None] | None = None
@@ -571,7 +595,16 @@ async def test_room_mode_voice_stays_normal_until_queued_dispatch_owns_it(
                 new=AsyncMock(side_effect=prepare_voice_event),
             ),
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
-            patch.object(bot._turn_controller, "_enqueue_for_dispatch", new=AsyncMock(side_effect=capture_enqueue)),
+            patch.object(
+                bot._turn_controller.deps.response_runner,
+                "reserve_waiting_human_message",
+                new=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(
+                bot._turn_controller.deps.coalescing_gate,
+                "enqueue",
+                new=AsyncMock(side_effect=capture_gate_enqueue),
+            ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
@@ -588,3 +621,10 @@ async def test_room_mode_voice_stays_normal_until_queued_dispatch_owns_it(
 
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
+    mock_reserve_waiting_human_message.assert_not_called()
+    assert len(enqueued_events) == 1
+    key, pending_event = enqueued_events[0]
+    assert key == (room.room_id, None, voice_event.sender)
+    assert pending_event.event is normalized_voice.event
+    assert pending_event.source_kind == "voice"
+    assert pending_event.dispatch_metadata == ()
