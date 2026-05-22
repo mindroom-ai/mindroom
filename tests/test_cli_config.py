@@ -958,7 +958,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "azure"
         assert config["models"]["default"]["id"] == "your-azure-openai-deployment"
-        assert config["models"]["default"]["context_window"] == 258_000
+        assert "context_window" not in config["models"]["default"]
 
         env_content = (tmp_path / ".env").read_text()
         assert "AZURE_OPENAI_API_KEY=your-azure-openai-key-here" in env_content

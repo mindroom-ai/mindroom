@@ -753,8 +753,9 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
     lines = [
         f"provider: {model_preset.provider}",
         f"id: {model_preset.id}",
-        f"context_window: {model_preset.context_window}",
     ]
+    if model_preset.context_window is not None:
+        lines.append(f"context_window: {model_preset.context_window}")
     if provider_preset == "codex":
         lines.extend(
             [

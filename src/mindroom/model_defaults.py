@@ -126,7 +126,7 @@ DEEPSEEK_REASONER = "deepseek-reasoner"
 CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
-        "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT, 258_000),
+        "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
         "codex": ModelPreset("codex", CODEX_GPT, 258_000),
         "llama_cpp": ModelPreset("openai", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),

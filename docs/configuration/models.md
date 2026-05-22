@@ -57,7 +57,6 @@ models:
   azure:
     provider: azure
     id: your-azure-openai-deployment
-    context_window: 258000
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -153,9 +152,10 @@ models:
   default:
     provider: azure
     id: your-azure-openai-deployment
-    context_window: 258000
 ```
 
+Azure deployment limits vary, so starter configs do not set `context_window` for Azure.
+Set `context_window` to the limit of your deployment when you know it.
 Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
 For starter config generation, use `mindroom config init --provider azure`.
 
