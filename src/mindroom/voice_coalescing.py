@@ -26,7 +26,6 @@ class VoiceIngressItem:
     room: nio.MatrixRoom
     event: AudioMessageEvent
     requester_user_id: str
-    coalescing_thread_id: str | None
     normalization_task: asyncio.Task[VoiceNormalizationResult | None]
     dispatch_timing: DispatchPipelineTiming | None
     received_at: float = field(default_factory=time.monotonic)

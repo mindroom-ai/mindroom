@@ -208,7 +208,6 @@ def _voice_ingress_item(room: nio.MatrixRoom, event: nio.RoomMessageAudio) -> Vo
         room=room,
         event=event,
         requester_user_id=event.sender,
-        coalescing_thread_id="$thread_root",
         normalization_task=asyncio.create_task(_immediate_normalized_voice_result(event)),
         dispatch_timing=None,
     )
@@ -240,7 +239,7 @@ def _install_streaming_test_gate(bot: AgentBot) -> None:
         debounce_seconds=lambda: 0.01,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        has_pending_external_voice_burst=voice_gate.has_pending_voice_burst,
+        has_pending_voice_handoff=voice_gate.has_pending_voice_burst,
     )
     replace_turn_controller_deps(bot, coalescing_gate=gate, voice_coalescing_gate=voice_gate)
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
@@ -889,7 +888,6 @@ async def test_voice_burst_retargets_captured_text_to_single_successful_voice_ke
                     room=room,
                     event=voice_event,
                     requester_user_id="@user:example.com",
-                    coalescing_thread_id="$pre_stt_thread",
                     normalization_task=asyncio.create_task(_immediate_normalized_voice_result(voice_event)),
                     dispatch_timing=None,
                 ),
@@ -905,8 +903,89 @@ async def test_voice_burst_retargets_captured_text_to_single_successful_voice_ke
 
     assert len(batches) == 1
     assert set(batches[0].source_event_ids) == {"$typed", "$voice-retargeted"}
+    typed_pending_event = next(
+        pending_event for pending_event in batches[0].pending_events if pending_event.event.event_id == "$typed"
+    )
+    assert typed_pending_event.dispatch_policy_source_kind is None
+    assert typed_pending_event.dispatch_metadata == ()
     assert "typed follow-up" in batches[0].prompt
     assert "transcript after retarget" in batches[0].prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_burst_keeps_captured_text_on_original_key_when_voices_split(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Text captured before STT should not guess a target when voice resolves into multiple threads."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
+
+    first_voice = _make_threaded_voice_event(event_id="$voice-one", thread_id="$pre_stt_thread")
+    second_voice = _make_threaded_voice_event(event_id="$voice-two", thread_id="$pre_stt_thread")
+    first_normalized_voice = _normalized_voice_result(
+        event=first_voice,
+        text="first retargeted transcript",
+        thread_id="$post_stt_thread_one",
+    )
+    second_normalized_voice = _normalized_voice_result(
+        event=second_voice,
+        text="second retargeted transcript",
+        thread_id="$post_stt_thread_two",
+    )
+    text_event = _threaded_prepared_text_event(
+        event_id="$typed-split",
+        body="typed follow-up",
+        thread_id="$pre_stt_thread",
+    )
+    _text_key, text_pending_event, _source_kind = await bot._turn_controller._build_pending_event_for_dispatch(
+        text_event,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        requester_user_id="@user:example.com",
+        coalescing_key=(room.room_id, "$pre_stt_thread", "@user:example.com"),
+    )
+    batch = VoiceIngressBatch(
+        key=(room.room_id, "$pre_stt_thread", "@user:example.com"),
+        voice_outcomes=(
+            VoiceNormalizationOutcome(
+                item=_voice_ingress_item(room, first_voice),
+                result=first_normalized_voice,
+            ),
+            VoiceNormalizationOutcome(
+                item=_voice_ingress_item(room, second_voice),
+                result=second_normalized_voice,
+            ),
+        ),
+        text_items=(TextIngressItem(pending_event=text_pending_event),),
+    )
+
+    with patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()):
+        await bot._turn_controller._flush_voice_ingress_batch(batch)
+        await gate.drain_all()
+
+    source_id_groups = {tuple(batch.source_event_ids) for batch in batches}
+    assert source_id_groups == {
+        ("$voice-one",),
+        ("$voice-two",),
+        ("$typed-split",),
+    }
+    typed_batch = next(batch for batch in batches if batch.source_event_ids == ["$typed-split"])
+    typed_pending_event = typed_batch.pending_events[0]
+    assert typed_pending_event.dispatch_policy_source_kind is None
+    assert typed_pending_event.dispatch_metadata == ()
 
 
 @pytest.mark.asyncio
@@ -930,7 +1009,7 @@ async def test_late_text_after_voice_claim_retargets_with_successful_voice_key(
         debounce_seconds=lambda: 0.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        has_pending_external_voice_burst=voice_gate.has_pending_voice_burst,
+        has_pending_voice_handoff=voice_gate.has_pending_voice_burst,
     )
     replace_turn_controller_deps(bot, coalescing_gate=gate, voice_coalescing_gate=voice_gate)
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
@@ -1437,7 +1516,7 @@ async def test_non_voice_trusted_relay_does_not_join_pending_voice_burst(
             return_value=True,
         ) as mock_enqueue_text_if_voice_pending,
     ):
-        accepted = await bot._turn_controller._try_enqueue_active_follow_up_with_pending_voice(
+        accepted = await bot._turn_controller._try_join_active_text_with_pending_voice(
             room=room,
             event=relay_event,
             envelope=envelope,

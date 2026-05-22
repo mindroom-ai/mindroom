@@ -372,7 +372,7 @@ class AgentBot:
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
-            has_pending_external_voice_burst=self._voice_coalescing_gate.has_pending_voice_burst,
+            has_pending_voice_handoff=self._voice_coalescing_gate.has_pending_voice_burst,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,

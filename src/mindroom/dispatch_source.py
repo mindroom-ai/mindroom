@@ -7,6 +7,8 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from mindroom.constants import SOURCE_KIND_KEY
 
+# Source kinds describe origin and dispatch policy. Coalescing classes describe
+# batching behavior; matching strings such as "voice" are separate axes.
 MESSAGE_SOURCE_KIND = "message"
 VOICE_SOURCE_KIND = "voice"
 IMAGE_SOURCE_KIND = "image"

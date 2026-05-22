@@ -34,6 +34,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import (
+    QUEUED_NOTICE_METADATA_KIND,
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     PendingDispatchMetadata,
@@ -1365,7 +1366,7 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pending_external_voice_does_not_delay_command_barrier() -> None:
+async def test_pending_voice_handoff_does_not_delay_command_barrier() -> None:
     """A command barrier should flush queued text even while raw voice STT is pending."""
     room = _make_room()
     text = _text_event(event_id="$text", body="text before command", server_timestamp=1000)
@@ -1380,7 +1381,7 @@ async def test_pending_external_voice_does_not_delay_command_barrier() -> None:
         debounce_seconds=lambda: 60.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
-        has_pending_external_voice_burst=lambda _key: True,
+        has_pending_voice_handoff=lambda _key: True,
     )
     key = ("!room:localhost", "$thread", "@user:localhost")
 
@@ -1627,7 +1628,7 @@ async def test_queued_notice_metadata_coalesces_in_thread_batch_and_drops_extras
     second_reservation = MagicMock()
     first_metadata = (
         PendingDispatchMetadata(
-            kind="queued_notice_reservation",
+            kind=QUEUED_NOTICE_METADATA_KIND,
             payload=first_reservation,
             close=first_reservation.cancel,
             requires_solo_batch=True,
@@ -1635,7 +1636,7 @@ async def test_queued_notice_metadata_coalesces_in_thread_batch_and_drops_extras
     )
     second_metadata = (
         PendingDispatchMetadata(
-            kind="queued_notice_reservation",
+            kind=QUEUED_NOTICE_METADATA_KIND,
             payload=second_reservation,
             close=second_reservation.cancel,
             requires_solo_batch=True,
@@ -1646,7 +1647,7 @@ async def test_queued_notice_metadata_coalesces_in_thread_batch_and_drops_extras
     async def dispatch_batch(batch: CoalescedBatch) -> None:
         calls.append(list(batch.source_event_ids))
         assert len(batch.dispatch_metadata) == 1
-        assert batch.dispatch_metadata[0].kind == "queued_notice_reservation"
+        assert batch.dispatch_metadata[0].kind == QUEUED_NOTICE_METADATA_KIND
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,

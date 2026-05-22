@@ -145,8 +145,6 @@ if TYPE_CHECKING:
 
 type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
-_ACTIVE_THREAD_FOLLOW_UP_BYPASS_EXCLUDED_SOURCE_KINDS = frozenset({VOICE_SOURCE_KIND})
-
 
 def _queued_notice_dispatch_metadata(
     reservation: QueuedHumanNoticeReservation | None,
@@ -430,6 +428,20 @@ class TurnController:
         sender_agent_name = self._managed_entity_name_for_sender(event.sender)
         return sender_agent_name == ROUTER_AGENT_NAME
 
+    def _is_display_only_visible_router_voice_echo(
+        self,
+        event: DispatchEvent,
+        *,
+        content: dict[str, Any],
+        source_kind: str | None,
+    ) -> bool:
+        """Return whether a trusted router transcript echo should not dispatch."""
+        return (
+            content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+            and source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+            and self._is_trusted_router_relay_event(event)
+        )
+
     def _should_use_trusted_router_relay_context(
         self,
         event: DispatchEvent,
@@ -589,10 +601,7 @@ class TurnController:
             return False
         if not envelope.origin.may_answer_interactive_prompt:
             return False
-        if (
-            envelope.source_kind in _ACTIVE_THREAD_FOLLOW_UP_BYPASS_EXCLUDED_SOURCE_KINDS
-            or coalescing_class == VOICE_COALESCING_CLASS
-        ):
+        if coalescing_class == VOICE_COALESCING_CLASS:
             return False
         return self.deps.response_runner.has_active_response_for_target(envelope.target)
 
@@ -675,7 +684,7 @@ class TurnController:
             envelope=envelope,
             coalescing_class=coalescing_class,
         ):
-            if await self._try_enqueue_active_follow_up_with_pending_voice(
+            if await self._try_join_active_text_with_pending_voice(
                 room=room,
                 event=dispatch_event,
                 envelope=envelope,
@@ -718,7 +727,7 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
 
-    async def _try_enqueue_active_follow_up_with_pending_voice(
+    async def _try_join_active_text_with_pending_voice(
         self,
         *,
         room: nio.MatrixRoom,
@@ -728,7 +737,7 @@ class TurnController:
         requester_user_id: str,
         trust_internal_payload_metadata: bool | None,
     ) -> bool:
-        """Keep normal active text with a pending raw voice burst for the same turn."""
+        """Keep normal active text with a raw voice burst still before downstream handoff."""
         can_join_voice_burst = (
             envelope.source_kind == MESSAGE_SOURCE_KIND
             and envelope.dispatch_policy_source_kind is None
@@ -742,6 +751,8 @@ class TurnController:
         key = (room.room_id, coalescing_thread_id, requester_user_id)
         if not self.deps.voice_coalescing_gate.has_pending_voice_burst(key):
             return False
+        # Keep the active-follow-up marker while voice may still fail. A
+        # successful voice outcome strips it before the mixed batch dispatches.
         resolved_key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
             event,
             room,
@@ -925,11 +936,10 @@ class TurnController:
         """Run shared ingress dispatch for text events and sidecar text previews."""
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
         prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
-        if (
-            isinstance(content, dict)
-            and content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
-            and prepared_source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-            and self._is_trusted_router_relay_event(prepared_event)
+        if isinstance(content, dict) and self._is_display_only_visible_router_voice_echo(
+            prepared_event,
+            content=content,
+            source_kind=prepared_source_kind,
         ):
             self.deps.logger.debug(
                 "Ignoring visible router voice echo",
@@ -2457,7 +2467,6 @@ class TurnController:
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
-                coalescing_thread_id=coalescing_thread_id,
                 normalization_task=normalization_task,
                 dispatch_timing=dispatch_timing,
             ),
@@ -2515,6 +2524,8 @@ class TurnController:
         pending_event = text_item.pending_event
         if not has_successful_voice or pending_event.dispatch_policy_source_kind != ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
             return pending_event
+        # Captured active text becomes part of the normal voice turn once at
+        # least one voice message survived STT.
         for metadata in pending_event.dispatch_metadata:
             metadata.close()
         return replace(
@@ -2522,6 +2533,18 @@ class TurnController:
             dispatch_policy_source_kind=None,
             dispatch_metadata=(),
         )
+
+    @staticmethod
+    def _text_key_for_voice_ingress_batch(
+        original_key: CoalescingKey,
+        successful_voice_keys: tuple[CoalescingKey, ...],
+    ) -> CoalescingKey:
+        """Return the downstream key for text captured while raw voice normalized."""
+        if len(successful_voice_keys) == 1:
+            return successful_voice_keys[0]
+        # If STT retargeted the burst into multiple final keys, there is no
+        # single voice destination for the text, so keep the original key.
+        return original_key
 
     async def _enqueue_voice_ingress_pending_events(
         self,
@@ -2544,7 +2567,7 @@ class TurnController:
     async def _flush_voice_ingress_batch(self, batch: VoiceIngressBatch) -> None:
         """Enqueue one claimed raw-voice burst after every STT task has finished."""
         pending_by_key: dict[CoalescingKey, list[tuple[float, PendingEvent]]] = {}
-        text_items = batch.text_items
+        text_items_to_close_on_failure = batch.text_items
         handoff_complete = False
         try:
             for outcome in batch.voice_outcomes:
@@ -2555,12 +2578,13 @@ class TurnController:
 
             has_successful_voice = bool(pending_by_key)
             successful_voice_keys = tuple(pending_by_key)
-            text_key = successful_voice_keys[0] if len(successful_voice_keys) == 1 else batch.key
-            text_items = (
+            text_key = self._text_key_for_voice_ingress_batch(batch.key, successful_voice_keys)
+            all_text_items = (
                 *batch.text_items,
                 *batch.consume_claimed_text_items(),
             )
-            for text_item in text_items:
+            text_items_to_close_on_failure = all_text_items
+            for text_item in all_text_items:
                 pending_event = self._pending_text_event_for_voice_batch(
                     text_item,
                     has_successful_voice=has_successful_voice,
@@ -2571,7 +2595,7 @@ class TurnController:
             handoff_complete = True
         except BaseException:
             if not handoff_complete:
-                _close_text_ingress_metadata(text_items)
+                _close_text_ingress_metadata(text_items_to_close_on_failure)
             raise
 
     async def _dispatch_file_sidecar_text_preview(

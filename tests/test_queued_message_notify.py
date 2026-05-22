@@ -34,7 +34,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import QUEUED_NOTICE_METADATA_KIND, PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -251,7 +251,7 @@ def _reserved_follow_up_case(
 def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispatchMetadata, ...]:
     return (
         PendingDispatchMetadata(
-            kind="queued_notice_reservation",
+            kind=QUEUED_NOTICE_METADATA_KIND,
             payload=reservation,
             close=reservation.cancel,
             requires_solo_batch=True,

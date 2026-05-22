@@ -46,7 +46,8 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-_PENDING_EXTERNAL_VOICE_WAIT_SECONDS = 0.05
+# Poll while raw voice for the same key is still normalizing outside this gate.
+_VOICE_HANDOFF_POLL_SECONDS = 0.05
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_SOURCE_KIND,
@@ -157,13 +158,13 @@ class CoalescingGate:
         debounce_seconds: Callable[[], float],
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
-        has_pending_external_voice_burst: Callable[[CoalescingKey], bool] | None = None,
+        has_pending_voice_handoff: Callable[[CoalescingKey], bool] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
-        self._has_pending_external_voice_burst = has_pending_external_voice_burst or (lambda _key: False)
+        self._has_pending_voice_handoff = has_pending_voice_handoff or (lambda _key: False)
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._retired_in_flight_drain_tasks: set[asyncio.Task[None]] = set()
 
@@ -304,10 +305,13 @@ class CoalescingGate:
             for item in pending_event.dispatch_metadata
         ):
             return _QueueKind.BYPASS
-        if pending_event.coalescing_class != VOICE_COALESCING_CLASS and is_coalescing_exempt_source_kind(
+        source_kind_requires_bypass = is_coalescing_exempt_source_kind(
             pending_event.event,
             pending_event.source_kind,
-        ):
+        )
+        if pending_event.coalescing_class != VOICE_COALESCING_CLASS and source_kind_requires_bypass:
+            # Trusted internal relays usually bypass, but voice-class relays
+            # are routed voice handoffs and must stay coalescible.
             return _QueueKind.BYPASS
         if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
             return _QueueKind.COMMAND
@@ -592,11 +596,12 @@ class CoalescingGate:
                 return candidate_count
             gate.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
 
-    async def _wait_for_pending_external_voice_burst(
+    async def _wait_for_pending_voice_handoff(
         self,
         gate: _GateEntry,
     ) -> None:
-        wait_seconds = _PENDING_EXTERNAL_VOICE_WAIT_SECONDS
+        """Briefly yield for raw voice ingress to hand events into this gate."""
+        wait_seconds = _VOICE_HANDOFF_POLL_SECONDS
         configured_debounce = max(self._debounce_seconds(), 0.0)
         if configured_debounce > 0:
             wait_seconds = min(wait_seconds, configured_debounce)
@@ -750,10 +755,10 @@ class CoalescingGate:
                 if (
                     not bypass_grace
                     and not self._has_item_after_candidate(gate, candidate_count)
-                    and self._has_pending_external_voice_burst(current_key)
+                    and self._has_pending_voice_handoff(current_key)
                     and not self._is_shutting_down()
                 ):
-                    await self._wait_for_pending_external_voice_burst(gate)
+                    await self._wait_for_pending_voice_handoff(gate)
                     continue
                 candidate_events = self._queue_pending_events(gate, candidate_count)
                 if use_upload_grace and _pending_has_only_text(candidate_events):
