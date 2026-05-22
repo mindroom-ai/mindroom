@@ -385,6 +385,10 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
 
 
+def _filter_settings_key(values: Iterable[str]) -> str:
+    return str(tuple(sorted(values)))
+
+
 def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
@@ -399,9 +403,9 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         chunk_size = str(base_config.chunk_size)
         chunk_overlap = str(base_config.chunk_overlap)
         include_extensions = (
-            str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else ""
+            _filter_settings_key(base_config.include_extensions) if base_config.include_extensions is not None else ""
         )
-        exclude_extensions = str(tuple(base_config.exclude_extensions))
+        exclude_extensions = _filter_settings_key(base_config.exclude_extensions)
     else:
         embedder_provider = ""
         embedder_model = ""
@@ -426,8 +430,8 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         git_branch=git_config.branch if git_config is not None else "",
         git_lfs=str(git_config.lfs) if git_config is not None else "",
         git_skip_hidden=str(git_config.skip_hidden) if git_config is not None else "",
-        git_include_patterns=str(tuple(git_config.include_patterns)) if git_config is not None else "",
-        git_exclude_patterns=str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
+        git_include_patterns=_filter_settings_key(git_config.include_patterns) if git_config is not None else "",
+        git_exclude_patterns=_filter_settings_key(git_config.exclude_patterns) if git_config is not None else "",
         include_extensions=include_extensions,
         exclude_extensions=exclude_extensions,
     )
@@ -1665,6 +1669,7 @@ class KnowledgeManager:
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
         if not _semantic_indexing_enabled(self.config, self.base_id):
+            self._last_refresh_error = None
             return 0
 
         async with self._lock:

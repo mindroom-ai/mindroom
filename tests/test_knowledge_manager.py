@@ -531,6 +531,25 @@ async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete
     assert state.reason is None
 
 
+@pytest.mark.asyncio
+async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_path: Path) -> None:
+    """File-only reindex no-ops should not leave stale manager-local errors."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    manager._last_refresh_error = "previous semantic failure"
+
+    assert await manager.reindex_all() == 0
+    assert manager._last_refresh_error is None
+
+
 def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
     """File-only metadata should cover every managed file agents can inspect."""
     docs_path = tmp_path / "docs"
@@ -2097,6 +2116,44 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     )
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+
+
+def test_indexing_settings_filter_keys_are_order_insensitive(tmp_path: Path) -> None:
+    """Reordered filters should not change indexing compatibility settings."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://example.com/org/repo.git",
+        include_patterns=["z/*.md", "a/*.md"],
+        exclude_patterns=["drafts/*", "archive/*"],
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    config.knowledge_bases["docs"].include_extensions = [".py", ".md"]
+    config.knowledge_bases["docs"].exclude_extensions = [".png", ".jpg"]
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    reordered_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url="https://example.com/org/repo.git",
+                include_patterns=["a/*.md", "z/*.md"],
+                exclude_patterns=["archive/*", "drafts/*"],
+            ),
+        },
+    )
+    reordered_config.knowledge_bases["docs"].include_extensions = [".md", ".py"]
+    reordered_config.knowledge_bases["docs"].exclude_extensions = [".jpg", ".png"]
+    reordered_key = resolve_published_index_key("docs", config=reordered_config, runtime_paths=runtime_paths)
+
+    assert reordered_key.indexing_settings == key.indexing_settings
 
 
 def test_file_mode_indexing_settings_ignore_semantic_only_settings(tmp_path: Path) -> None:

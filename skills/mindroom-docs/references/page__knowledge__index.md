@@ -99,8 +99,8 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `description` | string | `""` | Short description of what the knowledge base contains. Semantic bases use this in `search_knowledge_base` metadata. File-mode bases use it in workspace-path instructions |
-| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index. `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
+| `description` | string | `""` | Short description of what the knowledge base contains for semantic search metadata and file-mode workspace-path instructions |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |

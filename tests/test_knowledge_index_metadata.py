@@ -48,6 +48,31 @@ def test_index_metadata_fields_support_registry_and_manager_strictness(tmp_path:
     assert fields == ({"base": "storage"}, "indexing", None, None, None, None, None)
 
 
+def test_strict_index_metadata_parsing_requires_collection_except_complete_file_mode() -> None:
+    """Strict metadata parsing should only omit collection for completed file-mode records."""
+    indexing_payload = {
+        "settings": {"base": "storage"},
+        "status": "indexing",
+        "index_kind": "files",
+        "indexed_count": 0,
+        "source_signature": "source-signature",
+    }
+
+    assert (
+        parse_index_metadata_fields(
+            indexing_payload,
+            allowed_statuses={"indexing", "complete"},
+            require_complete_fields_for_all_statuses=True,
+        )
+        is None
+    )
+    assert parse_index_metadata_fields(
+        {**indexing_payload, "status": "complete"},
+        allowed_statuses={"indexing", "complete"},
+        require_complete_fields_for_all_statuses=True,
+    ) == ({"base": "storage"}, "complete", None, None, None, 0, "source-signature")
+
+
 def test_write_index_metadata_payload_preserves_field_names_and_omits_none_values(tmp_path: Path) -> None:
     """Payload building preserves on-disk field names and omits absent optional fields."""
     metadata_path = tmp_path / "indexing_settings.json"
