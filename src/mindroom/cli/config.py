@@ -33,6 +33,7 @@ from mindroom.model_defaults import (
     SENTENCE_TRANSFORMERS_DEFAULT,
     llama_cpp_server_command,
 )
+from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -660,7 +661,6 @@ def _find_missing_env_keys(
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
-    from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
@@ -1031,10 +1031,10 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
         """).rstrip()
 
     if provider_preset == "vertexai_claude":
-        return textwrap.dedent("""\
+        return textwrap.dedent(f"""\
         # Vertex AI Claude configuration
-        ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id
-        CLOUD_ML_REGION=us-central1
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]}=your-gcp-project-id
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=us-central1
 
         # Authenticate with Google Application Default Credentials before running:
         # gcloud auth application-default login
@@ -1042,11 +1042,13 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
         """).rstrip()
 
     if provider_preset == "azure":
-        return textwrap.dedent("""\
+        return textwrap.dedent(f"""\
         # Azure OpenAI configuration
-        AZURE_OPENAI_API_KEY=your-azure-openai-key-here
-        AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-        AZURE_OPENAI_API_VERSION=2024-10-21
+        {AZURE_OPENAI_ENV_BY_KEY["api_key"]}=your-azure-openai-key-here
+        {AZURE_OPENAI_ENV_BY_KEY["endpoint"]}=https://your-resource.openai.azure.com
+
+        # Optional: override Agno's Azure OpenAI default API version.
+        # {AZURE_OPENAI_ENV_BY_KEY["api_version"]}=2024-10-21
 
         # In config.yaml, set models.default.id to your Azure OpenAI deployment name.
         """).rstrip()

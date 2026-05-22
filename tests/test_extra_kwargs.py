@@ -347,6 +347,51 @@ def test_azure_openai_provider_uses_runtime_env() -> None:
     assert model.api_version == "2024-10-21"
 
 
+def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() -> None:
+    """Azure provider should support *_FILE endpoint secrets and Azure-specific overrides."""
+    runtime_root = Path(tempfile.mkdtemp())
+    endpoint_file = runtime_root / "azure-endpoint.txt"
+    endpoint_file.write_text("https://file-resource.openai.azure.com\n", encoding="utf-8")
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        f"AZURE_OPENAI_ENDPOINT_FILE={endpoint_file}\n"
+        "OPENAI_API_VERSION=2023-01-01\n"
+        "AZURE_OPENAI_DEPLOYMENT=env-chat-deployment\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "azure_model": ModelConfig(
+                provider="azure",
+                id="config-chat-deployment",
+                context_window=258_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "azure_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "azure_model")
+
+    assert isinstance(model, AzureOpenAI)
+    assert model.azure_endpoint == "https://file-resource.openai.azure.com"
+    assert model.azure_deployment == "env-chat-deployment"
+    assert model.api_version != "2023-01-01"
+
+
 def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
     """Vertex Claude requests should cache through the latest user text block."""
     model = VertexAIClaude(

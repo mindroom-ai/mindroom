@@ -876,7 +876,7 @@ Set the API key for each provider you use in `config.yaml`:
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
-| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API version |
+| `AZURE_OPENAI_API_VERSION` | Optional Azure OpenAI API version override |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
@@ -2247,7 +2247,8 @@ API keys are read from environment variables:
 ANTHROPIC_API_KEY=sk-ant-...
 AZURE_OPENAI_API_KEY=...
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-AZURE_OPENAI_API_VERSION=2024-10-21
+# Optional, only when overriding Agno's default Azure OpenAI API version:
+# AZURE_OPENAI_API_VERSION=2024-10-21
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...

@@ -82,7 +82,7 @@ Set the API key for each provider you use in `config.yaml`:
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
-| `AZURE_OPENAI_API_VERSION` | Azure OpenAI API version |
+| `AZURE_OPENAI_API_VERSION` | Optional Azure OpenAI API version override |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |

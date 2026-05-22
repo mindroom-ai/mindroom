@@ -43,15 +43,6 @@ def _canonical_provider(provider: str) -> str:
     return provider.strip().lower().replace("-", "_")
 
 
-def _runtime_env_value(runtime_paths: RuntimePaths, *names: str) -> str | None:
-    """Return the first non-empty runtime env value for one provider setting."""
-    for name in names:
-        value = runtime_paths.env_value(name)
-        if value:
-            return value
-    return None
-
-
 def _populate_azure_openai_runtime_kwargs(
     extra_kwargs: dict[str, Any],
     runtime_paths: RuntimePaths,
@@ -62,19 +53,15 @@ def _populate_azure_openai_runtime_kwargs(
         if api_key:
             extra_kwargs["api_key"] = api_key
     if "azure_endpoint" not in extra_kwargs:
-        azure_endpoint = runtime_paths.env_value(AZURE_OPENAI_ENV_BY_KEY["endpoint"])
+        azure_endpoint = get_secret_from_env(AZURE_OPENAI_ENV_BY_KEY["endpoint"], runtime_paths=runtime_paths)
         if azure_endpoint:
             extra_kwargs["azure_endpoint"] = azure_endpoint
     if "api_version" not in extra_kwargs:
-        api_version = _runtime_env_value(runtime_paths, AZURE_OPENAI_ENV_BY_KEY["api_version"], "OPENAI_API_VERSION")
+        api_version = runtime_paths.env_value(AZURE_OPENAI_ENV_BY_KEY["api_version"])
         if api_version:
             extra_kwargs["api_version"] = api_version
     if "azure_deployment" not in extra_kwargs:
-        azure_deployment = _runtime_env_value(
-            runtime_paths,
-            AZURE_OPENAI_ENV_BY_KEY["deployment"],
-            "AZURE_OPENAI_DEPLOYMENT_NAME",
-        )
+        azure_deployment = runtime_paths.env_value(AZURE_OPENAI_ENV_BY_KEY["deployment"])
         if azure_deployment:
             extra_kwargs["azure_deployment"] = azure_deployment
 
@@ -116,8 +103,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         ):
             client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
-            if client_params:
-                extra_kwargs["client_params"] = client_params
+        if client_params:
+            extra_kwargs["client_params"] = client_params
 
     if canonical_provider == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)
