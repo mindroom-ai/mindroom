@@ -196,7 +196,9 @@ def requires_linux(
 async def drain_coalescing(*bots: RuntimeBot) -> None:
     """Run queued coalescing dispatch before asserting post-dispatch effects."""
     for bot in bots:
-        await bot._coalescing_gate.drain_all()
+        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        await controller.deps.voice_coalescing_gate.drain_all()
+        await controller.deps.coalescing_gate.drain_all()
 
 
 def _wait_for_postgres_container(database_url: str) -> None:
@@ -906,6 +908,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "delivery_gateway": "_delivery_gateway",
         "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
+        "voice_coalescing_gate": "_voice_coalescing_gate",
         "edit_regenerator": "_edit_regenerator",
     }
     for field_name, attr_name in default_collaborators.items():

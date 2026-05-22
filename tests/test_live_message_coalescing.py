@@ -1365,6 +1365,34 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_external_voice_does_not_delay_command_barrier() -> None:
+    """A command barrier should flush queued text even while raw voice STT is pending."""
+    room = _make_room()
+    text = _text_event(event_id="$text", body="text before command", server_timestamp=1000)
+    command = _text_event(event_id="$command", body="!help", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        has_pending_external_voice_burst=lambda _key: True,
+    )
+    key = ("!room:localhost", "$thread", "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
+
+    await _wait_for(lambda: calls == [["$text"], ["$command"]], deadline_seconds=0.2)
+
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path: Path) -> None:
     """A blocked coalescing drain must not hold later Matrix ingress callbacks."""
     bot = _make_bot(tmp_path, debounce_ms=0)
@@ -1469,8 +1497,8 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 
 
 @pytest.mark.asyncio
-async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_modality() -> None:
-    """The queue-owned policy should classify prepared events inside the gate."""
+async def test_pending_dispatch_policy_preserves_prepared_modality() -> None:
+    """The queue-owned policy should reach dispatch without erasing modality."""
     room = _make_room()
     event = PreparedTextEvent(
         sender="@user:localhost",
@@ -1487,7 +1515,7 @@ async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
+        debounce_seconds=lambda: 0.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
@@ -1590,17 +1618,26 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
 
 
 @pytest.mark.asyncio
-async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_normal_message() -> None:
-    """Room-scoped voice notices should dispatch solo instead of joining normal debounce batches."""
+async def test_queued_notice_metadata_coalesces_in_thread_batch_and_drops_extras() -> None:
+    """Queued-notice reservations should not force active human follow-ups into solo batches."""
     room = _make_room()
     voice = _text_event(event_id="$voice-room", body="voice transcript", server_timestamp=1000, source_kind="voice")
     normal = _text_event(event_id="$normal", body="nearby text", server_timestamp=1001)
-    reservation = MagicMock()
-    metadata = (
+    first_reservation = MagicMock()
+    second_reservation = MagicMock()
+    first_metadata = (
         PendingDispatchMetadata(
             kind="queued_notice_reservation",
-            payload=reservation,
-            close=reservation.cancel,
+            payload=first_reservation,
+            close=first_reservation.cancel,
+            requires_solo_batch=True,
+        ),
+    )
+    second_metadata = (
+        PendingDispatchMetadata(
+            kind="queued_notice_reservation",
+            payload=second_reservation,
+            close=second_reservation.cancel,
             requires_solo_batch=True,
         ),
     )
@@ -1608,10 +1645,8 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
         calls.append(list(batch.source_event_ids))
-        if batch.source_event_ids == ["$voice-room"]:
-            assert batch.dispatch_metadata == metadata
-            return
-        assert batch.dispatch_metadata == ()
+        assert len(batch.dispatch_metadata) == 1
+        assert batch.dispatch_metadata[0].kind == "queued_notice_reservation"
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
@@ -1619,21 +1654,21 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = ("!room:localhost", "$thread", "@user:localhost")
 
     await gate.enqueue(
         key,
-        PendingEvent(event=voice, room=room, source_kind="voice", dispatch_metadata=metadata),
+        PendingEvent(event=voice, room=room, source_kind="voice", dispatch_metadata=first_metadata),
     )
-    await gate.enqueue(key, PendingEvent(event=normal, room=room, source_kind="message"))
-
-    await _wait_for(lambda: calls == [["$voice-room"]], deadline_seconds=0.2)
-    reservation.cancel.assert_not_called()
+    await gate.enqueue(
+        key,
+        PendingEvent(event=normal, room=room, source_kind="message", dispatch_metadata=second_metadata),
+    )
 
     await gate.drain_all()
 
-    assert calls == [["$voice-room"], ["$normal"]]
-    reservation.cancel.assert_not_called()
+    assert calls == [["$voice-room", "$normal"]]
+    assert first_reservation.cancel.call_count + second_reservation.cancel.call_count == 1
     assert _coalescing_gate_is_idle(gate)
 
 

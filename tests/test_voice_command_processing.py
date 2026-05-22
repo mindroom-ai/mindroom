@@ -16,14 +16,16 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    COALESCING_CLASS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    ROUTER_RELAY_PROMPT_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_COALESCING_CLASS, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -906,6 +908,73 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("visible_router_echo", "include_router"),
+    [
+        (True, False),
+        (True, True),
+        (False, True),
+    ],
+)
+async def test_agent_voice_dispatch_is_single_across_router_echo_modes(
+    tmp_path: Path,
+    visible_router_echo: bool,
+    include_router: bool,
+) -> None:
+    """A normal agent should answer one audio event once regardless of router echo availability."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_home:localhost"
+    agent_user.agent_name = "home"
+    agent_user.matrix_id = MatrixID.parse("@mindroom_home:localhost")
+
+    bot = _agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=_attach_runtime_paths(
+            Config(
+                agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+                authorization={"default_room_access": True},
+                voice={"enabled": True, "visible_router_echo": visible_router_echo},
+            ),
+            tmp_path,
+        ),
+        rooms=["!test:example.com"],
+    )
+    turn_store = unwrap_extracted_collaborator(bot._turn_store)
+    turn_store.is_handled = MagicMock(return_value=False)
+    bot.logger = MagicMock()
+    replace_turn_controller_deps(bot, logger=bot.logger)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.user_id = "@mindroom_home:localhost"
+    bot._generate_response = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, bot._generate_response)
+    _install_voice_thread_dispatch_mocks(bot)
+    _stub_resolve_dispatch_target(bot, "$voice_event")
+
+    room_users = ["@mindroom_home:localhost", "@alice:example.com"]
+    if include_router:
+        room_users.insert(0, "@mindroom_router:localhost")
+    room = _make_room(*room_users)
+    event = _make_voice_event(sender="@alice:example.com")
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
+        await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
+
+    mock_download_audio.assert_awaited_once()
+    mock_voice.assert_awaited_once()
+    bot._generate_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_router_and_agent_share_audio_normalization_when_router_is_present(tmp_path) -> None:  # noqa: ANN001
     """Router-present rooms should still normalize one audio event only once."""
     config = _attach_runtime_paths(
@@ -1084,6 +1153,8 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,
+        ROUTER_RELAY_PROMPT_KEY: f"{VOICE_PREFIX}summarize this audio",
     }
 
 
@@ -1266,6 +1337,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,
+        ROUTER_RELAY_PROMPT_KEY: f"{VOICE_PREFIX}summarize this audio",
     }
     turn_store.record_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(

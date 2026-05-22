@@ -17,6 +17,8 @@ HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
+TEXT_COALESCING_CLASS = "text"
+VOICE_COALESCING_CLASS = "voice"
 _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         MESSAGE_SOURCE_KIND,
@@ -29,6 +31,12 @@ _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_DISPATCH_SOURCE_KIND,
         ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    },
+)
+_KNOWN_COALESCING_CLASSES: frozenset[str] = frozenset(
+    {
+        TEXT_COALESCING_CLASS,
+        VOICE_COALESCING_CLASS,
     },
 )
 _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
@@ -73,6 +81,11 @@ def is_automation_source_kind(source_kind: str) -> bool:
 def _source_kind_from_value(value: object) -> str | None:
     """Return a canonical source kind from arbitrary metadata."""
     return value if isinstance(value, str) and value in _KNOWN_SOURCE_KINDS else None
+
+
+def coalescing_class_from_value(value: object) -> str | None:
+    """Return a canonical coalescing class from arbitrary metadata."""
+    return value if isinstance(value, str) and value in _KNOWN_COALESCING_CLASSES else None
 
 
 def source_kind_from_content(content: Mapping[str, Any]) -> str | None:

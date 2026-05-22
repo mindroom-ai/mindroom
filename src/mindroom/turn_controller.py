@@ -12,13 +12,15 @@ import nio
 from mindroom import interactive
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, close_pending_event_metadata
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    COALESCING_CLASS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    ROUTER_RELAY_PROMPT_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -30,6 +32,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import (
+    QUEUED_NOTICE_METADATA_KIND,
     DispatchEvent,
     DispatchHandoff,
     DispatchIngressMetadata,
@@ -51,7 +54,9 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    TEXT_COALESCING_CLASS,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_COALESCING_CLASS,
     VOICE_SOURCE_KIND,
     is_voice_event,
     source_kind_from_content,
@@ -110,6 +115,13 @@ from mindroom.turn_origin import (
     original_sender_for_router_relay,
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.voice_coalescing import (
+    TextIngressItem,
+    VoiceCoalescingGate,
+    VoiceIngressBatch,
+    VoiceIngressItem,
+    VoiceNormalizationOutcome,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -133,7 +145,6 @@ if TYPE_CHECKING:
 
 type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
-_QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _ACTIVE_THREAD_FOLLOW_UP_BYPASS_EXCLUDED_SOURCE_KINDS = frozenset({VOICE_SOURCE_KIND})
 
 
@@ -144,7 +155,7 @@ def _queued_notice_dispatch_metadata(
         return ()
     return (
         PendingDispatchMetadata(
-            kind=_QUEUED_NOTICE_METADATA_KIND,
+            kind=QUEUED_NOTICE_METADATA_KIND,
             payload=reservation,
             close=reservation.cancel,
             requires_solo_batch=True,
@@ -155,13 +166,17 @@ def _queued_notice_dispatch_metadata(
 def _queued_notice_reservation_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
 ) -> QueuedHumanNoticeReservation | None:
-    reservations = [item.payload for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
+    reservations = [item.payload for item in dispatch_metadata if item.kind == QUEUED_NOTICE_METADATA_KIND]
     if not reservations:
         return None
     if len(reservations) > 1:
         msg = "Coalesced batch carried multiple queued-human notice reservations"
         raise ValueError(msg)
     return cast("QueuedHumanNoticeReservation", reservations[0])
+
+
+def _close_text_ingress_metadata(text_items: tuple[TextIngressItem, ...]) -> None:
+    close_pending_event_metadata([text_item.pending_event for text_item in text_items])
 
 
 class _EditRegenerator(Protocol):
@@ -225,6 +240,7 @@ class TurnControllerDeps:
     tool_runtime: ToolRuntimeSupport
     turn_store: TurnStore
     coalescing_gate: CoalescingGate
+    voice_coalescing_gate: VoiceCoalescingGate
     edit_regenerator: _EditRegenerator
 
 
@@ -309,6 +325,22 @@ class TurnController:
         source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
         return source_kind if source_kind is not None else source_kind_from_content(content)
 
+    @staticmethod
+    def _event_with_body(event: TextDispatchEvent, body: str) -> TextDispatchEvent:
+        """Return a text dispatch event with a trusted canonical body."""
+        if event.body == body:
+            return event
+        if isinstance(event, PreparedTextEvent):
+            return replace(event, body=body)
+        source = event.source if isinstance(event.source, dict) else {}
+        return PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=body,
+            source=source,
+            server_timestamp=event.server_timestamp,
+        )
+
     def _trusted_human_original_sender_for_event(self, event: DispatchEvent) -> str | None:
         """Return trusted human original-sender metadata from one dispatch event."""
         if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
@@ -348,6 +380,37 @@ class TurnController:
     def _should_trust_internal_payload_metadata(self, event: DispatchEvent) -> bool:
         """Return whether internal payload keys on one event should be treated as authoritative."""
         return self._sender_is_trusted_for_ingress_metadata(event.sender)
+
+    def _resolve_trust_internal_payload_metadata(
+        self,
+        event: DispatchEvent,
+        trust_internal_payload_metadata: bool | None,
+    ) -> bool:
+        """Return the explicit or sender-derived internal payload trust decision."""
+        return (
+            self._should_trust_internal_payload_metadata(event)
+            if trust_internal_payload_metadata is None
+            else trust_internal_payload_metadata
+        )
+
+    @staticmethod
+    def _coalescing_class_for_event(
+        event: DispatchEvent,
+        *,
+        source_kind: str,
+        trust_internal_payload_metadata: bool,
+    ) -> str:
+        """Return the batching class for one event without trusting user-authored metadata."""
+        if source_kind == VOICE_SOURCE_KIND:
+            return VOICE_COALESCING_CLASS
+        if trust_internal_payload_metadata:
+            payload_metadata = payload_metadata_from_source(
+                event.source,
+                trust_internal_metadata=True,
+            )
+            if payload_metadata.coalescing_class is not None:
+                return payload_metadata.coalescing_class
+        return TEXT_COALESCING_CLASS
 
     def _is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
@@ -519,13 +582,17 @@ class TurnController:
         self,
         *,
         envelope: MessageEnvelope,
+        coalescing_class: str,
     ) -> bool:
         """Return whether one human thread follow-up should skip in-flight coalescing."""
         if envelope.target.resolved_thread_id is None:
             return False
         if not envelope.origin.may_answer_interactive_prompt:
             return False
-        if envelope.source_kind in _ACTIVE_THREAD_FOLLOW_UP_BYPASS_EXCLUDED_SOURCE_KINDS:
+        if (
+            envelope.source_kind in _ACTIVE_THREAD_FOLLOW_UP_BYPASS_EXCLUDED_SOURCE_KINDS
+            or coalescing_class == VOICE_COALESCING_CLASS
+        ):
             return False
         return self.deps.response_runner.has_active_response_for_target(envelope.target)
 
@@ -589,6 +656,15 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> None:
         """Queue one normalized text event with shared active-follow-up handling."""
+        resolved_trust_internal_payload_metadata = self._resolve_trust_internal_payload_metadata(
+            dispatch_event,
+            trust_internal_payload_metadata,
+        )
+        coalescing_class = self._coalescing_class_for_event(
+            dispatch_event,
+            source_kind=envelope.source_kind,
+            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+        )
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -597,7 +673,17 @@ class TurnController:
         )
         if self._should_bypass_coalescing_for_active_thread_follow_up(
             envelope=envelope,
+            coalescing_class=coalescing_class,
         ):
+            if await self._try_enqueue_active_follow_up_with_pending_voice(
+                room=room,
+                event=dispatch_event,
+                envelope=envelope,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=requester_user_id,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+            ):
+                return
             await self._enqueue_active_thread_follow_up(
                 room=room,
                 event=dispatch_event,
@@ -606,7 +692,7 @@ class TurnController:
                 coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
                 queued_notice_reservation=queued_notice_reservation,
             )
             return
@@ -621,7 +707,7 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             )
         except asyncio.CancelledError:
             if queued_notice_reservation is not None:
@@ -631,6 +717,48 @@ class TurnController:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
             raise
+
+    async def _try_enqueue_active_follow_up_with_pending_voice(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        envelope: MessageEnvelope,
+        coalescing_thread_id: str | None,
+        requester_user_id: str,
+        trust_internal_payload_metadata: bool | None,
+    ) -> bool:
+        """Keep normal active text with a pending raw voice burst for the same turn."""
+        can_join_voice_burst = (
+            envelope.source_kind == MESSAGE_SOURCE_KIND
+            and envelope.dispatch_policy_source_kind is None
+            and envelope.hook_source is None
+            and isinstance(event, nio.RoomMessageText | PreparedTextEvent)
+            and not self._is_trusted_internal_relay_event(event)
+            and command_parser.parse(event.body) is None
+        )
+        if not can_join_voice_burst:
+            return False
+        key = (room.room_id, coalescing_thread_id, requester_user_id)
+        if not self.deps.voice_coalescing_gate.has_pending_voice_burst(key):
+            return False
+        resolved_key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
+            event,
+            room,
+            source_kind=envelope.source_kind,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            hook_source=envelope.hook_source,
+            message_received_depth=envelope.message_received_depth,
+            requester_user_id=requester_user_id,
+            coalescing_key=key,
+            trust_internal_payload_metadata=trust_internal_payload_metadata,
+        )
+        if resolved_key != key:
+            return False
+        return self.deps.voice_coalescing_gate.enqueue_text_if_voice_pending(
+            key,
+            TextIngressItem(pending_event=pending_event),
+        )
 
     async def _enqueue_media_for_dispatch(
         self,
@@ -658,6 +786,7 @@ class TurnController:
         )
         if self._should_bypass_coalescing_for_active_thread_follow_up(
             envelope=envelope,
+            coalescing_class=TEXT_COALESCING_CLASS,
         ):
             await self._enqueue_active_thread_follow_up(
                 room=room,
@@ -881,42 +1010,20 @@ class TurnController:
             dispatch_timing.mark("gate_enter")
         enqueue_start = time.monotonic()
         timing_scope = event_timing_scope(event.event_id)
-        source_kind_allows_relay_detection = source_kind in {
-            "",
-            MESSAGE_SOURCE_KIND,
-            TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-        }
-        if source_kind_allows_relay_detection and self._is_trusted_internal_relay_event(event):
-            if dispatch_timing is not None:
-                dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
-            source_kind = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-        resolved_trust_internal_payload_metadata = (
-            self._should_trust_internal_payload_metadata(event)
-            if trust_internal_payload_metadata is None
-            else trust_internal_payload_metadata
-        )
-        coalescing_key_start = time.monotonic()
-        resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, requester_user_id)
-        emit_elapsed_timing(
-            "ingress_handoff.enqueue_for_dispatch.coalescing_key",
-            coalescing_key_start,
-            thread_id=resolved_key[1],
-            timing_scope=timing_scope,
+        resolved_key, pending_event, source_kind = await self._build_pending_event_for_dispatch(
+            event,
+            room,
+            source_kind=source_kind,
+            requester_user_id=requester_user_id,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
+            coalescing_key=coalescing_key,
+            queued_notice_reservation=queued_notice_reservation,
+            trust_internal_payload_metadata=trust_internal_payload_metadata,
         )
         gate_enqueue_start = time.monotonic()
-        await self.deps.coalescing_gate.enqueue(
-            resolved_key,
-            PendingEvent(
-                event=event,
-                room=room,
-                source_kind=source_kind,
-                dispatch_policy_source_kind=dispatch_policy_source_kind,
-                hook_source=hook_source,
-                message_received_depth=message_received_depth,
-                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
-            ),
-        )
+        await self.deps.coalescing_gate.enqueue(resolved_key, pending_event)
         emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
             gate_enqueue_start,
@@ -929,6 +1036,69 @@ class TurnController:
             source_kind=source_kind,
             timing_scope=timing_scope,
         )
+
+    async def _build_pending_event_for_dispatch(
+        self,
+        event: DispatchEvent,
+        room: nio.MatrixRoom,
+        *,
+        source_kind: str,
+        requester_user_id: str,
+        dispatch_policy_source_kind: str | None = None,
+        hook_source: str | None = None,
+        message_received_depth: int = 0,
+        coalescing_key: CoalescingKey | None = None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+        trust_internal_payload_metadata: bool | None = None,
+        enqueue_time: float | None = None,
+    ) -> tuple[CoalescingKey, PendingEvent, str]:
+        """Build a pending event without scheduling a coalescing drain."""
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        timing_scope = event_timing_scope(event.event_id)
+        source_kind_allows_relay_detection = source_kind in {
+            "",
+            MESSAGE_SOURCE_KIND,
+            TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        }
+        if source_kind_allows_relay_detection and self._is_trusted_internal_relay_event(event):
+            if dispatch_timing is not None:
+                dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
+            source_kind = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        resolved_trust_internal_payload_metadata = self._resolve_trust_internal_payload_metadata(
+            event,
+            trust_internal_payload_metadata,
+        )
+        event_payload_metadata = payload_metadata_from_source(
+            event.source,
+            trust_internal_metadata=resolved_trust_internal_payload_metadata,
+        )
+        coalescing_class = self._coalescing_class_for_event(
+            event,
+            source_kind=source_kind,
+            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+        )
+        coalescing_key_start = time.monotonic()
+        resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, requester_user_id)
+        emit_elapsed_timing(
+            "ingress_handoff.enqueue_for_dispatch.coalescing_key",
+            coalescing_key_start,
+            thread_id=resolved_key[1],
+            timing_scope=timing_scope,
+        )
+        pending_event = PendingEvent(
+            event=event,
+            room=room,
+            source_kind=source_kind,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
+            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+            coalescing_class=coalescing_class,
+            router_relay_prompt=event_payload_metadata.router_relay_prompt,
+            enqueue_time=time.time() if enqueue_time is None else enqueue_time,
+            dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
+        )
+        return resolved_key, pending_event, source_kind
 
     async def _maybe_send_visible_voice_echo(
         self,
@@ -1936,6 +2106,12 @@ class TurnController:
                     trust_hydrated_internal_metadata=trust_internal_payload_metadata,
                 )
             )
+            if payload_metadata.router_relay_prompt is not None and self._should_use_trusted_router_relay_context(
+                event,
+                ingress_metadata=ingress_metadata,
+                payload_metadata=payload_metadata,
+            ):
+                event = self._event_with_body(event, payload_metadata.router_relay_prompt)
             dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
             attach_dispatch_pipeline_timing(event.source, dispatch_timing)
             timing_scope_token = timing_scope_context.set(event_timing_scope(event.event_id))
@@ -1954,6 +2130,7 @@ class TurnController:
             command = None
             event_is_voice_dispatch = (
                 (ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND)
+                or payload_metadata.coalescing_class == VOICE_COALESCING_CLASS
                 or is_audio_message_event(event)
                 or is_voice_event(event, sender_is_trusted=self._sender_is_trusted_for_ingress_metadata)
             )
@@ -2012,6 +2189,9 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+            if self.deps.agent_name == ROUTER_AGENT_NAME and event_is_voice_dispatch:
+                router_extra_content[COALESCING_CLASS_KEY] = VOICE_COALESCING_CLASS
+                router_extra_content[ROUTER_RELAY_PROMPT_KEY] = payload_metadata.router_relay_prompt or event.body
             replay_guard_skips_turn = False
             if replay_guard.degraded:
                 replay_guard_skips_turn = await self._has_newer_unresponded_cached_thread_event(
@@ -2195,6 +2375,7 @@ class TurnController:
         if await self._dispatch_special_media_as_text(
             room,
             prechecked_event,
+            coalescing_thread_id=coalescing_thread_id,
         ):
             return
         if not is_matrix_media_dispatch_event(prechecked_event.event):
@@ -2211,6 +2392,8 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedInboundMediaEvent,
+        *,
+        coalescing_thread_id: str | None,
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
@@ -2221,6 +2404,7 @@ class TurnController:
                     event=event,
                     requester_user_id=prechecked_event.requester_user_id,
                 ),
+                coalescing_thread_id=coalescing_thread_id,
             )
             return True
         if is_file_message_event(event):
@@ -2237,6 +2421,8 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
+        *,
+        coalescing_thread_id: str | None = None,
     ) -> None:
         """Normalize audio into a synthetic text event and reuse text dispatch."""
         event = prechecked_event.event
@@ -2250,57 +2436,143 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
+        if coalescing_thread_id is None:
+            coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")
-        normalized_voice = await self.deps.normalizer.prepare_voice_event(
-            VoiceNormalizationRequest(
+        normalization_task = asyncio.create_task(
+            self.deps.normalizer.prepare_voice_event(
+                VoiceNormalizationRequest(
+                    room=room,
+                    event=event,
+                ),
+            ),
+            name=f"voice_normalization:{room.room_id}:{event.event_id}",
+        )
+        await self.deps.voice_coalescing_gate.enqueue_voice(
+            (room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
+            VoiceIngressItem(
                 room=room,
                 event=event,
+                requester_user_id=prechecked_event.requester_user_id,
+                coalescing_thread_id=coalescing_thread_id,
+                normalization_task=normalization_task,
+                dispatch_timing=dispatch_timing,
             ),
+            flush_batch=self._flush_voice_ingress_batch,
         )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
+
+    async def _pending_voice_event_from_outcome(
+        self,
+        outcome: VoiceNormalizationOutcome,
+    ) -> tuple[CoalescingKey, float, PendingEvent] | None:
+        """Return a downstream pending event for one successful voice outcome."""
+        item = outcome.item
+        if outcome.error is not None:
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(item.event.event_id))
+            return None
+
+        if item.dispatch_timing is not None:
+            item.dispatch_timing.mark("ingress_normalize_ready")
+
+        normalized_voice = outcome.result
         if normalized_voice is None:
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(item.event.event_id))
+            return None
+
         attach_dispatch_pipeline_timing(
             normalized_voice.event.source,
-            dispatch_timing,
+            item.dispatch_timing,
         )
-
         await self._maybe_send_visible_voice_echo(
-            room,
-            event,
+            item.room,
+            item.event,
             text=normalized_voice.event.body,
             thread_id=normalized_voice.effective_thread_id,
-            requester_user_id=prechecked_event.requester_user_id,
+            requester_user_id=item.requester_user_id,
             normalized_source=normalized_voice.event.source,
         )
-
-        normalized_target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=normalized_voice.effective_thread_id,
-            reply_to_event_id=normalized_voice.event.event_id,
-            event_source=normalized_voice.event.source,
-        )
-        envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=normalized_voice.event,
-            requester_user_id=prechecked_event.requester_user_id,
-            target=normalized_target,
+        key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
+            normalized_voice.event,
+            item.room,
             source_kind=VOICE_SOURCE_KIND,
-        )
-        await self._enqueue_prepared_text_for_dispatch(
-            room=room,
-            prepared_event=normalized_voice.event,
-            dispatch_event=normalized_voice.event,
-            envelope=envelope,
-            coalescing_thread_id=normalized_voice.effective_thread_id,
-            requester_user_id=prechecked_event.requester_user_id,
-            dispatch_timing=dispatch_timing,
+            requester_user_id=item.requester_user_id,
+            coalescing_key=(item.room.room_id, normalized_voice.effective_thread_id, item.requester_user_id),
             trust_internal_payload_metadata=True,
+            enqueue_time=item.received_wall_time,
         )
+        return key, item.received_at, pending_event
+
+    @staticmethod
+    def _pending_text_event_for_voice_batch(
+        text_item: TextIngressItem,
+        *,
+        has_successful_voice: bool,
+    ) -> PendingEvent:
+        """Return text pending metadata adjusted for a mixed voice batch."""
+        pending_event = text_item.pending_event
+        if not has_successful_voice or pending_event.dispatch_policy_source_kind != ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+            return pending_event
+        for metadata in pending_event.dispatch_metadata:
+            metadata.close()
+        return replace(
+            pending_event,
+            dispatch_policy_source_kind=None,
+            dispatch_metadata=(),
+        )
+
+    async def _enqueue_voice_ingress_pending_events(
+        self,
+        pending_by_key: dict[CoalescingKey, list[tuple[float, PendingEvent]]],
+    ) -> None:
+        """Push claimed voice-ingress events into the downstream coalescing gate."""
+        for key, pending_entries in pending_by_key.items():
+            pending_events = [
+                pending_event
+                for _received_at, pending_event in sorted(
+                    pending_entries,
+                    key=lambda entry: entry[0],
+                )
+            ]
+            if len(pending_events) == 1:
+                await self.deps.coalescing_gate.enqueue(key, pending_events[0])
+                continue
+            await self.deps.coalescing_gate.enqueue_many(key, pending_events)
+
+    async def _flush_voice_ingress_batch(self, batch: VoiceIngressBatch) -> None:
+        """Enqueue one claimed raw-voice burst after every STT task has finished."""
+        pending_by_key: dict[CoalescingKey, list[tuple[float, PendingEvent]]] = {}
+        text_items = batch.text_items
+        handoff_complete = False
+        try:
+            for outcome in batch.voice_outcomes:
+                pending_voice = await self._pending_voice_event_from_outcome(outcome)
+                if pending_voice is not None:
+                    key, received_at, pending_event = pending_voice
+                    pending_by_key.setdefault(key, []).append((received_at, pending_event))
+
+            has_successful_voice = bool(pending_by_key)
+            successful_voice_keys = tuple(pending_by_key)
+            text_key = successful_voice_keys[0] if len(successful_voice_keys) == 1 else batch.key
+            text_items = (
+                *batch.text_items,
+                *batch.consume_claimed_text_items(),
+            )
+            for text_item in text_items:
+                pending_event = self._pending_text_event_for_voice_batch(
+                    text_item,
+                    has_successful_voice=has_successful_voice,
+                )
+                pending_by_key.setdefault(text_key, []).append((text_item.received_at, pending_event))
+
+            await self._enqueue_voice_ingress_pending_events(pending_by_key)
+            handoff_complete = True
+        except BaseException:
+            if not handoff_complete:
+                _close_text_ingress_metadata(text_items)
+            raise
 
     async def _dispatch_file_sidecar_text_preview(
         self,

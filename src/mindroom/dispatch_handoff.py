@@ -10,14 +10,16 @@ import nio
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    COALESCING_CLASS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTER_RELAY_PROMPT_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, VOICE_COALESCING_CLASS, coalescing_class_from_value
 from mindroom.matrix.media import (
     MatrixMediaDispatchEvent,
     extract_media_caption,
@@ -59,6 +61,8 @@ type MediaDispatchEvent = MatrixMediaDispatchEvent
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
 
+QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
+
 
 @dataclass
 class PendingDispatchMetadata:
@@ -87,6 +91,8 @@ class DispatchPayloadMetadata:
     attachment_ids: tuple[str, ...] | None = None
     original_sender: str | None = None
     raw_audio_fallback: bool | None = None
+    coalescing_class: str | None = None
+    router_relay_prompt: str | None = None
     mentioned_user_ids: tuple[str, ...] | None = None
     formatted_bodies: tuple[str, ...] | None = None
     skip_mentions: bool | None = None
@@ -180,6 +186,12 @@ def _batch_payload_metadata(batch: CoalescedBatch) -> DispatchPayloadMetadata:
         attachment_ids=None if single_raw_sidecar_preview else tuple(batch.attachment_ids),
         original_sender=None if single_raw_sidecar_preview else batch.original_sender,
         raw_audio_fallback=None if single_raw_sidecar_preview else batch.raw_audio_fallback,
+        coalescing_class=(
+            batch.coalescing_class
+            if not single_raw_sidecar_preview and batch.coalescing_class == VOICE_COALESCING_CLASS
+            else None
+        ),
+        router_relay_prompt=None if single_raw_sidecar_preview else batch.router_relay_prompt,
         mentioned_user_ids=None if single_raw_sidecar_preview else mentioned_user_ids,
         formatted_bodies=None if single_raw_sidecar_preview else formatted_bodies,
         skip_mentions=None if single_raw_sidecar_preview else skip_mentions,
@@ -208,6 +220,8 @@ def payload_metadata_from_source(
             attachment_ids=(),
             original_sender=None,
             raw_audio_fallback=False,
+            coalescing_class=None,
+            router_relay_prompt=None,
             mentioned_user_ids=mentioned_user_ids,
             formatted_bodies=formatted_bodies,
             skip_mentions=False,
@@ -215,10 +229,13 @@ def payload_metadata_from_source(
 
     original_sender = content.get(ORIGINAL_SENDER_KEY)
     raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
+    router_relay_prompt = content.get(ROUTER_RELAY_PROMPT_KEY)
     return DispatchPayloadMetadata(
         attachment_ids=tuple(parse_attachment_ids_from_event_source(source)),
         original_sender=original_sender if isinstance(original_sender, str) else None,
         raw_audio_fallback=raw_audio_fallback is True,
+        coalescing_class=coalescing_class_from_value(content.get(COALESCING_CLASS_KEY)),
+        router_relay_prompt=router_relay_prompt if isinstance(router_relay_prompt, str) else None,
         mentioned_user_ids=mentioned_user_ids,
         formatted_bodies=formatted_bodies,
         skip_mentions=content.get(SKIP_MENTIONS_KEY) is True,
@@ -235,6 +252,8 @@ def merge_payload_metadata(
     attachment_ids = base.attachment_ids
     original_sender = base.original_sender
     raw_audio_fallback = base.raw_audio_fallback
+    coalescing_class = base.coalescing_class
+    router_relay_prompt = base.router_relay_prompt
     skip_mentions = base.skip_mentions
     if trust_hydrated_internal_metadata:
         if attachment_ids is None:
@@ -243,17 +262,25 @@ def merge_payload_metadata(
             original_sender = hydrated.original_sender
         if raw_audio_fallback is None:
             raw_audio_fallback = hydrated.raw_audio_fallback
+        if coalescing_class is None:
+            coalescing_class = hydrated.coalescing_class
+        if router_relay_prompt is None:
+            router_relay_prompt = hydrated.router_relay_prompt
         if skip_mentions is None:
             skip_mentions = hydrated.skip_mentions
     else:
         attachment_ids = attachment_ids if attachment_ids is not None else ()
         raw_audio_fallback = raw_audio_fallback if raw_audio_fallback is not None else False
+        coalescing_class = None
+        router_relay_prompt = None
         skip_mentions = skip_mentions if skip_mentions is not None else False
 
     return DispatchPayloadMetadata(
         attachment_ids=attachment_ids,
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
+        coalescing_class=coalescing_class,
+        router_relay_prompt=router_relay_prompt,
         mentioned_user_ids=base.mentioned_user_ids
         if base.mentioned_user_ids is not None
         else hydrated.mentioned_user_ids,
@@ -265,8 +292,10 @@ def merge_payload_metadata(
 _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
     {
         ATTACHMENT_IDS_KEY,
+        COALESCING_CLASS_KEY,
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
+        ROUTER_RELAY_PROMPT_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
         HOOK_SOURCE_KEY,
         SKIP_MENTIONS_KEY,
@@ -291,6 +320,10 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
         primary_content[ORIGINAL_SENDER_KEY] = payload.original_sender
     if payload.raw_audio_fallback:
         primary_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    if payload.coalescing_class is not None:
+        primary_content[COALESCING_CLASS_KEY] = payload.coalescing_class
+    if payload.router_relay_prompt is not None:
+        primary_content[ROUTER_RELAY_PROMPT_KEY] = payload.router_relay_prompt
     if payload.attachment_ids:
         primary_content[ATTACHMENT_IDS_KEY] = list(payload.attachment_ids)
     merged["content"] = primary_content

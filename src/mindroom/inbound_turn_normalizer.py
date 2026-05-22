@@ -64,7 +64,7 @@ class VoiceNormalizationRequest:
 
 
 @dataclass(frozen=True)
-class _VoiceNormalizationResult:
+class VoiceNormalizationResult:
     """Normalized text event plus resolved delivery thread for one audio turn."""
 
     event: PreparedTextEvent
@@ -156,7 +156,7 @@ class InboundTurnNormalizer:
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
 
-    async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult | None:
+    async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> VoiceNormalizationResult | None:
         """Normalize one audio message into a prepared text event."""
         client = self._client()
         target = await self.deps.conversation_resolver.resolve_dispatch_target(
@@ -178,7 +178,7 @@ class InboundTurnNormalizer:
             if prepared_voice is None:
                 return None
 
-            return _VoiceNormalizationResult(
+            return VoiceNormalizationResult(
                 event=PreparedTextEvent(
                     sender=request.event.sender,
                     event_id=request.event.event_id,

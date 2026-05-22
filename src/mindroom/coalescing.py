@@ -19,15 +19,15 @@ from .coalescing_batch import (
     close_pending_event_metadata,
 )
 from .commands.parsing import command_parser
-from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
+from .dispatch_handoff import QUEUED_NOTICE_METADATA_KIND, DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_COALESCING_CLASS,
     VOICE_SOURCE_KIND,
     is_voice_event,
 )
@@ -46,12 +46,12 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
+_PENDING_EXTERNAL_VOICE_WAIT_SECONDS = 0.05
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
-        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
@@ -157,11 +157,13 @@ class CoalescingGate:
         debounce_seconds: Callable[[], float],
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
+        has_pending_external_voice_burst: Callable[[CoalescingKey], bool] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
+        self._has_pending_external_voice_burst = has_pending_external_voice_burst or (lambda _key: False)
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._retired_in_flight_drain_tasks: set[asyncio.Task[None]] = set()
 
@@ -297,11 +299,15 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
-        if pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+        if any(
+            item.requires_solo_batch and item.kind != QUEUED_NOTICE_METADATA_KIND
+            for item in pending_event.dispatch_metadata
+        ):
             return _QueueKind.BYPASS
-        if any(item.requires_solo_batch for item in pending_event.dispatch_metadata):
-            return _QueueKind.BYPASS
-        if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
+        if pending_event.coalescing_class != VOICE_COALESCING_CLASS and is_coalescing_exempt_source_kind(
+            pending_event.event,
+            pending_event.source_kind,
+        ):
             return _QueueKind.BYPASS
         if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
             return _QueueKind.COMMAND
@@ -456,20 +462,27 @@ class CoalescingGate:
         It mutates bounded in-memory state, wakes one owned drain task for the
         key, and returns without awaiting dispatch or model generation.
         """
+        await self.enqueue_many(key, [pending_event])
+
+    async def enqueue_many(self, key: CoalescingKey, pending_events: list[PendingEvent]) -> None:
+        """Queue multiple pending events before scheduling their shared drain."""
+        if not pending_events:
+            return
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
-        kind = self._queue_kind(pending_event)
-        gate.queue.append(_QueuedEvent(kind, pending_event))
+        queued_events = [(self._queue_kind(pending_event), pending_event) for pending_event in pending_events]
+        gate.queue.extend(_QueuedEvent(kind, pending_event) for kind, pending_event in queued_events)
         self._schedule_drain(key, gate)
-        path = self._enqueue_path(kind)
-        self._record_enqueue(
-            key,
-            gate,
-            pending_event,
-            enqueue_start,
-            path=path,
-            flush_outcome="scheduled_drain" if path == "zero_debounce" else None,
-        )
+        for kind, pending_event in queued_events:
+            path = self._enqueue_path(kind)
+            self._record_enqueue(
+                key,
+                gate,
+                pending_event,
+                enqueue_start,
+                path=path,
+                flush_outcome="scheduled_drain" if path == "zero_debounce" else None,
+            )
 
     async def drain_all(self) -> None:
         """Flush every active gate and await owned drain tasks."""
@@ -578,6 +591,17 @@ class CoalescingGate:
             if remaining_seconds <= 0:
                 return candidate_count
             gate.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
+
+    async def _wait_for_pending_external_voice_burst(
+        self,
+        gate: _GateEntry,
+    ) -> None:
+        wait_seconds = _PENDING_EXTERNAL_VOICE_WAIT_SECONDS
+        configured_debounce = max(self._debounce_seconds(), 0.0)
+        if configured_debounce > 0:
+            wait_seconds = min(wait_seconds, configured_debounce)
+        gate.deadline = time.monotonic() + wait_seconds
+        await self._wait_for_deadline(gate, gate.deadline)
 
     def _log_dispatch_failure(
         self,
@@ -722,6 +746,14 @@ class CoalescingGate:
                     coalesce_normal_events=coalesce_normal_events,
                 )
                 if candidate_count == 0:
+                    continue
+                if (
+                    not bypass_grace
+                    and not self._has_item_after_candidate(gate, candidate_count)
+                    and self._has_pending_external_voice_burst(current_key)
+                    and not self._is_shutting_down()
+                ):
+                    await self._wait_for_pending_external_voice_burst(gate)
                     continue
                 candidate_events = self._queue_pending_events(gate, candidate_count)
                 if use_upload_grace and _pending_has_only_text(candidate_events):

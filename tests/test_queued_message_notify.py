@@ -2108,8 +2108,8 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
     assert not queued_signal.has_active_response_turn()
 
 
-def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> None:
-    """A reserved active follow-up mixed into a multi-event batch should fail and clear."""
+def test_reserved_follow_up_can_join_multi_event_batch(tmp_path: Path) -> None:
+    """A coalesced active follow-up should retain one queued notice reservation."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2126,24 +2126,30 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
-        with pytest.raises(ValueError, match="solo batches"):
-            build_coalesced_batch(
-                (room.room_id, "$thread", "@user:localhost"),
-                [
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$reserved"),
-                        room=room,
-                        source_kind=MESSAGE_SOURCE_KIND,
-                        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                        dispatch_metadata=_queued_notice_metadata(reservation),
-                    ),
-                    PendingEvent(
-                        event=_prepared_text_event(event_id="$normal"),
-                        room=room,
-                        source_kind=MESSAGE_SOURCE_KIND,
-                    ),
-                ],
-            )
+        queued_metadata = _queued_notice_metadata(reservation)
+        batch = build_coalesced_batch(
+            (room.room_id, "$thread", "@user:localhost"),
+            [
+                PendingEvent(
+                    event=_prepared_text_event(event_id="$reserved"),
+                    room=room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    dispatch_metadata=queued_metadata,
+                ),
+                PendingEvent(
+                    event=_prepared_text_event(event_id="$normal"),
+                    room=room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                ),
+            ],
+        )
+
+        assert batch.dispatch_metadata == queued_metadata
+        assert queued_signal.pending_human_messages == 1
+        assert queued_signal.is_set()
+        batch.dispatch_metadata[0].close()
+        assert queued_signal.pending_human_messages == 0
     finally:
         queued_signal.finish_response_turn()
 

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from .dispatch_handoff import (
+    QUEUED_NOTICE_METADATA_KIND,
     DispatchEvent,
     MediaDispatchEvent,
     PendingDispatchMetadata,
@@ -16,7 +17,13 @@ from .dispatch_handoff import (
     event_content_dict,
     is_media_dispatch_event,
 )
-from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
+from .dispatch_source import (
+    IMAGE_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
+    TEXT_COALESCING_CLASS,
+    VOICE_COALESCING_CLASS,
+    VOICE_SOURCE_KIND,
+)
 
 if TYPE_CHECKING:
     import nio
@@ -35,6 +42,8 @@ class PendingEvent:
     hook_source: str | None = None
     message_received_depth: int = 0
     trust_internal_payload_metadata: bool = False
+    coalescing_class: str = TEXT_COALESCING_CLASS
+    router_relay_prompt: str | None = None
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -58,6 +67,8 @@ class CoalescedBatch:
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
+    coalescing_class: str = TEXT_COALESCING_CLASS
+    router_relay_prompt: str | None = None
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
@@ -77,9 +88,19 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
     )
 
 
-def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool]:
+def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool, str, str | None]:
     original_sender: str | None = None
     raw_audio_fallback = False
+    coalescing_class = (
+        VOICE_COALESCING_CLASS
+        if any(pending_event.coalescing_class == VOICE_COALESCING_CLASS for pending_event in pending_events)
+        else TEXT_COALESCING_CLASS
+    )
+    router_relay_prompts = [
+        pending_event.router_relay_prompt
+        for pending_event in pending_events
+        if pending_event.router_relay_prompt is not None
+    ]
     for pending_event in pending_events:
         if not _pending_event_trusts_internal_payload(pending_event):
             continue
@@ -94,7 +115,8 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
             raw_audio_fallback = True
         if original_sender is not None and raw_audio_fallback:
             break
-    return original_sender, raw_audio_fallback
+    router_relay_prompt = coalesced_prompt(router_relay_prompts) if router_relay_prompts else None
+    return original_sender, raw_audio_fallback, coalescing_class, router_relay_prompt
 
 
 _SOURCE_KIND_PRIORITY: dict[str, int] = {
@@ -107,6 +129,10 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {
 def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
     resolved_source_kinds = [pending_event.source_kind for pending_event in ordered_pending_events]
     return min(resolved_source_kinds, key=lambda sk: _SOURCE_KIND_PRIORITY.get(sk, 999))
+
+
+def _pending_event_prompt(pending_event: PendingEvent) -> str:
+    return pending_event.router_relay_prompt or dispatch_prompt_for_event(pending_event.event)
 
 
 def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent]) -> str | None:
@@ -145,12 +171,40 @@ def _batch_dispatch_metadata(
     metadata = tuple(item for pending_event in ordered_pending_events for item in pending_event.dispatch_metadata)
     if not metadata:
         return ()
-    if len(ordered_pending_events) == 1 or not any(item.requires_solo_batch for item in metadata):
+    if len(ordered_pending_events) == 1:
         return metadata
+    solo_metadata = tuple(item for item in metadata if item.requires_solo_batch)
+    if not solo_metadata:
+        return metadata
+    blocking_solo_metadata = tuple(item for item in solo_metadata if item.kind != QUEUED_NOTICE_METADATA_KIND)
+    if blocking_solo_metadata:
+        for item in metadata:
+            item.close()
+        msg = "Pending dispatch metadata requires solo batches"
+        raise ValueError(msg)
+
+    retained_queued_notice = _retained_queued_notice_metadata(ordered_pending_events)
+    reduced_metadata: list[PendingDispatchMetadata] = []
     for item in metadata:
+        if item.kind != QUEUED_NOTICE_METADATA_KIND:
+            reduced_metadata.append(item)
+            continue
+        if item is retained_queued_notice:
+            reduced_metadata.append(item)
+            continue
         item.close()
-    msg = "Pending dispatch metadata requires solo batches"
-    raise ValueError(msg)
+    return tuple(reduced_metadata)
+
+
+def _retained_queued_notice_metadata(
+    ordered_pending_events: list[PendingEvent],
+) -> PendingDispatchMetadata | None:
+    """Return the queued notice that should remain attached to one coalesced response."""
+    for pending_event in reversed(ordered_pending_events):
+        for item in pending_event.dispatch_metadata:
+            if item.kind == QUEUED_NOTICE_METADATA_KIND:
+                return item
+    return None
 
 
 def close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
@@ -162,8 +216,7 @@ def close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
 
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
     return {
-        pending_event.event.event_id: dispatch_prompt_for_event(pending_event.event)
-        for pending_event in ordered_pending_events
+        pending_event.event.event_id: _pending_event_prompt(pending_event) for pending_event in ordered_pending_events
     }
 
 
@@ -171,14 +224,16 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
-    original_sender, raw_audio_fallback = _batch_metadata(ordered_pending_events)
+    original_sender, raw_audio_fallback, coalescing_class, router_relay_prompt = _batch_metadata(
+        ordered_pending_events,
+    )
     return CoalescedBatch(
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
         requester_user_id=key[2],
         pending_events=tuple(ordered_pending_events),
         prompt=coalesced_prompt(
-            [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
+            [_pending_event_prompt(pending_event) for pending_event in ordered_pending_events],
         ),
         source_kind=_batch_source_kind(ordered_pending_events),
         dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
@@ -200,5 +255,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
+        coalescing_class=coalescing_class,
+        router_relay_prompt=router_relay_prompt,
         dispatch_metadata=_batch_dispatch_metadata(ordered_pending_events),
     )
