@@ -179,9 +179,6 @@ class TurnIngressCoalescingGate:
 
     async def admit_raw_voice(self, provisional_key: IngressProvisionalKey, item: RawVoiceIngressItem) -> None:
         """Admit one raw voice event before preliminary key resolution or STT is awaited."""
-        if item.preliminary_key_task is None or item.ready_task is None:
-            msg = "Raw voice ingress item is missing receive-time coordinator tasks"
-            raise ValueError(msg)
         received_order, received_wall_time = self.claim_received_metadata()
         admission = _ReadyIngressAdmission(
             ready_task=item.ready_task,

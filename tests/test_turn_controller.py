@@ -41,6 +41,8 @@ from mindroom.dispatch_source import (
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.timing import DispatchPipelineTiming, attach_dispatch_pipeline_timing
+from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_ingress_coalescing import (
     BarrierReadyIngressResult,
     IngressProvisionalKey,
@@ -48,6 +50,7 @@ from mindroom.turn_ingress_coalescing import (
     TurnIngressCoalescingGate,
 )
 from tests.conftest import (
+    admit_file_sidecar_text_preview_for_test,
     admit_prepared_text_like_ingress_for_test,
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -140,6 +143,29 @@ def _prepared_text_event(
         server_timestamp=server_timestamp,
         source_kind_override=source_kind,
     )
+
+
+def _sidecar_file_event(*, event_id: str, body: str = "preview") -> nio.RoomMessageFile:
+    source = {
+        "content": {
+            "body": body,
+            "msgtype": "m.file",
+            "info": {"mimetype": "application/json"},
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://server/sidecar",
+        },
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+    event = nio.RoomMessageFile.from_dict(source)
+    event.source = source
+    return event
 
 
 def _raw_text_event(
@@ -259,6 +285,85 @@ def _replace_turn_dispatch_gates(
         coalescing_gate=gate,
     )
     replace_turn_controller_deps(bot, coalescing_gate=gate, turn_ingress_gate=turn_ingress_gate)
+
+
+class _TextAdmissionTestError(Exception):
+    """Test-only text admission failure."""
+
+
+@pytest.mark.asyncio
+async def test_build_pending_event_marks_dispatch_timing_gate_enter(tmp_path: Path) -> None:
+    """Ready ingress should preserve the pipeline boundary before downstream coalescing."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    event = _prepared_text_event(event_id="$timed", body="timed text")
+    timing = DispatchPipelineTiming(source_event_id=event.event_id, room_id=room.room_id)
+    attach_dispatch_pipeline_timing(event.source, timing)
+
+    await bot._turn_controller._build_pending_event_for_dispatch(
+        event,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id="@user:localhost",
+        coalescing_key=(room.room_id, "$thread:localhost", "@user:localhost"),
+    )
+
+    assert "gate_enter" in timing.marks
+
+
+@pytest.mark.asyncio
+async def test_raw_text_ingress_cancels_ready_task_when_admission_fails(tmp_path: Path) -> None:
+    """Text admission should not leave an unowned ready task when the gate rejects it."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    event = _raw_text_event(event_id="$text-admission-fails", body="hello")
+    ready_started = asyncio.Event()
+    ready_cancelled = asyncio.Event()
+
+    async def unresolved_ready(**_kwargs: object) -> None:
+        ready_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            ready_cancelled.set()
+            raise
+
+    async def fail_admission(*_args: object, **_kwargs: object) -> None:
+        await ready_started.wait()
+        raise _TextAdmissionTestError
+
+    try:
+        with (
+            patch.object(bot._turn_controller, "_ready_raw_text_ingress", new=AsyncMock(side_effect=unresolved_ready)),
+            patch.object(
+                bot._turn_controller.deps.turn_ingress_gate,
+                "admit_ready_task",
+                new=AsyncMock(side_effect=fail_admission),
+            ),
+            pytest.raises(_TextAdmissionTestError),
+        ):
+            await bot._turn_controller._admit_raw_text_ingress(
+                room=room,
+                event=event,
+                event_info=MagicMock(),
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+        await asyncio.sleep(0)
+        production_cancelled = ready_cancelled.is_set()
+    finally:
+        current_task = asyncio.current_task()
+        pending_ready_tasks = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current_task and task.get_name() == "text_ready:$text-admission-fails" and not task.done()
+        ]
+        for task in pending_ready_tasks:
+            task.cancel()
+        if pending_ready_tasks:
+            await asyncio.gather(*pending_ready_tasks, return_exceptions=True)
+
+    assert production_cancelled
 
 
 @pytest.mark.asyncio
@@ -746,6 +851,71 @@ async def test_visible_router_voice_echo_does_not_end_upload_grace(tmp_path: Pat
 
     assert [batch.source_event_ids for batch in batches] == [["$text", "$media"]]
     assert bot._turn_store.is_handled("$voice-echo")
+
+
+@pytest.mark.asyncio
+async def test_sidecar_text_preview_during_upload_grace_starts_text_turn(tmp_path: Path) -> None:
+    """Long-text sidecar previews should behave like text, not media attachments."""
+    bot = _make_general_bot(tmp_path)
+    wrap_extracted_collaborators(bot, "_inbound_turn_normalizer")
+    replace_turn_controller_deps(bot, normalizer=bot._inbound_turn_normalizer)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    _replace_turn_dispatch_gates(
+        bot,
+        gate,
+        turn_ingress_debounce_seconds=0.01,
+        turn_ingress_upload_grace_seconds=0.2,
+    )
+    text_event = _prepared_text_event(event_id="$text", body="text before sidecar")
+    sidecar_event = _sidecar_file_event(event_id="$sidecar")
+    hydrated_sidecar = _prepared_text_event(event_id="$sidecar", body="hydrated sidecar")
+    provisional_key = IngressProvisionalKey(room_id=room.room_id, requester_user_id="@user:localhost")
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "prepare_file_sidecar_text_event",
+            new=AsyncMock(return_value=hydrated_sidecar),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+    ):
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
+            room=room,
+            prepared_event=text_event,
+            dispatch_event=text_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+        await _wait_for(
+            lambda: bot._turn_controller.deps.turn_ingress_gate._ingress_grace_groups.get(provisional_key) is not None,
+        )
+        handled = await admit_file_sidecar_text_preview_for_test(
+            bot._turn_controller,
+            room,
+            _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+        )
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
+
+    assert handled is True
+    assert [batch.source_event_ids for batch in batches] == [["$text"], ["$sidecar"]]
 
 
 @pytest.mark.asyncio

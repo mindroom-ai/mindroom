@@ -221,7 +221,6 @@ class _RawVoicePreliminaryResult:
     """Pre-STT voice dispatch scope resolved at receive time."""
 
     key: CoalescingKey
-    thread_id: str | None
     preliminary_notice: _ActiveFollowUpNoticeReservation | None
 
 
@@ -668,6 +667,8 @@ class TurnController:
     @staticmethod
     def _media_ingress_source_kind(event: MatrixMediaEvent) -> str:
         """Return the receive-time ingress source kind for one non-audio media event."""
+        if is_file_message_event(event) and is_v2_sidecar_text_preview(event.source):
+            return MESSAGE_SOURCE_KIND
         return IMAGE_SOURCE_KIND if is_image_message_event(event) else MEDIA_SOURCE_KIND
 
     async def _ready_media_dispatch_result(
@@ -1215,13 +1216,17 @@ class TurnController:
             ),
             name=f"text_ready:{event.event_id}",
         )
-        await self.deps.turn_ingress_gate.admit_ready_task(
-            provisional_key,
-            ready_task=ready_task,
-            source_kind=self._text_ingress_source_kind(event),
-            coalescing_class=self._text_ingress_coalescing_class(event),
-            barrier=self._is_known_text_ingress_barrier(event),
-        )
+        try:
+            await self.deps.turn_ingress_gate.admit_ready_task(
+                provisional_key,
+                ready_task=ready_task,
+                source_kind=self._text_ingress_source_kind(event),
+                coalescing_class=self._text_ingress_coalescing_class(event),
+                barrier=self._is_known_text_ingress_barrier(event),
+            )
+        except BaseException:
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", ready_task))
+            raise
 
     async def _build_pending_event_for_dispatch(
         self,
@@ -1240,6 +1245,8 @@ class TurnController:
     ) -> tuple[CoalescingKey, PendingEvent, str]:
         """Build a pending event without scheduling a coalescing drain."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_enter")
         timing_scope = event_timing_scope(event.event_id)
         source_kind_allows_relay_detection = source_kind in {
             "",
@@ -2729,7 +2736,6 @@ class TurnController:
             )
             return _RawVoicePreliminaryResult(
                 key=(room.room_id, coalescing_thread_id, requester_user_id),
-                thread_id=coalescing_thread_id,
                 preliminary_notice=preliminary_notice,
             )
         except BaseException:
