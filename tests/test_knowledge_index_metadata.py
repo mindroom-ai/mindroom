@@ -51,9 +51,8 @@ def test_index_metadata_fields_support_registry_and_manager_strictness(tmp_path:
 def test_strict_index_metadata_parsing_requires_collection_except_complete_file_mode() -> None:
     """Strict metadata parsing should only omit collection for completed file-mode records."""
     indexing_payload = {
-        "settings": {"base": "storage"},
+        "settings": {"base": "storage", "mode": "files"},
         "status": "indexing",
-        "index_kind": "files",
         "indexed_count": 0,
         "source_signature": "source-signature",
     }
@@ -68,6 +67,23 @@ def test_strict_index_metadata_parsing_requires_collection_except_complete_file_
     )
     assert parse_index_metadata_fields(
         {**indexing_payload, "status": "complete"},
+        allowed_statuses={"indexing", "complete"},
+        require_complete_fields_for_all_statuses=True,
+    ) == ({"base": "storage", "mode": "files"}, "complete", None, None, None, 0, "source-signature")
+
+
+def test_strict_index_metadata_parsing_accepts_published_file_mode_index_kind() -> None:
+    """Published file-mode metadata stores file mode in the top-level index_kind field."""
+    payload = {
+        "settings": {"base": "storage"},
+        "status": "complete",
+        "index_kind": "files",
+        "indexed_count": 0,
+        "source_signature": "source-signature",
+    }
+
+    assert parse_index_metadata_fields(
+        payload,
         allowed_statuses={"indexing", "complete"},
         require_complete_fields_for_all_statuses=True,
     ) == ({"base": "storage"}, "complete", None, None, None, 0, "source-signature")
