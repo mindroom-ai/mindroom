@@ -732,21 +732,23 @@ class CoalescingGate:
 
     async def drain_all(self) -> None:
         """Flush every active gate and await owned drain tasks."""
-        for key, gate in list(self._gates.items()):
-            gate.drain_all_requested = True
-            gate.deadline = time.monotonic()
-            gate.grace_deadline = None
-            self._ensure_drain_task(key, gate)
-            self._wake(gate)
-        tasks_to_await = [
-            gate.drain_task
-            for gate in self._gates.values()
-            if gate.drain_task is not None and not gate.drain_task.done()
-        ]
-        tasks_to_await.extend(task for task in self._retired_in_flight_drain_tasks if not task.done())
-        if tasks_to_await:
+        while True:
+            for key, gate in list(self._gates.items()):
+                gate.drain_all_requested = True
+                gate.deadline = time.monotonic()
+                gate.grace_deadline = None
+                self._ensure_drain_task(key, gate)
+                self._wake(gate)
+            tasks_to_await = {
+                gate.drain_task
+                for gate in self._gates.values()
+                if gate.drain_task is not None and not gate.drain_task.done()
+            }
+            tasks_to_await.update(task for task in self._retired_in_flight_drain_tasks if not task.done())
+            if not tasks_to_await:
+                self._gates.clear()
+                return
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
-        self._gates.clear()
 
     def _upload_grace_hard_cap_seconds(self) -> float:
         return upload_grace_hard_cap_seconds(self._upload_grace_seconds())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import nio
@@ -198,6 +199,75 @@ async def test_sealed_room_level_text_split_survives_mid_dispatch_retarget() -> 
         ["$third:localhost"],
     ]
     assert [batch.coalescing_key for batch in batches] == [key, key, key]
+
+
+@pytest.mark.asyncio
+async def test_drain_all_waits_for_retargeted_task_spawned_during_dispatch() -> None:
+    """A drain-all flush must include drain tasks created by mid-dispatch retargeting."""
+    batches: list[list[str]] = []
+    first_dispatch_started = asyncio.Event()
+    allow_retarget = asyncio.Event()
+    third_dispatch_started = asyncio.Event()
+    release_third_dispatch = asyncio.Event()
+    key = ("!room:localhost", None, "@user:localhost")
+    retargeted_key = ("!room:localhost", "$first:localhost", "@user:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch.source_event_ids)
+        if batch.source_event_ids == ["$first:localhost"]:
+            first_dispatch_started.set()
+            await allow_retarget.wait()
+            gate.retarget(key, retargeted_key)
+        if batch.source_event_ids == ["$third:localhost"]:
+            third_dispatch_started.set()
+            await release_third_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$first:localhost", "first", 1_000_000),
+                room=room,
+                source_kind="message",
+            ),
+            PendingEvent(
+                event=_text_event("$second:localhost", "second", 1_000_600),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+    await gate.enqueue(key, _pending(_text_event("$third:localhost", "third", 1_001_200)))
+    await asyncio.wait_for(first_dispatch_started.wait(), timeout=1.0)
+
+    drain_task = asyncio.create_task(gate.drain_all())
+    try:
+        await asyncio.sleep(0.02)
+        allow_retarget.set()
+        await asyncio.wait_for(third_dispatch_started.wait(), timeout=1.0)
+        await asyncio.sleep(0.02)
+
+        assert drain_task.done() is False
+
+        release_third_dispatch.set()
+        await asyncio.wait_for(drain_task, timeout=1.0)
+    finally:
+        release_third_dispatch.set()
+        allow_retarget.set()
+        if not drain_task.done():
+            drain_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await drain_task
+
+    assert ["$third:localhost"] in batches
 
 
 @pytest.mark.asyncio

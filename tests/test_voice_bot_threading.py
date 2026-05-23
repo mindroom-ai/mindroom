@@ -1334,6 +1334,57 @@ async def test_known_barrier_without_existing_group_blocks_later_prompt_until_re
 
 
 @pytest.mark.asyncio
+async def test_known_barriers_preserve_receive_order_when_older_barrier_is_delayed() -> None:
+    """A later command/barrier must not pass an older command/barrier that is still resolving."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+    release_first_barrier = asyncio.Event()
+    second_barrier_task: asyncio.Task[None] | None = None
+
+    first_barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$command1", order=1),
+            barrier=True,
+            release=release_first_barrier,
+        ),
+    )
+    try:
+        await asyncio.sleep(0)
+        second_barrier_task = asyncio.create_task(
+            _admit_prompt_result(
+                ingress_gate,
+                provisional_key,
+                _barrier_ready_result(room=room, key=key, event_id="$command2", order=2),
+                barrier=True,
+            ),
+        )
+        await asyncio.sleep(0.02)
+        await coalescing_gate.drain_all()
+
+        assert batches == []
+        assert not second_barrier_task.done()
+
+        release_first_barrier.set()
+        await asyncio.wait_for(first_barrier_task, timeout=1.0)
+        await asyncio.wait_for(second_barrier_task, timeout=1.0)
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+    finally:
+        release_first_barrier.set()
+        for task in (first_barrier_task, second_barrier_task):
+            if task is not None and not task.done():
+                task.cancel()
+            if task is not None:
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    assert [batch.source_event_ids for batch in batches] == [["$command1"], ["$command2"]]
+
+
+@pytest.mark.asyncio
 async def test_known_barrier_flushes_ready_open_group_before_older_unresolved_group() -> None:
     """Barrier ordering is based on receive order, not internal group container order."""
     room = _threaded_room()

@@ -95,6 +95,7 @@ class _ReadyIngressAdmission:
     source_kind: str | None = None
     coalescing_class: str | None = None
     is_raw_voice: bool = False
+    is_barrier: bool = False
     preliminary_key_task: asyncio.Task[CoalescingKey] | None = None
 
 
@@ -168,6 +169,7 @@ class TurnIngressCoalescingGate:
             received_wall_time=received_wall_time,
             source_kind=source_kind,
             coalescing_class=coalescing_class,
+            is_barrier=barrier,
         )
         if barrier:
             if await self._dispatch_barrier_after_accepting_groups(provisional_key, admission):
@@ -337,7 +339,7 @@ class TurnIngressCoalescingGate:
             if group.drain_task is not None
             and not group.drain_task.done()
             and group.drain_task is not current_task
-            and not self._admissions_have_pending_work(group.items)
+            and self._predecessor_group_blocks_barrier(group)
         ]
         if not predecessor_tasks:
             return
@@ -384,7 +386,7 @@ class TurnIngressCoalescingGate:
             for group in self._ingress_draining_groups.get(provisional_key, ())
             if group.drain_task in predecessor_tasks
             and group.drain_task is not current_task
-            and not self._admissions_have_pending_work(group.items)
+            and self._predecessor_group_blocks_barrier(group)
         ]
         if not tasks_to_wait:
             return
@@ -1051,6 +1053,14 @@ class TurnIngressCoalescingGate:
     @staticmethod
     def _admissions_have_pending_work(admissions: list[_ReadyIngressAdmission]) -> bool:
         return any(TurnIngressCoalescingGate._admission_has_pending_work(admission) for admission in admissions)
+
+    @staticmethod
+    def _group_has_barrier_admission(group: _IngressPromptGroup) -> bool:
+        return any(admission.is_barrier for admission in group.items)
+
+    @classmethod
+    def _predecessor_group_blocks_barrier(cls, group: _IngressPromptGroup) -> bool:
+        return cls._group_has_barrier_admission(group) or not cls._admissions_have_pending_work(group.items)
 
     @staticmethod
     def _admission_has_pending_work(admission: _ReadyIngressAdmission) -> bool:
