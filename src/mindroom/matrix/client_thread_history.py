@@ -1150,6 +1150,8 @@ def _append_unique_thread_root_ids(
     new_root_count = 0
     for thread_root in thread_roots:
         thread_root_id = thread_root.event_id
+        if not thread_root_id:
+            continue
         if thread_root_id in seen_thread_root_ids:
             continue
         if len(thread_root_ids) >= max_thread_roots:
@@ -1219,14 +1221,34 @@ async def enumerate_room_thread_root_ids(
             ):
                 truncated = True
                 break
-            if next_token is None:
-                break
-        elif next_token is None:
+        elif next_token is not None:
+            logger.warning(
+                "Room thread enumeration stopped on empty page with pagination token",
+                room_id=room_id,
+                page_count=pages_fetched,
+                thread_root_count=len(thread_root_ids),
+            )
+            truncated = True
+            break
+        if next_token is None:
             break
         if next_token in seen_next_tokens:
+            logger.warning(
+                "Room thread enumeration stopped on repeated pagination token",
+                room_id=room_id,
+                page_count=pages_fetched,
+                thread_root_count=len(thread_root_ids),
+            )
             truncated = True
             break
         if pages_fetched >= _MAX_THREAD_ENUMERATION_PAGES:
+            logger.warning(
+                "Room thread enumeration stopped at page cap",
+                room_id=room_id,
+                page_count=pages_fetched,
+                thread_root_count=len(thread_root_ids),
+                max_pages=_MAX_THREAD_ENUMERATION_PAGES,
+            )
             truncated = True
             break
 

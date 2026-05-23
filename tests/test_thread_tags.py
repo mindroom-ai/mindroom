@@ -1291,8 +1291,28 @@ async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enumerate_room_thread_root_ids_skips_empty_page_with_next_token() -> None:
-    """Room thread enumeration should keep following cursors through empty pages."""
+async def test_enumerate_room_thread_root_ids_skips_blank_event_ids() -> None:
+    """Blank thread-root event IDs should not leak into room-wide listings."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.client_thread_history.get_room_threads_page",
+        new=AsyncMock(
+            return_value=(
+                [_thread_root_event(""), _thread_root_event("$root:localhost")],
+                None,
+            ),
+        ),
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == ["$root:localhost"]
+    assert truncated is False
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_token() -> None:
+    """Room thread enumeration should stop on ambiguous empty continuation pages."""
     client = AsyncMock()
 
     with patch(
@@ -1306,15 +1326,15 @@ async def test_enumerate_room_thread_root_ids_skips_empty_page_with_next_token()
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
 
-    assert thread_root_ids == ["$root_A", "$root_B"]
-    assert truncated is False
+    assert thread_root_ids == []
+    assert truncated is True
     assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
-    assert mock_get_page.await_args_list[1].kwargs["page_token"] == "next_token_1"  # noqa: S105
+    assert mock_get_page.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_enumerate_room_thread_root_ids_follows_consecutive_empty_pages() -> None:
-    """Room thread enumeration should tolerate sparse pagination before roots."""
+async def test_enumerate_room_thread_root_ids_does_not_follow_consecutive_empty_pages() -> None:
+    """Empty continuation pages should not burn requests until the hard page cap."""
     client = AsyncMock()
 
     with patch(
@@ -1330,12 +1350,10 @@ async def test_enumerate_room_thread_root_ids_follows_consecutive_empty_pages() 
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
 
-    assert thread_root_ids == ["$root_A", "$root_B"]
-    assert truncated is False
+    assert thread_root_ids == []
+    assert truncated is True
     assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
-    assert mock_get_page.await_args_list[1].kwargs["page_token"] == "empty-1"  # noqa: S105
-    assert mock_get_page.await_args_list[2].kwargs["page_token"] == "empty-2"  # noqa: S105
-    assert mock_get_page.await_args_list[3].kwargs["page_token"] == "empty-3"  # noqa: S105
+    assert mock_get_page.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -1355,7 +1373,7 @@ async def test_enumerate_room_thread_root_ids_truncates_fresh_empty_token_loop()
 
     assert thread_root_ids == []
     assert truncated is True
-    assert page_count < 110
+    assert page_count == 1
 
 
 @pytest.mark.asyncio
@@ -1499,9 +1517,12 @@ async def test_list_tagged_threads_include_untagged_filter_semantics_on_synthesi
         _thread_tag_state_event("$resolved-thread:localhost", "resolved"),
     )
 
+    mock_enumerate = AsyncMock(
+        return_value=(["$untagged-thread:localhost", "$resolved-thread:localhost"], True),
+    )
     with patch(
         "mindroom.thread_tags.enumerate_room_thread_root_ids",
-        new=AsyncMock(return_value=(["$untagged-thread:localhost", "$resolved-thread:localhost"], False)),
+        new=mock_enumerate,
     ):
         unresolved_listing = await list_tagged_threads(
             client,
@@ -1528,6 +1549,10 @@ async def test_list_tagged_threads_include_untagged_filter_semantics_on_synthesi
     assert list(unresolved_listing.tag_state) == ["$untagged-thread:localhost"]
     assert list(include_listing.tag_state) == ["$resolved-thread:localhost"]
     assert list(tag_listing.tag_state) == ["$resolved-thread:localhost"]
+    assert unresolved_listing.truncated is True
+    assert include_listing.truncated is False
+    assert tag_listing.truncated is False
+    assert mock_enumerate.await_count == 1
 
 
 @pytest.mark.asyncio

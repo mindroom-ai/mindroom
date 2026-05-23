@@ -985,11 +985,17 @@ async def test_list_thread_tags_room_wide_returns_error_on_room_state_failure() 
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags())
+        payload = json.loads(
+            await tool.list_thread_tags(include_tag="blocked", exclude_tag="resolved", include_untagged=True),
+        )
 
     assert payload["status"] == "error"
     assert payload["action"] == "list"
     assert payload["room_id"] == context.room_id
+    assert payload["tag"] is None
+    assert payload["include_tag"] == "blocked"
+    assert payload["exclude_tag"] == "resolved"
+    assert payload["include_untagged"] is True
     assert payload["message"] == "room state forbidden"
 
 
@@ -1173,7 +1179,7 @@ async def test_list_thread_tags_include_untagged_surfaces_enumeration_error_fiel
     assert payload["status"] == "error"
     assert payload["action"] == "list"
     assert payload["room_id"] == context.room_id
-    assert payload["message"] == "rate limited"
+    assert payload["message"] == "Failed to enumerate room thread roots: rate limited"
     assert payload["response"] == "rate limited"
     assert payload["errcode"] == "M_LIMIT_EXCEEDED"
     assert payload["retry_after_ms"] == 250

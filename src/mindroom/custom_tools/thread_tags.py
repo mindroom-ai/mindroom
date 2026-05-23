@@ -12,7 +12,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
-from mindroom.custom_tools.tool_payloads import ordered_custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.client_thread_history import RoomThreadsPageError
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
@@ -60,7 +60,7 @@ class ThreadTagsTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        return ordered_custom_tool_payload("thread_tags", status, **kwargs)
+        return custom_tool_payload("thread_tags", status, False, **kwargs)
 
     @classmethod
     def _context_error(cls) -> str:
@@ -377,7 +377,7 @@ class ThreadTagsTools(Toolkit):
             except RoomThreadsPageError as exc:
                 error_payload: dict[str, object] = {
                     "action": "list",
-                    "message": exc.response,
+                    "message": f"Failed to enumerate room thread roots: {exc.response}",
                     "response": exc.response,
                     "room_id": resolved_room_id,
                     "tag": normalized_tag,
@@ -398,6 +398,7 @@ class ThreadTagsTools(Toolkit):
                     tag=normalized_tag,
                     include_tag=normalized_include_tag,
                     exclude_tag=normalized_exclude_tag,
+                    include_untagged=include_untagged,
                     message=str(exc),
                 )
 

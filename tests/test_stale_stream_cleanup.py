@@ -2247,7 +2247,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
         patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
-        patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
     ):

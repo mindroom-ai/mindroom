@@ -889,19 +889,27 @@ async def list_tagged_threads(
     normalized_exclude_tag = normalize_tag_name(exclude_tag) if exclude_tag is not None else None
 
     tagged_threads = await _get_room_thread_tags_states(client, room_id)
+    filtered_tagged_threads = {
+        thread_root_id: state
+        for thread_root_id, state in tagged_threads.items()
+        if _thread_tags_match_filters(
+            state.tags,
+            tag=normalized_tag,
+            include_tag=normalized_include_tag,
+            exclude_tag=normalized_exclude_tag,
+        )
+    }
     if not include_untagged:
         return ThreadTagsListing(
-            tag_state={
-                thread_root_id: state
-                for thread_root_id, state in tagged_threads.items()
-                if _thread_tags_match_filters(
-                    state.tags,
-                    tag=normalized_tag,
-                    include_tag=normalized_include_tag,
-                    exclude_tag=normalized_exclude_tag,
-                )
-            },
+            tag_state=filtered_tagged_threads,
             include_untagged=False,
+            truncated=False,
+        )
+
+    if normalized_tag is not None or normalized_include_tag is not None:
+        return ThreadTagsListing(
+            tag_state=filtered_tagged_threads,
+            include_untagged=True,
             truncated=False,
         )
 
