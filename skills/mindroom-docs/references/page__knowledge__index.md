@@ -251,10 +251,11 @@ Bundled container images already include it.
 
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
-- Explicit dashboard/API reindex runs Git sync first for Git-backed bases and then rebuilds a candidate index.
+- Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
+- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
-- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
+- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
@@ -369,7 +370,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 - Configure chunk size and overlap per knowledge base
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
-- Trigger a full reindex on demand
+- Trigger a full reindex or Git sync on demand
 - Monitor indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 

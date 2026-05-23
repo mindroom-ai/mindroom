@@ -510,8 +510,9 @@ describe("Knowledge", () => {
       file_docs: {
         status: {
           base_id: "file_docs",
-          folder_path: "./knowledge_docs/file_docs",
-          watch: true,
+          folder_path:
+            "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/file_docs",
+          watch: false,
           mode: "files",
           file_count: 0,
           indexed_count: 0,
@@ -534,6 +535,12 @@ describe("Knowledge", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Create files-only access" }),
     );
+    fireEvent.change(screen.getByLabelText("Folder Path"), {
+      target: {
+        value:
+          "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/file_docs",
+      },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Add Base" }));
 
     await waitFor(() => {
@@ -541,10 +548,35 @@ describe("Knowledge", () => {
         "file_docs",
         expect.objectContaining({
           mode: "files",
-          path: "./knowledge_docs/file_docs",
+          path: "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/file_docs",
+          watch: false,
         }),
       );
     });
+  });
+
+  it("requires an explicit files-only folder path when creating a base", async () => {
+    mockStore({});
+    setKnowledgeApiMock({});
+
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+
+    fireEvent.change(screen.getByLabelText("Base Name"), {
+      target: { value: "file_docs" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create files-only access" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add Base" }));
+
+    expect(
+      screen.getByText(
+        "Folder path is required for files-only knowledge bases",
+      ),
+    ).toBeInTheDocument();
+    expect(mockUpdateKnowledgeBase).not.toHaveBeenCalled();
+    expect(mockSaveConfig).not.toHaveBeenCalled();
   });
 
   it("shows git badge and repo details on git knowledge base cards", async () => {
@@ -1029,6 +1061,72 @@ describe("Knowledge", () => {
     expect(screen.getByRole("button", { name: "Reindex" })).toBeInTheDocument();
   });
 
+  it("labels Git files-only refresh actions as sync", async () => {
+    mockStore({
+      git_docs: {
+        mode: "files",
+        path: "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/git_docs",
+        watch: false,
+        git: {
+          repo_url: "https://github.com/org/git-docs",
+          branch: "release",
+        },
+      },
+    });
+    setKnowledgeApiMock({
+      git_docs: {
+        status: {
+          base_id: "git_docs",
+          folder_path:
+            "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/git_docs",
+          watch: false,
+          mode: "files",
+          file_count: 1,
+          indexed_count: 0,
+          git: {
+            repo_url: "https://github.com/org/git-docs",
+            branch: "release",
+            lfs: false,
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: true,
+            last_successful_sync_at: null,
+            last_successful_commit: "abc123",
+            last_error: null,
+          },
+        },
+        files: {
+          base_id: "git_docs",
+          files: [
+            {
+              name: "guide.md",
+              path: "guide.md",
+              size: 42,
+              modified: "2026-02-09T00:00:00.000Z",
+              type: "md",
+            },
+          ],
+          total_size: 42,
+          file_count: 1,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: git_docs");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sync" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Sync complete",
+          description: "Knowledge base 'git_docs' synced successfully.",
+        }),
+      );
+    });
+  });
+
   it("does not upload dropped files while settings are dirty", async () => {
     mockStore(
       {
@@ -1220,6 +1318,82 @@ describe("Knowledge", () => {
     expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
       "docs",
       expect.objectContaining({ git: undefined }),
+    );
+  });
+
+  it("hides local refresh controls for files-only bases", async () => {
+    mockStore({
+      docs: {
+        mode: "files",
+        path: "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/docs",
+        watch: false,
+      },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path:
+            "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/docs",
+          watch: false,
+          mode: "files",
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    expect(screen.queryByText("Refresh on Access")).not.toBeInTheDocument();
+  });
+
+  it("clears the default semantic path when switching settings to files-only", async () => {
+    mockStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+      },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Settings files-only access" }),
+    );
+
+    expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
+      "docs",
+      expect.objectContaining({
+        mode: "files",
+        path: "",
+        watch: false,
+      }),
     );
   });
 
