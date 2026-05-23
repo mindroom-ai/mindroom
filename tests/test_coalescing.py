@@ -197,6 +197,7 @@ async def test_sealed_room_level_text_split_survives_mid_dispatch_retarget() -> 
         ["$second:localhost"],
         ["$third:localhost"],
     ]
+    assert [batch.coalescing_key for batch in batches] == [key, key, key]
 
 
 @pytest.mark.asyncio

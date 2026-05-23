@@ -272,12 +272,73 @@ class CoalescingGate:
         self._retired_in_flight_drain_tasks.add(task)
         task.add_done_callback(self._retired_in_flight_drain_tasks.discard)
 
+    @staticmethod
+    def _queued_work_stays_on_room_key_after_retarget(work: _QueuedWork) -> bool:
+        return isinstance(work, _QueuedSealedBatch) and not work.dispatch_together
+
+    def _split_room_key_retarget_work(
+        self,
+        old_key: CoalescingKey,
+        gate: _GateEntry,
+    ) -> list[_QueuedWork] | None:
+        if old_key[1] is not None:
+            return None
+        retained_work: list[_QueuedWork] = []
+        retargeted_work: list[_QueuedWork] = []
+        for work in gate.queue:
+            if self._queued_work_stays_on_room_key_after_retarget(work):
+                retained_work.append(work)
+                continue
+            retargeted_work.append(work)
+        if not retained_work:
+            return None
+        gate.queue = deque(retained_work)
+        return retargeted_work
+
+    def _install_retargeted_work(
+        self,
+        new_key: CoalescingKey,
+        queued_work: list[_QueuedWork],
+        *,
+        drain_all_requested: bool,
+    ) -> None:
+        if not queued_work:
+            return
+        existing_gate = self._gates.get(new_key)
+        if existing_gate is None:
+            target_gate = _GateEntry(
+                queue=deque(queued_work),
+                drain_all_requested=drain_all_requested,
+            )
+            self._gates[new_key] = target_gate
+        else:
+            existing_gate.queue = deque(
+                sorted(
+                    [*existing_gate.queue, *queued_work],
+                    key=_queued_work_oldest_enqueue_time,
+                ),
+            )
+            existing_gate.drain_all_requested = existing_gate.drain_all_requested or drain_all_requested
+            target_gate = existing_gate
+        self._ensure_drain_task(new_key, target_gate)
+        self._wake(target_gate)
+
     def retarget(self, old_key: CoalescingKey, new_key: CoalescingKey) -> None:
         """Re-key one live gate after thread resolution changes the canonical scope."""
         if old_key == new_key:
             return
         gate = self._gates.get(old_key)
         if gate is None:
+            return
+        retargeted_work = self._split_room_key_retarget_work(old_key, gate)
+        if retargeted_work is not None:
+            self._install_retargeted_work(
+                new_key,
+                retargeted_work,
+                drain_all_requested=gate.drain_all_requested,
+            )
+            self._ensure_drain_task(old_key, gate)
+            self._wake(gate)
             return
         existing_gate = self._gates.get(new_key)
         if existing_gate is None:
