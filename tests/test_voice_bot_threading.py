@@ -2188,6 +2188,40 @@ async def test_receive_time_dynamic_barrier_dispatches_ready_text_before_barrier
 
 
 @pytest.mark.asyncio
+async def test_receive_time_dynamic_barrier_waits_for_older_unresolved_dynamic_barrier() -> None:
+    """A ready dynamic barrier must not pass older work that may also become a barrier."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.0)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+    release_dynamic1 = asyncio.Event()
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$dynamic1", order=1),
+        may_resolve_barrier=True,
+        release=release_dynamic1,
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$dynamic2", order=2),
+        may_resolve_barrier=True,
+    )
+
+    await asyncio.sleep(0.02)
+    await coalescing_gate.drain_all()
+
+    assert batches == []
+
+    release_dynamic1.set()
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$dynamic1"], ["$dynamic2"]]
+
+
+@pytest.mark.asyncio
 async def test_receive_time_drop_barrier_splits_later_text_from_pending_voice_group() -> None:
     """A drop barrier should split prompt groups without dispatching its own event."""
     room = _threaded_room()

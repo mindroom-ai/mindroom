@@ -1146,12 +1146,17 @@ class TurnIngressCoalescingGate:
             if completed_split is not None:
                 split_index, split_admission, split_result = completed_split
                 before_split = ordered_items[:split_index]
+                ready_prefix, unresolved_remainder = self._split_ready_prefix(before_split)
+                if self._admissions_block_barrier(unresolved_remainder):
+                    if ready_prefix:
+                        self._claim_group_admissions(group, ready_prefix)
+                        await self._dispatch_fixed_ingress_admissions(ready_prefix)
+                        continue
+                    await self._wait_for_ingress_admission_progress(before_split, group=group)
+                    continue
                 ordering_future = self._start_group_ordering_future(group)
                 self._claim_group_admissions(group, [*before_split, split_admission])
                 try:
-                    ready_prefix_length = self._ready_prefix_length(before_split)
-                    ready_prefix = before_split[:ready_prefix_length]
-                    unresolved_remainder = before_split[ready_prefix_length:]
                     if ready_prefix:
                         await self._dispatch_fixed_ingress_admissions(ready_prefix)
                     if unresolved_remainder:
@@ -1195,24 +1200,12 @@ class TurnIngressCoalescingGate:
                     return
                 completed_split = self._completed_split_admission(ordered_items)
                 if completed_split is not None:
-                    split_index, split_admission, split_result = completed_split
-                    before_split = ordered_items[:split_index]
-                    if before_split:
-                        processed_admission_ids.update(id(admission) for admission in before_split)
-                        ready_prefix_length = self._ready_prefix_length(before_split)
-                        ready_prefix = before_split[:ready_prefix_length]
-                        unresolved_remainder = before_split[ready_prefix_length:]
-                        if ready_prefix:
-                            await self._dispatch_fixed_ingress_admissions(ready_prefix)
-                        if unresolved_remainder:
-                            child_tasks.append(
-                                asyncio.create_task(
-                                    self._dispatch_fixed_ingress_admissions(unresolved_remainder),
-                                    name="turn_ingress_segment_before_split",
-                                ),
-                            )
-                    processed_admission_ids.add(id(split_admission))
-                    await self._dispatch_split_result(split_result)
+                    await self._dispatch_fixed_completed_split(
+                        ordered_items=ordered_items,
+                        completed_split=completed_split,
+                        child_tasks=child_tasks,
+                        processed_admission_ids=processed_admission_ids,
+                    )
                     continue
                 independent_ready = self._ready_admissions_independent_of_pending_work(ordered_items)
                 if independent_ready:
@@ -1229,6 +1222,38 @@ class TurnIngressCoalescingGate:
             if child_tasks:
                 await asyncio.gather(*child_tasks)
 
+    async def _dispatch_fixed_completed_split(
+        self,
+        *,
+        ordered_items: list[_ReadyIngressAdmission],
+        completed_split: tuple[int, _ReadyIngressAdmission, BarrierReadyIngressResult | DropReadyIngressResult],
+        child_tasks: list[asyncio.Task[None]],
+        processed_admission_ids: set[int],
+    ) -> None:
+        split_index, split_admission, split_result = completed_split
+        before_split = ordered_items[:split_index]
+        ready_prefix, unresolved_remainder = self._split_ready_prefix(before_split)
+        if self._admissions_block_barrier(unresolved_remainder):
+            if ready_prefix:
+                processed_admission_ids.update(id(admission) for admission in ready_prefix)
+                await self._dispatch_fixed_ingress_admissions(ready_prefix)
+                return
+            await self._wait_for_ingress_admission_progress(before_split, group=None)
+            return
+        if before_split:
+            processed_admission_ids.update(id(admission) for admission in before_split)
+            if ready_prefix:
+                await self._dispatch_fixed_ingress_admissions(ready_prefix)
+            if unresolved_remainder:
+                child_tasks.append(
+                    asyncio.create_task(
+                        self._dispatch_fixed_ingress_admissions(unresolved_remainder),
+                        name="turn_ingress_segment_before_split",
+                    ),
+                )
+        processed_admission_ids.add(id(split_admission))
+        await self._dispatch_split_result(split_result)
+
     def _completed_split_admission(
         self,
         admissions: list[_ReadyIngressAdmission],
@@ -1238,6 +1263,14 @@ class TurnIngressCoalescingGate:
             if split_result is not None:
                 return index, admission, split_result
         return None
+
+    @classmethod
+    def _split_ready_prefix(
+        cls,
+        admissions: list[_ReadyIngressAdmission],
+    ) -> tuple[list[_ReadyIngressAdmission], list[_ReadyIngressAdmission]]:
+        ready_prefix_length = cls._ready_prefix_length(admissions)
+        return admissions[:ready_prefix_length], admissions[ready_prefix_length:]
 
     def _completed_split_result(
         self,
