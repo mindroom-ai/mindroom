@@ -1928,6 +1928,98 @@ async def test_receive_time_late_media_rearms_upload_grace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_receive_time_slow_text_still_waits_for_late_media_upload_grace() -> None:
+    """Upload grace starts from text receive time even if text readiness is still pending."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(
+        debounce_seconds=0.01,
+        upload_grace_seconds=0.05,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+    release_text = asyncio.Event()
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
+        release=release_text,
+    )
+    await _wait_for_direct_condition(lambda: provisional_key in ingress_gate._ingress_grace_groups)
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(
+            room=room,
+            key=key,
+            event_id="$image",
+            body="image upload",
+            order=2,
+            source_kind=IMAGE_SOURCE_KIND,
+        ),
+    )
+
+    release_text.set()
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text", "$image"]]
+
+
+@pytest.mark.asyncio
+async def test_receive_time_upload_grace_hard_cap_prevents_indefinite_extension() -> None:
+    """Repeated late uploads should not keep a text-first turn open forever."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(
+        debounce_seconds=0.01,
+        upload_grace_seconds=0.03,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+
+    with (
+        patch("mindroom.coalescing._UPLOAD_GRACE_HARD_CAP_MULTIPLIER", 1.5),
+        patch("mindroom.coalescing._UPLOAD_GRACE_MAX_HARD_CAP_SECONDS", 0.045),
+    ):
+        await _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
+        )
+        await _wait_for_direct_condition(lambda: provisional_key in ingress_gate._ingress_grace_groups)
+        await asyncio.sleep(0.02)
+        await _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _prompt_ready_result(
+                room=room,
+                key=key,
+                event_id="$image1",
+                body="first image upload",
+                order=2,
+                source_kind=IMAGE_SOURCE_KIND,
+            ),
+        )
+        await _wait_for_direct_condition(
+            lambda: [batch.source_event_ids for batch in batches] == [["$text", "$image1"]],
+        )
+        await _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _prompt_ready_result(
+                room=room,
+                key=key,
+                event_id="$image2",
+                body="second image upload",
+                order=3,
+                source_kind=IMAGE_SOURCE_KIND,
+            ),
+        )
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text", "$image1"], ["$image2"]]
+
+
+@pytest.mark.asyncio
 async def test_receive_time_text_during_upload_grace_starts_new_debounce() -> None:
     """Later text should not be pulled into a prior group's upload-grace hold."""
     room = _threaded_room()

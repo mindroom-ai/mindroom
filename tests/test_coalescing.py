@@ -150,6 +150,56 @@ async def test_sealed_room_level_text_messages_keep_split_policy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sealed_room_level_text_split_survives_mid_dispatch_retarget() -> None:
+    """A room-root sealed text batch must keep its split policy after the first root retargets the gate."""
+    batches: list[CoalescedBatch] = []
+    key = ("!room:localhost", None, "@user:localhost")
+    retargeted_key = ("!room:localhost", "$first:localhost", "@user:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+        if batch.source_event_ids == ["$first:localhost"]:
+            gate.retarget(key, retargeted_key)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$first:localhost", "first", 1_000_000),
+                room=room,
+                source_kind="message",
+            ),
+            PendingEvent(
+                event=_text_event("$second:localhost", "second", 1_000_600),
+                room=room,
+                source_kind="message",
+            ),
+            PendingEvent(
+                event=_text_event("$third:localhost", "third", 1_001_200),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$first:localhost"],
+        ["$second:localhost"],
+        ["$third:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_room_level_messages_do_not_coalesce_during_upload_grace() -> None:
     """Room-level text roots must stay separate even when upload grace is enabled."""
     batches: list[CoalescedBatch] = []

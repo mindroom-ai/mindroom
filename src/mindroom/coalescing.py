@@ -45,6 +45,7 @@ __all__ = [
     "dispatch_event_requires_ready_barrier",
     "is_coalescing_exempt_source_kind",
     "pending_event_requires_ready_barrier",
+    "upload_grace_hard_cap_seconds",
 ]
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
@@ -87,6 +88,7 @@ class _QueuedEvent:
 @dataclass
 class _QueuedSealedBatch:
     pending_events: list[PendingEvent]
+    dispatch_together: bool
 
 
 type _QueuedWork = _QueuedEvent | _QueuedSealedBatch
@@ -130,6 +132,15 @@ def _current_task_or_none() -> asyncio.Task[Any] | None:
         return asyncio.current_task()
     except RuntimeError:
         return None
+
+
+def upload_grace_hard_cap_seconds(grace_seconds: float) -> float:
+    """Return the maximum upload-grace hold time for one candidate turn."""
+    grace_seconds = max(grace_seconds, 0.0)
+    return max(
+        grace_seconds,
+        min(grace_seconds * _UPLOAD_GRACE_HARD_CAP_MULTIPLIER, _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS),
+    )
 
 
 def is_coalescing_exempt_source_kind(
@@ -423,12 +434,12 @@ class CoalescingGate:
         )
 
     @classmethod
-    def _claim_front_sealed_events(cls, key: CoalescingKey, gate: _GateEntry) -> list[PendingEvent]:
+    def _claim_front_sealed_events(cls, gate: _GateEntry) -> list[PendingEvent]:
         front = gate.queue[0]
         if not isinstance(front, _QueuedSealedBatch):
             msg = "front queue item is not a sealed batch"
             raise TypeError(msg)
-        if cls._sealed_batch_should_dispatch_together(key, front.pending_events):
+        if front.dispatch_together:
             return cls._claim_front_events(gate, 1)
         pending_event = front.pending_events.pop(0)
         if not front.pending_events:
@@ -641,7 +652,12 @@ class CoalescingGate:
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
         sealed_events = sorted(pending_events, key=lambda pending_event: pending_event.enqueue_time)
-        gate.queue.append(_QueuedSealedBatch(sealed_events))
+        gate.queue.append(
+            _QueuedSealedBatch(
+                pending_events=sealed_events,
+                dispatch_together=self._sealed_batch_should_dispatch_together(key, sealed_events),
+            ),
+        )
         self._schedule_drain(key, gate)
         for pending_event in sealed_events:
             self._record_enqueue(
@@ -672,11 +688,7 @@ class CoalescingGate:
         self._gates.clear()
 
     def _upload_grace_hard_cap_seconds(self) -> float:
-        grace_seconds = max(self._upload_grace_seconds(), 0.0)
-        return max(
-            grace_seconds,
-            min(grace_seconds * _UPLOAD_GRACE_HARD_CAP_MULTIPLIER, _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS),
-        )
+        return upload_grace_hard_cap_seconds(self._upload_grace_seconds())
 
     async def _wait_for_deadline(self, gate: _GateEntry, deadline: float) -> bool:
         """Return True when ingress woke the drain before the deadline."""
@@ -894,7 +906,7 @@ class CoalescingGate:
                 front = gate.queue[0]
                 front_kind = _queued_work_front_kind(front)
                 if front_kind is _QueueKind.SEALED:
-                    pending_events = self._claim_front_sealed_events(current_key, gate)
+                    pending_events = self._claim_front_sealed_events(gate)
                     if not gate.queue:
                         gate.drain_all_requested = False
                     await self._dispatch_claimed_events(

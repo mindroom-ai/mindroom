@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from .coalescing import upload_grace_hard_cap_seconds
 from .coalescing_batch import close_pending_event_metadata
 from .dispatch_handoff import is_media_dispatch_event
 from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_COALESCING_CLASS, VOICE_SOURCE_KIND
@@ -596,16 +597,20 @@ class TurnIngressCoalescingGate:
     def _group_has_voice_prompt(self, group: _IngressPromptGroup) -> bool:
         return any(self._admission_is_completed_voice_prompt(admission) for admission in group.items)
 
-    def _group_is_completed_text_only(self, group: _IngressPromptGroup) -> bool:
+    def _group_should_wait_for_upload_grace(self, group: _IngressPromptGroup) -> bool:
         if not group.items or self._group_has_voice_prompt(group):
             return False
-        return all(self._admission_is_completed_text_prompt(admission) for admission in group.items)
+        return all(self._admission_can_start_upload_grace(admission) for admission in group.items)
 
-    def _admission_is_completed_text_prompt(self, admission: _ReadyIngressAdmission) -> bool:
-        if admission.source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND}:
+    def _admission_can_start_upload_grace(self, admission: _ReadyIngressAdmission) -> bool:
+        if (
+            admission.is_raw_voice
+            or admission.source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND}
+            or admission.coalescing_class == VOICE_COALESCING_CLASS
+        ):
             return False
         if not admission.ready_task.done() or admission.ready_task.cancelled():
-            return False
+            return True
         try:
             result = admission.ready_task.result()
         except BaseException:
@@ -661,14 +666,18 @@ class TurnIngressCoalescingGate:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
         if grace_seconds <= 0 or self._is_shutting_down() or group.drain_all_requested or group.force_dispatch:
             return
-        group.deadline = time.monotonic() + grace_seconds
+        hard_deadline = time.monotonic() + upload_grace_hard_cap_seconds(grace_seconds)
+        group.deadline = min(time.monotonic() + grace_seconds, hard_deadline)
         while True:
             deadline = group.deadline or time.monotonic()
             if not await self._wait_for_ingress_deadline(group, deadline):
                 return
             if self._is_shutting_down() or group.drain_all_requested or group.force_dispatch:
                 return
-            group.deadline = time.monotonic() + grace_seconds
+            remaining_seconds = max(hard_deadline - time.monotonic(), 0.0)
+            if remaining_seconds <= 0:
+                return
+            group.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
 
     async def _wait_for_predecessor_drain_tasks(self, group: _IngressPromptGroup) -> None:
         predecessor_tasks = tuple(task for task in group.predecessor_drain_tasks if not task.done())
@@ -689,7 +698,7 @@ class TurnIngressCoalescingGate:
             await self._wait_for_ingress_debounce(group)
             if self._ingress_open_groups.get(provisional_key) is group:
                 self._ingress_open_groups.pop(provisional_key, None)
-            if self._group_is_completed_text_only(group):
+            if self._group_should_wait_for_upload_grace(group):
                 self._ingress_grace_groups[provisional_key] = group
                 await self._wait_for_ingress_upload_grace(group)
                 if self._ingress_grace_groups.get(provisional_key) is group:
