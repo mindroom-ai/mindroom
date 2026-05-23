@@ -598,19 +598,24 @@ class TurnIngressCoalescingGate:
             unique_groups.append(group)
         return tuple(unique_groups)
 
-    def cancel_unresolved_admissions(self) -> None:
+    def cancel_unresolved_admissions(self) -> bool:
         """Cancel unresolved ingress admission work so shutdown can drain boundedly."""
+        cancelled_unresolved = False
         for group in self._all_ingress_prompt_groups():
             for admission in group.items:
                 self._close_ready_metadata_when_cancelling_preliminary(admission)
                 if admission.preliminary_key_task is not None and not admission.preliminary_key_task.done():
                     admission.preliminary_key_task.cancel()
+                    cancelled_unresolved = True
                 if not admission.ready_task.done():
                     admission.ready_task.cancel()
+                    cancelled_unresolved = True
                 for task in admission.owned_tasks:
                     if not task.done():
                         task.cancel()
+                        cancelled_unresolved = True
             self._wake_ingress_group(group)
+        return cancelled_unresolved
 
     def _close_ready_metadata_when_cancelling_preliminary(self, admission: _ReadyIngressAdmission) -> None:
         if (
