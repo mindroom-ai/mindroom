@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import asyncio
 import os
 import re
 import shutil
@@ -23,10 +24,12 @@ from aioresponses import aioresponses
 
 import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing_batch import CoalescingKey
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
+from mindroom.dispatch_handoff import DispatchEvent, PreparedTextEvent, TextDispatchEvent
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
@@ -38,11 +41,21 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.media import FileMessageEvent
+from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.message_target import MessageTarget
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
-from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
+from mindroom.timing import (
+    DispatchPipelineTiming,
+    emit_elapsed_timing,
+    event_timing_scope,
+    get_dispatch_pipeline_timing,
+)
+from mindroom.turn_controller import TurnController, _DispatchPreparation, _PrecheckedEvent, _ReplayGuardContext
+from mindroom.turn_ingress_coalescing import ReadyIngressResult
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
@@ -55,6 +68,8 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "admit_file_sidecar_text_preview_for_test",
+    "admit_prepared_text_like_ingress_for_test",
     "aioresponse",
     "bind_mock_config_cache",
     "bind_runtime_paths",
@@ -65,6 +80,7 @@ __all__ = [
     "delivered_matrix_side_effect",
     "dispatch_context_result",
     "drain_coalescing",
+    "enqueue_ready_dispatch_for_test",
     "event_cache",
     "event_cache_factory",
     "install_edit_message_mock",
@@ -123,6 +139,123 @@ def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation
             thread_id=dispatch.target.resolved_thread_id,
         ),
     )
+
+
+async def admit_prepared_text_like_ingress_for_test(
+    controller: TurnController,
+    *,
+    room: nio.MatrixRoom,
+    prepared_event: PreparedTextEvent,
+    dispatch_event: TextDispatchEvent,
+    requester_user_id: str,
+    dispatch_timing: DispatchPipelineTiming | None,
+    enqueue_time: float | None = None,
+) -> None:
+    """Admit a test-created prepared text event through the receive-time ingress gate."""
+    if controller._drop_display_only_visible_router_voice_echo_before_ingress(prepared_event):
+        return
+    provisional_key = controller._text_ingress_provisional_key(room, requester_user_id)
+    received_wall_time = time.time() if enqueue_time is None else enqueue_time
+
+    async def _ready() -> ReadyIngressResult | None:
+        content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
+        prepared_source_kind = (
+            controller._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
+        )
+        if isinstance(content, dict):
+            display_only_result = controller._drop_display_only_visible_router_voice_echo_result(
+                prepared_event,
+                content=content,
+                source_kind=prepared_source_kind,
+            )
+            if display_only_result is not None:
+                return display_only_result
+        coalescing_thread_id = await controller.deps.resolver.coalescing_thread_id(room, prepared_event)
+        return await controller._ready_prepared_text_result(
+            room=room,
+            prepared_event=prepared_event,
+            dispatch_event=dispatch_event,
+            requester_user_id=requester_user_id,
+            received_wall_time=received_wall_time,
+            coalescing_thread_id=coalescing_thread_id,
+            dispatch_timing=dispatch_timing,
+        )
+
+    ready_task = asyncio.create_task(_ready(), name=f"text_ready:{prepared_event.event_id}")
+    await controller.deps.turn_ingress_gate.admit_ready_task(
+        provisional_key,
+        ready_task=ready_task,
+        source_kind=controller._text_ingress_source_kind(prepared_event),
+        coalescing_class=controller._text_ingress_coalescing_class(prepared_event),
+        barrier=controller._is_known_text_ingress_barrier(prepared_event),
+    )
+
+
+async def enqueue_ready_dispatch_for_test(
+    controller: TurnController,
+    event: DispatchEvent,
+    room: nio.MatrixRoom,
+    *,
+    source_kind: str,
+    requester_user_id: str,
+    dispatch_policy_source_kind: str | None = None,
+    hook_source: str | None = None,
+    message_received_depth: int = 0,
+    coalescing_key: CoalescingKey | None = None,
+    queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+    trust_internal_payload_metadata: bool | None = None,
+    enqueue_time: float | None = None,
+) -> None:
+    """Enqueue an already-ready dispatch event directly into the downstream gate for tests."""
+    dispatch_timing = get_dispatch_pipeline_timing(event.source)
+    if dispatch_timing is not None:
+        dispatch_timing.mark("gate_enter")
+    enqueue_start = time.monotonic()
+    timing_scope = event_timing_scope(event.event_id)
+    resolved_key, pending_event, resolved_source_kind = await controller._build_pending_event_for_dispatch(
+        event,
+        room,
+        source_kind=source_kind,
+        requester_user_id=requester_user_id,
+        dispatch_policy_source_kind=dispatch_policy_source_kind,
+        hook_source=hook_source,
+        message_received_depth=message_received_depth,
+        coalescing_key=coalescing_key,
+        queued_notice_reservation=queued_notice_reservation,
+        trust_internal_payload_metadata=trust_internal_payload_metadata,
+        enqueue_time=enqueue_time,
+    )
+    gate_enqueue_start = time.monotonic()
+    await controller.deps.coalescing_gate.enqueue(resolved_key, pending_event)
+    emit_elapsed_timing(
+        "ready_dispatch.enqueue_for_dispatch.coalescing_gate",
+        gate_enqueue_start,
+        source_kind=resolved_source_kind,
+        timing_scope=timing_scope,
+    )
+    emit_elapsed_timing(
+        "ready_dispatch.enqueue_for_dispatch",
+        enqueue_start,
+        source_kind=resolved_source_kind,
+        timing_scope=timing_scope,
+    )
+
+
+async def admit_file_sidecar_text_preview_for_test(
+    controller: TurnController,
+    room: nio.MatrixRoom,
+    prechecked_event: _PrecheckedEvent[FileMessageEvent],
+) -> bool:
+    """Admit a sidecar-backed file preview through the receive-time media ingress gate for tests."""
+    event = prechecked_event.event
+    if not is_v2_sidecar_text_preview(event.source):
+        return False
+    await controller._admit_non_audio_media_ingress(
+        room=room,
+        prechecked_event=prechecked_event,
+        dispatch_timing=get_dispatch_pipeline_timing(event.source),
+    )
+    return True
 
 
 def message_origin(
@@ -197,7 +330,7 @@ async def drain_coalescing(*bots: RuntimeBot) -> None:
     """Run queued coalescing dispatch before asserting post-dispatch effects."""
     for bot in bots:
         controller = unwrap_extracted_collaborator(bot._turn_controller)
-        await controller.deps.voice_coalescing_gate.drain_all()
+        await controller.deps.turn_ingress_gate.drain_all()
         await controller.deps.coalescing_gate.drain_all()
 
 
@@ -908,7 +1041,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "delivery_gateway": "_delivery_gateway",
         "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
-        "voice_coalescing_gate": "_voice_coalescing_gate",
+        "turn_ingress_gate": "_turn_ingress_gate",
         "edit_regenerator": "_edit_regenerator",
     }
     for field_name, attr_name in default_collaborators.items():
@@ -922,6 +1055,10 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         rebuilt_changes["turn_store"] = bot._turn_store
     if "edit_regenerator" not in rebuilt_changes:
         rebuilt_changes["edit_regenerator"] = bot._edit_regenerator
+    turn_ingress_gate = rebuilt_changes.get("turn_ingress_gate")
+    coalescing_gate = rebuilt_changes.get("coalescing_gate")
+    if turn_ingress_gate is not None and coalescing_gate is not None:
+        turn_ingress_gate.bind_coalescing_gate(coalescing_gate)
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
     edit_changes = {

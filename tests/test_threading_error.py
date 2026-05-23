@@ -4090,8 +4090,7 @@ class TestThreadingBehavior:
         )
         prechecked_event = MagicMock(event=media_event, requester_user_id="@user:localhost")
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
-        bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._coalescing_gate.enqueue_sealed_batch = AsyncMock()
 
         def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
             return nio.RoomGetEventResponse.from_dict(
@@ -4135,6 +4134,7 @@ class TestThreadingBehavior:
 
         try:
             await bot._turn_controller.handle_media_event(room, media_event)
+            await bot._turn_controller.deps.turn_ingress_gate.drain_all()
             await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, media_event_id) == thread_root_id

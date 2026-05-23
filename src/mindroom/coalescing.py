@@ -6,8 +6,8 @@ import asyncio
 import enum
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -21,13 +21,12 @@ from .coalescing_batch import (
 from .commands.parsing import command_parser
 from .dispatch_handoff import QUEUED_NOTICE_METADATA_KIND, DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
-    MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    TEXT_COALESCING_CLASS,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_COALESCING_CLASS,
     VOICE_SOURCE_KIND,
@@ -42,16 +41,14 @@ if TYPE_CHECKING:
 __all__ = [
     "CoalescingGate",
     "GatePhase",
+    "dispatch_event_requires_ready_barrier",
     "is_coalescing_exempt_source_kind",
+    "pending_event_requires_ready_barrier",
 ]
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-# Poll while raw voice for the same key is still normalizing outside this gate.
-_VOICE_HANDOFF_POLL_SECONDS = 0.05
-# Let same-burst routed voice handoffs join active text without restoring debounce latency.
-_ACTIVE_FOLLOW_UP_VOICE_JOIN_GRACE_SECONDS = 0.05
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_SOURCE_KIND,
@@ -77,6 +74,7 @@ class _QueueKind(enum.Enum):
     NORMAL = "normal"
     COMMAND = "command"
     BYPASS = "bypass"
+    SEALED = "sealed"
 
 
 @dataclass
@@ -86,9 +84,17 @@ class _QueuedEvent:
 
 
 @dataclass
+class _QueuedSealedBatch:
+    pending_events: list[PendingEvent]
+
+
+type _QueuedWork = _QueuedEvent | _QueuedSealedBatch
+
+
+@dataclass
 class _GateEntry:
     phase: GatePhase = GatePhase.DEBOUNCE
-    queue: deque[_QueuedEvent] = field(default_factory=deque)
+    queue: deque[_QueuedWork] = field(default_factory=deque)
     drain_task: asyncio.Task[None] | None = None
     wake_event: asyncio.Event = field(default_factory=asyncio.Event)
     wake_generation: int = 0
@@ -118,6 +124,13 @@ def _effective_source_kind(
     return None
 
 
+def _current_task_or_none() -> asyncio.Task[Any] | None:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
 def is_coalescing_exempt_source_kind(
     event: DispatchEvent,
     fallback_source_kind: str | None = None,
@@ -130,9 +143,12 @@ def _is_command_event(
     event: DispatchEvent,
     *,
     fallback_source_kind: str | None = None,
+    coalescing_class: str = TEXT_COALESCING_CLASS,
 ) -> bool:
     """Return whether a dispatch event should bypass coalescing as a command."""
     if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
+        return False
+    if coalescing_class == VOICE_COALESCING_CLASS:
         return False
     if fallback_source_kind == VOICE_SOURCE_KIND or is_voice_event(event):
         return False
@@ -141,10 +157,80 @@ def _is_command_event(
     return command_parser.parse(event.body) is not None
 
 
+def _dispatch_metadata_requires_bypass(pending_event: PendingEvent) -> bool:
+    return any(
+        item.requires_solo_batch and item.kind != QUEUED_NOTICE_METADATA_KIND
+        for item in pending_event.dispatch_metadata
+    )
+
+
+def _source_kind_requires_bypass(source_kind: str | None, coalescing_class: str) -> bool:
+    trusted_voice_relay = (
+        coalescing_class == VOICE_COALESCING_CLASS and source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    )
+    return source_kind in _COALESCING_EXEMPT_SOURCE_KINDS and not trusted_voice_relay
+
+
+def dispatch_event_requires_ready_barrier(
+    event: DispatchEvent,
+    *,
+    source_kind: str | None,
+    coalescing_class: str = TEXT_COALESCING_CLASS,
+) -> bool:
+    """Return whether one ready event must dispatch outside normal prompt coalescing."""
+    if _source_kind_requires_bypass(source_kind, coalescing_class):
+        return True
+    return _is_command_event(
+        event,
+        fallback_source_kind=source_kind,
+        coalescing_class=coalescing_class,
+    )
+
+
+def pending_event_requires_ready_barrier(pending_event: PendingEvent) -> bool:
+    """Return whether one pending event must dispatch outside normal prompt coalescing."""
+    return _dispatch_metadata_requires_bypass(pending_event) or dispatch_event_requires_ready_barrier(
+        pending_event.event,
+        source_kind=pending_event.source_kind,
+        coalescing_class=pending_event.coalescing_class,
+    )
+
+
+def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
+    if _dispatch_metadata_requires_bypass(pending_event):
+        return _QueueKind.BYPASS
+    source_kind = _effective_source_kind(pending_event.event, pending_event.source_kind)
+    if _source_kind_requires_bypass(source_kind, pending_event.coalescing_class):
+        # Trusted internal relays usually bypass, but voice-class relays
+        # must stay coalescible.
+        return _QueueKind.BYPASS
+    if _is_command_event(
+        pending_event.event,
+        fallback_source_kind=pending_event.source_kind,
+        coalescing_class=pending_event.coalescing_class,
+    ):
+        return _QueueKind.COMMAND
+    return _QueueKind.NORMAL
+
+
 def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
     return bool(pending_events) and all(
         isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent) for pending_event in pending_events
     )
+
+
+def _queued_work_pending_events(work: _QueuedWork) -> list[PendingEvent]:
+    return [work.pending_event] if isinstance(work, _QueuedEvent) else work.pending_events
+
+
+def _queued_work_oldest_enqueue_time(work: _QueuedWork) -> float:
+    return min(event.enqueue_time for event in _queued_work_pending_events(work))
+
+
+def _queued_work_front_kind(work: _QueuedWork) -> _QueueKind:
+    if isinstance(work, _QueuedSealedBatch):
+        return _QueueKind.SEALED
+    return _queue_kind(work.pending_event)
 
 
 class CoalescingGate:
@@ -162,13 +248,11 @@ class CoalescingGate:
         debounce_seconds: Callable[[], float],
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
-        has_pending_voice_handoff: Callable[[CoalescingKey], bool] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
-        self._has_pending_voice_handoff = has_pending_voice_handoff or (lambda _key: False)
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._retired_in_flight_drain_tasks: set[asyncio.Task[None]] = set()
 
@@ -204,7 +288,7 @@ class CoalescingGate:
         owner_gate.queue = deque(
             sorted(
                 [*owner_gate.queue, *retired_gate.queue],
-                key=lambda queued: queued.pending_event.enqueue_time,
+                key=_queued_work_oldest_enqueue_time,
             ),
         )
         owner_gate.drain_all_requested = owner_gate.drain_all_requested or retired_gate.drain_all_requested
@@ -215,38 +299,10 @@ class CoalescingGate:
         if retired_drain_task is not None and not retired_drain_task.done():
             if retired_gate.phase is GatePhase.IN_FLIGHT:
                 self._track_retired_in_flight_drain(retired_drain_task)
-            elif retired_drain_task is not asyncio.current_task():
+            elif retired_drain_task is not _current_task_or_none():
                 retired_drain_task.cancel()
         self._ensure_drain_task(new_key, owner_gate)
         self._wake(owner_gate)
-
-    def mark_voice_handoff_pending(self, key: CoalescingKey) -> None:
-        """Make eligible queued text under this key wait for an incoming raw voice handoff."""
-        gate = self._gates.get(key)
-        if gate is None:
-            return
-        if self._mark_gate_voice_handoff_pending(gate):
-            self._ensure_drain_task(key, gate)
-            self._wake(gate)
-
-    def _mark_gate_voice_handoff_pending(self, gate: _GateEntry) -> bool:
-        """Convert eligible queued text into voice-class work for this gate."""
-        updated_queue: deque[_QueuedEvent] = deque()
-        changed = False
-        for queued in gate.queue:
-            pending_event = queued.pending_event
-            updated = queued
-            if self._pending_event_can_join_voice_handoff(pending_event):
-                pending_event = replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
-                updated = _QueuedEvent(self._queue_kind(pending_event), pending_event)
-                changed = True
-            updated_queue.append(updated)
-        if not changed:
-            return False
-        gate.queue.clear()
-        for queued in updated_queue:
-            self._append_queued_event(gate, queued)
-        return True
 
     def _resolve_gate_entry(
         self,
@@ -271,13 +327,13 @@ class CoalescingGate:
 
     @staticmethod
     def _gate_work_count(gate: _GateEntry) -> int:
-        return len(gate.queue)
+        return sum(len(_queued_work_pending_events(queued_work)) for queued_work in gate.queue)
 
     @staticmethod
     def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
         if not gate.queue:
             return None
-        oldest_enqueue_time = min(queued.pending_event.enqueue_time for queued in gate.queue)
+        oldest_enqueue_time = min(_queued_work_oldest_enqueue_time(queued_work) for queued_work in gate.queue)
         return elapsed_ms_since(oldest_enqueue_time, clock=time.time)
 
     @staticmethod
@@ -291,32 +347,38 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_pending_events(gate: _GateEntry, count: int) -> list[PendingEvent]:
-        return [gate.queue[index].pending_event for index in range(count)]
+        return [
+            pending_event for index in range(count) for pending_event in _queued_work_pending_events(gate.queue[index])
+        ]
 
     @staticmethod
     def _claim_front_events(gate: _GateEntry, count: int) -> list[PendingEvent]:
-        return [gate.queue.popleft().pending_event for _ in range(count)]
+        pending_events: list[PendingEvent] = []
+        for _ in range(count):
+            pending_events.extend(_queued_work_pending_events(gate.queue.popleft()))
+        return pending_events
 
     @staticmethod
-    def _append_queued_event(gate: _GateEntry, queued_event: _QueuedEvent) -> None:
-        if queued_event.kind is not _QueueKind.NORMAL:
-            gate.queue.append(queued_event)
+    def _append_queued_work(gate: _GateEntry, queued_work: _QueuedWork) -> None:
+        if not isinstance(queued_work, _QueuedEvent) or queued_work.kind is not _QueueKind.NORMAL:
+            gate.queue.append(queued_work)
             return
         insert_index = len(gate.queue)
         while insert_index > 0:
             previous = gate.queue[insert_index - 1]
-            if previous.kind is not _QueueKind.NORMAL:
+            if _queued_work_front_kind(previous) is not _QueueKind.NORMAL:
                 break
-            if previous.pending_event.enqueue_time <= queued_event.pending_event.enqueue_time:
+            previous_events = _queued_work_pending_events(previous)
+            if previous_events[0].enqueue_time <= queued_work.pending_event.enqueue_time:
                 break
             insert_index -= 1
-        gate.queue.insert(insert_index, queued_event)
+        gate.queue.insert(insert_index, queued_work)
 
     @staticmethod
     def _front_normal_run_length(gate: _GateEntry, *, coalesce_normal_events: bool) -> int:
         count = 0
-        for queued in gate.queue:
-            if queued.kind is not _QueueKind.NORMAL:
+        for queued_work in gate.queue:
+            if _queued_work_front_kind(queued_work) is not _QueueKind.NORMAL:
                 break
             if count > 0 and not coalesce_normal_events:
                 break
@@ -325,16 +387,15 @@ class CoalescingGate:
 
     @staticmethod
     def _front_normal_run_contains_voice(gate: _GateEntry) -> bool:
-        for queued in gate.queue:
-            if queued.kind is not _QueueKind.NORMAL:
+        for queued_work in gate.queue:
+            if _queued_work_front_kind(queued_work) is not _QueueKind.NORMAL:
                 return False
-            if queued.pending_event.coalescing_class == VOICE_COALESCING_CLASS:
+            if any(
+                pending_event.coalescing_class == VOICE_COALESCING_CLASS
+                for pending_event in _queued_work_pending_events(queued_work)
+            ):
                 return True
         return False
-
-    @staticmethod
-    def _queue_contains_voice(gate: _GateEntry) -> bool:
-        return any(queued.pending_event.coalescing_class == VOICE_COALESCING_CLASS for queued in gate.queue)
 
     @staticmethod
     def _normal_events_should_coalesce(key: CoalescingKey, gate: _GateEntry) -> bool:
@@ -344,8 +405,11 @@ class CoalescingGate:
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
         count = candidate_count
         while count < len(gate.queue):
-            queued = gate.queue[count]
-            if queued.kind is not _QueueKind.NORMAL or not is_media_dispatch_event(queued.pending_event.event):
+            queued_work = gate.queue[count]
+            pending_events = _queued_work_pending_events(queued_work)
+            if _queued_work_front_kind(queued_work) is not _QueueKind.NORMAL or not is_media_dispatch_event(
+                pending_events[0].event,
+            ):
                 break
             count += 1
         return count
@@ -362,72 +426,13 @@ class CoalescingGate:
     def _has_item_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
         return candidate_count < len(gate.queue)
 
-    @staticmethod
-    def _has_barrier_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
-        return any(gate.queue[index].kind is not _QueueKind.NORMAL for index in range(candidate_count, len(gate.queue)))
-
-    @staticmethod
-    def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
-        if (
-            pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-            and pending_event.coalescing_class != VOICE_COALESCING_CLASS
-        ):
-            return _QueueKind.BYPASS
-        if any(
-            item.requires_solo_batch and item.kind != QUEUED_NOTICE_METADATA_KIND
-            for item in pending_event.dispatch_metadata
-        ):
-            return _QueueKind.BYPASS
-        source_kind_requires_bypass = is_coalescing_exempt_source_kind(
-            pending_event.event,
-            pending_event.source_kind,
-        )
-        if pending_event.coalescing_class != VOICE_COALESCING_CLASS and source_kind_requires_bypass:
-            # Trusted internal relays usually bypass, but voice-class relays
-            # are routed voice handoffs and must stay coalescible.
-            return _QueueKind.BYPASS
-        if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
-            return _QueueKind.COMMAND
-        return _QueueKind.NORMAL
-
-    @staticmethod
-    def _pending_event_can_join_voice_handoff(pending_event: PendingEvent) -> bool:
-        if pending_event.coalescing_class == VOICE_COALESCING_CLASS:
-            return False
-        if pending_event.source_kind != MESSAGE_SOURCE_KIND or pending_event.hook_source is not None:
-            return False
-        if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
-            return False
-        return all(
-            not item.requires_solo_batch or item.kind == QUEUED_NOTICE_METADATA_KIND
-            for item in pending_event.dispatch_metadata
-        )
-
-    @staticmethod
-    def _active_follow_up_bypass_can_wait_for_voice_join(queued: _QueuedEvent) -> bool:
-        pending_event = queued.pending_event
-        return (
-            queued.kind is _QueueKind.BYPASS
-            and pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-            and pending_event.coalescing_class != VOICE_COALESCING_CLASS
-        )
-
-    @staticmethod
-    def _active_follow_up_voice_join_has_barrier(gate: _GateEntry) -> bool:
-        return any(
-            queued.kind is _QueueKind.COMMAND
-            or (
-                queued.pending_event.coalescing_class != VOICE_COALESCING_CLASS
-                and not CoalescingGate._pending_event_can_join_voice_handoff(queued.pending_event)
-            )
-            for queued in gate.queue
-        )
-
     def _enqueue_path(self, kind: _QueueKind) -> str:
         if kind is _QueueKind.BYPASS:
             return "bypass"
         if kind is _QueueKind.COMMAND:
             return "command_interrupt"
+        if kind is _QueueKind.SEALED:
+            return "sealed_batch"
         if self._debounce_seconds() <= 0:
             return "zero_debounce"
         return "debounce_schedule"
@@ -580,21 +585,9 @@ class CoalescingGate:
             return
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
-        incoming_has_voice = any(
-            pending_event.coalescing_class == VOICE_COALESCING_CLASS for pending_event in pending_events
-        )
-        if incoming_has_voice:
-            self._mark_gate_voice_handoff_pending(gate)
-        if incoming_has_voice or self._queue_contains_voice(gate):
-            pending_events = [
-                replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
-                if self._pending_event_can_join_voice_handoff(pending_event)
-                else pending_event
-                for pending_event in pending_events
-            ]
-        queued_events = [(self._queue_kind(pending_event), pending_event) for pending_event in pending_events]
+        queued_events = [(_queue_kind(pending_event), pending_event) for pending_event in pending_events]
         for kind, pending_event in queued_events:
-            self._append_queued_event(gate, _QueuedEvent(kind, pending_event))
+            self._append_queued_work(gate, _QueuedEvent(kind, pending_event))
         self._schedule_drain(key, gate)
         for kind, pending_event in queued_events:
             path = self._enqueue_path(kind)
@@ -605,6 +598,25 @@ class CoalescingGate:
                 enqueue_start,
                 path=path,
                 flush_outcome="scheduled_drain" if path == "zero_debounce" else None,
+            )
+
+    async def enqueue_sealed_batch(self, key: CoalescingKey, pending_events: list[PendingEvent]) -> None:
+        """Queue an already coalesced receive-time group without another debounce."""
+        if not pending_events:
+            return
+        enqueue_start = time.monotonic()
+        gate = self._get_or_create_gate(key)
+        sealed_events = sorted(pending_events, key=lambda pending_event: pending_event.enqueue_time)
+        gate.queue.append(_QueuedSealedBatch(sealed_events))
+        self._schedule_drain(key, gate)
+        for pending_event in sealed_events:
+            self._record_enqueue(
+                key,
+                gate,
+                pending_event,
+                enqueue_start,
+                path=self._enqueue_path(_QueueKind.SEALED),
+                flush_outcome="scheduled_drain",
             )
 
     async def drain_all(self) -> None:
@@ -718,39 +730,6 @@ class CoalescingGate:
             if remaining_seconds <= 0:
                 return candidate_count
             gate.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
-
-    async def _wait_for_pending_voice_handoff(
-        self,
-        gate: _GateEntry,
-    ) -> None:
-        """Briefly yield for raw voice ingress to hand events into this gate."""
-        wait_seconds = _VOICE_HANDOFF_POLL_SECONDS
-        configured_debounce = max(self._debounce_seconds(), 0.0)
-        if configured_debounce > 0:
-            wait_seconds = min(wait_seconds, configured_debounce)
-        gate.deadline = time.monotonic() + wait_seconds
-        await self._wait_for_deadline(gate, gate.deadline)
-
-    async def _wait_for_active_follow_up_voice_join(self, gate: _GateEntry) -> bool:
-        """Briefly let a same-burst routed voice handoff join an active text follow-up."""
-        wait_seconds = _ACTIVE_FOLLOW_UP_VOICE_JOIN_GRACE_SECONDS
-        configured_debounce = max(self._debounce_seconds(), 0.0)
-        if configured_debounce <= 0:
-            return False
-        wait_seconds = min(wait_seconds, configured_debounce)
-        deadline = time.monotonic() + wait_seconds
-        gate.deadline = deadline
-        while True:
-            if self._queue_contains_voice(gate):
-                return True
-            if (
-                self._is_shutting_down()
-                or gate.drain_all_requested
-                or self._active_follow_up_voice_join_has_barrier(gate)
-            ):
-                return False
-            if not await self._wait_for_deadline(gate, deadline):
-                return False
 
     def _log_dispatch_failure(
         self,
@@ -879,15 +858,19 @@ class CoalescingGate:
                     return
 
                 front = gate.queue[0]
-                if front.kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
-                    if (
-                        len(gate.queue) == 1
-                        and not gate.drain_all_requested
-                        and not self._is_shutting_down()
-                        and self._active_follow_up_bypass_can_wait_for_voice_join(front)
-                        and await self._wait_for_active_follow_up_voice_join(gate)
-                    ):
-                        continue
+                front_kind = _queued_work_front_kind(front)
+                if front_kind is _QueueKind.SEALED:
+                    pending_events = self._claim_front_events(gate, 1)
+                    if not gate.queue:
+                        gate.drain_all_requested = False
+                    await self._dispatch_claimed_events(
+                        current_key,
+                        gate,
+                        pending_events,
+                        bypass_grace=True,
+                    )
+                    continue
+                if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
                     pending_events = self._claim_front_events(gate, 1)
                     await self._dispatch_claimed_events(
                         current_key,
@@ -906,14 +889,6 @@ class CoalescingGate:
                     coalesce_normal_events=coalesce_normal_events,
                 )
                 if candidate_count == 0:
-                    continue
-                if (
-                    not bypass_grace
-                    and not self._has_barrier_after_candidate(gate, candidate_count)
-                    and self._has_pending_voice_handoff(current_key)
-                    and not self._is_shutting_down()
-                ):
-                    await self._wait_for_pending_voice_handoff(gate)
                     continue
                 candidate_events = self._queue_pending_events(gate, candidate_count)
                 if use_upload_grace and _pending_has_only_text(candidate_events):
@@ -945,7 +920,7 @@ class CoalescingGate:
         finally:
             resolved_key, resolved_gate = self._resolve_gate_entry(current_key or key, gate)
             if resolved_key is not None and resolved_gate is not None:
-                if resolved_gate.drain_task is asyncio.current_task():
+                if resolved_gate.drain_task is _current_task_or_none():
                     resolved_gate.drain_task = None
                 if self._gate_work_count(resolved_gate) == 0:
                     self._gates.pop(resolved_key, None)

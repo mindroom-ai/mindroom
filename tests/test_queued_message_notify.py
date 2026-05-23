@@ -1980,19 +1980,24 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                 return_value=reservation,
             ),
             patch.object(
+                bot._turn_controller.deps.response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
                 bot._turn_controller,
-                "_enqueue_for_dispatch",
+                "_build_pending_event_for_dispatch",
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
             pytest.raises(asyncio.CancelledError),
         ):
-            await bot._turn_controller._enqueue_active_thread_follow_up(
+            await bot._turn_controller._ready_pending_text_result(
                 room=room,
-                event=event,
-                target=target,
+                dispatch_event=event,
+                requester_user_id="@user:localhost",
                 envelope=envelope,
                 coalescing_thread_id="$thread",
-                requester_user_id="@user:localhost",
+                received_wall_time=0.0,
                 dispatch_timing=None,
             )
     finally:

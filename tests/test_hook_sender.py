@@ -54,9 +54,11 @@ from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
+    admit_file_sidecar_text_preview_for_test,
     bind_runtime_paths,
     delivered_matrix_event,
     dispatch_context_result,
+    drain_coalescing,
     install_runtime_cache_support,
     message_origin,
     orchestrator_runtime_paths,
@@ -1232,7 +1234,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
 
     assert isinstance(event, nio.RoomMessageFile)
     await bot._on_media_message(room, event)
-    await bot._coalescing_gate.drain_all()
+    await drain_coalescing(bot)
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
     assert bot._turn_policy.plan_turn.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"
@@ -1797,14 +1799,15 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             new=AsyncMock(return_value=None),
         ) as mock_handle_text_response:
             assert isinstance(sidecar_event, nio.RoomMessageFile)
-            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            handled = await admit_file_sidecar_text_preview_for_test(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(
                     event=sidecar_event,
                     requester_user_id="@mindroom_router:localhost",
                 ),
             )
-            await bot._coalescing_gate.drain_all()
+            await drain_coalescing(bot)
 
         assert handled is True
         assert "$question123" in interactive._active_questions
@@ -1863,13 +1866,15 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         new=AsyncMock(return_value=None),
     ) as mock_handle_text_response:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
-        handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+        handled = await admit_file_sidecar_text_preview_for_test(
+            bot._turn_controller,
             room,
             _PrecheckedEvent(
                 event=sidecar_event,
                 requester_user_id="@mindroom_router:localhost",
             ),
         )
+        await drain_coalescing(bot)
 
     assert handled is True
     mock_handle_text_response.assert_not_awaited()

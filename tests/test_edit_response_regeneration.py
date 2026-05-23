@@ -3968,6 +3968,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
 
     mock_handle_text_response.assert_awaited_once()
     mock_dispatch_text.assert_not_awaited()
@@ -4284,6 +4285,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
 
         # Process the voice event
         await bot._on_media_message(room, voice_event)
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
         await bot._coalescing_gate.drain_all()
 
         # Verify that the bot tracked the response correctly
@@ -4400,6 +4402,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
         # Process the voice event
         await bot._on_media_message(room, voice_event)
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
         await bot._coalescing_gate.drain_all()
 
         # Verify that the bot marked as responded with the fallback relay.

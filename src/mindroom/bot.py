@@ -105,9 +105,9 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .turn_controller import TurnController, TurnControllerDeps
+from .turn_ingress_coalescing import TurnIngressCoalescingGate
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
-from .voice_coalescing import VoiceCoalescingGate
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -269,7 +269,7 @@ class AgentBot:
     _hook_registry_state: HookRegistryState
     _runtime_view: BotRuntimeState
     _coalescing_gate: CoalescingGate
-    _voice_coalescing_gate: VoiceCoalescingGate
+    _turn_ingress_gate: TurnIngressCoalescingGate
     _inbound_turn_normalizer: InboundTurnNormalizer
     _turn_policy: TurnPolicy
     _conversation_resolver: ConversationResolver
@@ -363,8 +363,9 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
-        self._voice_coalescing_gate = VoiceCoalescingGate(
+        self._turn_ingress_gate = TurnIngressCoalescingGate(
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
+            upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
         )
         self._coalescing_gate = CoalescingGate(
@@ -372,8 +373,8 @@ class AgentBot:
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
-            has_pending_voice_handoff=self._voice_coalescing_gate.has_pending_voice_burst,
         )
+        self._turn_ingress_gate.bind_coalescing_gate(self._coalescing_gate)
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
             logger=self.logger,
@@ -516,7 +517,7 @@ class AgentBot:
                 tool_runtime=self._tool_runtime_support,
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
-                voice_coalescing_gate=self._voice_coalescing_gate,
+                turn_ingress_gate=self._turn_ingress_gate,
                 edit_regenerator=self._edit_regenerator,
             ),
         )
@@ -1416,7 +1417,7 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
-        await self._voice_coalescing_gate.drain_all()
+        await self._turn_ingress_gate.drain_all()
         await self._coalescing_gate.drain_all()
         if self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)

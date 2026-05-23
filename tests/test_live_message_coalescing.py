@@ -44,6 +44,10 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_COALESCING_CLASS,
     VOICE_SOURCE_KIND,
@@ -70,8 +74,10 @@ from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
+    admit_file_sidecar_text_preview_for_test,
     bind_runtime_paths,
     dispatch_context_result,
+    enqueue_ready_dispatch_for_test,
     install_generate_response_mock,
     install_send_response_mock,
     make_matrix_client_mock,
@@ -90,6 +96,18 @@ if TYPE_CHECKING:
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
     return not gate._gates and not any(not task.done() for task in gate._retired_in_flight_drain_tasks)
+
+
+def _queued_work_event_ids_for_test(work: object) -> list[str]:
+    work_fields = vars(work)
+    pending_event = work_fields.get("pending_event")
+    if isinstance(pending_event, PendingEvent):
+        return [pending_event.event.event_id]
+    return [pending_event.event.event_id for pending_event in work_fields["pending_events"]]
+
+
+def _gate_queue_event_ids_for_test(gate: object) -> list[list[str]]:
+    return [_queued_work_event_ids_for_test(work) for work in vars(gate)["queue"]]
 
 
 def _make_config(
@@ -404,7 +422,8 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), media_events or []))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -438,13 +457,15 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         calls.append((dispatched_event.event_id, dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
@@ -471,13 +492,15 @@ async def test_two_rapid_text_messages_forward_prompt_map_to_dispatch(tmp_path: 
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch:
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
@@ -516,13 +539,15 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             image_event,
             room,
             source_kind="image",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
@@ -561,14 +586,16 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
         await asyncio.sleep(0.005)
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             image_event,
             room,
             source_kind="image",
@@ -601,7 +628,8 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
@@ -611,7 +639,8 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
         await asyncio.sleep(0.02)
         assert calls == []
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             image_event,
             room,
             source_kind="image",
@@ -652,7 +681,8 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
@@ -662,14 +692,16 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
         await asyncio.sleep(0.02)
         assert calls == []
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first_image,
             room,
             source_kind="image",
             requester_user_id="@user:localhost",
         )
         await asyncio.sleep(0.01)
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second_image,
             room,
             source_kind="image",
@@ -702,7 +734,8 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
@@ -712,7 +745,8 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
         await asyncio.sleep(0.06)
         assert calls == []
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
@@ -752,7 +786,8 @@ async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Pa
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
@@ -760,7 +795,8 @@ async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Pa
         )
         await _wait_for(lambda: len(calls) == 1)
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             image_event,
             room,
             source_kind="image",
@@ -796,13 +832,15 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             alice,
             room,
             source_kind="message",
             requester_user_id="@alice:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             bob,
             room,
             source_kind="message",
@@ -922,13 +960,15 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             thread_a,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             thread_b,
             room,
             source_kind="message",
@@ -969,13 +1009,15 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             room_message,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             threaded_plain_reply,
             room,
             source_kind="message",
@@ -1039,13 +1081,15 @@ async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_pat
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             reply_a,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             reply_b,
             room,
             source_kind="message",
@@ -1078,13 +1122,15 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             command,
             room,
             source_kind="message",
@@ -1121,21 +1167,24 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
         await asyncio.sleep(0.01)
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             command,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
         await asyncio.sleep(0.005)
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
@@ -1179,7 +1228,8 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
@@ -1189,7 +1239,8 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
         await asyncio.sleep(0.02)
         assert calls == []
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             command_event,
             room,
             source_kind="message",
@@ -1258,7 +1309,8 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             await release_first_dispatch.wait()
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
@@ -1267,13 +1319,15 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             third,
             room,
             source_kind="message",
@@ -1366,34 +1420,6 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
 
     release_first_dispatch.set()
     await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"], ["$m3"]])
-
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_pending_voice_handoff_does_not_delay_command_barrier() -> None:
-    """A command barrier should flush queued text even while raw voice STT is pending."""
-    room = _make_room()
-    text = _text_event(event_id="$text", body="text before command", server_timestamp=1000)
-    command = _text_event(event_id="$command", body="!help", server_timestamp=1001)
-    calls: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-        has_pending_voice_handoff=lambda _key: True,
-    )
-    key = ("!room:localhost", "$thread", "@user:localhost")
-
-    await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind="message"))
-    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
-
-    await _wait_for(lambda: calls == [["$text"], ["$command"]], deadline_seconds=0.2)
 
     assert _coalescing_gate_is_idle(gate)
 
@@ -1509,80 +1535,42 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces() -> None:
 
 
 @pytest.mark.asyncio
-async def test_room_scope_pending_voice_handoff_waits_past_following_normal_text() -> None:
-    """A later normal text item should not unblock dispatch while raw voice may still hand off."""
+async def test_active_text_follow_up_is_owned_but_still_coalesces() -> None:
+    """Active text ownership should not split same-key text batches."""
     room = _make_room()
-    first_text = _text_event(event_id="$text-1", body="first typed follow-up", server_timestamp=1000)
-    second_text = _text_event(event_id="$text-2", body="second typed follow-up", server_timestamp=1001)
-    pending_voice = True
-    calls: list[list[str]] = []
+    first = _text_event(event_id="$text-1", body="first", server_timestamp=1000)
+    second = _text_event(event_id="$text-2", body="second", server_timestamp=1001)
+    calls: list[CoalescedBatch] = []
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
+        calls.append(batch)
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-        has_pending_voice_handoff=lambda _key: pending_voice,
-    )
-    key = ("!room:localhost", None, "@user:localhost")
-
-    await gate.enqueue(key, PendingEvent(event=first_text, room=room, source_kind="message"))
-    await gate.enqueue(key, PendingEvent(event=second_text, room=room, source_kind="message"))
-    await asyncio.sleep(0.06)
-
-    assert calls == []
-
-    pending_voice = False
-    await gate.drain_all()
-
-    assert calls == [["$text-1"], ["$text-2"]]
-    assert _coalescing_gate_is_idle(gate)
-
-
-@pytest.mark.asyncio
-async def test_non_voice_active_follow_up_policy_bypasses_gate() -> None:
-    """Direct active text follow-ups should not wait for the normal debounce window."""
-    room = _make_room()
-    active_followup = _text_event(event_id="$active", body="stop", server_timestamp=1000)
-    dispatched = asyncio.Event()
-    calls: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append(list(batch.source_event_ids))
-        dispatched.set()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
+        debounce_seconds=lambda: 0.05,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = ("!room:localhost", "$thread", "@user:localhost")
+    for event in [first, second]:
+        await gate.enqueue(
+            key,
+            PendingEvent(
+                event=event,
+                room=room,
+                source_kind="message",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+    await gate.drain_all()
 
-    await gate.enqueue(
-        key,
-        PendingEvent(
-            event=active_followup,
-            room=room,
-            source_kind="message",
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        ),
-    )
-    try:
-        await asyncio.wait_for(dispatched.wait(), timeout=0.2)
-    finally:
-        await gate.drain_all()
-
-    assert calls == [["$active"]]
-    assert _coalescing_gate_is_idle(gate)
+    assert [batch.source_event_ids for batch in calls] == [["$text-1", "$text-2"]]
+    assert calls[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 
 
 @pytest.mark.asyncio
-async def test_active_follow_up_voice_join_grace_ignores_ordinary_text_wakes() -> None:
-    """A second active text wake should not break the tiny router-voice join grace."""
+async def test_active_follow_up_text_can_join_later_voice_without_bypass() -> None:
+    """Active text should remain coalescible when later voice joins the same key."""
     room = _make_room()
     first_text = _text_event(event_id="$text-1", body="first typed follow-up", server_timestamp=1000)
     second_text = _text_event(event_id="$text-2", body="second typed follow-up", server_timestamp=1001)
@@ -1637,6 +1625,42 @@ async def test_active_follow_up_voice_join_grace_ignores_ordinary_text_wakes() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", [HOOK_SOURCE_KIND, HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND])
+async def test_hook_and_scheduled_voice_class_sources_still_bypass(source_kind: str) -> None:
+    """Hook and scheduled barriers should not become normal just because they carry voice class."""
+    room = _make_room()
+    text = _text_event(event_id="$text", body="normal text", server_timestamp=1000)
+    barrier = _text_event(event_id="$barrier", body="barrier text", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", "$thread", "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind=MESSAGE_SOURCE_KIND))
+    await gate.enqueue(
+        key,
+        PendingEvent(
+            event=barrier,
+            room=room,
+            source_kind=source_kind,
+            coalescing_class=VOICE_COALESCING_CLASS,
+        ),
+    )
+    await gate.drain_all()
+
+    assert calls == [["$text"], ["$barrier"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_room_scope_voice_front_coalesces_multiple_voice_events() -> None:
     """Room-scope voice bursts handed to the main gate together should dispatch once."""
     room = _make_room()
@@ -1679,7 +1703,294 @@ async def test_room_scope_voice_front_coalesces_multiple_voice_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path: Path) -> None:
+async def test_sealed_active_text_events_dispatch_together_without_debounce_or_upload_grace() -> None:
+    """Sealed active text groups should dispatch as one batch without debounce or upload grace."""
+    room = _make_room()
+    first = _text_event(event_id="$active-1", body="first active", server_timestamp=1000)
+    second = _text_event(event_id="$active-2", body="second active", server_timestamp=1001)
+    dispatched: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        dispatched.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", "$thread", "@user:localhost")
+
+    with patch.object(gate, "_wait_for_upload_grace", new=AsyncMock()) as wait_for_upload_grace:
+        await gate.enqueue_sealed_batch(
+            key,
+            [
+                PendingEvent(
+                    event=second,
+                    room=room,
+                    source_kind="message",
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    enqueue_time=2.0,
+                ),
+                PendingEvent(
+                    event=first,
+                    room=room,
+                    source_kind="message",
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    enqueue_time=1.0,
+                ),
+            ],
+        )
+
+        await _wait_for(lambda: dispatched == [["$active-1", "$active-2"]], deadline_seconds=0.2)
+
+    wait_for_upload_grace.assert_not_awaited()
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_sealed_voice_text_room_scope_events_dispatch_together() -> None:
+    """Sealed room-scope voice and text handoffs should dispatch as one batch."""
+    room = _make_room()
+    voice = _text_event(event_id="$sealed-voice", body="voice transcript", server_timestamp=1000)
+    text = _text_event(event_id="$sealed-text", body="typed follow-up", server_timestamp=1001)
+    dispatched: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        dispatched.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue_sealed_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=text,
+                room=room,
+                source_kind="message",
+                enqueue_time=2.0,
+            ),
+            PendingEvent(
+                event=voice,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                coalescing_class=VOICE_COALESCING_CLASS,
+                enqueue_time=1.0,
+            ),
+        ],
+    )
+
+    await _wait_for(lambda: dispatched == [["$sealed-voice", "$sealed-text"]], deadline_seconds=0.2)
+
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_sealed_batch_with_blocking_solo_metadata_closes_metadata_and_logs_failure() -> None:
+    """Invalid sealed batches should close metadata and log a dispatch failure."""
+    room = _make_room()
+    queued_reservation = MagicMock()
+    blocking_owner = MagicMock()
+    queued_metadata = (
+        PendingDispatchMetadata(
+            kind=QUEUED_NOTICE_METADATA_KIND,
+            payload=queued_reservation,
+            close=queued_reservation.cancel,
+            requires_solo_batch=True,
+        ),
+    )
+    blocking_metadata = (
+        PendingDispatchMetadata(
+            kind="blocking_test_metadata",
+            payload=blocking_owner,
+            close=blocking_owner.close,
+            requires_solo_batch=True,
+        ),
+    )
+    dispatch_batch = AsyncMock()
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        await gate.enqueue_sealed_batch(
+            ("!room:localhost", "$thread", "@user:localhost"),
+            [
+                PendingEvent(
+                    event=_text_event(event_id="$queued", body="queued", server_timestamp=1000),
+                    room=room,
+                    source_kind="message",
+                    dispatch_metadata=queued_metadata,
+                    enqueue_time=1.0,
+                ),
+                PendingEvent(
+                    event=_text_event(event_id="$blocking", body="blocking", server_timestamp=1001),
+                    room=room,
+                    source_kind="message",
+                    dispatch_metadata=blocking_metadata,
+                    enqueue_time=2.0,
+                ),
+            ],
+        )
+        await _wait_for(lambda: mock_exception.called, deadline_seconds=0.2)
+
+    dispatch_batch.assert_not_awaited()
+    assert queued_reservation.cancel.call_count >= 1
+    assert blocking_owner.close.call_count >= 1
+    assert mock_exception.call_args.args == ("Coalescing drain failed",)
+    assert mock_exception.call_args.kwargs["exception_type"] == "ValueError"
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_sealed_batch_does_not_merge_with_following_command() -> None:
+    """A command queued behind a sealed batch should dispatch as its own batch."""
+    room = _make_room()
+    first = _text_event(event_id="$sealed-1", body="first", server_timestamp=1000)
+    second = _text_event(event_id="$sealed-2", body="second", server_timestamp=1001)
+    command = _text_event(event_id="$command", body="!help", server_timestamp=1002)
+    sealed_dispatch_started = asyncio.Event()
+    release_sealed_dispatch = asyncio.Event()
+    dispatched: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        dispatched.append(source_event_ids)
+        if source_event_ids == ["$sealed-1", "$sealed-2"]:
+            sealed_dispatch_started.set()
+            await release_sealed_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", "$thread", "@user:localhost")
+
+    await gate.enqueue_sealed_batch(
+        key,
+        [
+            PendingEvent(event=first, room=room, source_kind="message", enqueue_time=1.0),
+            PendingEvent(event=second, room=room, source_kind="message", enqueue_time=2.0),
+        ],
+    )
+    await sealed_dispatch_started.wait()
+    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message", enqueue_time=3.0))
+
+    release_sealed_dispatch.set()
+    await _wait_for(lambda: dispatched == [["$sealed-1", "$sealed-2"], ["$command"]], deadline_seconds=0.2)
+
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_retarget_moves_sealed_batch_as_one_opaque_item() -> None:
+    """Retargeting should move a sealed batch without splitting it into event queue items."""
+    room = _make_room()
+    dispatched: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        dispatched.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    old_key = ("!room:localhost", None, "@user:localhost")
+    new_key = ("!room:localhost", "$thread", "@user:localhost")
+
+    await gate.enqueue_sealed_batch(
+        old_key,
+        [
+            PendingEvent(
+                event=_text_event(event_id="$sealed-1", body="first", server_timestamp=1000),
+                room=room,
+                source_kind="message",
+                enqueue_time=1.0,
+            ),
+            PendingEvent(
+                event=_text_event(event_id="$sealed-2", body="second", server_timestamp=1001),
+                room=room,
+                source_kind="message",
+                enqueue_time=2.0,
+            ),
+        ],
+    )
+    await gate.enqueue(
+        new_key,
+        PendingEvent(
+            event=_text_event(event_id="$follow-up", body="follow-up", thread_id="$thread", server_timestamp=1002),
+            room=room,
+            source_kind="message",
+            enqueue_time=3.0,
+        ),
+    )
+    gate.retarget(old_key, new_key)
+
+    assert _gate_queue_event_ids_for_test(gate._gates[new_key]) == [["$sealed-1", "$sealed-2"], ["$follow-up"]]
+
+    await gate.drain_all()
+
+    assert dispatched == [["$sealed-1", "$sealed-2"], ["$follow-up"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_sealed_batch_idle_detection_handles_in_flight_dispatch() -> None:
+    """Idle detection should treat an in-flight sealed batch as active work."""
+    room = _make_room()
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        dispatch_started.set()
+        await release_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue_sealed_batch(
+        ("!room:localhost", "$thread", "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$sealed-1", body="first", server_timestamp=1000),
+                room=room,
+                source_kind="message",
+                enqueue_time=1.0,
+            ),
+            PendingEvent(
+                event=_text_event(event_id="$sealed-2", body="second", server_timestamp=1001),
+                room=room,
+                source_kind="message",
+                enqueue_time=2.0,
+            ),
+        ],
+    )
+    await dispatch_started.wait()
+
+    assert _coalescing_gate_is_idle(gate) is False
+
+    release_dispatch.set()
+    await _wait_for(lambda: _coalescing_gate_is_idle(gate), deadline_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_ready_dispatch_enqueue_returns_while_drain_dispatch_blocks(tmp_path: Path) -> None:
     """A blocked coalescing drain must not hold later Matrix ingress callbacks."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
@@ -1707,7 +2018,8 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await asyncio.wait_for(
-            bot._turn_controller._enqueue_for_dispatch(
+            enqueue_ready_dispatch_for_test(
+                bot._turn_controller,
                 first,
                 room,
                 source_kind="message",
@@ -1718,7 +2030,8 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         await entered_first_dispatch.wait()
 
         await asyncio.wait_for(
-            bot._turn_controller._enqueue_for_dispatch(
+            enqueue_ready_dispatch_for_test(
+                bot._turn_controller,
                 second,
                 room,
                 source_kind="message",
@@ -1728,9 +2041,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         )
 
         retargeted_key = ("!room:localhost", "$m1", "@user:localhost")
-        assert [
-            queued.pending_event.event.event_id for queued in bot._coalescing_gate._gates[retargeted_key].queue
-        ] == ["$m2"]
+        assert _gate_queue_event_ids_for_test(bot._coalescing_gate._gates[retargeted_key]) == [["$m2"]]
 
         release_first_dispatch.set()
         await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
@@ -1771,7 +2082,8 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         calls.append(dispatched_event.body)
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind=source_kind,
@@ -1857,7 +2169,8 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         calls.append(dispatched_event)
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -2046,7 +2359,8 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
             await release_first_dispatch.wait()
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="scheduled",
@@ -2055,7 +2369,8 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
 
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="scheduled",
@@ -2097,7 +2412,8 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         await release_dispatch.wait()
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -2138,7 +2454,8 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -2171,7 +2488,8 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -2214,7 +2532,8 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
             await release_dispatch.wait()
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
@@ -2224,7 +2543,8 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
         await entered_dispatch.wait()
 
         # Enqueue another message while first is in-flight
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
@@ -2274,7 +2594,8 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         first_task = asyncio.create_task(
-            bot._turn_controller._enqueue_for_dispatch(
+            enqueue_ready_dispatch_for_test(
+                bot._turn_controller,
                 first,
                 room,
                 source_kind="message",
@@ -2288,7 +2609,8 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
         assert bot._coalescing_gate._gates[retargeted_key].phase is GatePhase.IN_FLIGHT
 
         for followup in followups:
-            await bot._turn_controller._enqueue_for_dispatch(
+            await enqueue_ready_dispatch_for_test(
+                bot._turn_controller,
                 followup,
                 room,
                 source_kind="message",
@@ -2297,7 +2619,7 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
 
         gate = bot._coalescing_gate._gates[retargeted_key]
         assert gate.phase is GatePhase.IN_FLIGHT
-        assert [queued.pending_event.event.event_id for queued in gate.queue] == ["$m2", "$m3"]
+        assert _gate_queue_event_ids_for_test(gate) == [["$m2"], ["$m3"]]
 
         release_first_dispatch.set()
         await first_task
@@ -2377,7 +2699,7 @@ async def test_retarget_merges_existing_destination_gate_queue() -> None:
     gate.retarget(old_key, new_key)
 
     assert set(gate._gates) == {new_key}
-    assert [queued.pending_event.event.event_id for queued in gate._gates[new_key].queue] == ["$m1", "$m2"]
+    assert _gate_queue_event_ids_for_test(gate._gates[new_key]) == [["$m1"], ["$m2"]]
 
     await gate.drain_all()
 
@@ -2628,8 +2950,8 @@ async def test_zero_debounce_with_upload_grace_logs_scheduled_grace_outcome() ->
 
 
 @pytest.mark.asyncio
-async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_path: Path) -> None:
-    """Pre-dispatch handoff telemetry should carry the source-event timing scope explicitly."""
+async def test_ready_dispatch_enqueue_timing_events_include_explicit_scope(tmp_path: Path) -> None:
+    """Ready-dispatch telemetry should carry the source-event timing scope explicitly."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     event = _text_event(event_id="$m1", body="hello")
@@ -2638,7 +2960,8 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
         patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()),
         patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
     ):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -2646,15 +2969,15 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
             coalescing_key=(room.room_id, None, "@user:localhost"),
         )
 
-    handoff_calls = [
+    ready_dispatch_calls = [
         call
         for call in mock_emit.call_args_list
         if call.args
         and isinstance(call.args[0], str)
-        and call.args[0].startswith("ingress_handoff.enqueue_for_dispatch")
+        and call.args[0].startswith("ready_dispatch.enqueue_for_dispatch")
     ]
-    assert handoff_calls
-    assert all(call.kwargs["timing_scope"] == "$m1" for call in handoff_calls)
+    assert ready_dispatch_calls
+    assert all(call.kwargs["timing_scope"] == "$m1" for call in ready_dispatch_calls)
 
 
 @pytest.mark.asyncio
@@ -3236,7 +3559,8 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
         patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -3280,7 +3604,8 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         started_at = time.monotonic()
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             text_event,
             room,
             source_kind="message",
@@ -3292,7 +3617,8 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
 
         for delay, image_event in zip((0.01, 0.01, 0.01, 0.01), image_events, strict=True):
             await asyncio.sleep(delay)
-            await bot._turn_controller._enqueue_for_dispatch(
+            await enqueue_ready_dispatch_for_test(
+                bot._turn_controller,
                 image_event,
                 room,
                 source_kind="image",
@@ -3332,13 +3658,15 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
         ),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second,
             room,
             source_kind="message",
@@ -3376,7 +3704,8 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -3410,13 +3739,15 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             first_cmd,
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             second_cmd,
             room,
             source_kind="message",
@@ -3439,7 +3770,8 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()):
         assert _coalescing_gate_is_idle(bot._coalescing_gate)
-        await bot._turn_controller._enqueue_for_dispatch(
+        await enqueue_ready_dispatch_for_test(
+            bot._turn_controller,
             event,
             room,
             source_kind="message",
@@ -4815,7 +5147,8 @@ async def _capture_gate_dispatches(
         ),
     ):
         for event, source_kind, dispatch_policy_source_kind, metadata in enqueued:
-            await bot._turn_controller._enqueue_for_dispatch(
+            await enqueue_ready_dispatch_for_test(
+                bot._turn_controller,
                 cast("nio.RoomMessageText | PreparedTextEvent", event),
                 room,
                 source_kind=source_kind,
@@ -5429,10 +5762,12 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=record_payload_request),
         ),
     ):
-        handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+        handled = await admit_file_sidecar_text_preview_for_test(
+            bot._turn_controller,
             room,
             _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
         )
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
         await bot._coalescing_gate.drain_all()
 
     assert handled is True

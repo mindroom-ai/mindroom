@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom import interactive
+from mindroom import inbound_turn_normalizer, interactive
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate
 from mindroom.coalescing_batch import CoalescedBatch, PendingEvent
@@ -28,6 +29,8 @@ from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TEXT_COALESCING_CLASS,
@@ -38,7 +41,14 @@ from mindroom.dispatch_source import (
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.turn_ingress_coalescing import (
+    BarrierReadyIngressResult,
+    IngressProvisionalKey,
+    PromptReadyIngressResult,
+    TurnIngressCoalescingGate,
+)
 from tests.conftest import (
+    admit_prepared_text_like_ingress_for_test,
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_generate_response_mock,
@@ -132,6 +142,125 @@ def _prepared_text_event(
     )
 
 
+def _raw_text_event(
+    *,
+    event_id: str,
+    body: str,
+    sender: str = "@user:localhost",
+    server_timestamp: int = 1000000,
+) -> nio.RoomMessageText:
+    source = {
+        "content": {"body": body, "msgtype": "m.text"},
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": server_timestamp,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+    event = cast("nio.RoomMessageText", nio.RoomMessageText.from_dict(source))
+    event.source = source
+    return event
+
+
+def _make_audio_event(
+    *,
+    event_id: str,
+    sender: str = "@user:localhost",
+    thread_id: str | None = "$thread:localhost",
+    server_timestamp: int = 1000000,
+) -> nio.RoomMessageAudio:
+    content: dict[str, object] = {"body": "voice.ogg", "msgtype": "m.audio"}
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    voice_event = MagicMock(spec=nio.RoomMessageAudio)
+    voice_event.sender = sender
+    voice_event.event_id = event_id
+    voice_event.body = "voice.ogg"
+    voice_event.server_timestamp = server_timestamp
+    voice_event.source = {
+        "content": content,
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": server_timestamp,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+    return voice_event
+
+
+def _normalized_voice_result(
+    *,
+    event: nio.RoomMessageAudio,
+    text: str,
+    thread_id: str | None,
+) -> inbound_turn_normalizer.VoiceNormalizationResult:
+    return inbound_turn_normalizer.VoiceNormalizationResult(
+        event=PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=text,
+            source={
+                "content": {
+                    "body": text,
+                    "msgtype": "m.text",
+                    SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id} if thread_id is not None else None,
+                },
+                "event_id": event.event_id,
+                "sender": event.sender,
+                "origin_server_ts": event.server_timestamp,
+                "type": "m.room.message",
+                "room_id": "!test:localhost",
+            },
+            server_timestamp=event.server_timestamp,
+            source_kind_override=VOICE_SOURCE_KIND,
+        ),
+        effective_thread_id=thread_id,
+    )
+
+
+def _install_turn_batch_capture_gates(
+    bot: AgentBot,
+    *,
+    debounce_seconds: float = 0.02,
+    voice_debounce_seconds: float = 0.01,
+) -> tuple[CoalescingGate, list[CoalescedBatch]]:
+    ingress_gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: voice_debounce_seconds,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: debounce_seconds,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate, turn_ingress_gate=ingress_gate)
+    return gate, batches
+
+
+def _replace_turn_dispatch_gates(
+    bot: AgentBot,
+    gate: CoalescingGate,
+    *,
+    turn_ingress_debounce_seconds: float,
+    turn_ingress_upload_grace_seconds: float = 0.0,
+) -> None:
+    turn_ingress_gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: turn_ingress_debounce_seconds,
+        upload_grace_seconds=lambda: turn_ingress_upload_grace_seconds,
+        is_shutting_down=lambda: False,
+        coalescing_gate=gate,
+    )
+    replace_turn_controller_deps(bot, coalescing_gate=gate, turn_ingress_gate=turn_ingress_gate)
+
+
 @pytest.mark.asyncio
 async def test_active_thread_voice_stays_normal_and_coalesces(tmp_path: Path) -> None:
     """Voice follow-ups during active responses should remain in one coalesced batch."""
@@ -155,30 +284,22 @@ async def test_active_thread_voice_stays_normal_and_coalesces(tmp_path: Path) ->
         _prepared_text_event(event_id="$voice-1", body="first transcription", source_kind=VOICE_SOURCE_KIND),
         _prepared_text_event(event_id="$voice-2", body="second transcription", source_kind=VOICE_SOURCE_KIND),
     ]
-    for event in voice_events:
-        target = bot._turn_controller.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id="$thread:localhost",
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        envelope = bot._turn_controller.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id="@user:localhost",
-            target=target,
-            source_kind=VOICE_SOURCE_KIND,
-        )
-        await bot._turn_controller._enqueue_prepared_text_for_dispatch(
-            room=room,
-            prepared_event=event,
-            dispatch_event=event,
-            envelope=envelope,
-            coalescing_thread_id="$thread:localhost",
-            requester_user_id="@user:localhost",
-            dispatch_timing=None,
-        )
+    with patch.object(
+        bot._turn_controller.deps.resolver,
+        "coalescing_thread_id",
+        new=AsyncMock(return_value="$thread:localhost"),
+    ):
+        for event in voice_events:
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
+                room=room,
+                prepared_event=event,
+                dispatch_event=event,
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
 
+    await bot._turn_controller.deps.turn_ingress_gate.drain_all()
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$voice-1", "$voice-2"]]
@@ -228,31 +349,23 @@ async def test_active_thread_voice_coalesces_while_prior_dispatch_is_in_flight(t
         _prepared_text_event(event_id="$voice-1", body="first transcription", source_kind=VOICE_SOURCE_KIND),
         _prepared_text_event(event_id="$voice-2", body="second transcription", source_kind=VOICE_SOURCE_KIND),
     ]
-    for event in voice_events:
-        target = bot._turn_controller.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id="$thread:localhost",
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        envelope = bot._turn_controller.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id="@user:localhost",
-            target=target,
-            source_kind=VOICE_SOURCE_KIND,
-        )
-        await bot._turn_controller._enqueue_prepared_text_for_dispatch(
-            room=room,
-            prepared_event=event,
-            dispatch_event=event,
-            envelope=envelope,
-            coalescing_thread_id="$thread:localhost",
-            requester_user_id="@user:localhost",
-            dispatch_timing=None,
-        )
+    with patch.object(
+        bot._turn_controller.deps.resolver,
+        "coalescing_thread_id",
+        new=AsyncMock(return_value="$thread:localhost"),
+    ):
+        for event in voice_events:
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
+                room=room,
+                prepared_event=event,
+                dispatch_event=event,
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
 
     release_first_dispatch.set()
+    await bot._turn_controller.deps.turn_ingress_gate.drain_all()
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$prior"], ["$voice-1", "$voice-2"]]
@@ -262,6 +375,175 @@ async def test_active_thread_voice_coalesces_while_prior_dispatch_is_in_flight(t
     ]
     assert "first transcription" in batches[1].prompt
     assert "second transcription" in batches[1].prompt
+
+
+@pytest.mark.asyncio
+async def test_text_received_before_voice_keeps_receive_order_when_text_thread_resolution_is_slow(
+    tmp_path: Path,
+) -> None:
+    """Receive-time text admission keeps a slow first text with the later voice burst."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    gate, batches = _install_turn_batch_capture_gates(bot, debounce_seconds=0.02, voice_debounce_seconds=0.0)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
+    bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
+
+    text_event = _prepared_text_event(event_id="$text", body="typed first")
+    voice_event = _make_audio_event(event_id="$voice", thread_id="$thread:localhost")
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+    release_stt = asyncio.Event()
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: PreparedTextEvent | nio.RoomMessageAudio) -> str:
+        if event.event_id == "$text":
+            resolution_started.set()
+            await release_resolution.wait()
+        return "$thread:localhost"
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer.VoiceNormalizationResult:
+        await release_stt.wait()
+        return _normalized_voice_result(
+            event=request.event,
+            text="canonical voice transcript",
+            thread_id="$thread:localhost",
+        )
+
+    normalizer = MagicMock(wraps=bot._turn_controller.deps.normalizer)
+    normalizer.prepare_voice_event = AsyncMock(side_effect=prepare_voice_event)
+    replace_turn_controller_deps(
+        bot,
+        coalescing_gate=bot._turn_controller.deps.coalescing_gate,
+        turn_ingress_gate=bot._turn_controller.deps.turn_ingress_gate,
+        normalizer=normalizer,
+    )
+    text_task: asyncio.Task[None] | None = None
+    voice_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            text_task = asyncio.create_task(
+                admit_prepared_text_like_ingress_for_test(
+                    bot._turn_controller,
+                    room=room,
+                    prepared_event=text_event,
+                    dispatch_event=text_event,
+                    requester_user_id="@user:localhost",
+                    dispatch_timing=None,
+                ),
+            )
+            await asyncio.wait_for(resolution_started.wait(), timeout=1.0)
+            await asyncio.sleep(0.08)
+
+            voice_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, voice_event))
+            await asyncio.sleep(0.08)
+
+            release_resolution.set()
+            release_stt.set()
+            await asyncio.wait_for(asyncio.gather(text_task, voice_task), timeout=1.0)
+            await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+            await gate.drain_all()
+    finally:
+        release_resolution.set()
+        release_stt.set()
+        for task in (text_task, voice_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    assert [batch.source_event_ids for batch in batches] == [["$text", "$voice"]]
+    assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batches[0].coalescing_class == VOICE_COALESCING_CLASS
+
+
+@pytest.mark.asyncio
+async def test_same_room_same_requester_different_threads_are_partitioned_before_voice_retarget(
+    tmp_path: Path,
+) -> None:
+    """Same-room events from one requester must partition by pre-STT thread."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    gate, batches = _install_turn_batch_capture_gates(bot, debounce_seconds=60.0, voice_debounce_seconds=0.0)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=False)
+
+    text_event = _prepared_text_event(
+        event_id="$text-thread-a",
+        body="typed in thread A",
+        content_overrides={"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-a"}},
+    )
+    voice_event = _make_audio_event(event_id="$voice-thread-b", thread_id="$thread-b")
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: PreparedTextEvent | nio.RoomMessageAudio) -> str:
+        if event.event_id == "$text-thread-a":
+            return "$thread-a"
+        return "$thread-b"
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer.VoiceNormalizationResult:
+        return _normalized_voice_result(
+            event=request.event,
+            text="voice retargeted to final thread",
+            thread_id="$voice-final-thread",
+        )
+
+    normalizer = MagicMock(wraps=bot._turn_controller.deps.normalizer)
+    normalizer.prepare_voice_event = AsyncMock(side_effect=prepare_voice_event)
+    replace_turn_controller_deps(
+        bot,
+        coalescing_gate=bot._turn_controller.deps.coalescing_gate,
+        turn_ingress_gate=bot._turn_controller.deps.turn_ingress_gate,
+        normalizer=normalizer,
+    )
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=coalescing_thread_id),
+        ),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
+            room=room,
+            prepared_event=text_event,
+            dispatch_event=text_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+        await bot._turn_controller.handle_media_event(room, voice_event)
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$text-thread-a"], ["$voice-thread-b"]]
+    assert len(batches) == 2
+    batches_by_event_id = {batch.source_event_ids[0]: batch for batch in batches}
+    assert batches_by_event_id["$text-thread-a"].coalescing_key == (
+        room.room_id,
+        "$thread-a",
+        "@user:localhost",
+    )
+    assert batches_by_event_id["$voice-thread-b"].coalescing_key == (
+        room.room_id,
+        "$voice-final-thread",
+        "@user:localhost",
+    )
 
 
 @pytest.mark.asyncio
@@ -304,7 +586,8 @@ async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None
             new=AsyncMock(return_value="$should-not-resolve"),
         ) as mock_coalescing_thread_id,
     ):
-        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
             room=room,
             prepared_event=echo_event,
             dispatch_event=echo_event,
@@ -312,6 +595,7 @@ async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None
             dispatch_timing=None,
         )
 
+    await bot._turn_controller.deps.turn_ingress_gate.drain_all()
     await gate.drain_all()
 
     mock_interactive.assert_not_awaited()
@@ -321,7 +605,151 @@ async def test_visible_router_voice_echo_is_display_only(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_voice_coalescing_forged_visible_router_voice_echo_marker_still_dispatches(tmp_path: Path) -> None:
+async def test_visible_router_voice_echo_does_not_split_neighboring_text(tmp_path: Path) -> None:
+    """Display-only router echoes should not seal or split a human prompt group."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    _replace_turn_dispatch_gates(bot, gate, turn_ingress_debounce_seconds=60.0)
+    text_before = _prepared_text_event(event_id="$text-before", body="first part")
+    echo_event = _prepared_text_event(
+        event_id="$voice-echo",
+        body="🎤 transcribed audio",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        content_overrides={
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+    )
+    text_after = _prepared_text_event(event_id="$text-after", body="second part")
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+    ):
+        for event in (text_before, echo_event, text_after):
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
+                room=room,
+                prepared_event=event,
+                dispatch_event=event,
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$text-before", "$text-after"]]
+    assert bot._turn_store.is_handled("$voice-echo")
+
+
+@pytest.mark.asyncio
+async def test_visible_router_voice_echo_does_not_end_upload_grace(tmp_path: Path) -> None:
+    """Display-only router echoes should not close a text group that is waiting for media."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    _replace_turn_dispatch_gates(
+        bot,
+        gate,
+        turn_ingress_debounce_seconds=0.01,
+        turn_ingress_upload_grace_seconds=0.2,
+    )
+    text_event = _prepared_text_event(event_id="$text", body="text before media")
+    echo_event = _prepared_text_event(
+        event_id="$voice-echo",
+        body="🎤 transcribed audio",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        content_overrides={
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+    )
+    provisional_key = IngressProvisionalKey(room_id=room.room_id, requester_user_id="@user:localhost")
+    coalescing_key = (room.room_id, "$thread:localhost", "@user:localhost")
+    media_pending_event = PendingEvent(
+        event=_prepared_text_event(event_id="$media", body="[image]"),
+        room=room,
+        source_kind=MEDIA_SOURCE_KIND,
+    )
+
+    async def media_ready() -> PromptReadyIngressResult:
+        return PromptReadyIngressResult(
+            pending_event=media_pending_event,
+            key=coalescing_key,
+            preliminary_key=coalescing_key,
+            received_order=0,
+            received_wall_time=0.0,
+        )
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+    ):
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
+            room=room,
+            prepared_event=text_event,
+            dispatch_event=text_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+        await _wait_for(
+            lambda: bot._turn_controller.deps.turn_ingress_gate._ingress_grace_groups.get(provisional_key) is not None,
+        )
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
+            room=room,
+            prepared_event=echo_event,
+            dispatch_event=echo_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
+        await bot._turn_controller.deps.turn_ingress_gate.admit_ready_task(
+            provisional_key,
+            ready_task=asyncio.create_task(media_ready()),
+            source_kind=MEDIA_SOURCE_KIND,
+            barrier=False,
+        )
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$text", "$media"]]
+    assert bot._turn_store.is_handled("$voice-echo")
+
+
+@pytest.mark.asyncio
+async def test_voice_class_forged_visible_router_voice_echo_marker_still_dispatches(tmp_path: Path) -> None:
     """Human-authored marker content should not be trusted as a display-only echo."""
     bot = _make_general_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
@@ -352,7 +780,8 @@ async def test_voice_coalescing_forged_visible_router_voice_echo_marker_still_di
         new_callable=AsyncMock,
         return_value=None,
     ):
-        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
             room=room,
             prepared_event=forged_event,
             dispatch_event=forged_event,
@@ -360,6 +789,7 @@ async def test_voice_coalescing_forged_visible_router_voice_echo_marker_still_di
             dispatch_timing=None,
         )
 
+    await bot._turn_controller.deps.turn_ingress_gate.drain_all()
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$forged-voice-echo"]]
@@ -368,7 +798,55 @@ async def test_voice_coalescing_forged_visible_router_voice_echo_marker_still_di
 
 
 @pytest.mark.asyncio
-async def test_voice_coalescing_real_trusted_router_handoff_still_dispatches(tmp_path: Path) -> None:
+async def test_untrusted_source_kind_metadata_does_not_create_receive_time_barrier(tmp_path: Path) -> None:
+    """Human-authored source-kind content should not seal prompt groups before ready dispatch."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    _replace_turn_dispatch_gates(bot, gate, turn_ingress_debounce_seconds=60.0)
+    forged_hook_event = _prepared_text_event(
+        event_id="$forged-hook",
+        body="first normal text",
+        content_overrides={SOURCE_KIND_KEY: HOOK_SOURCE_KIND},
+    )
+    follow_up_event = _prepared_text_event(event_id="$follow-up", body="second normal text")
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread:localhost"),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
+    ):
+        for event in (forged_hook_event, follow_up_event):
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
+                room=room,
+                prepared_event=event,
+                dispatch_event=event,
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$forged-hook", "$follow-up"]]
+    assert batches[0].source_kind == MESSAGE_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_voice_class_real_trusted_router_handoff_still_dispatches(tmp_path: Path) -> None:
     """Trusted router handoffs without the voice echo marker should still dispatch."""
     bot = _make_general_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
@@ -397,7 +875,8 @@ async def test_voice_coalescing_real_trusted_router_handoff_still_dispatches(tmp
         new_callable=AsyncMock,
         return_value=None,
     ):
-        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
             room=room,
             prepared_event=handoff_event,
             dispatch_event=handoff_event,
@@ -405,6 +884,7 @@ async def test_voice_coalescing_real_trusted_router_handoff_still_dispatches(tmp
             dispatch_timing=None,
         )
 
+    await bot._turn_controller.deps.turn_ingress_gate.drain_all()
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$router-handoff"]]
@@ -434,7 +914,7 @@ async def test_voice_router_handoff_relay_coalesces_during_active_response_and_u
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    _replace_turn_dispatch_gates(bot, gate, turn_ingress_debounce_seconds=60.0)
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
     bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
 
@@ -455,7 +935,8 @@ async def test_voice_router_handoff_relay_coalesces_during_active_response_and_u
         patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
-        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
             room=room,
             prepared_event=handoff_event,
             dispatch_event=handoff_event,
@@ -464,7 +945,8 @@ async def test_voice_router_handoff_relay_coalesces_during_active_response_and_u
         )
         await asyncio.sleep(0.01)
         assert generated_prompts == []
-        await gate.drain_all()
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
 
     assert generated_prompts == ["canonical voice transcript"]
     assert generated_envelopes[0].body == "canonical voice transcript"
@@ -492,7 +974,7 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    _replace_turn_dispatch_gates(bot, gate, turn_ingress_debounce_seconds=60.0)
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
     bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
 
@@ -527,7 +1009,8 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
         patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
     ):
         for event in ordered_events:
-            await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
                 room=room,
                 prepared_event=event,
                 dispatch_event=event,
@@ -536,7 +1019,8 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
             )
         await asyncio.sleep(0.01)
         assert batches == []
-        await gate.drain_all()
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
 
     assert len(batches) == 1
     assert set(batches[0].source_event_ids) == {"$typed-followup", "$voice-router-handoff"}
@@ -547,6 +1031,410 @@ async def test_active_text_and_trusted_voice_router_handoff_coalesce_in_one_batc
     assert "canonical voice transcript" in batches[0].router_relay_prompt
     assert batches[0].coalescing_class == VOICE_COALESCING_CLASS
     assert batches[0].attachment_ids == ["voice-attachment"]
+
+
+def _assert_split_router_handoff_batches(
+    batches: list[CoalescedBatch],
+    expected_batches: list[list[str]],
+) -> None:
+    assert [batch.source_event_ids for batch in batches] == expected_batches
+    voice_batch = next(batch for batch in batches if "$router-voice-handoff" in batch.source_event_ids)
+    assert voice_batch.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert voice_batch.coalescing_class == VOICE_COALESCING_CLASS
+    assert voice_batch.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert voice_batch.router_relay_prompt is not None
+    assert "canonical voice transcript" in voice_batch.router_relay_prompt
+    assert all(batch.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND for batch in batches)
+
+
+@pytest.mark.asyncio
+async def test_media_admission_after_barrier_seals_grace_starts_new_turn() -> None:
+    """Media ready probing must not append to a grace group after a barrier sealed it."""
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    provisional_key = IngressProvisionalKey(room_id=room.room_id, requester_user_id="@user:localhost")
+    coalescing_key = (room.room_id, "$thread:localhost", "@user:localhost")
+    sealed_batches: list[list[str]] = []
+    barrier_event_ids: list[str] = []
+
+    class CaptureCoalescingGate:
+        async def enqueue_sealed_batch(
+            self,
+            _key: tuple[str, str | None, str],
+            pending_events: list[PendingEvent],
+        ) -> None:
+            sealed_batches.append([pending_event.event.event_id for pending_event in pending_events])
+
+        async def enqueue(
+            self,
+            _key: tuple[str, str | None, str],
+            pending_event: PendingEvent,
+        ) -> None:
+            barrier_event_ids.append(pending_event.event.event_id)
+
+    gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 60.0,
+        is_shutting_down=lambda: False,
+        coalescing_gate=cast("CoalescingGate", CaptureCoalescingGate()),
+    )
+
+    async def completed_ready(
+        result: PromptReadyIngressResult | BarrierReadyIngressResult,
+    ) -> PromptReadyIngressResult | BarrierReadyIngressResult:
+        return result
+
+    text_pending = PendingEvent(
+        event=_prepared_text_event(event_id="$text", body="text before upload"),
+        room=room,
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+    text_ready_task = asyncio.create_task(
+        completed_ready(
+            PromptReadyIngressResult(
+                pending_event=text_pending,
+                key=coalescing_key,
+                preliminary_key=coalescing_key,
+                received_order=0,
+                received_wall_time=0.0,
+            ),
+        ),
+    )
+    await text_ready_task
+    await gate.admit_ready_task(
+        provisional_key,
+        ready_task=text_ready_task,
+        source_kind=MESSAGE_SOURCE_KIND,
+        barrier=False,
+    )
+    await _wait_for(lambda: gate._ingress_grace_groups.get(provisional_key) is not None)
+
+    media_pending = PendingEvent(
+        event=_prepared_text_event(event_id="$media", body="[image]"),
+        room=room,
+        source_kind=MEDIA_SOURCE_KIND,
+    )
+    release_media_ready = asyncio.Event()
+
+    async def media_ready() -> PromptReadyIngressResult:
+        await release_media_ready.wait()
+        return PromptReadyIngressResult(
+            pending_event=media_pending,
+            key=coalescing_key,
+            preliminary_key=coalescing_key,
+            received_order=0,
+            received_wall_time=0.0,
+        )
+
+    barrier_pending = PendingEvent(
+        event=_prepared_text_event(event_id="$barrier", body="!help"),
+        room=room,
+        source_kind=HOOK_SOURCE_KIND,
+    )
+    barrier_ready_task = asyncio.create_task(
+        completed_ready(
+            BarrierReadyIngressResult(
+                pending_event=barrier_pending,
+                key=coalescing_key,
+                received_order=0,
+                received_wall_time=0.0,
+            ),
+        ),
+    )
+    await barrier_ready_task
+    media_ready_task = asyncio.create_task(media_ready())
+    media_admitted_to_grace = asyncio.Event()
+    release_media_admission = asyncio.Event()
+
+    async def block_media_probe_sleep(delay: float) -> None:
+        assert delay == 0
+        media_admitted_to_grace.set()
+        await release_media_admission.wait()
+
+    media_admit_task: asyncio.Task[None] | None = None
+    try:
+        with patch("mindroom.turn_ingress_coalescing.asyncio.sleep", new=block_media_probe_sleep):
+            media_admit_task = asyncio.create_task(
+                gate.admit_ready_task(
+                    provisional_key,
+                    ready_task=media_ready_task,
+                    source_kind=None,
+                    barrier=False,
+                ),
+            )
+            await asyncio.wait_for(media_admitted_to_grace.wait(), timeout=1.0)
+            release_media_ready.set()
+            await _wait_for(lambda: media_ready_task.done())
+            await gate.admit_ready_task(
+                provisional_key,
+                ready_task=barrier_ready_task,
+                source_kind=HOOK_SOURCE_KIND,
+                barrier=True,
+            )
+            release_media_admission.set()
+            await asyncio.wait_for(media_admit_task, timeout=1.0)
+    finally:
+        release_media_admission.set()
+        if media_admit_task is not None and not media_admit_task.done():
+            media_admit_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await media_admit_task
+
+    await gate.drain_all()
+
+    assert sealed_batches == [["$text"], ["$media"]]
+    assert barrier_event_ids == ["$barrier"]
+
+
+async def _run_active_router_handoff_receive_order_sequence(  # noqa: PLR0915
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    sequence: list[str],
+    *,
+    slow_text_ids: frozenset[str],
+    expected_ids: list[str],
+    expected_batches: list[list[str]] | None = None,
+) -> list[CoalescedBatch]:
+    gate, batches = _install_turn_batch_capture_gates(bot, debounce_seconds=0.02)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
+    bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
+    text_events = {
+        "$text1": _prepared_text_event(event_id="$text1", body="typed follow-up", server_timestamp=1_000_001),
+        "$text2": _prepared_text_event(event_id="$text2", body="second typed follow-up", server_timestamp=1_000_002),
+    }
+    raw_text_events = {
+        event_id: _raw_text_event(
+            event_id=event.event_id,
+            body=event.body,
+            server_timestamp=event.server_timestamp or 1_000_000,
+        )
+        for event_id, event in text_events.items()
+    }
+    handoff_event = _prepared_text_event(
+        event_id="$router-voice-handoff",
+        body="@general could you help with this?",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        server_timestamp=1_000_000,
+        content_overrides={
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            ROUTER_RELAY_PROMPT_KEY: "canonical voice transcript",
+        },
+    )
+    events = {**text_events, "$router-voice-handoff": handoff_event}
+    text_resolution_started = {event_id: asyncio.Event() for event_id in slow_text_ids}
+    release_text_resolution = asyncio.Event()
+    tasks: list[asyncio.Task[None]] = []
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: PreparedTextEvent | nio.RoomMessageText) -> str:
+        if event.event_id in slow_text_ids:
+            text_resolution_started[event.event_id].set()
+            await release_text_resolution.wait()
+        return "$thread:localhost"
+
+    async def resolve_text_event(
+        request: inbound_turn_normalizer.TextNormalizationRequest,
+    ) -> PreparedTextEvent:
+        return text_events[request.event.event_id]
+
+    normalizer = MagicMock(wraps=bot._turn_controller.deps.normalizer)
+    normalizer.resolve_text_event = AsyncMock(side_effect=resolve_text_event)
+    replace_turn_controller_deps(
+        bot,
+        coalescing_gate=gate,
+        turn_ingress_gate=bot._turn_controller.deps.turn_ingress_gate,
+        normalizer=normalizer,
+    )
+
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            for event_id in sequence:
+                event = events[event_id]
+                if event_id == "$router-voice-handoff":
+                    task = asyncio.create_task(
+                        admit_prepared_text_like_ingress_for_test(
+                            bot._turn_controller,
+                            room=room,
+                            prepared_event=event,
+                            dispatch_event=event,
+                            requester_user_id="@user:localhost",
+                            dispatch_timing=None,
+                        ),
+                    )
+                else:
+                    task = asyncio.create_task(
+                        bot._on_message(room, raw_text_events[event_id]),
+                    )
+                tasks.append(task)
+                if event_id in slow_text_ids:
+                    await asyncio.wait_for(text_resolution_started[event_id].wait(), timeout=1.0)
+                    await asyncio.sleep(0.08)
+                    continue
+                await asyncio.wait_for(task, timeout=1.0)
+
+            release_text_resolution.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=1.0)
+            await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+            await gate.drain_all()
+    finally:
+        release_text_resolution.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    if expected_batches is not None:
+        _assert_split_router_handoff_batches(batches, expected_batches)
+        return batches
+
+    assert len(batches) == 1
+    assert batches[0].source_event_ids == expected_ids
+    assert batches[0].dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    assert batches[0].coalescing_class == VOICE_COALESCING_CLASS
+    assert batches[0].source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert batches[0].router_relay_prompt is not None
+    assert "typed follow-up" in batches[0].router_relay_prompt
+    assert "canonical voice transcript" in batches[0].router_relay_prompt
+    return batches
+
+
+@pytest.mark.asyncio
+async def test_active_router_handoff_text_text_coalesces_when_text_resolution_is_slow(
+    tmp_path: Path,
+) -> None:
+    """Slow text after a router voice relay should still join by receive-time admission."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+
+    await _run_active_router_handoff_receive_order_sequence(
+        bot,
+        room,
+        ["$router-voice-handoff", "$text1", "$text2"],
+        slow_text_ids=frozenset({"$text1"}),
+        expected_ids=["$router-voice-handoff", "$text1", "$text2"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_delayed_trusted_voice_router_handoff_keeps_late_text_in_same_turn(
+    tmp_path: Path,
+) -> None:
+    """Receive-time voice-class metadata should hold the turn while relay ready work is pending."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    gate, batches = _install_turn_batch_capture_gates(bot, debounce_seconds=0.02, voice_debounce_seconds=0.02)
+    bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
+    bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
+
+    handoff_event = _prepared_text_event(
+        event_id="$router-voice-handoff",
+        body="@general could you help with this?",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        server_timestamp=1_000_000,
+        content_overrides={
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            COALESCING_CLASS_KEY: VOICE_COALESCING_CLASS,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            ROUTER_RELAY_PROMPT_KEY: "canonical voice transcript",
+        },
+    )
+    text_event = _prepared_text_event(
+        event_id="$typed-followup",
+        body="typed follow-up after pending relay",
+        server_timestamp=1_000_001,
+    )
+    handoff_resolution_started = asyncio.Event()
+    release_handoff_resolution = asyncio.Event()
+    handoff_task: asyncio.Task[None] | None = None
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: PreparedTextEvent) -> str:
+        if event.event_id == "$router-voice-handoff":
+            handoff_resolution_started.set()
+            await release_handoff_resolution.wait()
+        return "$thread:localhost"
+
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            handoff_task = asyncio.create_task(
+                admit_prepared_text_like_ingress_for_test(
+                    bot._turn_controller,
+                    room=room,
+                    prepared_event=handoff_event,
+                    dispatch_event=handoff_event,
+                    requester_user_id="@user:localhost",
+                    dispatch_timing=None,
+                ),
+            )
+            await asyncio.wait_for(handoff_resolution_started.wait(), timeout=1.0)
+            await asyncio.wait_for(handoff_task, timeout=1.0)
+            await asyncio.sleep(0.08)
+
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
+                room=room,
+                prepared_event=text_event,
+                dispatch_event=text_event,
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+            release_handoff_resolution.set()
+            await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+            await gate.drain_all()
+    finally:
+        release_handoff_resolution.set()
+        if handoff_task is not None and not handoff_task.done():
+            handoff_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await handoff_task
+
+    assert len(batches) == 1
+    assert batches[0].source_event_ids == ["$router-voice-handoff", "$typed-followup"]
+    assert batches[0].coalescing_class == VOICE_COALESCING_CLASS
+    assert batches[0].source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+
+
+@pytest.mark.asyncio
+async def test_active_text_text_router_handoff_splits_closed_text_group_when_text_resolution_is_slow(
+    tmp_path: Path,
+) -> None:
+    """Text-only groups closed before a router voice relay should keep receive-order boundaries."""
+    bot = _make_general_bot(tmp_path)
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+
+    await _run_active_router_handoff_receive_order_sequence(
+        bot,
+        room,
+        ["$text1", "$text2", "$router-voice-handoff"],
+        slow_text_ids=frozenset({"$text1"}),
+        expected_ids=[],
+        expected_batches=[["$text1"], ["$text2", "$router-voice-handoff"]],
+    )
 
 
 @pytest.mark.asyncio
@@ -573,7 +1461,7 @@ async def test_mixed_text_and_trusted_voice_router_handoff_dispatches_with_relay
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    replace_turn_controller_deps(bot, coalescing_gate=gate)
+    _replace_turn_dispatch_gates(bot, gate, turn_ingress_debounce_seconds=60.0)
     bot._turn_controller.deps.response_runner.has_active_response_for_target = MagicMock(return_value=True)
     bot._turn_controller.deps.response_runner.reserve_waiting_human_message = MagicMock(return_value=None)
     text_timestamp = 2_000_000 if event_order == "voice-first" else 1_000_000
@@ -623,7 +1511,8 @@ async def test_mixed_text_and_trusted_voice_router_handoff_dispatches_with_relay
         patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         for event in ordered_events:
-            await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            await admit_prepared_text_like_ingress_for_test(
+                bot._turn_controller,
                 room=room,
                 prepared_event=event,
                 dispatch_event=event,
@@ -632,7 +1521,8 @@ async def test_mixed_text_and_trusted_voice_router_handoff_dispatches_with_relay
             )
         await asyncio.sleep(0.01)
         assert generated_prompts == []
-        await gate.drain_all()
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
+    await gate.drain_all()
 
     assert len(generated_prompts) == 1
     assert "typed follow-up" in generated_prompts[0]
@@ -670,30 +1560,20 @@ async def test_non_voice_router_handoff_keeps_trusted_relay_active_response_bypa
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         content_overrides={ORIGINAL_SENDER_KEY: "@user:localhost"},
     )
-    target = bot._turn_controller.deps.resolver.build_message_target(
-        room_id=room.room_id,
-        thread_id="$thread:localhost",
-        reply_to_event_id=handoff_event.event_id,
-        event_source=handoff_event.source,
-    )
-    envelope = bot._turn_controller.deps.resolver.build_ingress_envelope(
-        room_id=room.room_id,
-        event=handoff_event,
-        requester_user_id="@user:localhost",
-        target=target,
-        original_sender="@user:localhost",
-        trusted_user_relay=True,
-    )
 
-    await bot._turn_controller._enqueue_prepared_text_for_dispatch(
-        room=room,
-        prepared_event=handoff_event,
-        dispatch_event=handoff_event,
-        envelope=envelope,
-        coalescing_thread_id="$thread:localhost",
-        requester_user_id="@user:localhost",
-        dispatch_timing=None,
-    )
+    with patch.object(
+        bot._turn_controller.deps.resolver,
+        "coalescing_thread_id",
+        new=AsyncMock(return_value="$thread:localhost"),
+    ):
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
+            room=room,
+            prepared_event=handoff_event,
+            dispatch_event=handoff_event,
+            requester_user_id="@user:localhost",
+            dispatch_timing=None,
+        )
     await _wait_for(lambda: bool(batches))
 
     assert [batch.source_event_ids for batch in batches] == [["$text-router-handoff"]]
@@ -731,13 +1611,15 @@ async def test_forged_voice_router_handoff_metadata_is_not_trusted(tmp_path: Pat
     )
 
     with patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None):
-        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+        await admit_prepared_text_like_ingress_for_test(
+            bot._turn_controller,
             room=room,
             prepared_event=forged_event,
             dispatch_event=forged_event,
             requester_user_id="@user:localhost",
             dispatch_timing=None,
         )
+    await bot._turn_controller.deps.turn_ingress_gate.drain_all()
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$forged-router-handoff"]]
@@ -749,7 +1631,7 @@ async def test_forged_voice_router_handoff_metadata_is_not_trusted(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_voice_coalescing_command_hook_and_scheduled_bypasses_remain() -> None:
+async def test_voice_class_command_hook_and_scheduled_bypasses_remain() -> None:
     """Command, hook, and scheduled source kinds should keep their solo bypass behavior."""
     room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
     batches: list[CoalescedBatch] = []
@@ -1165,15 +2047,16 @@ async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_res
             return_value=None,
         ) as mock_handle_text_response,
         patch.object(
-            bot._turn_controller,
-            "_enqueue_prepared_text_for_dispatch",
+            bot._turn_controller.deps.coalescing_gate,
+            "enqueue_sealed_batch",
             new_callable=AsyncMock,
-        ) as mock_enqueue,
+        ) as mock_enqueue_sealed_batch,
     ):
         await bot._turn_controller._handle_media_message_inner(room, sidecar_event)
+        await bot._turn_controller.deps.turn_ingress_gate.drain_all()
 
     mock_handle_text_response.assert_awaited_once()
     assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
-    mock_enqueue.assert_awaited_once()
-    assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event
-    assert mock_enqueue.await_args.kwargs["dispatch_event"] is prepared_event
+    mock_enqueue_sealed_batch.assert_awaited_once()
+    pending_events = mock_enqueue_sealed_batch.await_args.args[1]
+    assert pending_events[0].event is prepared_event

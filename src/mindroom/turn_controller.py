@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Never, Protocol, cast
 
 import nio
 
 from mindroom import interactive
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
+from mindroom.coalescing import dispatch_event_requires_ready_barrier, pending_event_requires_ready_barrier
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, close_pending_event_metadata
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
@@ -76,6 +78,7 @@ from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     TextNormalizationRequest,
     VoiceNormalizationRequest,
+    VoiceNormalizationResult,
 )
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
@@ -109,19 +112,21 @@ from mindroom.timing import (
     get_dispatch_pipeline_timing,
 )
 from mindroom.timing import timing_scope as timing_scope_context
+from mindroom.turn_ingress_coalescing import (
+    BarrierReadyIngressResult,
+    DropReadyIngressResult,
+    IngressProvisionalKey,
+    PromptReadyIngressResult,
+    RawVoiceIngressItem,
+    ReadyIngressResult,
+    TurnIngressCoalescingGate,
+)
 from mindroom.turn_origin import (
     classify_turn_origin,
     original_sender_for_router_handoff,
     original_sender_for_router_relay,
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
-from mindroom.voice_coalescing import (
-    TextIngressItem,
-    VoiceCoalescingGate,
-    VoiceIngressBatch,
-    VoiceIngressItem,
-    VoiceNormalizationOutcome,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -173,10 +178,6 @@ def _queued_notice_reservation_from_metadata(
     return cast("QueuedHumanNoticeReservation", reservations[0])
 
 
-def _close_text_ingress_metadata(text_items: tuple[TextIngressItem, ...]) -> None:
-    close_pending_event_metadata([text_item.pending_event for text_item in text_items])
-
-
 class _EditRegenerator(Protocol):
     """Minimal edit-regeneration surface needed by turn sequencing."""
 
@@ -196,6 +197,32 @@ class _PrecheckedEvent[T]:
 
     event: T
     requester_user_id: str
+
+
+@dataclass(frozen=True)
+class _ActiveFollowUpNoticeReservation:
+    """A queued notice reservation tied to one active response target."""
+
+    target: MessageTarget
+    reservation: QueuedHumanNoticeReservation | None
+
+
+@dataclass(frozen=True)
+class _ReadyTextPendingEvent:
+    """Pending text event plus the keys needed by ready ingress dispatch."""
+
+    key: CoalescingKey
+    resolved_key: CoalescingKey
+    pending_event: PendingEvent
+
+
+@dataclass(frozen=True)
+class _RawVoicePreliminaryResult:
+    """Pre-STT voice dispatch scope resolved at receive time."""
+
+    key: CoalescingKey
+    thread_id: str | None
+    preliminary_notice: _ActiveFollowUpNoticeReservation | None
 
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
@@ -238,7 +265,7 @@ class TurnControllerDeps:
     tool_runtime: ToolRuntimeSupport
     turn_store: TurnStore
     coalescing_gate: CoalescingGate
-    voice_coalescing_gate: VoiceCoalescingGate
+    turn_ingress_gate: TurnIngressCoalescingGate
     edit_regenerator: _EditRegenerator
 
 
@@ -442,6 +469,27 @@ class TurnController:
             and self._is_trusted_router_relay_event(event)
         )
 
+    def _mark_display_only_visible_router_voice_echo_handled(self, event: DispatchEvent) -> None:
+        self.deps.logger.debug(
+            "Ignoring visible router voice echo",
+            event_id=event.event_id,
+            sender=event.sender,
+        )
+        self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
+
+    def _drop_display_only_visible_router_voice_echo_before_ingress(self, event: TextDispatchEvent) -> bool:
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if not isinstance(content, dict):
+            return False
+        if not self._is_display_only_visible_router_voice_echo(
+            event,
+            content=content,
+            source_kind=self._text_ingress_source_kind(event),
+        ):
+            return False
+        self._mark_display_only_visible_router_voice_echo_handled(event)
+        return True
+
     def _should_use_trusted_router_relay_context(
         self,
         event: DispatchEvent,
@@ -590,242 +638,39 @@ class TurnController:
         )
         return True
 
-    def _should_bypass_coalescing_for_active_thread_follow_up(
-        self,
-        *,
-        envelope: MessageEnvelope,
-        coalescing_class: str,
-    ) -> bool:
-        """Return whether one human thread follow-up should skip in-flight coalescing."""
-        if coalescing_class == VOICE_COALESCING_CLASS:
-            return False
-        return self._should_preserve_active_thread_follow_up_policy(envelope=envelope)
-
     def _should_preserve_active_thread_follow_up_policy(
         self,
         *,
+        target: MessageTarget,
         envelope: MessageEnvelope,
     ) -> bool:
         """Return whether delayed dispatch must remain owned by the active responder."""
-        if envelope.target.resolved_thread_id is None:
+        if target.resolved_thread_id is None:
             return False
         if not envelope.origin.may_answer_interactive_prompt:
             return False
-        return self.deps.response_runner.has_active_response_for_target(envelope.target)
+        return self.deps.response_runner.has_active_response_for_target(target)
 
-    async def _enqueue_active_thread_follow_up(
+    async def _reserve_active_follow_up_notice_if_needed(
         self,
         *,
-        room: nio.MatrixRoom,
-        event: DispatchEvent,
         target: MessageTarget,
         envelope: MessageEnvelope,
-        coalescing_thread_id: str | None,
-        requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
-        trust_internal_payload_metadata: bool | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-    ) -> None:
-        """Queue an active-thread follow-up while preserving its mid-turn notice."""
-        if dispatch_timing is not None:
-            dispatch_timing.note(
-                coalescing_bypassed=True,
-                coalescing_bypass_reason="active_thread_follow_up",
-            )
-        if queued_notice_reservation is None:
-            queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                target=target,
-                response_envelope=envelope,
-            )
-        try:
-            await self._enqueue_for_dispatch(
-                event,
-                room,
-                source_kind=envelope.source_kind,
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-                hook_source=envelope.hook_source,
-                message_received_depth=envelope.message_received_depth,
-                requester_user_id=requester_user_id,
-                coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
-                queued_notice_reservation=queued_notice_reservation,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
-            )
-        except asyncio.CancelledError:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-        except Exception:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-
-    async def _enqueue_prepared_text_for_dispatch(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        prepared_event: PreparedTextEvent,
-        dispatch_event: TextDispatchEvent,
-        envelope: MessageEnvelope,
-        coalescing_thread_id: str | None,
-        requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
-        trust_internal_payload_metadata: bool | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-    ) -> None:
-        """Queue one normalized text event with shared active-follow-up handling."""
-        resolved_trust_internal_payload_metadata = self._resolve_trust_internal_payload_metadata(
-            dispatch_event,
-            trust_internal_payload_metadata,
-        )
-        coalescing_class = self._coalescing_class_for_event(
-            dispatch_event,
-            source_kind=envelope.source_kind,
-            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-        )
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=prepared_event.event_id,
-            event_source=prepared_event.source,
-        )
-        should_preserve_active_follow_up_policy = self._should_preserve_active_thread_follow_up_policy(
-            envelope=envelope,
-        )
-        should_bypass_active_follow_up = (
-            coalescing_class != VOICE_COALESCING_CLASS and should_preserve_active_follow_up_policy
-        )
-        voice_join_policy_source_kind = (
-            ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-            if should_preserve_active_follow_up_policy
-            else envelope.dispatch_policy_source_kind
-        )
-        if await self._try_join_text_with_pending_voice(
-            room=room,
-            event=dispatch_event,
-            envelope=envelope,
+    ) -> QueuedHumanNoticeReservation | None:
+        """Reserve active-turn notice metadata without making the event bypass coalescing."""
+        if not self._should_preserve_active_thread_follow_up_policy(target=target, envelope=envelope):
+            return None
+        return self.deps.response_runner.reserve_waiting_human_message(
             target=target,
-            coalescing_thread_id=coalescing_thread_id,
-            requester_user_id=requester_user_id,
-            dispatch_policy_source_kind=voice_join_policy_source_kind,
-            queued_notice_reservation=queued_notice_reservation,
-            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-        ):
-            return
-        if should_bypass_active_follow_up:
-            await self._enqueue_active_thread_follow_up(
-                room=room,
-                event=dispatch_event,
-                target=target,
-                envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=requester_user_id,
-                dispatch_timing=dispatch_timing,
-                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-                queued_notice_reservation=queued_notice_reservation,
-            )
-            return
-        try:
-            await self._enqueue_for_dispatch(
-                dispatch_event,
-                room,
-                source_kind=envelope.source_kind,
-                dispatch_policy_source_kind=voice_join_policy_source_kind,
-                hook_source=envelope.hook_source,
-                message_received_depth=envelope.message_received_depth,
-                requester_user_id=requester_user_id,
-                coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
-                queued_notice_reservation=queued_notice_reservation,
-                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-            )
-        except asyncio.CancelledError:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-        except Exception:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-            raise
-
-    async def _try_join_text_with_pending_voice(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        event: DispatchEvent,
-        envelope: MessageEnvelope,
-        target: MessageTarget,
-        coalescing_thread_id: str | None,
-        requester_user_id: str,
-        dispatch_policy_source_kind: str | None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None,
-        trust_internal_payload_metadata: bool | None,
-    ) -> bool:
-        """Keep normal text with a raw voice burst still before downstream handoff."""
-        can_join_voice_burst = (
-            envelope.source_kind == MESSAGE_SOURCE_KIND
-            and dispatch_policy_source_kind in {None, ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND}
-            and envelope.dispatch_policy_source_kind is None
-            and envelope.hook_source is None
-            and isinstance(event, nio.RoomMessageText | PreparedTextEvent)
-            and not self._is_trusted_internal_relay_event(event)
-            and command_parser.parse(event.body) is None
+            response_envelope=envelope,
         )
-        if not can_join_voice_burst:
-            return False
-        key = (room.room_id, coalescing_thread_id, requester_user_id)
-        if not self.deps.voice_coalescing_gate.has_pending_voice_burst(key):
-            return False
-        reservation = queued_notice_reservation
-        created_reservation = False
-        if dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND and reservation is None:
-            reservation = self.deps.response_runner.reserve_waiting_human_message(
-                target=target,
-                response_envelope=envelope,
-            )
-            created_reservation = reservation is not None
-        try:
-            resolved_key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
-                event,
-                room,
-                source_kind=envelope.source_kind,
-                dispatch_policy_source_kind=dispatch_policy_source_kind,
-                hook_source=envelope.hook_source,
-                message_received_depth=envelope.message_received_depth,
-                requester_user_id=requester_user_id,
-                coalescing_key=key,
-                queued_notice_reservation=reservation,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
-            )
-        except BaseException:
-            if created_reservation and reservation is not None:
-                reservation.cancel()
-            raise
-        if resolved_key != key:
-            if created_reservation:
-                close_pending_event_metadata([pending_event])
-            return False
-        accepted = self.deps.voice_coalescing_gate.enqueue_text_if_voice_pending(
-            key,
-            TextIngressItem(pending_event=pending_event),
-        )
-        if accepted:
-            return True
-        await self._enqueue_text_waiting_for_voice_handoff(key, pending_event)
-        return True
 
-    async def _enqueue_text_waiting_for_voice_handoff(
-        self,
-        key: CoalescingKey,
-        pending_event: PendingEvent,
-    ) -> None:
-        """Queue text that saw unresolved raw voice before a concrete voice burst existed."""
-        voice_pending_event = replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
-        try:
-            await self.deps.coalescing_gate.enqueue(key, voice_pending_event)
-        except BaseException:
-            close_pending_event_metadata([voice_pending_event])
-            raise
+    @staticmethod
+    def _media_ingress_source_kind(event: MatrixMediaEvent) -> str:
+        """Return the receive-time ingress source kind for one non-audio media event."""
+        return IMAGE_SOURCE_KIND if is_image_message_event(event) else MEDIA_SOURCE_KIND
 
-    async def _enqueue_media_for_dispatch(
+    async def _ready_media_dispatch_result(
         self,
         *,
         room: nio.MatrixRoom,
@@ -833,9 +678,10 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> None:
-        """Queue one media event with the same active-follow-up policy as text."""
-        source_kind = IMAGE_SOURCE_KIND if is_image_message_event(event) else MEDIA_SOURCE_KIND
+        source_kind: str,
+        received_wall_time: float,
+    ) -> PromptReadyIngressResult:
+        """Build one ready media dispatch event with the same active-follow-up policy as text."""
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -849,32 +695,50 @@ class TurnController:
             target=target,
             source_kind=source_kind,
         )
-        if self._should_bypass_coalescing_for_active_thread_follow_up(
+        should_preserve_active_follow_up_policy = self._should_preserve_active_thread_follow_up_policy(
+            target=target,
             envelope=envelope,
-            coalescing_class=TEXT_COALESCING_CLASS,
-        ):
-            await self._enqueue_active_thread_follow_up(
-                room=room,
-                event=event,
+        )
+        dispatch_policy_source_kind = (
+            ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND if should_preserve_active_follow_up_policy else None
+        )
+        if dispatch_timing is not None and should_preserve_active_follow_up_policy:
+            dispatch_timing.note(active_follow_up_policy_preserved=True)
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+        pending_event: PendingEvent | None = None
+        try:
+            queued_notice_reservation = await self._reserve_active_follow_up_notice_if_needed(
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=requester_user_id,
-                dispatch_timing=dispatch_timing,
             )
-            return
-        await self._enqueue_for_dispatch(
-            event,
-            room,
-            source_kind=envelope.source_kind,
-            requester_user_id=requester_user_id,
-            coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
-        )
+            key = (room.room_id, coalescing_thread_id, requester_user_id)
+            resolved_key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
+                event,
+                room,
+                source_kind=envelope.source_kind,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                requester_user_id=requester_user_id,
+                coalescing_key=key,
+                queued_notice_reservation=queued_notice_reservation,
+            )
+            return PromptReadyIngressResult(
+                pending_event=pending_event,
+                key=resolved_key,
+                preliminary_key=key,
+                received_order=0,
+                received_wall_time=received_wall_time,
+            )
+        except BaseException as exc:
+            self._raise_ready_text_pending_event_build_error(
+                exc,
+                pending_event=pending_event,
+                queued_notice_reservation=queued_notice_reservation,
+            )
 
     async def _should_skip_router_before_shared_ingress_work(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: TextDispatchEvent,
         *,
         requester_user_id: str,
         thread_id: str | None,
@@ -978,32 +842,76 @@ class TurnController:
         attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return prepared_event
 
-    async def _dispatch_prepared_text_like_ingress(
+    @staticmethod
+    def _placeholder_drop_ready_ingress_result(*, split_prompt_group: bool) -> DropReadyIngressResult:
+        return DropReadyIngressResult(
+            received_order=0,
+            received_wall_time=0.0,
+            split_prompt_group=split_prompt_group,
+        )
+
+    def _drop_display_only_visible_router_voice_echo_result(
+        self,
+        event: TextDispatchEvent,
+        *,
+        content: dict[str, Any],
+        source_kind: str | None,
+    ) -> DropReadyIngressResult | None:
+        if not self._is_display_only_visible_router_voice_echo(
+            event,
+            content=content,
+            source_kind=source_kind,
+        ):
+            return None
+        self._mark_display_only_visible_router_voice_echo_handled(event)
+        return self._placeholder_drop_ready_ingress_result(split_prompt_group=False)
+
+    @staticmethod
+    def _text_ingress_provisional_key(room: nio.MatrixRoom, requester_user_id: str) -> IngressProvisionalKey:
+        return IngressProvisionalKey(room_id=room.room_id, requester_user_id=requester_user_id)
+
+    def _text_ingress_source_kind(self, event: TextDispatchEvent) -> str | None:
+        if isinstance(event, PreparedTextEvent) and event.source_kind_override is not None:
+            return event.source_kind_override
+        if not self._should_trust_internal_payload_metadata(event):
+            return None
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        return self._event_source_kind(event, content) if isinstance(content, dict) else None
+
+    def _text_ingress_coalescing_class(self, event: TextDispatchEvent) -> str | None:
+        """Return trusted receive-time batching class metadata for one text-like ingress event."""
+        if isinstance(event, PreparedTextEvent) and event.source_kind_override == VOICE_SOURCE_KIND:
+            return VOICE_COALESCING_CLASS
+        if not self._should_trust_internal_payload_metadata(event):
+            return None
+        payload_metadata = payload_metadata_from_source(event.source, trust_internal_metadata=True)
+        return payload_metadata.coalescing_class
+
+    def _is_known_text_ingress_barrier(self, event: TextDispatchEvent) -> bool:
+        source_kind = self._text_ingress_source_kind(event)
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if isinstance(content, dict) and self._is_display_only_visible_router_voice_echo(
+            event,
+            content=content,
+            source_kind=source_kind,
+        ):
+            return False
+        coalescing_class = self._text_ingress_coalescing_class(event) or TEXT_COALESCING_CLASS
+        return dispatch_event_requires_ready_barrier(
+            event,
+            source_kind=source_kind,
+            coalescing_class=coalescing_class,
+        )
+
+    def _build_ready_text_envelope(
         self,
         *,
         room: nio.MatrixRoom,
         prepared_event: PreparedTextEvent,
-        dispatch_event: TextDispatchEvent,
         requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
-    ) -> None:
-        """Run shared ingress dispatch for text events and sidecar text previews."""
-        content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
-        prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
-        if isinstance(content, dict) and self._is_display_only_visible_router_voice_echo(
-            prepared_event,
-            content=content,
-            source_kind=prepared_source_kind,
-        ):
-            self.deps.logger.debug(
-                "Ignoring visible router voice echo",
-                event_id=prepared_event.event_id,
-                sender=prepared_event.sender,
-            )
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(prepared_event.event_id))
-            return
-
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
+        coalescing_thread_id: str | None,
+        prepared_source_kind: str | None,
+    ) -> MessageEnvelope:
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -1015,7 +923,7 @@ class TurnController:
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             VOICE_SOURCE_KIND,
         }
-        envelope = self.deps.resolver.build_ingress_envelope(
+        return self.deps.resolver.build_ingress_envelope(
             room_id=room.room_id,
             event=prepared_event,
             requester_user_id=requester_user_id,
@@ -1023,82 +931,296 @@ class TurnController:
             original_sender=original_sender,
             trusted_user_relay=trusted_user_relay,
         )
+
+    async def _drop_interactive_selection_result(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        prepared_event: PreparedTextEvent,
+        envelope: MessageEnvelope,
+        coalescing_thread_id: str | None,
+    ) -> DropReadyIngressResult | None:
+        if not envelope.origin.may_answer_interactive_prompt:
+            return None
+        selection = await interactive.handle_text_response(
+            self._client(),
+            room,
+            prepared_event,
+            self.deps.agent_name,
+            resolved_thread_id=coalescing_thread_id,
+        )
+        if selection is None:
+            return None
+        await self.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=envelope.requester_id,
+            source_event_id=prepared_event.event_id,
+        )
+        return self._placeholder_drop_ready_ingress_result(split_prompt_group=True)
+
+    @staticmethod
+    def _raise_ready_text_pending_event_build_error(
+        exc: BaseException,
+        *,
+        pending_event: PendingEvent | None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    ) -> Never:
+        if pending_event is not None:
+            if isinstance(exc, asyncio.CancelledError | KeyboardInterrupt | SystemExit):
+                close_pending_event_metadata([pending_event])
+                raise exc
+            raise TurnIngressCoalescingGate.ReadyTaskError(pending_event, exc) from exc
+        if queued_notice_reservation is not None:
+            queued_notice_reservation.cancel()
+        raise exc
+
+    async def _build_ready_text_pending_event(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        dispatch_event: TextDispatchEvent,
+        requester_user_id: str,
+        envelope: MessageEnvelope,
+        coalescing_thread_id: str | None,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> _ReadyTextPendingEvent:
+        resolved_trust_internal_payload_metadata = self._resolve_trust_internal_payload_metadata(
+            dispatch_event,
+            None,
+        )
+        should_preserve_active_follow_up_policy = self._should_preserve_active_thread_follow_up_policy(
+            target=envelope.target,
+            envelope=envelope,
+        )
+        dispatch_policy_source_kind = (
+            ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            if should_preserve_active_follow_up_policy
+            else envelope.dispatch_policy_source_kind
+        )
+        if dispatch_timing is not None and should_preserve_active_follow_up_policy:
+            dispatch_timing.note(active_follow_up_policy_preserved=True)
+
+        pending_event: PendingEvent | None = None
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+        try:
+            if should_preserve_active_follow_up_policy:
+                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                )
+            key = (room.room_id, coalescing_thread_id, requester_user_id)
+            resolved_key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
+                dispatch_event,
+                room,
+                source_kind=envelope.source_kind,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                hook_source=envelope.hook_source,
+                message_received_depth=envelope.message_received_depth,
+                requester_user_id=requester_user_id,
+                coalescing_key=key,
+                queued_notice_reservation=queued_notice_reservation,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+            )
+            return _ReadyTextPendingEvent(key=key, resolved_key=resolved_key, pending_event=pending_event)
+        except BaseException as exc:
+            self._raise_ready_text_pending_event_build_error(
+                exc,
+                pending_event=pending_event,
+                queued_notice_reservation=queued_notice_reservation,
+            )
+
+    def _ready_result_from_pending_text_event(
+        self,
+        *,
+        built_event: _ReadyTextPendingEvent,
+        received_wall_time: float,
+    ) -> ReadyIngressResult:
+        if pending_event_requires_ready_barrier(built_event.pending_event):
+            return BarrierReadyIngressResult(
+                pending_event=built_event.pending_event,
+                key=built_event.resolved_key,
+                received_order=0,
+                received_wall_time=received_wall_time,
+            )
+        return PromptReadyIngressResult(
+            pending_event=built_event.pending_event,
+            key=built_event.resolved_key,
+            preliminary_key=built_event.key,
+            received_order=0,
+            received_wall_time=received_wall_time,
+        )
+
+    async def _ready_pending_text_result(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        dispatch_event: TextDispatchEvent,
+        requester_user_id: str,
+        envelope: MessageEnvelope,
+        received_wall_time: float,
+        coalescing_thread_id: str | None,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> ReadyIngressResult:
+        built_event = await self._build_ready_text_pending_event(
+            room=room,
+            dispatch_event=dispatch_event,
+            requester_user_id=requester_user_id,
+            envelope=envelope,
+            coalescing_thread_id=coalescing_thread_id,
+            dispatch_timing=dispatch_timing,
+        )
+        return self._ready_result_from_pending_text_event(
+            built_event=built_event,
+            received_wall_time=received_wall_time,
+        )
+
+    async def _ready_prepared_text_result(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        prepared_event: PreparedTextEvent,
+        dispatch_event: TextDispatchEvent,
+        requester_user_id: str,
+        received_wall_time: float,
+        coalescing_thread_id: str | None,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> ReadyIngressResult | None:
+        content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
+        prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
+        if isinstance(content, dict):
+            display_only_result = self._drop_display_only_visible_router_voice_echo_result(
+                prepared_event,
+                content=content,
+                source_kind=prepared_source_kind,
+            )
+            if display_only_result is not None:
+                return display_only_result
+
+        envelope = self._build_ready_text_envelope(
+            room=room,
+            prepared_event=prepared_event,
+            requester_user_id=requester_user_id,
+            coalescing_thread_id=coalescing_thread_id,
+            prepared_source_kind=prepared_source_kind,
+        )
         if self._should_skip_deep_synthetic_full_dispatch(
             event_id=prepared_event.event_id,
             envelope=envelope,
         ):
-            return
-        if envelope.origin.may_answer_interactive_prompt:
-            selection = await interactive.handle_text_response(
-                self._client(),
-                room,
-                prepared_event,
-                self.deps.agent_name,
-                resolved_thread_id=coalescing_thread_id,
-            )
-            if selection is not None:
-                await self.handle_interactive_selection(
-                    room,
-                    selection=selection,
-                    user_id=envelope.requester_id,
-                    source_event_id=prepared_event.event_id,
-                )
-                return
-        await self._enqueue_prepared_text_for_dispatch(
+            return self._placeholder_drop_ready_ingress_result(split_prompt_group=True)
+        interactive_result = await self._drop_interactive_selection_result(
             room=room,
             prepared_event=prepared_event,
-            dispatch_event=dispatch_event,
             envelope=envelope,
             coalescing_thread_id=coalescing_thread_id,
+        )
+        if interactive_result is not None:
+            return interactive_result
+
+        return await self._ready_pending_text_result(
+            room=room,
+            dispatch_event=dispatch_event,
             requester_user_id=requester_user_id,
+            envelope=envelope,
+            received_wall_time=received_wall_time,
+            coalescing_thread_id=coalescing_thread_id,
             dispatch_timing=dispatch_timing,
         )
 
-    async def _enqueue_for_dispatch(
+    async def _ready_raw_text_ingress(
         self,
-        event: DispatchEvent,
-        room: nio.MatrixRoom,
         *,
-        source_kind: str,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        event_info: EventInfo,
         requester_user_id: str,
-        dispatch_policy_source_kind: str | None = None,
-        hook_source: str | None = None,
-        message_received_depth: int = 0,
-        coalescing_key: CoalescingKey | None = None,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-        trust_internal_payload_metadata: bool | None = None,
-    ) -> None:
-        """Route one inbound event through the live coalescing gate."""
-        dispatch_timing = get_dispatch_pipeline_timing(event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("gate_enter")
-        enqueue_start = time.monotonic()
-        timing_scope = event_timing_scope(event.event_id)
-        resolved_key, pending_event, source_kind = await self._build_pending_event_for_dispatch(
-            event,
+        received_wall_time: float,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> ReadyIngressResult | None:
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        source_kind = self._event_source_kind(event, content) if isinstance(content, dict) else None
+        if isinstance(content, dict):
+            display_only_result = self._drop_display_only_visible_router_voice_echo_result(
+                event,
+                content=content,
+                source_kind=source_kind,
+            )
+            if display_only_result is not None:
+                return display_only_result
+
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        self.deps.logger.info(
+            "Received message",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            sender=event.sender,
+            thread_id=coalescing_thread_id,
+        )
+        if await self._should_skip_router_before_shared_ingress_work(
             room,
-            source_kind=source_kind,
+            event,
             requester_user_id=requester_user_id,
-            dispatch_policy_source_kind=dispatch_policy_source_kind,
-            hook_source=hook_source,
-            message_received_depth=message_received_depth,
-            coalescing_key=coalescing_key,
-            queued_notice_reservation=queued_notice_reservation,
-            trust_internal_payload_metadata=trust_internal_payload_metadata,
+            thread_id=coalescing_thread_id,
+        ):
+            self.deps.logger.debug(
+                "skip_router_shared_ingress_work",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                thread_id=coalescing_thread_id,
+            )
+            return self._placeholder_drop_ready_ingress_result(split_prompt_group=True)
+
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
         )
-        gate_enqueue_start = time.monotonic()
-        await self.deps.coalescing_gate.enqueue(resolved_key, pending_event)
-        emit_elapsed_timing(
-            "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
-            gate_enqueue_start,
-            source_kind=source_kind,
-            timing_scope=timing_scope,
+        prepared_event = await self._resolve_text_event_with_ingress_timing(
+            event,
+            dispatch_timing=dispatch_timing,
         )
-        emit_elapsed_timing(
-            "ingress_handoff.enqueue_for_dispatch",
-            enqueue_start,
-            source_kind=source_kind,
-            timing_scope=timing_scope,
+        return await self._ready_prepared_text_result(
+            room=room,
+            prepared_event=prepared_event,
+            dispatch_event=event,
+            requester_user_id=requester_user_id,
+            received_wall_time=received_wall_time,
+            coalescing_thread_id=coalescing_thread_id,
+            dispatch_timing=dispatch_timing,
+        )
+
+    async def _admit_raw_text_ingress(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        event_info: EventInfo,
+        requester_user_id: str,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        if self._drop_display_only_visible_router_voice_echo_before_ingress(event):
+            return
+        provisional_key = self._text_ingress_provisional_key(room, requester_user_id)
+        received_wall_time = time.time()
+        ready_task = asyncio.create_task(
+            self._ready_raw_text_ingress(
+                room=room,
+                event=event,
+                event_info=event_info,
+                requester_user_id=requester_user_id,
+                received_wall_time=received_wall_time,
+                dispatch_timing=dispatch_timing,
+            ),
+            name=f"text_ready:{event.event_id}",
+        )
+        await self.deps.turn_ingress_gate.admit_ready_task(
+            provisional_key,
+            ready_task=ready_task,
+            source_kind=self._text_ingress_source_kind(event),
+            coalescing_class=self._text_ingress_coalescing_class(event),
+            barrier=self._is_known_text_ingress_barrier(event),
         )
 
     async def _build_pending_event_for_dispatch(
@@ -1144,7 +1266,7 @@ class TurnController:
         coalescing_key_start = time.monotonic()
         resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, requester_user_id)
         emit_elapsed_timing(
-            "ingress_handoff.enqueue_for_dispatch.coalescing_key",
+            "ready_dispatch.enqueue_for_dispatch.coalescing_key",
             coalescing_key_start,
             thread_id=resolved_key[1],
             timing_scope=timing_scope,
@@ -2050,7 +2172,6 @@ class TurnController:
     ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
-        ingress_thread_id = None if event_info.is_edit else await self.deps.resolver.coalescing_thread_id(room, event)
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -2063,40 +2184,20 @@ class TurnController:
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
-        if await self._should_skip_router_before_shared_ingress_work(
-            room,
-            prechecked_event.event,
-            requester_user_id=prechecked_event.requester_user_id,
-            thread_id=ingress_thread_id,
-        ):
-            self.deps.logger.debug(
-                "skip_router_shared_ingress_work",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                thread_id=ingress_thread_id,
-            )
-            return
 
-        self.deps.logger.info(
-            "Received message",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            sender=event.sender,
-            thread_id=ingress_thread_id,
-        )
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        await self._append_live_event_with_timing(
-            room.room_id,
-            event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
 
         if event_info.is_edit:
+            await self._append_live_event_with_timing(
+                room.room_id,
+                event,
+                event_info=event_info,
+                dispatch_timing=dispatch_timing,
+            )
             await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
@@ -2105,14 +2206,10 @@ class TurnController:
             )
             return
 
-        prepared_event = await self._resolve_text_event_with_ingress_timing(
-            prechecked_event.event,
-            dispatch_timing=dispatch_timing,
-        )
-        await self._dispatch_prepared_text_like_ingress(
+        await self._admit_raw_text_ingress(
             room=room,
-            prepared_event=prepared_event,
-            dispatch_event=prechecked_event.event,
+            event=prechecked_event.event,
+            event_info=event_info,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
         )
@@ -2432,47 +2529,391 @@ class TurnController:
             )
             return
 
-        # Prime transitive ancestor lookups before writing advisory cache membership.
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
-        event_info = EventInfo.from_event(prechecked_event.event.source)
-        await self._append_live_event_with_timing(
-            room.room_id,
-            prechecked_event.event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
-
-        if await self._dispatch_special_media_as_text(
-            room,
-            prechecked_event,
-        ):
-            return
-        if not is_matrix_media_dispatch_event(prechecked_event.event):
-            return
-        await self._enqueue_media_for_dispatch(
+        await self._admit_non_audio_media_ingress(
             room=room,
-            event=prechecked_event.event,
-            coalescing_thread_id=coalescing_thread_id,
-            requester_user_id=prechecked_event.requester_user_id,
+            prechecked_event=_PrecheckedEvent(
+                event=prechecked_event.event,
+                requester_user_id=prechecked_event.requester_user_id,
+            ),
             dispatch_timing=dispatch_timing,
         )
 
-    async def _dispatch_special_media_as_text(
+    async def _admit_non_audio_media_ingress(
         self,
+        *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedInboundMediaEvent,
-    ) -> bool:
-        """Handle media events that normalize into the text dispatch pipeline."""
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Admit one non-audio media event before slow resolver or sidecar work completes."""
         event = prechecked_event.event
-        if is_file_message_event(event):
-            return await self._dispatch_file_sidecar_text_preview(
+        source_kind = self._media_ingress_source_kind(event)
+        received_wall_time = time.time()
+        provisional_key = self._text_ingress_provisional_key(room, prechecked_event.requester_user_id)
+        ready_task = asyncio.create_task(
+            self._ready_non_audio_media_ingress(
                 room,
                 _PrecheckedEvent(
                     event=event,
                     requester_user_id=prechecked_event.requester_user_id,
                 ),
+                source_kind=source_kind,
+                received_wall_time=received_wall_time,
+                dispatch_timing=dispatch_timing,
+            ),
+            name=f"media_ready:{event.event_id}",
+        )
+        try:
+            await self.deps.turn_ingress_gate.admit_ready_task(
+                provisional_key,
+                ready_task=ready_task,
+                source_kind=source_kind,
+                barrier=False,
             )
-        return False
+        except BaseException:
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", ready_task))
+            raise
+
+    async def _ready_non_audio_media_ingress(
+        self,
+        room: nio.MatrixRoom,
+        prechecked_event: _PrecheckedInboundMediaEvent,
+        *,
+        source_kind: str,
+        received_wall_time: float,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> ReadyIngressResult | None:
+        """Resolve, persist, normalize, and build the ready result for one non-audio media event."""
+        event = prechecked_event.event
+        # Prime transitive ancestor lookups before writing advisory cache membership.
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        event_info = EventInfo.from_event(event.source)
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
+
+        if is_file_message_event(event) and is_v2_sidecar_text_preview(event.source):
+            return await self._ready_file_sidecar_text_preview_result(
+                room=room,
+                prechecked_event=_PrecheckedEvent(
+                    event=event,
+                    requester_user_id=prechecked_event.requester_user_id,
+                ),
+                coalescing_thread_id=coalescing_thread_id,
+                received_wall_time=received_wall_time,
+                dispatch_timing=dispatch_timing,
+            )
+        if not is_matrix_media_dispatch_event(event):
+            return None
+        return await self._ready_media_dispatch_result(
+            room=room,
+            event=event,
+            coalescing_thread_id=coalescing_thread_id,
+            requester_user_id=prechecked_event.requester_user_id,
+            dispatch_timing=dispatch_timing,
+            source_kind=source_kind,
+            received_wall_time=received_wall_time,
+        )
+
+    @staticmethod
+    def _active_follow_up_notice_scope(target: MessageTarget) -> tuple[str, str | None]:
+        return (target.room_id, target.resolved_thread_id)
+
+    @staticmethod
+    def _cancel_active_follow_up_notice(notice: _ActiveFollowUpNoticeReservation | None) -> None:
+        if notice is not None and notice.reservation is not None:
+            notice.reservation.cancel()
+
+    def _voice_follow_up_target_and_envelope(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: DispatchEvent | AudioMessageEvent,
+        requester_user_id: str,
+        thread_id: str | None,
+    ) -> tuple[MessageTarget, MessageEnvelope]:
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=cast("DispatchEvent", event),
+            requester_user_id=requester_user_id,
+            target=target,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+        return target, envelope
+
+    async def _reserve_voice_active_follow_up_notice_if_needed(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: DispatchEvent | AudioMessageEvent,
+        requester_user_id: str,
+        thread_id: str | None,
+    ) -> _ActiveFollowUpNoticeReservation | None:
+        target, envelope = self._voice_follow_up_target_and_envelope(
+            room=room,
+            event=event,
+            requester_user_id=requester_user_id,
+            thread_id=thread_id,
+        )
+        if not self._should_preserve_active_thread_follow_up_policy(target=target, envelope=envelope):
+            return None
+        reservation = self.deps.response_runner.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+        )
+        return _ActiveFollowUpNoticeReservation(target=target, reservation=reservation)
+
+    async def _voice_active_follow_up_policy_and_reservation(
+        self,
+        *,
+        preliminary_notice: _ActiveFollowUpNoticeReservation | None,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        requester_user_id: str,
+        thread_id: str | None,
+    ) -> tuple[str | None, QueuedHumanNoticeReservation | None]:
+        final_target, final_envelope = self._voice_follow_up_target_and_envelope(
+            room=room,
+            event=event,
+            requester_user_id=requester_user_id,
+            thread_id=thread_id,
+        )
+        if preliminary_notice is not None and self._active_follow_up_notice_scope(
+            preliminary_notice.target,
+        ) == self._active_follow_up_notice_scope(final_target):
+            return ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, preliminary_notice.reservation
+        if not self._should_preserve_active_thread_follow_up_policy(target=final_target, envelope=final_envelope):
+            self._cancel_active_follow_up_notice(preliminary_notice)
+            return None, None
+        self._cancel_active_follow_up_notice(preliminary_notice)
+        reservation = self.deps.response_runner.reserve_waiting_human_message(
+            target=final_target,
+            response_envelope=final_envelope,
+        )
+        return ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, reservation
+
+    async def _prepare_raw_voice_preliminary_ingress(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        requester_user_id: str,
+        coalescing_thread_id: str | None,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> _RawVoicePreliminaryResult:
+        preliminary_notice: _ActiveFollowUpNoticeReservation | None = None
+        try:
+            if coalescing_thread_id is None:
+                coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+            preliminary_notice = await self._reserve_voice_active_follow_up_notice_if_needed(
+                room=room,
+                event=event,
+                requester_user_id=requester_user_id,
+                thread_id=coalescing_thread_id,
+            )
+            event_info = EventInfo.from_event(event.source)
+            await self._append_live_event_with_timing(
+                room.room_id,
+                event,
+                event_info=event_info,
+                dispatch_timing=dispatch_timing,
+            )
+            return _RawVoicePreliminaryResult(
+                key=(room.room_id, coalescing_thread_id, requester_user_id),
+                thread_id=coalescing_thread_id,
+                preliminary_notice=preliminary_notice,
+            )
+        except BaseException:
+            self._cancel_active_follow_up_notice(preliminary_notice)
+            raise
+
+    @staticmethod
+    async def _raw_voice_preliminary_key(
+        preliminary_task: asyncio.Task[_RawVoicePreliminaryResult],
+        *,
+        fallback_key: CoalescingKey,
+    ) -> CoalescingKey:
+        try:
+            return (await preliminary_task).key
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return fallback_key
+
+    @staticmethod
+    async def _cancel_task_and_wait(task: asyncio.Task[object]) -> None:
+        if task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _await_raw_voice_normalization(
+        self,
+        *,
+        event: AudioMessageEvent,
+        preliminary_result: _RawVoicePreliminaryResult,
+        normalization_task: asyncio.Task[VoiceNormalizationResult | None],
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> VoiceNormalizationResult | DropReadyIngressResult:
+        try:
+            normalized_voice = await normalization_task
+        except BaseException:
+            self._cancel_active_follow_up_notice(preliminary_result.preliminary_notice)
+            raise
+
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
+        if normalized_voice is None:
+            self._cancel_active_follow_up_notice(preliminary_result.preliminary_notice)
+            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
+            return self._placeholder_drop_ready_ingress_result(split_prompt_group=False)
+        attach_dispatch_pipeline_timing(
+            normalized_voice.event.source,
+            dispatch_timing,
+        )
+        return normalized_voice
+
+    async def _send_visible_echo_for_raw_voice(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        requester_user_id: str,
+        normalized_voice: VoiceNormalizationResult,
+    ) -> None:
+        try:
+            await self._maybe_send_visible_voice_echo(
+                room,
+                event,
+                text=normalized_voice.event.body,
+                thread_id=normalized_voice.effective_thread_id,
+                requester_user_id=requester_user_id,
+                normalized_source=normalized_voice.event.source,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.deps.logger.warning(
+                "Visible voice echo failed; continuing canonical voice dispatch",
+                event_id=event.event_id,
+                error=str(error),
+            )
+
+    @staticmethod
+    def _raise_raw_voice_ready_event_error(
+        exc: BaseException,
+        *,
+        pending_event: PendingEvent | None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        preliminary_notice: _ActiveFollowUpNoticeReservation | None,
+    ) -> Never:
+        if pending_event is not None:
+            if isinstance(exc, asyncio.CancelledError | KeyboardInterrupt | SystemExit):
+                close_pending_event_metadata([pending_event])
+                raise exc
+            raise TurnIngressCoalescingGate.ReadyTaskError(pending_event, exc) from exc
+        if queued_notice_reservation is not None:
+            queued_notice_reservation.cancel()
+        elif preliminary_notice is not None:
+            TurnController._cancel_active_follow_up_notice(preliminary_notice)
+        raise exc
+
+    async def _build_raw_voice_prompt_ready_result(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+        preliminary_result: _RawVoicePreliminaryResult,
+        normalized_voice: VoiceNormalizationResult,
+    ) -> PromptReadyIngressResult:
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+        pending_event: PendingEvent | None = None
+        try:
+            (
+                dispatch_policy_source_kind,
+                queued_notice_reservation,
+            ) = await self._voice_active_follow_up_policy_and_reservation(
+                preliminary_notice=preliminary_result.preliminary_notice,
+                room=room,
+                event=normalized_voice.event,
+                requester_user_id=requester_user_id,
+                thread_id=normalized_voice.effective_thread_id,
+            )
+            final_key = (room.room_id, normalized_voice.effective_thread_id, requester_user_id)
+            resolved_key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
+                normalized_voice.event,
+                room,
+                source_kind=VOICE_SOURCE_KIND,
+                requester_user_id=requester_user_id,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                coalescing_key=final_key,
+                queued_notice_reservation=queued_notice_reservation,
+                trust_internal_payload_metadata=True,
+            )
+            return PromptReadyIngressResult(
+                pending_event=pending_event,
+                key=resolved_key,
+                preliminary_key=preliminary_result.key,
+                received_order=0,
+                received_wall_time=0.0,
+            )
+        except BaseException as exc:
+            self._raise_raw_voice_ready_event_error(
+                exc,
+                pending_event=pending_event,
+                queued_notice_reservation=queued_notice_reservation,
+                preliminary_notice=preliminary_result.preliminary_notice,
+            )
+
+    async def _ready_raw_voice_ingress(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        requester_user_id: str,
+        preliminary_task: asyncio.Task[_RawVoicePreliminaryResult],
+        normalization_task: asyncio.Task[VoiceNormalizationResult | None],
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> ReadyIngressResult | None:
+        try:
+            preliminary_result = await preliminary_task
+        except BaseException:
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", normalization_task))
+            raise
+        normalized_voice = await self._await_raw_voice_normalization(
+            event=event,
+            preliminary_result=preliminary_result,
+            normalization_task=normalization_task,
+            dispatch_timing=dispatch_timing,
+        )
+        if isinstance(normalized_voice, DropReadyIngressResult):
+            return normalized_voice
+        try:
+            await self._send_visible_echo_for_raw_voice(
+                room=room,
+                event=event,
+                requester_user_id=requester_user_id,
+                normalized_voice=normalized_voice,
+            )
+        except asyncio.CancelledError:
+            self._cancel_active_follow_up_notice(preliminary_result.preliminary_notice)
+            raise
+        return await self._build_raw_voice_prompt_ready_result(
+            room=room,
+            requester_user_id=requester_user_id,
+            preliminary_result=preliminary_result,
+            normalized_voice=normalized_voice,
+        )
 
     async def _on_audio_media_message(
         self,
@@ -2493,13 +2934,29 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        unresolved_reservation = self.deps.voice_coalescing_gate.reserve_unresolved_voice_handoff(
-            room.room_id,
-            prechecked_event.requester_user_id,
-        )
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")
+        requester_user_id = prechecked_event.requester_user_id
+        provisional_key = self._text_ingress_provisional_key(room, requester_user_id)
+        fallback_key = (room.room_id, coalescing_thread_id, requester_user_id)
+        preliminary_task = asyncio.create_task(
+            self._prepare_raw_voice_preliminary_ingress(
+                room=room,
+                event=event,
+                requester_user_id=requester_user_id,
+                coalescing_thread_id=coalescing_thread_id,
+                dispatch_timing=dispatch_timing,
+            ),
+            name=f"voice_preliminary:{event.event_id}",
+        )
+        preliminary_key_task = asyncio.create_task(
+            self._raw_voice_preliminary_key(
+                preliminary_task,
+                fallback_key=fallback_key,
+            ),
+            name=f"voice_preliminary_key:{event.event_id}",
+        )
         normalization_task = asyncio.create_task(
             self.deps.normalizer.prepare_voice_event(
                 VoiceNormalizationRequest(
@@ -2509,187 +2966,46 @@ class TurnController:
             ),
             name=f"voice_normalization:{room.room_id}:{event.event_id}",
         )
-        try:
-            if coalescing_thread_id is None:
-                coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-            event_info = EventInfo.from_event(event.source)
-            await self._append_live_event_with_timing(
-                room.room_id,
-                event,
-                event_info=event_info,
+        ready_task = asyncio.create_task(
+            self._ready_raw_voice_ingress(
+                room=room,
+                event=event,
+                requester_user_id=requester_user_id,
+                preliminary_task=preliminary_task,
+                normalization_task=normalization_task,
                 dispatch_timing=dispatch_timing,
-            )
-            voice_key = (room.room_id, coalescing_thread_id, prechecked_event.requester_user_id)
-            self.deps.coalescing_gate.mark_voice_handoff_pending(voice_key)
-            await self.deps.voice_coalescing_gate.enqueue_voice(
-                voice_key,
-                VoiceIngressItem(
-                    room=room,
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                    normalization_task=normalization_task,
-                    dispatch_timing=dispatch_timing,
+            ),
+            name=f"voice_ready:{event.event_id}",
+        )
+        try:
+            await self.deps.turn_ingress_gate.admit_raw_voice(
+                provisional_key,
+                RawVoiceIngressItem(
+                    preliminary_key_task=preliminary_key_task,
+                    ready_task=ready_task,
                 ),
-                flush_batch=self._flush_voice_ingress_batch,
-                unresolved_reservation=unresolved_reservation,
             )
         except BaseException:
-            unresolved_reservation.release()
-            if not normalization_task.done():
-                normalization_task.cancel()
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", ready_task))
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", preliminary_key_task))
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", preliminary_task))
+            await self._cancel_task_and_wait(cast("asyncio.Task[object]", normalization_task))
             raise
 
-    async def _pending_voice_event_from_outcome(
-        self,
-        outcome: VoiceNormalizationOutcome,
-    ) -> tuple[CoalescingKey, float, PendingEvent] | None:
-        """Return a downstream pending event for one successful voice outcome."""
-        item = outcome.item
-        if outcome.error is not None:
-            return None
-
-        if item.dispatch_timing is not None:
-            item.dispatch_timing.mark("ingress_normalize_ready")
-
-        normalized_voice = outcome.result
-        if normalized_voice is None:
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(item.event.event_id))
-            return None
-
-        attach_dispatch_pipeline_timing(
-            normalized_voice.event.source,
-            item.dispatch_timing,
-        )
-        await self._maybe_send_visible_voice_echo(
-            item.room,
-            item.event,
-            text=normalized_voice.event.body,
-            thread_id=normalized_voice.effective_thread_id,
-            requester_user_id=item.requester_user_id,
-            normalized_source=normalized_voice.event.source,
-        )
-        dispatch_policy_source_kind = self._voice_dispatch_policy_source_kind(
-            room=item.room,
-            event=normalized_voice.event,
-            requester_user_id=item.requester_user_id,
-            thread_id=normalized_voice.effective_thread_id,
-        )
-        key, pending_event, _source_kind = await self._build_pending_event_for_dispatch(
-            normalized_voice.event,
-            item.room,
-            source_kind=VOICE_SOURCE_KIND,
-            requester_user_id=item.requester_user_id,
-            dispatch_policy_source_kind=dispatch_policy_source_kind,
-            coalescing_key=(item.room.room_id, normalized_voice.effective_thread_id, item.requester_user_id),
-            trust_internal_payload_metadata=True,
-            enqueue_time=item.received_wall_time,
-        )
-        return key, item.received_at, pending_event
-
-    def _voice_dispatch_policy_source_kind(
+    async def _ready_file_sidecar_text_preview_result(
         self,
         *,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
-        requester_user_id: str,
-        thread_id: str | None,
-    ) -> str | None:
-        """Return target-dependent dispatch policy after voice normalization has resolved."""
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=event,
-            requester_user_id=requester_user_id,
-            target=target,
-            source_kind=VOICE_SOURCE_KIND,
-        )
-        if self._should_preserve_active_thread_follow_up_policy(envelope=envelope):
-            return ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-        return None
-
-    @staticmethod
-    def _text_key_for_voice_ingress_batch(
-        original_key: CoalescingKey,
-        successful_voice_keys: tuple[CoalescingKey, ...],
-    ) -> CoalescingKey:
-        """Return the downstream key for text captured while raw voice normalized."""
-        if len(successful_voice_keys) == 1:
-            return successful_voice_keys[0]
-        # If STT retargeted the burst into multiple final keys, there is no
-        # single voice destination for the text, so keep the original key.
-        return original_key
-
-    async def _enqueue_voice_ingress_pending_events(
-        self,
-        pending_by_key: dict[CoalescingKey, list[tuple[float, PendingEvent]]],
-    ) -> None:
-        """Push claimed voice-ingress events into the downstream coalescing gate."""
-        for key, pending_entries in pending_by_key.items():
-            pending_events = [
-                pending_event
-                for _received_at, pending_event in sorted(
-                    pending_entries,
-                    key=lambda entry: entry[0],
-                )
-            ]
-            if len(pending_events) == 1:
-                await self.deps.coalescing_gate.enqueue(key, pending_events[0])
-                continue
-            await self.deps.coalescing_gate.enqueue_many(key, pending_events)
-
-    async def _flush_voice_ingress_batch(self, batch: VoiceIngressBatch) -> None:
-        """Enqueue one claimed raw-voice burst after every STT task has finished."""
-        pending_by_key: dict[CoalescingKey, list[tuple[float, PendingEvent]]] = {}
-        text_items_to_close_on_failure = batch.text_items
-        handoff_complete = False
-        try:
-            for outcome in batch.voice_outcomes:
-                pending_voice = await self._pending_voice_event_from_outcome(outcome)
-                if pending_voice is not None:
-                    key, received_at, pending_event = pending_voice
-                    pending_by_key.setdefault(key, []).append((received_at, pending_event))
-
-            has_successful_voice = bool(pending_by_key)
-            successful_voice_keys = tuple(pending_by_key)
-            text_key = self._text_key_for_voice_ingress_batch(batch.key, successful_voice_keys)
-            if has_successful_voice:
-                self.deps.voice_coalescing_gate.alias_pending_voice_handoff(batch.key, text_key)
-                self.deps.coalescing_gate.retarget(batch.key, text_key)
-                self.deps.coalescing_gate.mark_voice_handoff_pending(text_key)
-            all_text_items = (
-                *batch.text_items,
-                *batch.consume_claimed_text_items(),
-            )
-            text_items_to_close_on_failure = all_text_items
-            for text_item in all_text_items:
-                pending_event = text_item.pending_event
-                if has_successful_voice:
-                    pending_event = replace(pending_event, coalescing_class=VOICE_COALESCING_CLASS)
-                pending_by_key.setdefault(text_key, []).append((text_item.received_at, pending_event))
-
-            await self._enqueue_voice_ingress_pending_events(pending_by_key)
-            handoff_complete = True
-        except BaseException:
-            if not handoff_complete:
-                _close_text_ingress_metadata(text_items_to_close_on_failure)
-            raise
-
-    async def _dispatch_file_sidecar_text_preview(
-        self,
-        room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[FileMessageEvent],
-    ) -> bool:
-        """Dispatch one sidecar-backed file preview through the normal text pipeline."""
+        coalescing_thread_id: str | None,
+        received_wall_time: float,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> ReadyIngressResult | None:
+        """Prepare one sidecar-backed file preview and return its ready text result."""
         event = prechecked_event.event
         if not is_v2_sidecar_text_preview(event.source):
-            return False
+            return None
 
-        dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")
         prepared_text_event = await self.deps.normalizer.prepare_file_sidecar_text_event(event)
@@ -2697,11 +3013,12 @@ class TurnController:
             dispatch_timing.mark("ingress_normalize_ready")
         assert prepared_text_event is not None
         attach_dispatch_pipeline_timing(prepared_text_event.source, dispatch_timing)
-        await self._dispatch_prepared_text_like_ingress(
+        return await self._ready_prepared_text_result(
             room=room,
             prepared_event=prepared_text_event,
             dispatch_event=prepared_text_event,
             requester_user_id=prechecked_event.requester_user_id,
+            received_wall_time=received_wall_time,
+            coalescing_thread_id=coalescing_thread_id,
             dispatch_timing=dispatch_timing,
         )
-        return True
