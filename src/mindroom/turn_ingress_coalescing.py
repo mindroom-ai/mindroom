@@ -110,6 +110,7 @@ class _IngressPromptGroup:
     predecessor_drain_tasks: tuple[asyncio.Task[None], ...] = ()
     wake_event: asyncio.Event = field(default_factory=asyncio.Event)
     wake_generation: int = 0
+    admission_generation: int = 0
     deadline: float | None = None
     force_dispatch: bool = False
     drain_all_requested: bool = False
@@ -273,6 +274,7 @@ class TurnIngressCoalescingGate:
         admission: _ReadyIngressAdmission,
     ) -> None:
         group.items.append(admission)
+        group.admission_generation += 1
         admission.ready_task.add_done_callback(lambda _task: self._wake_ingress_group(group))
         if admission.preliminary_key_task is not None:
             admission.preliminary_key_task.add_done_callback(lambda _task: self._wake_ingress_group(group))
@@ -480,6 +482,7 @@ class TurnIngressCoalescingGate:
         for group in reversed(claimed_groups):
             if group.accepting_late_prompts:
                 group.items.append(admission)
+                group.admission_generation += 1
                 admission.ready_task.add_done_callback(
                     lambda _task, target_group=group: self._wake_ingress_group(target_group),
                 )
@@ -872,6 +875,7 @@ class TurnIngressCoalescingGate:
             group.deadline = time.monotonic()
             return
         group.deadline = time.monotonic() + debounce_seconds
+        observed_admission_generation = group.admission_generation
         while True:
             deadline = group.deadline or time.monotonic()
             if not await self._wait_for_ingress_deadline(group, deadline):
@@ -883,7 +887,9 @@ class TurnIngressCoalescingGate:
                 or self._group_has_completed_split(group)
             ):
                 return
-            group.deadline = time.monotonic() + debounce_seconds
+            if group.admission_generation != observed_admission_generation:
+                observed_admission_generation = group.admission_generation
+                group.deadline = time.monotonic() + debounce_seconds
 
     async def _wait_for_ingress_upload_grace(self, group: _IngressPromptGroup) -> None:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
@@ -897,6 +903,7 @@ class TurnIngressCoalescingGate:
             return
         hard_deadline = time.monotonic() + upload_grace_hard_cap_seconds(grace_seconds)
         group.deadline = min(time.monotonic() + grace_seconds, hard_deadline)
+        observed_admission_generation = group.admission_generation
         while True:
             deadline = group.deadline or time.monotonic()
             if not await self._wait_for_ingress_deadline(group, deadline):
@@ -911,7 +918,9 @@ class TurnIngressCoalescingGate:
             remaining_seconds = max(hard_deadline - time.monotonic(), 0.0)
             if remaining_seconds <= 0:
                 return
-            group.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
+            if group.admission_generation != observed_admission_generation:
+                observed_admission_generation = group.admission_generation
+                group.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
 
     async def _wait_for_predecessor_drain_tasks(self, group: _IngressPromptGroup) -> None:
         predecessor_tasks = tuple(task for task in group.predecessor_drain_tasks if not task.done())

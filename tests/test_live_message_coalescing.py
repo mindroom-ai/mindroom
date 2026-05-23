@@ -1338,7 +1338,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         assert calls == [["$m1"]]
 
         release_first_dispatch.set()
-        await asyncio.sleep(0.05)
+        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
 

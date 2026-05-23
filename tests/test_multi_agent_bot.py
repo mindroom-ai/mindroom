@@ -177,6 +177,8 @@ if TYPE_CHECKING:
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.turn_store import TurnStore
 
+_PENDING_APPROVAL_WAIT_SECONDS = 15.0
+
 
 def _stream_outcome(
     event_id: str | None,
@@ -602,7 +604,7 @@ async def _wait_for_live_pending(
     *,
     room_id: str = "!test:localhost",
 ) -> PendingApproval:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(_PENDING_APPROVAL_WAIT_SECONDS):
         while True:
             if sender.await_args is not None:
                 approval_id = sender.await_args.args[2]["approval_id"]

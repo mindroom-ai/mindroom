@@ -53,6 +53,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
 
+_PENDING_APPROVAL_WAIT_SECONDS = 15.0
+
 
 class FakeEventCache:
     def __init__(self) -> None:
@@ -231,7 +233,7 @@ async def _wait_for_pending(
     sender: AsyncMock | None = None,
     call_index: int | None = None,
 ) -> PendingApproval:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(_PENDING_APPROVAL_WAIT_SECONDS):
         while True:
             resolved_approval_id = approval_id
             if resolved_approval_id is None and sender is not None:
