@@ -40,6 +40,7 @@ from mindroom.approval_manager import (
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing import ReadyPendingEvent
 from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -95,6 +96,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution, _MultiKnowledgeVector
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -7206,12 +7208,12 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_audio_dispatch_appends_live_event_before_special_media_handling(
+    async def test_audio_dispatch_admits_before_live_cache_append(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should update live cache before special-media short-circuiting."""
+        """Audio dispatch should enter the gate before async thread/cache work."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -7219,19 +7221,36 @@ class TestAgentBot:
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_cache.append_live_event = AsyncMock()
+        resolver_started = asyncio.Event()
+        release_resolver = asyncio.Event()
 
         async def record_coalescing(_room: object, _event: object) -> None:
             assert bot._conversation_cache.append_live_event.await_count == 0
+            assert mock_admit.await_count == 1
+            resolver_started.set()
+            await release_resolver.wait()
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_coalescing)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=True)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        mock_admit = AsyncMock()
+        bot._coalescing_gate.admit = mock_admit
 
-        await bot._turn_controller._handle_media_message_inner(room, event)
-
+        with patch(
+            "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
+            new=AsyncMock(return_value=None),
+        ):
+            await bot._turn_controller._handle_media_message_inner(room, event)
+            mock_admit.assert_awaited_once()
+            bot._conversation_cache.append_live_event.assert_not_awaited()
+            await asyncio.wait_for(resolver_started.wait(), timeout=1.0)
+            release_resolver.set()
+            ready_event = await mock_admit.await_args.kwargs["ready_task"]
+        assert ready_event is None
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(room, event)
+        bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -11224,12 +11243,12 @@ class TestAgentBot:
         assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
     @pytest.mark.asyncio
-    async def test_handle_message_inner_enqueues_active_thread_follow_up_as_gate_bypass(
+    async def test_handle_message_inner_enqueues_active_thread_follow_up_as_coalescible_gate_event(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Human follow-ups in an actively responding thread must stay owned by the gate."""
+        """Human follow-ups in an active thread must keep policy while remaining coalescible."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _install_runtime_cache_support(bot)
@@ -11340,7 +11359,7 @@ class TestAgentBot:
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is True
+        assert metadata.requires_solo_batch is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
@@ -11423,6 +11442,7 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
+        voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
         prepared_event = PreparedTextEvent(
             sender="@user:localhost",
             event_id="$voice-followup",
@@ -11444,6 +11464,11 @@ class TestAgentBot:
             ),
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
             patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
                 bot._response_runner,
                 "has_active_response_for_target",
                 return_value=True,
@@ -11453,22 +11478,28 @@ class TestAgentBot:
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
+                event_info=EventInfo.from_event(voice_event.source),
+                dispatch_timing=None,
             )
+            mock_admit.assert_awaited_once()
+            key = mock_admit.await_args.args[0]
+            assert key == (room.room_id, "$thread_root", "@user:localhost")
+            ready_event = await mock_admit.await_args.kwargs["ready_task"]
 
+        assert isinstance(ready_event, ReadyPendingEvent)
         mock_echo.assert_awaited_once()
         mock_reserve_waiting_human_message.assert_called_once()
         reserved_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert reserved_target.resolved_thread_id == "$thread_root"
         reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
-        mock_start.assert_awaited_once()
-        key, pending_event = mock_start.await_args.args
-        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert ready_event.key == (room.room_id, "$thread_root", "@user:localhost")
+        pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
@@ -11477,7 +11508,7 @@ class TestAgentBot:
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is True
+        assert metadata.requires_solo_batch is False
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
@@ -11676,7 +11707,7 @@ class TestAgentBot:
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
-        assert metadata.requires_solo_batch is True
+        assert metadata.requires_solo_batch is False
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(

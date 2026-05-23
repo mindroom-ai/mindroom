@@ -17,7 +17,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.media import (
     MatrixMediaDispatchEvent,
     extract_media_caption,
@@ -293,6 +293,11 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
         primary_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     if payload.attachment_ids:
         primary_content[ATTACHMENT_IDS_KEY] = list(payload.attachment_ids)
+    if batch.source_kind == VOICE_SOURCE_KIND and batch.coalescing_key[1] is not None:
+        primary_content["m.relates_to"] = {
+            "rel_type": "m.thread",
+            "event_id": batch.coalescing_key[1],
+        }
     merged["content"] = primary_content
     return merged
 

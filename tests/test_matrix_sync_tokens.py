@@ -12,6 +12,8 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
+from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -353,13 +355,9 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_precallback"
 
 
-@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
 @pytest.mark.asyncio
 async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     """Sync shutdown should wait for an admitted prompt to become ready and dispatch it."""
-    from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-    from mindroom.coalescing_batch import PendingEvent
-
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
     event = cast(
@@ -396,7 +394,7 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
         is_shutting_down=lambda: True,
     )
 
-    await gate.admit(key, asyncio.create_task(ready_event()))
+    await gate.admit(key, ready_task=asyncio.create_task(ready_event()))
     shutdown_task = asyncio.create_task(gate.drain_all())
     await asyncio.sleep(0)
 
@@ -408,13 +406,9 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     assert dispatched == [["$waiting"]]
 
 
-@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
 @pytest.mark.asyncio
 async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> None:
     """A shutdown drain should not prevent a later clean sync generation from admitting prompts."""
-    from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-    from mindroom.coalescing_batch import PendingEvent
-
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
     key = (room.room_id, "$thread", "@user:localhost")
@@ -454,7 +448,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
             pending_event=PendingEvent(event=text_event("$waiting", "waiting"), room=room, source_kind="message"),
         )
 
-    await gate.admit(key, asyncio.create_task(waiting_ready()))
+    await gate.admit(key, ready_task=asyncio.create_task(waiting_ready()))
     drain_task = asyncio.create_task(gate.drain_all())
     await asyncio.sleep(0)
     waiting_release.set()
@@ -466,7 +460,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
             pending_event=PendingEvent(event=text_event("$next", "next"), room=room, source_kind="message"),
         )
 
-    await gate.admit(key, asyncio.create_task(next_ready()))
+    await gate.admit(key, ready_task=asyncio.create_task(next_ready()))
     await gate.drain_all()
 
     assert dispatched == [["$waiting"], ["$next"]]
