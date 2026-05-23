@@ -31,6 +31,9 @@ Use `--provider` to select a different provider preset:
 # Use Anthropic Claude
 uvx mindroom config init --provider anthropic
 
+# Use Azure OpenAI
+uvx mindroom config init --provider azure
+
 # Use Codex CLI ChatGPT subscription auth
 uvx mindroom config init --provider codex
 
@@ -47,6 +50,9 @@ uvx mindroom config init --provider vertexai_claude
 Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
 Use `--provider` for the model provider.
 Run `codex login` before starting MindRoom when using `--provider codex`.
+
+`--provider azure` uses Azure OpenAI through your deployment name.
+Set `models.default.id` to the Azure deployment name you created.
 
 `--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
 Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
@@ -66,6 +72,7 @@ $EDITOR ~/.mindroom/.env
 For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
+- `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI subscription auth: run `codex login`.

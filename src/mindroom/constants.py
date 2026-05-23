@@ -826,6 +826,7 @@ OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 # Other modules derive their own views from this single source of truth.
 PROVIDER_ENV_KEYS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "azure": runtime_env_policy.AZURE_OPENAI_ENV_BY_KEY["api_key"],
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
