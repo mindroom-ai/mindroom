@@ -41,7 +41,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -1361,6 +1361,77 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
     release_first_dispatch.set()
     await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"], ["$m3"]])
 
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time() -> None:
+    """Room-scoped text should join a following voice event that arrives during debounce."""
+    room = _make_room()
+    text = _text_event(event_id="$text", body="typed first", server_timestamp=1000)
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1001,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.05,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind="message"))
+    await asyncio.sleep(0.01)
+    await gate.enqueue(key, PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND))
+
+    await _wait_for(lambda: calls == [["$text", "$voice"]], deadline_seconds=0.2)
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_room_scope_voice_burst_coalesces_under_null_thread_key() -> None:
+    """Multiple room-scoped voice events should still be one user turn."""
+    room = _make_room()
+    first_voice = _text_event(
+        event_id="$voice1",
+        body="first voice transcript",
+        server_timestamp=1000,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    second_voice = _text_event(
+        event_id="$voice2",
+        body="second voice transcript",
+        server_timestamp=1001,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.05,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=first_voice, room=room, source_kind=VOICE_SOURCE_KIND))
+    await gate.enqueue(key, PendingEvent(event=second_voice, room=room, source_kind=VOICE_SOURCE_KIND))
+    await gate.drain_all()
+
+    assert calls == [["$voice1", "$voice2"]]
     assert _coalescing_gate_is_idle(gate)
 
 

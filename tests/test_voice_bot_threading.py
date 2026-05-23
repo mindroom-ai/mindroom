@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 from contextlib import suppress
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -15,10 +16,13 @@ from agno.media import Audio
 from mindroom import inbound_turn_normalizer
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
+from mindroom.coalescing import CoalescingGate
 from mindroom.config.main import Config
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
@@ -93,6 +97,158 @@ def _make_voice_event(
     voice_event.server_timestamp = server_timestamp
     voice_event.source = source
     return voice_event
+
+
+def _threaded_room() -> MagicMock:
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@mindroom_router:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
+    room.members_synced = True
+    return room
+
+
+def _make_threaded_voice_event(
+    *,
+    event_id: str,
+    thread_id: str = "$thread_root",
+    server_timestamp: int = 1_712_350_000_000,
+) -> nio.RoomMessageAudio:
+    return _make_voice_event(
+        event_id=event_id,
+        server_timestamp=server_timestamp,
+        source={
+            "event_id": event_id,
+            "sender": "@user:example.com",
+            "origin_server_ts": server_timestamp,
+            "type": "m.room.message",
+            "room_id": "!test:server",
+            "content": {
+                "body": "voice.ogg",
+                "msgtype": "m.audio",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        },
+    )
+
+
+def _threaded_text_event(
+    *,
+    event_id: str,
+    body: str,
+    thread_id: str = "$thread_root",
+    server_timestamp: int = 1_712_350_000_000,
+    sender: str = "@user:example.com",
+    content_overrides: dict[str, object] | None = None,
+) -> nio.RoomMessageText:
+    content: dict[str, object] = {
+        "body": body,
+        "msgtype": "m.text",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+    }
+    if content_overrides is not None:
+        content.update(content_overrides)
+    return cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "type": "m.room.message",
+                "room_id": "!test:server",
+                "content": content,
+            },
+        ),
+    )
+
+
+def _threaded_prepared_text_event(
+    *,
+    event_id: str,
+    body: str,
+    thread_id: str = "$thread_root",
+    server_timestamp: int = 1_712_350_000_000,
+    sender: str = "@user:example.com",
+    source_kind: str | None = None,
+    content_overrides: dict[str, object] | None = None,
+) -> PreparedTextEvent:
+    content: dict[str, object] = {
+        "body": body,
+        "msgtype": "m.text",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+    }
+    if source_kind is not None:
+        content[SOURCE_KIND_KEY] = source_kind
+    if content_overrides is not None:
+        content.update(content_overrides)
+    return PreparedTextEvent(
+        sender=sender,
+        event_id=event_id,
+        body=body,
+        source={
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": server_timestamp,
+            "type": "m.room.message",
+            "room_id": "!test:server",
+            "content": content,
+        },
+        server_timestamp=server_timestamp,
+        source_kind_override=source_kind,
+    )
+
+
+def _normalized_voice_result(
+    *,
+    event: nio.RoomMessageAudio,
+    text: str,
+    thread_id: str | None = "$thread_root",
+) -> inbound_turn_normalizer._VoiceNormalizationResult:
+    content: dict[str, object] = {
+        "body": text,
+        "msgtype": "m.text",
+        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+    }
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    return inbound_turn_normalizer._VoiceNormalizationResult(
+        event=PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=text,
+            source={
+                "event_id": event.event_id,
+                "sender": event.sender,
+                "origin_server_ts": event.server_timestamp,
+                "type": "m.room.message",
+                "room_id": "!test:server",
+                "content": content,
+            },
+            server_timestamp=event.server_timestamp,
+            source_kind_override=VOICE_SOURCE_KIND,
+        ),
+        effective_thread_id=thread_id,
+    )
+
+
+def _handled_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
+    return list(handled_turn.source_event_ids) if handled_turn is not None else []
+
+
+def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.02) -> None:
+    gate = CoalescingGate(
+        dispatch_batch=bot._dispatch_coalesced_batch,
+        debounce_seconds=lambda: debounce_seconds,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    bot._coalescing_gate = gate
+    replace_turn_controller_deps(bot, coalescing_gate=gate)
 
 
 def _stub_resolve_dispatch_target(bot: AgentBot, thread_id: str | None, event_id: str) -> None:
@@ -598,3 +754,341 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
     assert len(captured_reservations) == 1
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_order(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Voice and typed follow-ups sent during one active reply should produce one ordered follow-up."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+
+    streaming_started = asyncio.Event()
+    release_streaming = asyncio.Event()
+    prepare_started = {"$voice1": asyncio.Event(), "$voice2": asyncio.Event()}
+    release_prepare = {"$voice1": asyncio.Event(), "$voice2": asyncio.Event()}
+    dispatches: list[tuple[list[str], str]] = []
+
+    streaming_event = _threaded_prepared_text_event(event_id="$streaming", body="still streaming")
+    first_voice = _make_threaded_voice_event(event_id="$voice1", server_timestamp=1_712_350_000_001)
+    second_voice = _make_threaded_voice_event(event_id="$voice2", server_timestamp=1_712_350_000_002)
+    typed_event = _threaded_text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        server_timestamp=1_712_350_000_003,
+    )
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        prepare_started[request.event.event_id].set()
+        await release_prepare[request.event.event_id].wait()
+        return _normalized_voice_result(
+            event=request.event,
+            text=f"transcript for {request.event.event_id}",
+        )
+
+    async def resolve_text_event(
+        request: inbound_turn_normalizer.TextNormalizationRequest,
+    ) -> PreparedTextEvent:
+        return _threaded_prepared_text_event(
+            event_id=request.event.event_id,
+            body=request.event.body,
+            server_timestamp=request.event.server_timestamp,
+        )
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        source_ids = _handled_source_event_ids(handled_turn)
+        dispatches.append((source_ids, dispatched_event.body))
+        if source_ids == ["$streaming"]:
+            streaming_started.set()
+            await release_streaming.wait()
+
+    first_task: asyncio.Task[None] | None = None
+    second_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "resolve_text_event",
+                new=AsyncMock(side_effect=resolve_text_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            await bot._turn_controller._enqueue_for_dispatch(
+                streaming_event,
+                room,
+                source_kind="message",
+                requester_user_id="@user:example.com",
+                coalescing_key=(room.room_id, "$thread_root", "@user:example.com"),
+            )
+            await asyncio.wait_for(streaming_started.wait(), timeout=1.0)
+
+            first_task = asyncio.create_task(bot._on_media_message(room, first_voice))
+            second_task = asyncio.create_task(bot._on_media_message(room, second_voice))
+            await asyncio.wait_for(prepare_started["$voice1"].wait(), timeout=1.0)
+            await asyncio.wait_for(prepare_started["$voice2"].wait(), timeout=1.0)
+            await bot._on_message(room, typed_event)
+
+            release_prepare["$voice1"].set()
+            release_prepare["$voice2"].set()
+            await asyncio.gather(first_task, second_task)
+            release_streaming.set()
+            await drain_coalescing(bot)
+    finally:
+        release_streaming.set()
+        for event in release_prepare.values():
+            event.set()
+        for task in (first_task, second_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    assert dispatches == [
+        (["$streaming"], "still streaming"),
+        (
+            ["$voice1", "$voice2", "$typed"],
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\n"
+            "transcript for $voice1\ntranscript for $voice2\ntyped follow-up",
+        ),
+    ]
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late(
+    mock_home_bot: AgentBot,
+) -> None:
+    """A later typed message must not jump ahead of an earlier voice event while STT is pending."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+
+    voice_event = _make_threaded_voice_event(event_id="$voice", server_timestamp=1_712_350_000_001)
+    typed_event = _threaded_text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        server_timestamp=1_712_350_000_002,
+    )
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
+    dispatches: list[tuple[list[str], str]] = []
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        prepare_started.set()
+        await release_prepare.wait()
+        return _normalized_voice_result(event=request.event, text="voice transcript")
+
+    async def resolve_text_event(
+        request: inbound_turn_normalizer.TextNormalizationRequest,
+    ) -> PreparedTextEvent:
+        return _threaded_prepared_text_event(
+            event_id=request.event.event_id,
+            body=request.event.body,
+            server_timestamp=request.event.server_timestamp,
+        )
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
+
+    voice_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "resolve_text_event",
+                new=AsyncMock(side_effect=resolve_text_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
+            await bot._on_message(room, typed_event)
+            await asyncio.sleep(0.05)
+            release_prepare.set()
+            await voice_task
+            await drain_coalescing(bot)
+    finally:
+        release_prepare.set()
+        if voice_task is not None and not voice_task.done():
+            voice_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await voice_task
+
+    assert dispatches == [
+        (
+            ["$voice", "$typed"],
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\n"
+            "voice transcript\ntyped follow-up",
+        ),
+    ]
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: AgentBot) -> None:
+    """Room-scoped voice bursts should batch even though their coalescing key has no thread id."""
+    bot = mock_home_bot
+    bot.config.agents["home"].thread_mode = "room"
+    room = _threaded_room()
+    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+
+    first_voice = _make_threaded_voice_event(event_id="$voice1", server_timestamp=1_712_350_000_001)
+    second_voice = _make_threaded_voice_event(event_id="$voice2", server_timestamp=1_712_350_000_002)
+    dispatches: list[list[str]] = []
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        return _normalized_voice_result(
+            event=request.event,
+            text=f"room transcript {request.event.event_id}",
+            thread_id=None,
+        )
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append(_handled_source_event_ids(handled_turn))
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            new=AsyncMock(side_effect=prepare_voice_event),
+        ),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await asyncio.gather(
+            bot._on_media_message(room, first_voice),
+            bot._on_media_message(room, second_voice),
+        )
+        await drain_coalescing(bot)
+
+    assert dispatches == [["$voice1", "$voice2"]]
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: AgentBot) -> None:
+    """Trusted router voice echoes should be marked handled and skipped by target agents."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    visible_router_voice_echo_key = "com.mindroom.visible_router_voice_echo"
+    echo_event = _threaded_prepared_text_event(
+        event_id="$echo",
+        body="🎤 voice transcript",
+        sender="@mindroom_router:localhost",
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        content_overrides={
+            ORIGINAL_SENDER_KEY: "@user:example.com",
+            visible_router_voice_echo_key: True,
+        },
+    )
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread_root"),
+        ),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+    ):
+        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=echo_event,
+            dispatch_event=echo_event,
+            requester_user_id="@user:example.com",
+            dispatch_timing=None,
+        )
+        await drain_coalescing(bot)
+
+    mock_dispatch.assert_not_awaited()
+    assert bot._turn_store.is_handled("$echo")
+
+
+@pytest.mark.asyncio
+async def test_raw_voice_stt_failure_does_not_mark_audio_handled(mock_home_bot: AgentBot) -> None:
+    """Transient STT failures should leave the audio source retryable."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$audio-fails")
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread_root"),
+        ),
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            new=AsyncMock(side_effect=RuntimeError("stt failed")),
+        ),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        pytest.raises(RuntimeError, match="stt failed"),
+    ):
+        await bot._on_media_message(room, voice_event)
+
+    assert not bot._turn_store.is_handled("$audio-fails")

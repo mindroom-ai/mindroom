@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -350,3 +351,122 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
     await bot.prepare_for_sync_shutdown()
 
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_precallback"
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
+    """Sync shutdown should wait for an admitted prompt to become ready and dispatch it."""
+    from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
+    from mindroom.coalescing_batch import PendingEvent
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    event = cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$waiting",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1000,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "waiting"},
+            },
+        ),
+    )
+    key = (room.room_id, "$thread", "@user:localhost")
+    release_ready = asyncio.Event()
+    dispatched: list[list[str]] = []
+
+    async def dispatch_batch(batch: object) -> None:
+        dispatched.append(list(batch.source_event_ids))
+
+    async def ready_event() -> object:
+        await release_ready.wait()
+        return ReadyPendingEvent(
+            key=key,
+            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+        )
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+
+    await gate.admit(key, asyncio.create_task(ready_event()))
+    shutdown_task = asyncio.create_task(gate.drain_all())
+    await asyncio.sleep(0)
+
+    assert shutdown_task.done() is False
+
+    release_ready.set()
+    await shutdown_task
+
+    assert dispatched == [["$waiting"]]
+
+
+@pytest.mark.xfail(reason="issue-225 receive-time coalescing not implemented yet", strict=True)
+@pytest.mark.asyncio
+async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> None:
+    """A shutdown drain should not prevent a later clean sync generation from admitting prompts."""
+    from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
+    from mindroom.coalescing_batch import PendingEvent
+
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    key = (room.room_id, "$thread", "@user:localhost")
+    dispatched: list[list[str]] = []
+
+    def text_event(event_id: str, body: str) -> nio.RoomMessageText:
+        return cast(
+            "nio.RoomMessageText",
+            nio.RoomMessageText.from_dict(
+                {
+                    "event_id": event_id,
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1000,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": body},
+                },
+            ),
+        )
+
+    async def dispatch_batch(batch: object) -> None:
+        dispatched.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    waiting_release = asyncio.Event()
+
+    async def waiting_ready() -> object:
+        await waiting_release.wait()
+        return ReadyPendingEvent(
+            key=key,
+            pending_event=PendingEvent(event=text_event("$waiting", "waiting"), room=room, source_kind="message"),
+        )
+
+    await gate.admit(key, asyncio.create_task(waiting_ready()))
+    drain_task = asyncio.create_task(gate.drain_all())
+    await asyncio.sleep(0)
+    waiting_release.set()
+    await drain_task
+
+    async def next_ready() -> object:
+        return ReadyPendingEvent(
+            key=key,
+            pending_event=PendingEvent(event=text_event("$next", "next"), room=room, source_kind="message"),
+        )
+
+    await gate.admit(key, asyncio.create_task(next_ready()))
+    await gate.drain_all()
+
+    assert dispatched == [["$waiting"], ["$next"]]
