@@ -932,6 +932,56 @@ async def test_prepare_for_sync_shutdown_cancels_unresolved_turn_ingress_ready_t
 
 
 @pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_cancels_raw_voice_child_tasks(mock_home_bot: AgentBot) -> None:
+    """Raw voice shutdown owns the preliminary and STT tasks, not only the wrapper tasks."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-shutdown")
+    release_preliminary = asyncio.Event()
+    release_normalization = asyncio.Event()
+
+    async def pending_coalescing_thread_id(*_args: object, **_kwargs: object) -> str:
+        await release_preliminary.wait()
+        return "$thread_root"
+
+    async def pending_prepare_voice_event(*_args: object, **_kwargs: object) -> None:
+        await release_normalization.wait()
+
+    child_task_names = {
+        "voice_preliminary:$voice-shutdown",
+        f"voice_normalization:{room.room_id}:$voice-shutdown",
+    }
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=pending_coalescing_thread_id),
+        ),
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            new=AsyncMock(side_effect=pending_prepare_voice_event),
+        ),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        child_tasks = [task for task in asyncio.all_tasks() if task.get_name() in child_task_names]
+        assert {task.get_name() for task in child_tasks} == child_task_names
+
+        try:
+            await asyncio.wait_for(bot.prepare_for_sync_shutdown(), timeout=2.0)
+            assert all(task.done() for task in child_tasks)
+        finally:
+            release_preliminary.set()
+            release_normalization.set()
+            for task in child_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*child_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_receive_time_coordinator_late_text_joins_newer_claimed_voice_burst() -> None:
     """A typed follow-up after two claimed voice bursts should belong to the newer burst."""
     room = _threaded_room()
@@ -1776,6 +1826,75 @@ async def test_receive_time_barrier_flushes_ready_prefix_from_pending_closed_gro
         await _drain_direct_ingress(ingress_gate, coalescing_gate)
 
     assert [batch.source_event_ids for batch in batches] == [["$text"], ["$command"], ["$voice"]]
+
+
+@pytest.mark.asyncio
+async def test_known_barrier_does_not_reclaim_dynamic_split_prefix_while_enqueueing() -> None:
+    """Once a dynamic split claims a prefix, a later barrier must not dispatch that prefix again."""
+    room = _threaded_room()
+    dispatched: list[list[str]] = []
+    first_enqueue_started = asyncio.Event()
+    release_first_enqueue = asyncio.Event()
+    downstream_gate = MagicMock()
+
+    async def enqueue_sealed_batch(_key: tuple[str, str | None, str], pending_events: list[PendingEvent]) -> None:
+        event_ids = [pending_event.event.event_id for pending_event in pending_events]
+        dispatched.append(event_ids)
+        if event_ids == ["$text"]:
+            first_enqueue_started.set()
+            await release_first_enqueue.wait()
+
+    async def enqueue(_key: tuple[str, str | None, str], pending_event: PendingEvent) -> None:
+        dispatched.append([pending_event.event.event_id])
+
+    downstream_gate.enqueue_sealed_batch = AsyncMock(side_effect=enqueue_sealed_batch)
+    downstream_gate.enqueue = AsyncMock(side_effect=enqueue)
+    ingress_gate = TurnIngressCoalescingGate(
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        coalescing_gate=downstream_gate,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text", body="text first", order=1),
+    )
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _barrier_ready_result(room=room, key=key, event_id="$dynamic-command", order=2),
+        barrier=False,
+    )
+    await asyncio.wait_for(first_enqueue_started.wait(), timeout=1.0)
+
+    known_barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$known-command", order=3),
+            barrier=True,
+        ),
+    )
+    try:
+        await asyncio.sleep(0.02)
+        assert dispatched == [["$text"]]
+        assert not known_barrier_task.done()
+
+        release_first_enqueue.set()
+        await asyncio.wait_for(known_barrier_task, timeout=1.0)
+        await ingress_gate.drain_all()
+    finally:
+        release_first_enqueue.set()
+        if not known_barrier_task.done():
+            known_barrier_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await known_barrier_task
+
+    assert dispatched == [["$text"], ["$dynamic-command"], ["$known-command"]]
 
 
 @pytest.mark.asyncio

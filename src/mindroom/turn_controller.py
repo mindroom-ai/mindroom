@@ -2989,6 +2989,10 @@ class TurnController:
                 RawVoiceIngressItem(
                     preliminary_key_task=preliminary_key_task,
                     ready_task=ready_task,
+                    owned_tasks=(
+                        cast("asyncio.Task[object]", preliminary_task),
+                        cast("asyncio.Task[object]", normalization_task),
+                    ),
                 ),
             )
         except BaseException:

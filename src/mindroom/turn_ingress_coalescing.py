@@ -76,6 +76,7 @@ class RawVoiceIngressItem:
 
     preliminary_key_task: asyncio.Task[CoalescingKey]
     ready_task: asyncio.Task[ReadyIngressResult | None]
+    owned_tasks: tuple[asyncio.Task[object], ...] = ()
 
 
 def _target_key_for_non_voice_item(
@@ -97,11 +98,14 @@ class _ReadyIngressAdmission:
     is_raw_voice: bool = False
     is_barrier: bool = False
     preliminary_key_task: asyncio.Task[CoalescingKey] | None = None
+    owned_tasks: tuple[asyncio.Task[object], ...] = ()
 
 
 @dataclass
 class _IngressPromptGroup:
     items: list[_ReadyIngressAdmission] = field(default_factory=list)
+    claimed_admission_ids: set[int] = field(default_factory=set)
+    ordering_futures: set[asyncio.Future[None]] = field(default_factory=set)
     drain_task: asyncio.Task[None] | None = None
     predecessor_drain_tasks: tuple[asyncio.Task[None], ...] = ()
     wake_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -189,6 +193,7 @@ class TurnIngressCoalescingGate:
             coalescing_class=VOICE_COALESCING_CLASS,
             is_raw_voice=True,
             preliminary_key_task=item.preliminary_key_task,
+            owned_tasks=item.owned_tasks,
         )
         await self._admit_prompt_admission(provisional_key, admission)
 
@@ -357,14 +362,19 @@ class TurnIngressCoalescingGate:
             return False
 
         ready_prefixes: list[_ReadyIngressAdmission] = []
+        ordering_futures: list[asyncio.Future[None]] = []
         for group in groups:
             self._seal_group_for_barrier(provisional_key, group)
-            ordered_items = sorted(group.items, key=lambda item: item.received_order)
+            ordering_futures.extend(future for future in group.ordering_futures if not future.done())
+            ordered_items = self._unclaimed_group_admissions(group)
             ready_prefix_length = self._ready_prefix_length(ordered_items)
-            ready_prefixes.extend(ordered_items[:ready_prefix_length])
-            group.items = ordered_items[ready_prefix_length:]
+            ready_prefix = ordered_items[:ready_prefix_length]
+            self._claim_group_admissions(group, ready_prefix)
+            ready_prefixes.extend(ready_prefix)
 
         await self._wait_for_ready_predecessor_groups(provisional_key, groups)
+        if ordering_futures:
+            await asyncio.gather(*ordering_futures)
         if ready_prefixes:
             await self._dispatch_fixed_ingress_admissions(
                 sorted(ready_prefixes, key=lambda item: item.received_order),
@@ -597,6 +607,9 @@ class TurnIngressCoalescingGate:
                     admission.preliminary_key_task.cancel()
                 if not admission.ready_task.done():
                     admission.ready_task.cancel()
+                for task in admission.owned_tasks:
+                    if not task.done():
+                        task.cancel()
             self._wake_ingress_group(group)
 
     def _close_ready_metadata_when_cancelling_preliminary(self, admission: _ReadyIngressAdmission) -> None:
@@ -619,9 +632,38 @@ class TurnIngressCoalescingGate:
             close_pending_event_metadata([result.pending_event])
 
     @staticmethod
+    async def _await_owned_tasks(admission: _ReadyIngressAdmission) -> None:
+        if admission.owned_tasks:
+            await asyncio.gather(*admission.owned_tasks, return_exceptions=True)
+
+    @staticmethod
     def _wake_ingress_group(group: _IngressPromptGroup) -> None:
         group.wake_generation += 1
         group.wake_event.set()
+
+    @staticmethod
+    def _unclaimed_group_admissions(group: _IngressPromptGroup) -> list[_ReadyIngressAdmission]:
+        return [
+            admission
+            for admission in sorted(group.items, key=lambda item: item.received_order)
+            if id(admission) not in group.claimed_admission_ids
+        ]
+
+    @staticmethod
+    def _claim_group_admissions(group: _IngressPromptGroup, admissions: list[_ReadyIngressAdmission]) -> None:
+        group.claimed_admission_ids.update(id(admission) for admission in admissions)
+
+    @staticmethod
+    def _start_group_ordering_future(group: _IngressPromptGroup) -> asyncio.Future[None]:
+        future = asyncio.get_running_loop().create_future()
+        group.ordering_futures.add(future)
+        return future
+
+    @staticmethod
+    def _finish_group_ordering_future(group: _IngressPromptGroup, future: asyncio.Future[None]) -> None:
+        group.ordering_futures.discard(future)
+        if not future.done():
+            future.set_result(None)
 
     def _require_coalescing_gate(self) -> CoalescingGate:
         if self._coalescing_gate is None:
@@ -849,6 +891,7 @@ class TurnIngressCoalescingGate:
             current_task = asyncio.current_task()
             if current_task is not None and current_task.cancelling():
                 raise
+            await self._await_owned_tasks(admission)
             logger.warning(
                 "Turn ingress ready task was cancelled",
                 received_order=admission.received_order,
@@ -923,21 +966,17 @@ class TurnIngressCoalescingGate:
         group: _IngressPromptGroup,
         child_tasks: list[asyncio.Task[None]],
     ) -> None:
-        processed_admission_ids: set[int] = set()
         while True:
-            ordered_items = [
-                admission
-                for admission in sorted(group.items, key=lambda item: item.received_order)
-                if id(admission) not in processed_admission_ids
-            ]
+            ordered_items = self._unclaimed_group_admissions(group)
             if not ordered_items:
                 return
             completed_split = self._completed_split_admission(ordered_items)
             if completed_split is not None:
                 split_index, split_admission, split_result = completed_split
                 before_split = ordered_items[:split_index]
-                if before_split:
-                    processed_admission_ids.update(id(admission) for admission in before_split)
+                ordering_future = self._start_group_ordering_future(group)
+                self._claim_group_admissions(group, [*before_split, split_admission])
+                try:
                     ready_prefix_length = self._ready_prefix_length(before_split)
                     ready_prefix = before_split[:ready_prefix_length]
                     unresolved_remainder = before_split[ready_prefix_length:]
@@ -950,14 +989,15 @@ class TurnIngressCoalescingGate:
                                 name="turn_ingress_segment_before_split",
                             ),
                         )
-                processed_admission_ids.add(id(split_admission))
-                await self._dispatch_split_result(split_result)
+                    await self._dispatch_split_result(split_result)
+                finally:
+                    self._finish_group_ordering_future(group, ordering_future)
                 continue
             if self._admissions_have_pending_work(ordered_items):
                 await self._wait_for_ingress_admission_progress(ordered_items, group=group)
                 continue
             group.accepting_late_prompts = False
-            processed_admission_ids.update(id(admission) for admission in ordered_items)
+            self._claim_group_admissions(group, ordered_items)
             await self._dispatch_prompt_admissions(ordered_items)
             return
 
@@ -1048,7 +1088,7 @@ class TurnIngressCoalescingGate:
         return None
 
     def _group_has_completed_split(self, group: _IngressPromptGroup) -> bool:
-        return self._completed_split_admission(sorted(group.items, key=lambda item: item.received_order)) is not None
+        return self._completed_split_admission(self._unclaimed_group_admissions(group)) is not None
 
     @staticmethod
     def _admissions_have_pending_work(admissions: list[_ReadyIngressAdmission]) -> bool:
