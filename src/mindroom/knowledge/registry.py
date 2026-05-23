@@ -775,8 +775,7 @@ def _published_index_keys_for_shared_source(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[PublishedIndexKey, ...]:
-    if config.get_knowledge_base_config(base_id).mode != "semantic":
-        return ()
+    base_mode = config.get_knowledge_base_config(base_id).mode
     key = resolve_published_index_key(
         base_id,
         config=config,
@@ -784,7 +783,7 @@ def _published_index_keys_for_shared_source(
         execution_identity=execution_identity,
         create=False,
     )
-    matching_keys = [key]
+    matching_keys = [key] if base_mode == "semantic" else []
     for candidate_base_id in config.knowledge_bases:
         if candidate_base_id == base_id:
             continue

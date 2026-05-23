@@ -597,7 +597,15 @@ async def _refresh_file_mode_binding_locked(
         knowledge_path=binding.knowledge_path,
     )
     if manager._git_config() is not None:
-        await manager.sync_git_source()
+        git_sync_result = await manager.sync_git_source()
+        if git_sync_result.get("updated", False):
+            await mark_knowledge_source_changed_async(
+                key.base_id,
+                config=manager.config,
+                runtime_paths=manager.runtime_paths,
+                execution_identity=execution_identity,
+                reason="git_source_updated",
+            )
 
     source_signature = await asyncio.to_thread(
         knowledge_source_signature,

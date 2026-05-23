@@ -500,6 +500,67 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
 
 
 @pytest.mark.asyncio
+async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-only Git sync should stale semantic indexes that read the same checkout."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"semantic_docs": docs_path, "file_docs": docs_path},
+        agent_bases=["semantic_docs", "file_docs"],
+        git_configs={"semantic_docs": git_config, "file_docs": git_config},
+        modes={"file_docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    semantic_key = resolve_published_index_key("semantic_docs", config=config, runtime_paths=runtime_paths)
+    file_key = resolve_published_index_key("file_docs", config=config, runtime_paths=runtime_paths)
+    semantic_collection = KnowledgeManager(
+        "semantic_docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )._default_collection_name()
+    _VectorDb.collections[semantic_collection] = [
+        {"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}},
+    ]
+    knowledge_registry.save_published_index_state(
+        published_index_metadata_path(semantic_key),
+        knowledge_registry.PublishedIndexState(
+            settings=semantic_key.indexing_settings,
+            status="complete",
+            collection=semantic_collection,
+            indexed_count=1,
+            source_signature="old-source-signature",
+        ),
+    )
+    knowledge_registry.mark_published_index_refresh_succeeded(semantic_key)
+
+    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
+        assert self.base_id == "file_docs"
+        self._git_last_successful_commit = "rev-updated"
+        _set_git_tracked_files(self, "guide.md")
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
+
+    result = await refresh_knowledge_binding("file_docs", config=config, runtime_paths=runtime_paths)
+    semantic_state = load_published_index_state(published_index_metadata_path(semantic_key))
+    file_state = load_published_index_state(published_index_metadata_path(file_key))
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert semantic_state is not None
+    assert knowledge_registry.published_index_refresh_state(semantic_state) == "stale"
+    assert file_state is not None
+    assert file_state.status == "complete"
+    assert file_state.index_kind == "files"
+    assert knowledge_registry.published_index_refresh_state(file_state) == "none"
+
+
+@pytest.mark.asyncio
 async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete(tmp_path: Path) -> None:
     """Cancellation recovery should not require vector state for file-only metadata."""
     docs_path = tmp_path / "docs"
@@ -1634,6 +1695,47 @@ async def test_mark_stale_skips_file_mode_duplicate_physical_sources(tmp_path: P
     assert marked_base_ids == ("alpha",)
     assert beta_state is not None
     assert beta_state.status == "complete"
+    assert beta_state.collection is None
+    assert knowledge_registry.published_index_refresh_state(beta_state) == "none"
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_from_file_mode_alias_marks_semantic_duplicate_sources(tmp_path: Path) -> None:
+    """File-mode source mutations should stale semantic aliases that read the same folder."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared source old", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"alpha": docs_path, "beta": docs_path},
+        agent_bases=["alpha", "beta"],
+        modes={"alpha": "semantic", "beta": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    alpha_lookup = get_published_index("alpha", config=config, runtime_paths=runtime_paths)
+    assert alpha_lookup.index is not None
+    assert alpha_lookup.availability is KnowledgeAvailability.READY
+
+    doc.write_text("shared source new", encoding="utf-8")
+    marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
+        "beta",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    alpha_key = resolve_published_index_key("alpha", config=config, runtime_paths=runtime_paths)
+    beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
+    alpha_state = load_published_index_state(published_index_metadata_path(alpha_key))
+    beta_state = load_published_index_state(published_index_metadata_path(beta_key))
+    refreshed_alpha_lookup = get_published_index("alpha", config=config, runtime_paths=runtime_paths)
+
+    assert marked_base_ids == ("alpha",)
+    assert alpha_state is not None
+    assert knowledge_registry.published_index_refresh_state(alpha_state) == "stale"
+    assert refreshed_alpha_lookup.availability is KnowledgeAvailability.STALE
+    assert beta_state is not None
     assert beta_state.collection is None
     assert knowledge_registry.published_index_refresh_state(beta_state) == "none"
 
