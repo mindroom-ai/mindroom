@@ -1418,8 +1418,6 @@ class AgentBot:
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
         dropped_unresolved_ingress = self._turn_ingress_gate.cancel_unresolved_admissions()
-        await self._turn_ingress_gate.drain_all()
-        await self._coalescing_gate.drain_all()
         if dropped_unresolved_ingress:
             self._sync_trust_state = SyncTrustState.UNCERTAIN
             self._sync_checkpoint = None
@@ -1428,7 +1426,9 @@ class AgentBot:
                 client.next_batch = None
             self._clear_saved_sync_token()
             self.logger.warning("matrix_sync_checkpoint_cleared_after_unresolved_ingress_shutdown")
-        elif self._sync_trust_state is SyncTrustState.CERTIFIED:
+        await self._turn_ingress_gate.drain_all()
+        await self._coalescing_gate.drain_all()
+        if not dropped_unresolved_ingress and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)
         if self.agent_name != ROUTER_AGENT_NAME:
             return

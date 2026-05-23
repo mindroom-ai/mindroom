@@ -373,6 +373,44 @@ async def test_prepare_for_sync_shutdown_clears_checkpoint_after_dropping_unreso
 
 
 @pytest.mark.asyncio
+async def test_prepare_for_sync_shutdown_clears_checkpoint_before_raising_drain_error(tmp_path: Path) -> None:
+    """Failing shutdown drains must not leave a checkpoint after unresolved ingress was cancelled."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_event"
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_after_event")
+    save_sync_token(tmp_path, bot.agent_name, "s_after_event")
+    release_ready_task = asyncio.Event()
+
+    async def unresolved_ready_result() -> None:
+        await release_ready_task.wait()
+
+    ready_task = asyncio.create_task(unresolved_ready_result())
+    await bot._turn_ingress_gate.admit_ready_task(
+        IngressProvisionalKey("!room:localhost", "@user:localhost"),
+        ready_task=ready_task,
+        source_kind="message",
+        barrier=False,
+    )
+    bot._turn_ingress_gate.drain_all = AsyncMock(side_effect=RuntimeError("drain failed"))
+
+    try:
+        with pytest.raises(RuntimeError, match="drain failed"):
+            await bot.prepare_for_sync_shutdown()
+    finally:
+        release_ready_task.set()
+        if not ready_task.done():
+            ready_task.cancel()
+        await asyncio.gather(ready_task, return_exceptions=True)
+
+    assert load_sync_token_record(tmp_path, bot.agent_name) is None
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert bot.client.next_batch is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
     """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
     bot = _agent_bot(tmp_path)

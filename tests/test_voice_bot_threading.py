@@ -1410,6 +1410,55 @@ async def test_known_barrier_waits_for_older_prompt_group_to_enqueue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_known_barrier_after_accepting_group_blocks_later_prompt_until_ready() -> None:
+    """A barrier behind an open prompt group must still block later prompts while resolving."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(debounce_seconds=0.05)
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread", "@user:example.com")
+    release_barrier = asyncio.Event()
+
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text1", body="text 1", order=1),
+    )
+    barrier_task = asyncio.create_task(
+        _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _barrier_ready_result(room=room, key=key, event_id="$command", order=2),
+            barrier=True,
+            release=release_barrier,
+        ),
+    )
+
+    try:
+        await _wait_for_direct_condition(lambda: [batch.source_event_ids for batch in batches] == [["$text1"]])
+        await _admit_prompt_result(
+            ingress_gate,
+            provisional_key,
+            _prompt_ready_result(room=room, key=key, event_id="$text2", body="text 2", order=3),
+        )
+
+        await asyncio.sleep(0.08)
+        await coalescing_gate.drain_all()
+        assert [batch.source_event_ids for batch in batches] == [["$text1"]]
+
+        release_barrier.set()
+        await asyncio.wait_for(barrier_task, timeout=1.0)
+        await _drain_direct_ingress(ingress_gate, coalescing_gate)
+    finally:
+        release_barrier.set()
+        if not barrier_task.done():
+            barrier_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await barrier_task
+
+    assert [batch.source_event_ids for batch in batches] == [["$text1"], ["$command"], ["$text2"]]
+
+
+@pytest.mark.asyncio
 async def test_known_barrier_without_existing_group_blocks_later_prompt_until_ready() -> None:
     """A delayed command/barrier received first must stay before later prompts."""
     room = _threaded_room()
@@ -2524,6 +2573,44 @@ async def test_receive_time_text_during_upload_grace_starts_new_debounce() -> No
         provisional_key,
         _prompt_ready_result(room=room, key=key, event_id="$text2", body="second text", order=2),
     )
+    await _drain_direct_ingress(ingress_gate, coalescing_gate)
+
+    assert [batch.source_event_ids for batch in batches] == [["$text1"], ["$text2"]]
+
+
+@pytest.mark.asyncio
+async def test_receive_time_text_after_sealed_upload_grace_waits_for_older_unresolved_text() -> None:
+    """A later text group must not overtake an older unresolved text group sealed from upload grace."""
+    room = _threaded_room()
+    ingress_gate, coalescing_gate, batches = _install_direct_ingress_capture_gates(
+        debounce_seconds=0.01,
+        upload_grace_seconds=0.2,
+    )
+    provisional_key = IngressProvisionalKey(room.room_id, "@user:example.com")
+    key = (room.room_id, "$thread_root", "@user:example.com")
+    release_first_text = asyncio.Event()
+
+    await ingress_gate.admit_ready_task(
+        provisional_key,
+        ready_task=_ready_task(
+            _prompt_ready_result(room=room, key=key, event_id="$text1", body="first text", order=1),
+            release=release_first_text,
+        ),
+        source_kind=MESSAGE_SOURCE_KIND,
+        barrier=False,
+    )
+    await _wait_for_direct_condition(lambda: provisional_key in ingress_gate._ingress_grace_groups)
+    await _admit_prompt_result(
+        ingress_gate,
+        provisional_key,
+        _prompt_ready_result(room=room, key=key, event_id="$text2", body="second text", order=2),
+    )
+
+    await asyncio.sleep(0.04)
+    await coalescing_gate.drain_all()
+    assert batches == []
+
+    release_first_text.set()
     await _drain_direct_ingress(ingress_gate, coalescing_gate)
 
     assert [batch.source_event_ids for batch in batches] == [["$text1"], ["$text2"]]
