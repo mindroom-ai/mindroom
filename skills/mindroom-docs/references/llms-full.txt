@@ -11440,12 +11440,13 @@ knowledge_bases:
   source_docs:
     description: Source documents the agent should inspect directly
     mode: files
-    path: ./agent_workspace/source_docs
+    path: ${MINDROOM_STORAGE_PATH}/agents/assistant/workspace/source_docs
 
 agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
+    memory_backend: file
     tools: [file, shell]
     knowledge_bases: [source_docs]
 ```
@@ -11453,7 +11454,8 @@ agents:
 File mode does not create a ChromaDB collection.
 It does not call the embedder.
 It does not expose `search_knowledge_base` for that base.
-When the source is inside the agent workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
+`memory_backend: file` creates the shared agent workspace at `${MINDROOM_STORAGE_PATH}/agents/assistant/workspace`.
+Because the example source path is inside that workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
 Targets outside the workspace are not advertised for direct file-tool access because the default tools enforce workspace containment after symlinks are resolved.
 Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refreshes publish only lightweight source metadata instead of a vector index.
 
