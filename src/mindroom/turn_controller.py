@@ -2373,14 +2373,25 @@ class TurnController:
                 dispatch_timing,
             )
 
-            await self._maybe_send_visible_voice_echo(
-                room,
-                event,
-                text=normalized_voice.event.body,
-                thread_id=normalized_voice.effective_thread_id,
-                requester_user_id=prechecked_event.requester_user_id,
-                normalized_source=normalized_voice.event.source,
-            )
+            try:
+                await self._maybe_send_visible_voice_echo(
+                    room,
+                    event,
+                    text=normalized_voice.event.body,
+                    thread_id=normalized_voice.effective_thread_id,
+                    requester_user_id=prechecked_event.requester_user_id,
+                    normalized_source=normalized_voice.event.source,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.deps.logger.warning(
+                    "Visible voice echo failed; continuing canonical voice dispatch",
+                    event_id=event.event_id,
+                    room_id=room.room_id,
+                    exception_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
 
             normalized_target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,

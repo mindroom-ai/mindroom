@@ -574,6 +574,66 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
     assert not queued_signal.is_set()
 
 
+@pytest.mark.parametrize(
+    ("echo_side_effect", "echo_return"),
+    [
+        pytest.param(RuntimeError("echo failed"), None, id="failed"),
+        pytest.param(None, None, id="disabled"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_dispatch(
+    mock_home_bot: AgentBot,
+    echo_side_effect: BaseException | None,
+    echo_return: str | None,
+) -> None:
+    """Visible echo failures or disabled echo should not block canonical voice dispatch."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    _install_test_coalescing_gate(bot, debounce_seconds=0.0)
+    voice_event = _make_threaded_voice_event(event_id="$voice-visible-echo")
+    normalized_voice = _normalized_voice_result(
+        event=voice_event,
+        text="canonical voice transcript",
+        thread_id="$thread_root",
+    )
+    dispatches: list[tuple[list[str], str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread_root"),
+        ),
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            new=AsyncMock(return_value=normalized_voice),
+        ),
+        patch.object(
+            bot._turn_controller,
+            "_maybe_send_visible_voice_echo",
+            new=AsyncMock(side_effect=echo_side_effect, return_value=echo_return),
+        ),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
+
+    assert dispatches == [(["$voice-visible-echo"], "canonical voice transcript")]
+
+
 @pytest.mark.asyncio
 async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
     mock_home_bot: AgentBot,
@@ -1304,6 +1364,43 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
 
     mock_dispatch.assert_not_awaited()
     assert bot._turn_store.is_handled("$echo")
+
+
+@pytest.mark.asyncio
+async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: AgentBot) -> None:
+    """Human-authored visible-echo marker content should not suppress dispatch."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    forged_event = _threaded_prepared_text_event(
+        event_id="$forged-echo",
+        body="@home this should still dispatch",
+        content_overrides={
+            ORIGINAL_SENDER_KEY: "@user:example.com",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+    )
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(return_value="$thread_root"),
+        ),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+    ):
+        await bot._turn_controller._dispatch_prepared_text_like_ingress(
+            room=room,
+            prepared_event=forged_event,
+            dispatch_event=forged_event,
+            requester_user_id="@user:example.com",
+            dispatch_timing=None,
+        )
+        await drain_coalescing(bot)
+
+    mock_dispatch.assert_awaited_once()
+    assert not bot._turn_store.is_handled("$forged-echo")
 
 
 @pytest.mark.asyncio
