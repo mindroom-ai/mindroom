@@ -1411,37 +1411,38 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
 
 @pytest.mark.asyncio
 async def test_ready_voice_event_cancels_thread_resolution_when_cancelled(mock_home_bot: AgentBot) -> None:
-    """Cancelling voice readiness should not leave the shared thread-resolution task running."""
+    """Cancelling voice readiness should cancel in-progress thread resolution."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$voice-cancelled")
     thread_resolution_started = asyncio.Event()
     never_release = asyncio.Event()
 
-    async def waiting_thread_id() -> str | None:
+    async def waiting_thread_id(*_args: object) -> str | None:
         thread_resolution_started.set()
         await never_release.wait()
         return "$thread_root"
 
-    coalescing_thread_id_task = asyncio.create_task(waiting_thread_id())
-    ready_task = asyncio.create_task(
-        bot._turn_controller._ready_voice_event(
-            room=room,
-            prechecked_event=_PrecheckedEvent(event=voice_event, requester_user_id="@user:example.com"),
-            event_info=EventInfo.from_event(voice_event.source),
-            dispatch_timing=None,
-            coalescing_thread_id_task=coalescing_thread_id_task,
-        ),
-    )
+    with patch.object(
+        bot._turn_controller.deps.resolver,
+        "coalescing_thread_id",
+        new=AsyncMock(side_effect=waiting_thread_id),
+    ):
+        ready_task = asyncio.create_task(
+            bot._turn_controller._ready_voice_event(
+                room=room,
+                prechecked_event=_PrecheckedEvent(event=voice_event, requester_user_id="@user:example.com"),
+                event_info=EventInfo.from_event(voice_event.source),
+                dispatch_timing=None,
+            ),
+        )
 
-    await thread_resolution_started.wait()
-    ready_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await ready_task
-    with suppress(asyncio.CancelledError):
-        await coalescing_thread_id_task
+        await thread_resolution_started.wait()
+        ready_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await ready_task
 
-    assert coalescing_thread_id_task.cancelled()
+    assert ready_task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -1494,8 +1495,8 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
 
 
 @pytest.mark.asyncio
-async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
-    """Unexpected pre-normalization readiness errors should also terminate visibly."""
+async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guess(mock_home_bot: AgentBot) -> None:
+    """Thread-resolution failures should not guess a fallback dispatch target."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$thread-resolution-fails")
@@ -1525,14 +1526,5 @@ async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(m
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    assert len(dispatches) == 1
-    dispatched_event, handled_source_ids = dispatches[0]
-    assert isinstance(dispatched_event, PreparedTextEvent)
-    assert dispatched_event.body == "🎤 [Attached voice message]"
-    assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
-    assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
-    assert dispatched_event.source["content"]["m.relates_to"] == {
-        "rel_type": "m.thread",
-        "event_id": "$thread_root",
-    }
-    assert handled_source_ids == ["$thread-resolution-fails"]
+    assert dispatches == []
+    assert not bot._turn_store.is_handled("$thread-resolution-fails")

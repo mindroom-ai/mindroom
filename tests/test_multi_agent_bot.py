@@ -11488,7 +11488,7 @@ class TestAgentBot:
             )
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == (room.room_id, "$thread_root", "@user:localhost")
+            assert key == (room.room_id, None, "@user:localhost")
             ready_event = await mock_admit.await_args.kwargs["ready_task"]
 
         assert isinstance(ready_event, ReadyPendingEvent)

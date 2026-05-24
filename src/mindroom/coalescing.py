@@ -83,9 +83,6 @@ class _QueuedEvent:
     source_event_id: str | None
     source_kind: str
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None
-    key_hint_task: asyncio.Task[CoalescingKey | None] | None = None
-    key_hint_result: CoalescingKey | None = None
-    key_hint_resolved: bool = False
     ready_result: ReadyPendingEvent | None = None
 
     @property
@@ -359,115 +356,29 @@ class CoalescingGate:
         return key
 
     @staticmethod
-    def _first_queued_order(gate: _GateEntry) -> int | None:
-        return gate.queue[0].received_order if gate.queue else None
+    def _voice_owner_key(key: CoalescingKey) -> CoalescingKey:
+        return (key[0], None, key[2])
 
     @staticmethod
-    def _queued_key_hint_is_pending(queued: _QueuedEvent) -> bool:
-        return queued.key_hint_task is not None and not queued.key_hint_resolved
+    def _gate_has_unresolved_voice(gate: _GateEntry) -> bool:
+        return any(
+            queued.source_kind == VOICE_SOURCE_KIND and queued.ready_result is None
+            for queued in [*gate.claimed_admissions, *gate.queue]
+        )
 
-    @staticmethod
-    def _should_settle_key_hint_for_gate(
-        gate_key: CoalescingKey,
-        current_key: CoalescingKey,
-        queued: _QueuedEvent,
-        *,
-        first_queued_order: int,
-        include_later_gate_hints: bool,
-        max_received_order: int | None,
-    ) -> bool:
-        if max_received_order is not None and queued.received_order > max_received_order:
-            return False
-        if gate_key == current_key:
-            return True
-        return include_later_gate_hints or queued.received_order < first_queued_order
-
-    def _next_key_hint_to_settle(
-        self,
-        key: CoalescingKey,
-        gate: _GateEntry,
-        *,
-        include_later_gate_hints: bool = False,
-        max_received_order: int | None = None,
-    ) -> tuple[CoalescingKey, _QueuedEvent] | None:
-        first_queued_order = self._first_queued_order(gate)
-        if first_queued_order is None:
-            return None
-        hint_to_settle: tuple[int, CoalescingKey, _QueuedEvent] | None = None
-        for gate_key, candidate_gate in self._gates.items():
+    def _unresolved_voice_gate_key(self, key: CoalescingKey) -> CoalescingKey | None:
+        for gate_key, gate in self._gates.items():
             if gate_key[0] != key[0] or gate_key[2] != key[2]:
                 continue
-            for queued in [*candidate_gate.claimed_admissions, *candidate_gate.queue]:
-                if not self._queued_key_hint_is_pending(queued):
-                    continue
-                if not self._should_settle_key_hint_for_gate(
-                    gate_key,
-                    key,
-                    queued,
-                    first_queued_order=first_queued_order,
-                    include_later_gate_hints=include_later_gate_hints,
-                    max_received_order=max_received_order,
-                ):
-                    continue
-                if hint_to_settle is None or queued.received_order < hint_to_settle[0]:
-                    hint_to_settle = (queued.received_order, gate_key, queued)
-        if hint_to_settle is None:
-            return None
-        return hint_to_settle[1], hint_to_settle[2]
+            if self._gate_has_unresolved_voice(gate):
+                return gate_key
+        return None
 
-    async def _resolve_key_hint(self, queued: _QueuedEvent) -> CoalescingKey | None:
-        if queued.key_hint_task is None:
-            queued.key_hint_resolved = True
-            return None
-        try:
-            queued.key_hint_result = await asyncio.shield(queued.key_hint_task)
-        except asyncio.CancelledError:
-            if queued.key_hint_task.cancelled():
-                logger.warning(
-                    "coalescing_gate_key_hint_cancelled",
-                    received_order=queued.received_order,
-                    age_ms=elapsed_ms_since(queued.received_at, clock=time.time),
-                )
-                queued.key_hint_result = None
-            else:
-                raise
-        except Exception as error:
-            logger.warning(
-                "coalescing_gate_key_hint_failed",
-                received_order=queued.received_order,
-                age_ms=elapsed_ms_since(queued.received_at, clock=time.time),
-                exception_type=error.__class__.__name__,
-                error_message=str(error),
-            )
-            queued.key_hint_result = None
-        queued.key_hint_resolved = True
-        return queued.key_hint_result
-
-    async def _settle_key_hints_for_gate(
-        self,
-        key: CoalescingKey,
-        gate: _GateEntry,
-        *,
-        include_later_gate_hints: bool = False,
-        max_received_order: int | None = None,
-    ) -> tuple[CoalescingKey | None, _GateEntry | None]:
-        while True:
-            current_key, current_gate = self._resolve_gate_entry(key, gate)
-            if current_key is None or current_gate is None:
-                return None, None
-            next_hint = self._next_key_hint_to_settle(
-                current_key,
-                current_gate,
-                include_later_gate_hints=include_later_gate_hints,
-                max_received_order=max_received_order,
-            )
-            if next_hint is None:
-                return current_key, current_gate
-            hint_gate_key, queued = next_hint
-            hinted_key = await self._resolve_key_hint(queued)
-            if hinted_key is not None:
-                self.retarget(hint_gate_key, hinted_key)
-            key, gate = current_key, current_gate
+    def _merge_room_requester_gates_into(self, owner_key: CoalescingKey) -> None:
+        for gate_key in list(self._gates):
+            if gate_key == owner_key or gate_key[0] != owner_key[0] or gate_key[2] != owner_key[2]:
+                continue
+            self.retarget(gate_key, owner_key)
 
     @staticmethod
     def _gate_work_count(gate: _GateEntry) -> int:
@@ -733,14 +644,22 @@ class CoalescingGate:
         source_event_id: str | None = None,
         source_kind: str = "pending",
         ready_result: ReadyPendingEvent | None = None,
-        key_hint_task: asyncio.Task[CoalescingKey | None] | None = None,
     ) -> None:
         """Admit one Matrix receive-time item without awaiting async normalization."""
         if ready_task is None and ready_result is None:
             msg = "ready_task is required when ready_result is not provided"
             raise ValueError(msg)
         enqueue_start = time.monotonic()
-        provisional_key = self._key_for_pending_voice_source_event(self._canonical_key(provisional_key))
+        canonical_key = self._canonical_key(provisional_key)
+        if source_kind == VOICE_SOURCE_KIND and ready_result is None:
+            provisional_key = self._voice_owner_key(canonical_key)
+            self._merge_room_requester_gates_into(provisional_key)
+        else:
+            provisional_key = self._unresolved_voice_gate_key(
+                canonical_key,
+            ) or self._key_for_pending_voice_source_event(
+                canonical_key,
+            )
         gate = self._get_or_create_gate(provisional_key)
         self._next_received_order += 1
         admission = _QueuedEvent(
@@ -750,7 +669,6 @@ class CoalescingGate:
             source_event_id=source_event_id,
             source_kind=source_kind,
             ready_task=ready_task,
-            key_hint_task=key_hint_task,
             ready_result=ready_result,
         )
         gate.queue.append(admission)
@@ -974,7 +892,7 @@ class CoalescingGate:
         else:
             dispatch_key = CoalescingGate._voice_resolved_key_for_admission(ready_admissions, index)
             if dispatch_key is None:
-                dispatch_key = ready_admission.key if ready_admission.key[1] is not None else provisional_key
+                dispatch_key = ready_admission.key
         return dispatch_key
 
     @staticmethod
@@ -982,14 +900,13 @@ class CoalescingGate:
         ready_admissions: list[_ReadyAdmission],
         index: int,
     ) -> CoalescingKey | None:
-        admission_key = ready_admissions[index].admission_key
+        admission_thread_id = ready_admissions[index].admission_key[1]
+        ready_thread_id = ready_admissions[index].key[1]
 
         def matches_admission(voice_admission: _ReadyAdmission) -> bool:
             if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
                 return False
-            if voice_admission.admission_key == admission_key:
-                return True
-            return voice_admission.pending_event.event.event_id == admission_key[1]
+            return voice_admission.pending_event.event.event_id in {admission_thread_id, ready_thread_id}
 
         for previous_index in range(index - 1, -1, -1):
             previous_admission = ready_admissions[previous_index]
@@ -1002,17 +919,11 @@ class CoalescingGate:
         return None
 
     @staticmethod
-    def _room_voice_batch_key(
-        ready_admissions: list[_ReadyAdmission],
-    ) -> CoalescingKey | None:
-        if not any(
-            ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND for ready_admission in ready_admissions
-        ):
-            return None
+    def _owner_voice_batch_key(ready_admissions: list[_ReadyAdmission]) -> CoalescingKey | None:
         for ready_admission in reversed(ready_admissions):
             if ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
                 return ready_admission.key
-        return ready_admissions[-1].admission_key if ready_admissions else None
+        return None
 
     @staticmethod
     def _can_merge_ready_segment(
@@ -1032,11 +943,10 @@ class CoalescingGate:
         ready_admissions: list[_ReadyAdmission],
     ) -> list[tuple[CoalescingKey, list[PendingEvent]]]:
         if provisional_key[1] is None:
-            room_voice_key = CoalescingGate._room_voice_batch_key(ready_admissions)
-            if room_voice_key is not None:
-                return [
-                    (room_voice_key, [ready_admission.pending_event for ready_admission in ready_admissions]),
-                ]
+            voice_batch_key = CoalescingGate._owner_voice_batch_key(ready_admissions)
+            if voice_batch_key is not None:
+                return [(voice_batch_key, [ready_admission.pending_event for ready_admission in ready_admissions])]
+
         segments: list[tuple[CoalescingKey, list[PendingEvent]]] = []
         for index, ready_admission in enumerate(ready_admissions):
             key = CoalescingGate._dispatch_key_for_ready_admissions(provisional_key, ready_admissions, index)
@@ -1179,21 +1089,6 @@ class CoalescingGate:
                 front = gate.queue[0]
                 front_kind = self._queued_kind(front)
                 if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
-                    settled_key, settled_gate = await self._settle_key_hints_for_gate(
-                        current_key,
-                        gate,
-                        max_received_order=front.received_order,
-                    )
-                    if settled_key is None or settled_gate is None:
-                        return
-                    current_key = settled_key
-                    gate = settled_gate
-                    if not gate.queue:
-                        continue
-                    front = gate.queue[0]
-                    front_kind = self._queued_kind(front)
-                    if front_kind not in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
-                        continue
                     claimed_admissions = self._claim_front_events(gate, 1)
                     ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
                     if not ready_admissions:
@@ -1214,19 +1109,12 @@ class CoalescingGate:
                         entry,
                     ),
                 )
-                claim_max_received_order = self._next_received_order
-                # Freeze the debounce boundary before resolving hints so late arrivals
-                # cannot keep moving this claim forward indefinitely.
-                settled_key, settled_gate = await self._settle_key_hints_for_gate(
-                    current_key,
-                    gate,
-                    include_later_gate_hints=True,
-                    max_received_order=claim_max_received_order,
-                )
-                if settled_key is None or settled_gate is None:
+                resolved_key, resolved_gate = self._resolve_gate_entry(current_key, gate)
+                if resolved_key is None or resolved_gate is None:
                     return
-                current_key = settled_key
-                gate = settled_gate
+                current_key = resolved_key
+                gate = resolved_gate
+                claim_max_received_order = self._next_received_order
                 if not gate.queue:
                     continue
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested

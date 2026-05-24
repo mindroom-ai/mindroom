@@ -834,47 +834,6 @@ class TurnController:
             requester_user_id,
         )
 
-    def _provisional_voice_thread_id(self, room_id: str, event_info: EventInfo) -> str | None:
-        """Return the best synchronous thread hint available before async voice resolution."""
-        if (
-            self.deps.runtime.config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room_id,
-            )
-            == "room"
-        ):
-            return None
-        return event_info.thread_id or event_info.reply_to_event_id
-
-    def _voice_key_hint_task(
-        self,
-        room_id: str,
-        event_info: EventInfo,
-        requester_user_id: str,
-        coalescing_thread_id_task: asyncio.Task[str | None],
-    ) -> asyncio.Task[CoalescingKey | None] | None:
-        if (
-            self.deps.runtime.config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room_id,
-            )
-            == "room"
-            or event_info.thread_id is not None
-            or event_info.reply_to_event_id is None
-        ):
-            return None
-
-        async def resolve_voice_key_hint() -> CoalescingKey | None:
-            resolved_thread_id = await asyncio.shield(coalescing_thread_id_task)
-            return (room_id, resolved_thread_id, requester_user_id)
-
-        return asyncio.create_task(
-            resolve_voice_key_hint(),
-            name=f"voice_key_hint:{room_id}:{event_info.reply_to_event_id}",
-        )
-
     async def _append_live_event_with_timing(
         self,
         room_id: str,
@@ -2376,33 +2335,20 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        provisional_thread_id = self._provisional_voice_thread_id(room.room_id, event_info)
-        coalescing_thread_id_task = asyncio.create_task(
-            self.deps.resolver.coalescing_thread_id(room, event),
-            name=f"voice_thread_id:{room.room_id}:{event.event_id}",
-        )
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
                 prechecked_event=prechecked_event,
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
-                coalescing_thread_id_task=coalescing_thread_id_task,
-                provisional_thread_id=provisional_thread_id,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
         await self.deps.coalescing_gate.admit(
-            (room.room_id, provisional_thread_id, prechecked_event.requester_user_id),
+            (room.room_id, None, prechecked_event.requester_user_id),
             ready_task=ready_task,
             source_event_id=event.event_id,
             source_kind=VOICE_SOURCE_KIND,
-            key_hint_task=self._voice_key_hint_task(
-                room.room_id,
-                event_info,
-                prechecked_event.requester_user_id,
-                coalescing_thread_id_task,
-            ),
         )
 
     async def _ready_voice_event(
@@ -2412,16 +2358,17 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
-        coalescing_thread_id_task: asyncio.Task[str | None],
-        provisional_thread_id: str | None = None,
     ) -> ReadyPendingEvent | None:
         """Normalize a raw voice event after receive-time admission."""
         event = prechecked_event.event
+        coalescing_thread_id: str | None = None
+        thread_resolved = False
         queued_notice_reservation = None
         preliminary_target = None
         reservation_released_or_handed_off = False
         try:
-            coalescing_thread_id = await asyncio.shield(coalescing_thread_id_task)
+            coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+            thread_resolved = True
             await self._append_live_event_with_timing(
                 room.room_id,
                 event,
@@ -2518,17 +2465,17 @@ class TurnController:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
                 queued_notice_reservation = None
+            if not thread_resolved:
+                raise
             return self._ready_voice_fallback_event(
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
-                thread_id=provisional_thread_id,
+                thread_id=coalescing_thread_id,
                 dispatch_timing=dispatch_timing,
                 error=exc,
             )
         finally:
-            if not coalescing_thread_id_task.done():
-                coalescing_thread_id_task.cancel()
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
 
