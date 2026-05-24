@@ -141,27 +141,41 @@ _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
 def _queued_notice_dispatch_metadata(
     reservation: QueuedHumanNoticeReservation | None,
+    target: MessageTarget | None,
 ) -> tuple[PendingDispatchMetadata, ...]:
     if reservation is None:
         return ()
+    if target is None:
+        msg = "Queued notice dispatch metadata requires a response target"
+        raise ValueError(msg)
     return (
         PendingDispatchMetadata(
             kind=_QUEUED_NOTICE_METADATA_KIND,
             payload=reservation,
             close=reservation.cancel,
+            target_key=(target.room_id, target.resolved_thread_id),
         ),
     )
 
 
 def _queued_notice_reservation_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
+    *,
+    target_key: tuple[str, str | None],
 ) -> QueuedHumanNoticeReservation | None:
-    reservations = [item.payload for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
-    if not reservations:
+    reservation_items = [item for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
+    if not reservation_items:
         return None
-    for reservation in reservations[1:]:
-        cast("QueuedHumanNoticeReservation", reservation).consume()
-    return cast("QueuedHumanNoticeReservation", reservations[0])
+    selected_item = next(
+        (item for item in reversed(reservation_items) if item.target_key == target_key),
+        None,
+    )
+    for item in reservation_items:
+        if item is not selected_item:
+            cast("QueuedHumanNoticeReservation", item.payload).consume()
+    if selected_item is None:
+        return None
+    return cast("QueuedHumanNoticeReservation", selected_item.payload)
 
 
 def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedTextEvent:
@@ -564,6 +578,37 @@ class TurnController:
         """Return whether two targets share the same response lifecycle lock."""
         return left.room_id == right.room_id and left.resolved_thread_id == right.resolved_thread_id
 
+    def _voice_active_follow_up_reservation(
+        self,
+        *,
+        preliminary_target: MessageTarget | None,
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    ) -> tuple[bool, QueuedHumanNoticeReservation | None]:
+        """Return active-follow-up policy and the reservation for a voice target."""
+        if queued_notice_reservation is not None and (
+            preliminary_target is None
+            or not self._same_response_lifecycle_target(
+                preliminary_target,
+                target,
+            )
+        ):
+            queued_notice_reservation.cancel()
+            queued_notice_reservation = None
+        if queued_notice_reservation is not None:
+            return True, queued_notice_reservation
+        active_follow_up = (
+            envelope.origin.may_answer_interactive_prompt
+            and self.deps.response_runner.has_active_response_for_target(target)
+        )
+        if not active_follow_up:
+            return False, None
+        return True, self.deps.response_runner.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+        )
+
     async def _enqueue_active_thread_follow_up(
         self,
         *,
@@ -599,6 +644,7 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
+                queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
             )
         except asyncio.CancelledError:
@@ -656,6 +702,7 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
+                queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
             )
         except asyncio.CancelledError:
@@ -805,7 +852,6 @@ class TurnController:
         room_id: str,
         event_info: EventInfo,
         requester_user_id: str,
-        provisional_thread_id: str | None,
         coalescing_thread_id_task: asyncio.Task[str | None],
     ) -> asyncio.Task[CoalescingKey | None] | None:
         if (
@@ -822,7 +868,7 @@ class TurnController:
 
         async def resolve_voice_key_hint() -> CoalescingKey | None:
             resolved_thread_id = await asyncio.shield(coalescing_thread_id_task)
-            return (room_id, resolved_thread_id or provisional_thread_id, requester_user_id)
+            return (room_id, resolved_thread_id, requester_user_id)
 
         return asyncio.create_task(
             resolve_voice_key_hint(),
@@ -943,6 +989,7 @@ class TurnController:
         message_received_depth: int = 0,
         coalescing_key: CoalescingKey | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+        queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
     ) -> None:
         """Route one inbound event through the live coalescing gate."""
@@ -984,7 +1031,7 @@ class TurnController:
                 hook_source=hook_source,
                 message_received_depth=message_received_depth,
                 trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
+                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target),
             ),
         )
         emit_elapsed_timing(
@@ -1809,7 +1856,10 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        reservation = _queued_notice_reservation_from_metadata(batch.dispatch_metadata)
+        reservation = _queued_notice_reservation_from_metadata(
+            batch.dispatch_metadata,
+            target_key=(batch.room.room_id, batch.coalescing_key[1]),
+        )
         try:
             handoff = build_dispatch_handoff(batch)
             timing_scope = event_timing_scope(handoff.event.event_id)
@@ -1842,7 +1892,11 @@ class TurnController:
                     handoff.source_event_ids,
                     source_event_prompts=dict(handoff.source_event_prompts),
                 )
-                await self._dispatch_handoff(handoff, handled_turn=handled_turn)
+                await self._dispatch_handoff(
+                    handoff,
+                    handled_turn=handled_turn,
+                    queued_notice_reservation=reservation,
+                )
                 reservation = None
                 emit_elapsed_timing(
                     "coalescing.handle_batch.dispatch_text_message",
@@ -1859,9 +1913,10 @@ class TurnController:
         handoff: DispatchHandoff,
         *,
         handled_turn: HandledTurnState,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> None:
         """Dispatch one coalesced handoff and own opaque metadata cleanup."""
-        reservation = _queued_notice_reservation_from_metadata(handoff.dispatch_metadata)
+        reservation = queued_notice_reservation
         await self._dispatch_text_message(
             handoff.room,
             handoff.event,
@@ -2333,6 +2388,7 @@ class TurnController:
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
                 coalescing_thread_id_task=coalescing_thread_id_task,
+                provisional_thread_id=provisional_thread_id,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
@@ -2345,7 +2401,6 @@ class TurnController:
                 room.room_id,
                 event_info,
                 prechecked_event.requester_user_id,
-                provisional_thread_id,
                 coalescing_thread_id_task,
             ),
         )
@@ -2358,6 +2413,7 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         coalescing_thread_id_task: asyncio.Task[str | None],
+        provisional_thread_id: str | None = None,
     ) -> ReadyPendingEvent | None:
         """Normalize a raw voice event after receive-time admission."""
         event = prechecked_event.event
@@ -2432,24 +2488,12 @@ class TurnController:
                 target=normalized_target,
                 source_kind=VOICE_SOURCE_KIND,
             )
-            if queued_notice_reservation is not None and (
-                preliminary_target is None
-                or not self._same_response_lifecycle_target(
-                    preliminary_target,
-                    normalized_target,
-                )
-            ):
-                queued_notice_reservation.cancel()
-                queued_notice_reservation = None
-            active_follow_up = queued_notice_reservation is not None or (
-                envelope.origin.may_answer_interactive_prompt
-                and self.deps.response_runner.has_active_response_for_target(normalized_target)
+            active_follow_up, queued_notice_reservation = self._voice_active_follow_up_reservation(
+                preliminary_target=preliminary_target,
+                target=normalized_target,
+                envelope=envelope,
+                queued_notice_reservation=queued_notice_reservation,
             )
-            if active_follow_up and queued_notice_reservation is None:
-                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                    target=normalized_target,
-                    response_envelope=envelope,
-                )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
                 key=(room.room_id, effective_thread_id, prechecked_event.requester_user_id),
@@ -2465,14 +2509,100 @@ class TurnController:
                     hook_source=envelope.hook_source,
                     message_received_depth=envelope.message_received_depth,
                     trust_internal_payload_metadata=True,
-                    dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
+                    dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, normalized_target),
                 ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if queued_notice_reservation is not None:
+                queued_notice_reservation.cancel()
+                queued_notice_reservation = None
+            return self._ready_voice_fallback_event(
+                room=room,
+                event=event,
+                requester_user_id=prechecked_event.requester_user_id,
+                thread_id=provisional_thread_id,
+                dispatch_timing=dispatch_timing,
+                error=exc,
             )
         finally:
             if not coalescing_thread_id_task.done():
                 coalescing_thread_id_task.cancel()
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
+
+    def _ready_voice_fallback_event(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        requester_user_id: str,
+        thread_id: str | None,
+        dispatch_timing: DispatchPipelineTiming | None,
+        error: Exception,
+    ) -> ReadyPendingEvent:
+        """Return a raw-audio fallback when voice readiness fails before STT."""
+        self.deps.logger.warning(
+            "Voice readiness failed; dispatching raw-audio fallback",
+            event_id=event.event_id,
+            room_id=room.room_id,
+            exception_type=error.__class__.__name__,
+            error=str(error),
+        )
+        fallback_event = _raw_voice_fallback_event(event, thread_id=thread_id)
+        attach_dispatch_pipeline_timing(fallback_event.source, dispatch_timing)
+        queued_notice_reservation = None
+        dispatch_policy_source_kind = None
+        hook_source = None
+        message_received_depth = 0
+        target = None
+        try:
+            target = self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=thread_id,
+                reply_to_event_id=fallback_event.event_id,
+                event_source=fallback_event.source,
+            )
+            envelope = self.deps.resolver.build_ingress_envelope(
+                room_id=room.room_id,
+                event=fallback_event,
+                requester_user_id=requester_user_id,
+                target=target,
+                source_kind=VOICE_SOURCE_KIND,
+            )
+            active_follow_up, queued_notice_reservation = self._voice_active_follow_up_reservation(
+                preliminary_target=target,
+                target=target,
+                envelope=envelope,
+                queued_notice_reservation=None,
+            )
+            dispatch_policy_source_kind = (
+                ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND if active_follow_up else envelope.dispatch_policy_source_kind
+            )
+            hook_source = envelope.hook_source
+            message_received_depth = envelope.message_received_depth
+        except Exception as metadata_error:
+            self.deps.logger.warning(
+                "Voice fallback metadata failed; dispatching without active-turn reservation",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                exception_type=metadata_error.__class__.__name__,
+                error=str(metadata_error),
+            )
+        return ReadyPendingEvent(
+            key=(room.room_id, thread_id, requester_user_id),
+            pending_event=PendingEvent(
+                event=fallback_event,
+                room=room,
+                source_kind=VOICE_SOURCE_KIND,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                hook_source=hook_source,
+                message_received_depth=message_received_depth,
+                trust_internal_payload_metadata=True,
+                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, target),
+            ),
+        )
 
     async def _normalize_voice_event_or_fallback(
         self,

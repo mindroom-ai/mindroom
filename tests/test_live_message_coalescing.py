@@ -1515,6 +1515,62 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
 
 
 @pytest.mark.asyncio
+async def test_front_command_does_not_wait_for_later_voice_key_hint() -> None:
+    """A front command is a barrier and must not wait on later voice resolution."""
+    room = _make_room()
+    key = (room.room_id, "$thread", "@user:localhost")
+    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$thread")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1001,
+        thread_id="$thread",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    release_key_hint = asyncio.Event()
+    release_voice = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def key_hint() -> CoalescingKey:
+        await release_key_hint.wait()
+        return key
+
+    async def ready_voice() -> ReadyPendingEvent:
+        await release_voice.wait()
+        return ReadyPendingEvent(
+            key=key,
+            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(ready_voice()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+        key_hint_task=asyncio.create_task(key_hint()),
+    )
+
+    await _wait_for(lambda: calls == [["$cmd"]], deadline_seconds=0.2)
+
+    release_key_hint.set()
+    release_voice.set()
+    await gate.drain_all()
+    assert calls == [["$cmd"], ["$voice"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     """A cancelled drain should not lose admissions already claimed from the queue."""
     room = _make_room()
@@ -1747,6 +1803,176 @@ async def test_threaded_text_reply_to_pending_room_voice_waits_for_voice_root() 
 
     release_voice.set()
     await _wait_for(lambda: calls == [["$voice", "$typed"]], deadline_seconds=0.2)
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_room_voice_reply_resolution_keeps_pending_audio_reply_in_room_batch() -> None:
+    """A typed reply to pending audio should follow a proven room-level voice resolution."""
+    room = _make_room()
+    provisional_key = (room.room_id, "$normal-message", "@user:localhost")
+    typed_reply_key = (room.room_id, "$voice", "@user:localhost")
+    room_key = (room.room_id, None, "@user:localhost")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1000,
+        thread_id="$normal-message",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    typed = _text_event(
+        event_id="$typed",
+        body="typed reply to the pending voice",
+        server_timestamp=1001,
+        thread_id="$voice",
+    )
+    release_voice = asyncio.Event()
+    calls: list[tuple[CoalescingKey, list[str]]] = []
+
+    async def ready_voice() -> ReadyPendingEvent:
+        await release_voice.wait()
+        return ReadyPendingEvent(
+            key=room_key,
+            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.05,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.admit(
+        provisional_key,
+        ready_task=asyncio.create_task(ready_voice()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await asyncio.sleep(0.005)
+    await gate.enqueue(typed_reply_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await asyncio.sleep(0.06)
+    assert calls == []
+
+    release_voice.set()
+    await _wait_for(lambda: calls == [(room_key, ["$voice", "$typed"])], deadline_seconds=0.2)
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_room_gate_voice_resolution_does_not_use_stale_pending_audio_reply_key() -> None:
+    """A room-level voice batch should not inherit a typed reply's stale pending-audio thread."""
+    room = _make_room()
+    room_key = (room.room_id, None, "@user:localhost")
+    typed_reply_key = (room.room_id, "$voice", "@user:localhost")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1000,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    typed = _text_event(
+        event_id="$typed",
+        body="typed reply to the pending voice",
+        server_timestamp=1001,
+        thread_id="$voice",
+    )
+    release_voice = asyncio.Event()
+    calls: list[tuple[CoalescingKey, list[str]]] = []
+
+    async def ready_voice() -> ReadyPendingEvent:
+        await release_voice.wait()
+        return ReadyPendingEvent(
+            key=room_key,
+            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.05,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.admit(
+        room_key,
+        ready_task=asyncio.create_task(ready_voice()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await asyncio.sleep(0.005)
+    await gate.enqueue(typed_reply_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await asyncio.sleep(0.06)
+    assert calls == []
+
+    release_voice.set()
+    await _wait_for(lambda: calls == [(room_key, ["$voice", "$typed"])], deadline_seconds=0.2)
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_pending_audio_reply_after_voice_claim_follows_resolved_voice_gate() -> None:
+    """A reply admitted behind a claimed voice source should not retarget the resolved gate backward."""
+    room = _make_room()
+    room_key = (room.room_id, None, "@user:localhost")
+    typed_reply_key = (room.room_id, "$voice", "@user:localhost")
+    resolved_key = (room.room_id, "$post-stt-thread", "@user:localhost")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1000,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    typed = _text_event(
+        event_id="$typed",
+        body="typed reply to the pending voice",
+        server_timestamp=1001,
+        thread_id="$voice",
+    )
+    release_voice = asyncio.Event()
+    calls: list[tuple[CoalescingKey, CoalescingKey, list[str]]] = []
+
+    async def ready_voice() -> ReadyPendingEvent:
+        await release_voice.wait()
+        return ReadyPendingEvent(
+            key=resolved_key,
+            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        gate.retarget(batch.gate_key, batch.coalescing_key)
+        calls.append((batch.coalescing_key, batch.gate_key, list(batch.source_event_ids)))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.admit(
+        room_key,
+        ready_task=asyncio.create_task(ready_voice()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await asyncio.sleep(0.02)
+    await gate.enqueue(typed_reply_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await asyncio.sleep(0.02)
+    assert calls == []
+
+    release_voice.set()
+    await gate.drain_all()
+    assert calls == [
+        (resolved_key, room_key, ["$voice"]),
+        (resolved_key, resolved_key, ["$typed"]),
+    ]
     assert _coalescing_gate_is_idle(gate)
 
 

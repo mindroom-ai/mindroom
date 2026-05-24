@@ -68,6 +68,7 @@ class PendingDispatchMetadata:
     payload: object
     close: Callable[[], None]
     requires_solo_batch: bool = False
+    target_key: tuple[str, str | None] | None = None
 
 
 @dataclass(frozen=True)

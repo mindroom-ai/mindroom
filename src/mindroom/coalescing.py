@@ -376,10 +376,10 @@ class CoalescingGate:
         include_later_gate_hints: bool,
         max_received_order: int | None,
     ) -> bool:
-        if gate_key == current_key:
-            return True
         if max_received_order is not None and queued.received_order > max_received_order:
             return False
+        if gate_key == current_key:
+            return True
         return include_later_gate_hints or queued.received_order < first_queued_order
 
     def _next_key_hint_to_settle(
@@ -969,6 +969,8 @@ class CoalescingGate:
         pending_event = ready_admission.pending_event
         if pending_event.source_kind == VOICE_SOURCE_KIND:
             dispatch_key = ready_admission.key
+        elif ready_admission.admission_key not in {ready_admission.key, provisional_key}:
+            dispatch_key = provisional_key
         else:
             dispatch_key = CoalescingGate._voice_resolved_key_for_admission(ready_admissions, index)
             if dispatch_key is None:
@@ -983,7 +985,7 @@ class CoalescingGate:
         admission_key = ready_admissions[index].admission_key
 
         def matches_admission(voice_admission: _ReadyAdmission) -> bool:
-            if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND or voice_admission.key[1] is None:
+            if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
                 return False
             if voice_admission.admission_key == admission_key:
                 return True
@@ -1008,7 +1010,7 @@ class CoalescingGate:
         ):
             return None
         for ready_admission in reversed(ready_admissions):
-            if ready_admission.key[1] is not None:
+            if ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
                 return ready_admission.key
         return ready_admissions[-1].admission_key if ready_admissions else None
 
@@ -1019,6 +1021,8 @@ class CoalescingGate:
         next_event: PendingEvent,
     ) -> bool:
         if key[1] is not None:
+            return True
+        if _pending_has_voice_source([*pending_events, next_event]):
             return True
         return any(is_media_dispatch_event(pending_event.event) for pending_event in [*pending_events, next_event])
 
@@ -1175,7 +1179,11 @@ class CoalescingGate:
                 front = gate.queue[0]
                 front_kind = self._queued_kind(front)
                 if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
-                    settled_key, settled_gate = await self._settle_key_hints_for_gate(current_key, gate)
+                    settled_key, settled_gate = await self._settle_key_hints_for_gate(
+                        current_key,
+                        gate,
+                        max_received_order=front.received_order,
+                    )
                     if settled_key is None or settled_gate is None:
                         return
                     current_key = settled_key

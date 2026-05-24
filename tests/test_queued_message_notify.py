@@ -42,6 +42,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
@@ -255,6 +256,20 @@ def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispa
             payload=reservation,
             close=reservation.cancel,
             requires_solo_batch=True,
+        ),
+    )
+
+
+def _targeted_queued_notice_metadata(
+    reservation: _ReservationLike,
+    target: MessageTarget,
+) -> tuple[PendingDispatchMetadata, ...]:
+    return (
+        PendingDispatchMetadata(
+            kind="queued_notice_reservation",
+            payload=reservation,
+            close=reservation.cancel,
+            target_key=(target.room_id, target.resolved_thread_id),
         ),
     )
 
@@ -1954,6 +1969,86 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         queued_signal.finish_response_turn()
 
     assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_retargeted_coalesced_batch_uses_queued_notice_for_final_thread(tmp_path: Path) -> None:
+    """A retargeted mixed batch should keep the reservation for the final response target."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    pre_target = MessageTarget.resolve(room.room_id, "$pre_stt_thread", "$typed")
+    post_target = MessageTarget.resolve(room.room_id, "$post_stt_thread", "$voice")
+    pre_envelope = _envelope(
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        source_event_id="$typed",
+        target=pre_target,
+    )
+    post_envelope = _envelope(
+        source_kind=VOICE_SOURCE_KIND,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        source_event_id="$voice",
+        target=post_target,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    pre_signal = lifecycle._get_or_create_queued_signal(pre_target)
+    post_signal = lifecycle._get_or_create_queued_signal(post_target)
+    typed_event = _prepared_text_event(event_id="$typed")
+    voice_event = replace(
+        _prepared_text_event(event_id="$voice"),
+        body="🎤 voice transcript",
+        source_kind_override=VOICE_SOURCE_KIND,
+    )
+    captured_reservations: list[object] = []
+
+    async def capture_dispatch(*_args: object, **kwargs: object) -> None:
+        assert pre_signal.pending_human_messages == 0
+        assert post_signal.pending_human_messages == 1
+        reservation = kwargs["queued_notice_reservation"]
+        captured_reservations.append(reservation)
+        assert reservation is post_reservation
+        reservation.consume()
+
+    pre_signal.begin_response_turn()
+    post_signal.begin_response_turn()
+    try:
+        pre_reservation = lifecycle.reserve_waiting_human_message(target=pre_target, response_envelope=pre_envelope)
+        post_reservation = lifecycle.reserve_waiting_human_message(target=post_target, response_envelope=post_envelope)
+        assert pre_reservation is not None
+        assert post_reservation is not None
+        batch = build_coalesced_batch(
+            (room.room_id, "$post_stt_thread", "@user:localhost"),
+            [
+                PendingEvent(
+                    event=typed_event,
+                    room=room,
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    dispatch_metadata=_targeted_queued_notice_metadata(pre_reservation, pre_target),
+                ),
+                PendingEvent(
+                    event=voice_event,
+                    room=room,
+                    source_kind=VOICE_SOURCE_KIND,
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
+                ),
+            ],
+            gate_key=(room.room_id, "$pre_stt_thread", "@user:localhost"),
+        )
+
+        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
+            await bot._turn_controller.handle_coalesced_batch(batch)
+    finally:
+        pre_signal.finish_response_turn()
+        post_signal.finish_response_turn()
+
+    assert captured_reservations == [post_reservation]
+    assert pre_signal.pending_human_messages == 0
+    assert post_signal.pending_human_messages == 0
+    assert not pre_signal.is_set()
+    assert not post_signal.is_set()
 
 
 @pytest.mark.asyncio

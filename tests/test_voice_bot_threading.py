@@ -1491,3 +1491,48 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
         "event_id": "$thread_root",
     }
     assert handled_source_ids == ["$audio-fails"]
+
+
+@pytest.mark.asyncio
+async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
+    """Unexpected pre-normalization readiness errors should also terminate visibly."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$thread-resolution-fails")
+    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=RuntimeError("thread lookup failed")),
+        ),
+        patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
+
+    assert len(dispatches) == 1
+    dispatched_event, handled_source_ids = dispatches[0]
+    assert isinstance(dispatched_event, PreparedTextEvent)
+    assert dispatched_event.body == "🎤 [Attached voice message]"
+    assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
+    assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    assert dispatched_event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread_root",
+    }
+    assert handled_source_ids == ["$thread-resolution-fails"]
