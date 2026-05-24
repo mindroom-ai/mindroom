@@ -1977,6 +1977,67 @@ async def test_pending_audio_reply_after_voice_claim_follows_resolved_voice_gate
 
 
 @pytest.mark.asyncio
+async def test_same_thread_followup_after_voice_claim_follows_retargeted_gate() -> None:
+    """A follow-up queued on the pre-STT thread should not move a retargeted gate backward."""
+    room = _make_room()
+    pre_key = (room.room_id, "$pre-stt-thread", "@user:localhost")
+    post_key = (room.room_id, "$post-stt-thread", "@user:localhost")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1000,
+        thread_id="$pre-stt-thread",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    typed = _text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        server_timestamp=1001,
+        thread_id="$pre-stt-thread",
+    )
+    release_voice = asyncio.Event()
+    calls: list[tuple[CoalescingKey, CoalescingKey, list[str]]] = []
+
+    async def ready_voice() -> ReadyPendingEvent:
+        await release_voice.wait()
+        return ReadyPendingEvent(
+            key=post_key,
+            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        gate.retarget(batch.gate_key, batch.coalescing_key)
+        calls.append((batch.coalescing_key, batch.gate_key, list(batch.source_event_ids)))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.admit(
+        pre_key,
+        ready_task=asyncio.create_task(ready_voice()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await asyncio.sleep(0.02)
+    await gate.enqueue(pre_key, PendingEvent(event=typed, room=room, source_kind="message"))
+    await asyncio.sleep(0.02)
+    assert calls == []
+
+    release_voice.set()
+    await gate.drain_all()
+
+    assert calls == [
+        (post_key, pre_key, ["$voice"]),
+        (post_key, post_key, ["$typed"]),
+    ]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_unresolved_room_voice_does_not_capture_unrelated_thread_text() -> None:
     """A room-key voice admission should not batch unrelated existing-thread text."""
     room = _make_room()
@@ -3848,6 +3909,64 @@ async def test_handle_coalesced_batch_uses_resolved_key_for_room_scoped_primary(
     assert isinstance(dispatched_event, PreparedTextEvent)
     content = dispatched_event.source["content"]
     assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$voice_thread"}
+
+
+def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> None:
+    """A room-resolved voice batch must not dispatch through a typed reply's stale thread relation."""
+    room = _make_room()
+    room_key = (room.room_id, None, "@user:localhost")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1000,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    typed = _text_event(
+        event_id="$typed",
+        body="typed reply to pending voice",
+        server_timestamp=1001,
+        thread_id="$voice",
+    )
+
+    batch = build_coalesced_batch(
+        room_key,
+        [
+            PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+            PendingEvent(event=typed, room=room, source_kind="message"),
+        ],
+        gate_key=(room.room_id, "$pre-stt-thread", "@user:localhost"),
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert isinstance(handoff.event, PreparedTextEvent)
+    assert "m.relates_to" not in handoff.event.source["content"]
+
+
+def test_single_followup_batch_uses_resolved_coalescing_thread_relation() -> None:
+    """A single follow-up batch retargeted by voice resolution should dispatch on the resolved thread."""
+    room = _make_room()
+    post_key = (room.room_id, "$post-stt-thread", "@user:localhost")
+    typed = _text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        server_timestamp=1001,
+        thread_id="$voice",
+    )
+
+    batch = build_coalesced_batch(
+        post_key,
+        [PendingEvent(event=typed, room=room, source_kind="message")],
+        gate_key=post_key,
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert isinstance(handoff.event, PreparedTextEvent)
+    assert handoff.event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$post-stt-thread",
+    }
 
 
 @pytest.mark.asyncio

@@ -969,7 +969,7 @@ class CoalescingGate:
         pending_event = ready_admission.pending_event
         if pending_event.source_kind == VOICE_SOURCE_KIND:
             dispatch_key = ready_admission.key
-        elif ready_admission.admission_key not in {ready_admission.key, provisional_key}:
+        elif ready_admission.admission_key != provisional_key:
             dispatch_key = provisional_key
         else:
             dispatch_key = CoalescingGate._voice_resolved_key_for_admission(ready_admissions, index)

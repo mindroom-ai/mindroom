@@ -276,6 +276,31 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _thread_relation_event_id(content: dict[str, Any]) -> str | None:
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, dict) or relates_to.get("rel_type") != "m.thread":
+        return None
+    event_id = relates_to.get("event_id")
+    return event_id if isinstance(event_id, str) else None
+
+
+def _normalize_batch_thread_relation(content: dict[str, Any], batch: CoalescedBatch) -> None:
+    thread_id = batch.coalescing_key[1]
+    if thread_id is None:
+        if _thread_relation_event_id(content) is not None:
+            content.pop("m.relates_to", None)
+        return
+    content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+
+
+def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: CoalescedBatch) -> bool:
+    content = event_content_dict(event)
+    current_thread_id = _thread_relation_event_id(content) if content is not None else None
+    if current_thread_id is not None:
+        return current_thread_id != batch.coalescing_key[1]
+    return batch.source_kind == VOICE_SOURCE_KIND and batch.coalescing_key[1] is not None
+
+
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
     primary_source: dict[str, Any] = batch.primary_event.source if isinstance(batch.primary_event.source, dict) else {}
     merged: dict[str, Any] = dict(primary_source)
@@ -294,11 +319,8 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
         primary_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     if payload.attachment_ids:
         primary_content[ATTACHMENT_IDS_KEY] = list(payload.attachment_ids)
-    if batch.source_kind == VOICE_SOURCE_KIND and batch.coalescing_key[1] is not None:
-        primary_content["m.relates_to"] = {
-            "rel_type": "m.thread",
-            "event_id": batch.coalescing_key[1],
-        }
+    if _batch_requires_thread_relation_normalization(batch.primary_event, batch):
+        _normalize_batch_thread_relation(primary_content, batch)
     merged["content"] = primary_content
     return merged
 
@@ -311,7 +333,11 @@ def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) 
 
 def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the text dispatch event for one batch."""
-    if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
+    if (
+        len(batch.pending_events) == 1
+        and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
+        and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
+    ):
         if isinstance(batch.primary_event, PreparedTextEvent):
             return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
         return batch.primary_event
