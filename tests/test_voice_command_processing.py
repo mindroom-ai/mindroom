@@ -978,6 +978,7 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
@@ -1098,6 +1099,7 @@ async def test_router_visible_voice_echo_marks_raw_audio_fallback(tmp_path) -> N
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]

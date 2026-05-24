@@ -908,21 +908,8 @@ class CoalescingGate:
         self,
         admissions: list[_QueuedEvent],
     ) -> list[ReadyPendingEvent]:
-        results = await asyncio.gather(
-            *(self._resolve_queued_event(admission) for admission in admissions),
-            return_exceptions=True,
-        )
-        ready_events: list[ReadyPendingEvent] = []
-        for result in results:
-            if isinstance(result, ReadyPendingEvent):
-                ready_events.append(result)
-            elif isinstance(result, BaseException):
-                logger.error(
-                    "coalescing_gate_claimed_ready_task_failed",
-                    exception_type=result.__class__.__name__,
-                    error_message=str(result),
-                )
-        return ready_events
+        results = await asyncio.gather(*(self._resolve_queued_event(admission) for admission in admissions))
+        return [result for result in results if result is not None]
 
     @staticmethod
     def _dispatch_key_for_ready_events(

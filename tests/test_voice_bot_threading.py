@@ -18,12 +18,14 @@ from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -1271,7 +1273,6 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
     """Trusted router voice echoes should be marked handled and skipped by target agents."""
     bot = mock_home_bot
     room = _threaded_room()
-    visible_router_voice_echo_key = "com.mindroom.visible_router_voice_echo"
     echo_event = _threaded_prepared_text_event(
         event_id="$echo",
         body="🎤 voice transcript",
@@ -1279,7 +1280,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         content_overrides={
             ORIGINAL_SENDER_KEY: "@user:example.com",
-            visible_router_voice_echo_key: True,
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
         },
     )
 
@@ -1303,6 +1304,41 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
 
     mock_dispatch.assert_not_awaited()
     assert bot._turn_store.is_handled("$echo")
+
+
+@pytest.mark.asyncio
+async def test_ready_voice_event_cancels_thread_resolution_when_cancelled(mock_home_bot: AgentBot) -> None:
+    """Cancelling voice readiness should not leave the shared thread-resolution task running."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$voice-cancelled")
+    thread_resolution_started = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def waiting_thread_id() -> str | None:
+        thread_resolution_started.set()
+        await never_release.wait()
+        return "$thread_root"
+
+    coalescing_thread_id_task = asyncio.create_task(waiting_thread_id())
+    ready_task = asyncio.create_task(
+        bot._turn_controller._ready_voice_event(
+            room=room,
+            prechecked_event=_PrecheckedEvent(event=voice_event, requester_user_id="@user:example.com"),
+            event_info=EventInfo.from_event(voice_event.source),
+            dispatch_timing=None,
+            coalescing_thread_id_task=coalescing_thread_id_task,
+        ),
+    )
+
+    await thread_resolution_started.wait()
+    ready_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await ready_task
+    with suppress(asyncio.CancelledError):
+        await coalescing_thread_id_task
+
+    assert coalescing_thread_id_task.cancelled()
 
 
 @pytest.mark.asyncio

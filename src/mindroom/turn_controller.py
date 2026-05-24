@@ -2432,6 +2432,8 @@ class TurnController:
                 ),
             )
         finally:
+            if not coalescing_thread_id_task.done():
+                coalescing_thread_id_task.cancel()
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
 

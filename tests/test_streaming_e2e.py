@@ -27,6 +27,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
@@ -600,6 +601,10 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
                         display_name="CalculatorAgent",
                         rooms=["!test:localhost"],
                     ),
+                    "helper": AgentConfig(
+                        display_name="HelperAgent",
+                        rooms=["!test:localhost"],
+                    ),
                 },
                 router=RouterConfig(model="default"),
             ),
@@ -638,6 +643,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         # Process - bot should not respond (not mentioned)
         await bot._on_message(test_room, initial_event)
+        await drain_coalescing(bot)
         assert len(events_sent) == 0
 
         # User edits to add mention

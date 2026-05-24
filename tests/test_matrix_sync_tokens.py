@@ -432,11 +432,12 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     async def dispatch_batch(batch: object) -> None:
         dispatched.append(list(batch.source_event_ids))
 
+    shutting_down = True
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
         debounce_seconds=lambda: 60.0,
         upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
+        is_shutting_down=lambda: shutting_down,
     )
 
     waiting_release = asyncio.Event()
@@ -453,6 +454,8 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     await asyncio.sleep(0)
     waiting_release.set()
     await drain_task
+
+    shutting_down = False
 
     async def next_ready() -> object:
         return ReadyPendingEvent(
