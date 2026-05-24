@@ -18,7 +18,12 @@ from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
@@ -1440,11 +1445,22 @@ async def test_ready_voice_event_cancels_thread_resolution_when_cancelled(mock_h
 
 
 @pytest.mark.asyncio
-async def test_raw_voice_stt_failure_does_not_mark_audio_handled(mock_home_bot: AgentBot) -> None:
-    """Transient STT failures should leave the audio source retryable."""
+async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
+    """Unexpected normalization errors should terminate visibly instead of dropping live ingress."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$audio-fails")
+    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
 
     with (
         patch.object(
@@ -1457,9 +1473,21 @@ async def test_raw_voice_stt_failure_does_not_mark_audio_handled(mock_home_bot: 
             "prepare_voice_event",
             new=AsyncMock(side_effect=RuntimeError("stt failed")),
         ),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
     ):
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    assert not bot._turn_store.is_handled("$audio-fails")
+    assert len(dispatches) == 1
+    dispatched_event, handled_source_ids = dispatches[0]
+    assert isinstance(dispatched_event, PreparedTextEvent)
+    assert dispatched_event.body == "🎤 [Attached voice message]"
+    assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
+    assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    assert dispatched_event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread_root",
+    }
+    assert handled_source_ids == ["$audio-fails"]

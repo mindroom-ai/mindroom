@@ -961,49 +961,42 @@ class CoalescingGate:
 
     @staticmethod
     def _dispatch_key_for_ready_admissions(
+        provisional_key: CoalescingKey,
         ready_admissions: list[_ReadyAdmission],
         index: int,
     ) -> CoalescingKey:
         ready_admission = ready_admissions[index]
         pending_event = ready_admission.pending_event
-        admission_key = ready_admission.admission_key
         if pending_event.source_kind == VOICE_SOURCE_KIND:
             dispatch_key = ready_admission.key
-        elif admission_key[1] is not None:
-            dispatch_key = CoalescingGate._voice_resolved_key_for_admission(admission_key, ready_admissions)
-            if dispatch_key is None:
-                dispatch_key = admission_key
         else:
-            dispatch_key = CoalescingGate._neighbor_thread_key(ready_admissions, index) or admission_key
+            dispatch_key = CoalescingGate._voice_resolved_key_for_admission(ready_admissions, index)
+            if dispatch_key is None:
+                dispatch_key = ready_admission.key if ready_admission.key[1] is not None else provisional_key
         return dispatch_key
 
     @staticmethod
     def _voice_resolved_key_for_admission(
-        admission_key: CoalescingKey,
-        ready_admissions: list[_ReadyAdmission],
-    ) -> CoalescingKey | None:
-        for voice_admission in ready_admissions:
-            if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND or voice_admission.key[1] is None:
-                continue
-            if voice_admission.admission_key == admission_key:
-                return voice_admission.key
-            if voice_admission.pending_event.event.event_id == admission_key[1]:
-                return voice_admission.key
-        return None
-
-    @staticmethod
-    def _neighbor_thread_key(
         ready_admissions: list[_ReadyAdmission],
         index: int,
     ) -> CoalescingKey | None:
+        admission_key = ready_admissions[index].admission_key
+
+        def matches_admission(voice_admission: _ReadyAdmission) -> bool:
+            if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND or voice_admission.key[1] is None:
+                return False
+            if voice_admission.admission_key == admission_key:
+                return True
+            return voice_admission.pending_event.event.event_id == admission_key[1]
+
         for previous_index in range(index - 1, -1, -1):
-            previous_key = ready_admissions[previous_index].key
-            if previous_key[1] is not None:
-                return previous_key
+            previous_admission = ready_admissions[previous_index]
+            if matches_admission(previous_admission):
+                return previous_admission.key
         for next_index in range(index + 1, len(ready_admissions)):
-            next_key = ready_admissions[next_index].key
-            if next_key[1] is not None:
-                return next_key
+            next_admission = ready_admissions[next_index]
+            if matches_admission(next_admission):
+                return next_admission.key
         return None
 
     @staticmethod
@@ -1020,6 +1013,16 @@ class CoalescingGate:
         return ready_admissions[-1].admission_key if ready_admissions else None
 
     @staticmethod
+    def _can_merge_ready_segment(
+        key: CoalescingKey,
+        pending_events: list[PendingEvent],
+        next_event: PendingEvent,
+    ) -> bool:
+        if key[1] is not None:
+            return True
+        return any(is_media_dispatch_event(pending_event.event) for pending_event in [*pending_events, next_event])
+
+    @staticmethod
     def _ready_admission_segments(
         provisional_key: CoalescingKey,
         ready_admissions: list[_ReadyAdmission],
@@ -1032,8 +1035,12 @@ class CoalescingGate:
                 ]
         segments: list[tuple[CoalescingKey, list[PendingEvent]]] = []
         for index, ready_admission in enumerate(ready_admissions):
-            key = CoalescingGate._dispatch_key_for_ready_admissions(ready_admissions, index)
-            if segments and segments[-1][0] == key:
+            key = CoalescingGate._dispatch_key_for_ready_admissions(provisional_key, ready_admissions, index)
+            if (
+                segments
+                and segments[-1][0] == key
+                and CoalescingGate._can_merge_ready_segment(key, segments[-1][1], ready_admission.pending_event)
+            ):
                 segments[-1][1].append(ready_admission.pending_event)
             else:
                 segments.append((key, [ready_admission.pending_event]))
@@ -1184,7 +1191,7 @@ class CoalescingGate:
                     if not ready_admissions:
                         continue
                     await self._dispatch_claimed_events(
-                        self._dispatch_key_for_ready_admissions(ready_admissions, 0),
+                        self._dispatch_key_for_ready_admissions(current_key, ready_admissions, 0),
                         gate,
                         [ready_admissions[0].pending_event],
                         bypass_grace=True,

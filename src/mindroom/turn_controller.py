@@ -26,6 +26,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
@@ -81,6 +82,7 @@ from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
     MatrixMediaEvent,
+    extract_media_caption,
     is_audio_message_event,
     is_file_message_event,
     is_image_message_event,
@@ -160,6 +162,38 @@ def _queued_notice_reservation_from_metadata(
     for reservation in reservations[1:]:
         cast("QueuedHumanNoticeReservation", reservation).consume()
     return cast("QueuedHumanNoticeReservation", reservations[0])
+
+
+def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedTextEvent:
+    """Return a dispatchable fallback when voice normalization itself fails."""
+    body = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
+    source = dict(event.source) if isinstance(event.source, dict) else {}
+    source_content = source.get("content")
+    original_content = source_content if isinstance(source_content, dict) else {}
+    content: dict[str, Any] = {
+        "msgtype": "m.text",
+        "body": body,
+        ORIGINAL_SENDER_KEY: event.sender,
+        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+    }
+    inherited_mentions = original_content.get("m.mentions")
+    if isinstance(inherited_mentions, dict):
+        content["m.mentions"] = inherited_mentions
+    inherited_relation = original_content.get("m.relates_to")
+    if isinstance(inherited_relation, dict):
+        content["m.relates_to"] = inherited_relation
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    source["content"] = content
+    return PreparedTextEvent(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=body,
+        source=source,
+        server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
+        source_kind_override=VOICE_SOURCE_KIND,
+    )
 
 
 class _EditRegenerator(Protocol):
@@ -2355,32 +2389,24 @@ class TurnController:
                 target=preliminary_target,
                 response_envelope=envelope,
             )
-            if dispatch_timing is not None:
-                dispatch_timing.mark("ingress_normalize_start")
-            normalized_voice = await self.deps.normalizer.prepare_voice_event(
-                VoiceNormalizationRequest(
-                    room=room,
-                    event=event,
-                ),
+            normalized_event, effective_thread_id = await self._normalize_voice_event_or_fallback(
+                room=room,
+                event=event,
+                thread_id=coalescing_thread_id,
+                dispatch_timing=dispatch_timing,
             )
-            if dispatch_timing is not None:
-                dispatch_timing.mark("ingress_normalize_ready")
-            if normalized_voice is None:
+            if normalized_event is None:
                 self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
                 return None
-            attach_dispatch_pipeline_timing(
-                normalized_voice.event.source,
-                dispatch_timing,
-            )
 
             try:
                 await self._maybe_send_visible_voice_echo(
                     room,
                     event,
-                    text=normalized_voice.event.body,
-                    thread_id=normalized_voice.effective_thread_id,
+                    text=normalized_event.body,
+                    thread_id=effective_thread_id,
                     requester_user_id=prechecked_event.requester_user_id,
-                    normalized_source=normalized_voice.event.source,
+                    normalized_source=normalized_event.source,
                 )
             except asyncio.CancelledError:
                 raise
@@ -2395,13 +2421,13 @@ class TurnController:
 
             normalized_target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
-                thread_id=normalized_voice.effective_thread_id,
-                reply_to_event_id=normalized_voice.event.event_id,
-                event_source=normalized_voice.event.source,
+                thread_id=effective_thread_id,
+                reply_to_event_id=normalized_event.event_id,
+                event_source=normalized_event.source,
             )
             envelope = self.deps.resolver.build_ingress_envelope(
                 room_id=room.room_id,
-                event=normalized_voice.event,
+                event=normalized_event,
                 requester_user_id=prechecked_event.requester_user_id,
                 target=normalized_target,
                 source_kind=VOICE_SOURCE_KIND,
@@ -2426,9 +2452,9 @@ class TurnController:
                 )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
-                key=(room.room_id, normalized_voice.effective_thread_id, prechecked_event.requester_user_id),
+                key=(room.room_id, effective_thread_id, prechecked_event.requester_user_id),
                 pending_event=PendingEvent(
-                    event=normalized_voice.event,
+                    event=normalized_event,
                     room=room,
                     source_kind=envelope.source_kind,
                     dispatch_policy_source_kind=(
@@ -2447,6 +2473,47 @@ class TurnController:
                 coalescing_thread_id_task.cancel()
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
+
+    async def _normalize_voice_event_or_fallback(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        thread_id: str | None,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> tuple[PreparedTextEvent | None, str | None]:
+        """Normalize voice or return a raw-audio fallback event for unexpected failures."""
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_start")
+        try:
+            normalized_voice = await self.deps.normalizer.prepare_voice_event(
+                VoiceNormalizationRequest(
+                    room=room,
+                    event=event,
+                ),
+            )
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Voice normalization failed; dispatching raw-audio fallback",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                exception_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            normalized_event = _raw_voice_fallback_event(event, thread_id=thread_id)
+            effective_thread_id = thread_id
+        else:
+            if normalized_voice is None:
+                return None, None
+            normalized_event = normalized_voice.event
+            effective_thread_id = normalized_voice.effective_thread_id
+        if dispatch_timing is not None:
+            dispatch_timing.mark("ingress_normalize_ready")
+        attach_dispatch_pipeline_timing(
+            normalized_event.source,
+            dispatch_timing,
+        )
+        return normalized_event, effective_thread_id
 
     async def _dispatch_file_sidecar_text_preview(
         self,
