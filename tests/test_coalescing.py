@@ -92,11 +92,10 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
 
 async def _ready_after(
     release: asyncio.Event,
-    key: tuple[str, str | None, str],
     pending_event: PendingEvent,
 ) -> ReadyPendingEvent:
     await release.wait()
-    return ReadyPendingEvent(key=key, pending_event=pending_event)
+    return ReadyPendingEvent(pending_event=pending_event)
 
 
 @pytest.mark.asyncio
@@ -253,7 +252,7 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
     voice_ready = asyncio.Event()
 
     voice_pending = _voice_pending("$voice:localhost", "voice transcript", 1_000_000)
-    voice_task = asyncio.create_task(_ready_after(voice_ready, key, voice_pending))
+    voice_task = asyncio.create_task(_ready_after(voice_ready, voice_pending))
 
     await gate.admit(
         key,
@@ -273,44 +272,6 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
     assert [batch.source_event_ids for batch in batches] == [
         ["$voice:localhost"],
         ["$typed:localhost"],
-    ]
-
-
-@pytest.mark.asyncio
-async def test_explicit_thread_voice_retarget_moves_same_window_text_to_resolved_key() -> None:
-    """Text admitted with an explicit pre-STT thread should follow the voice's resolved thread."""
-    batches: list[CoalescedBatch] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch)
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 1.0,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    pre_stt_key = CoalescingKey("!room:localhost", "$pre-stt-thread:localhost", "@user:localhost")
-    post_stt_key = CoalescingKey("!room:localhost", "$post-stt-thread:localhost", "@user:localhost")
-    voice_ready = asyncio.Event()
-
-    voice_pending = _voice_pending("$voice:localhost", "voice transcript", 1_000_000)
-    voice_task = asyncio.create_task(_ready_after(voice_ready, post_stt_key, voice_pending))
-
-    await gate.admit(
-        pre_stt_key,
-        ready_task=voice_task,
-        source_event_id="$voice:localhost",
-        source_kind=VOICE_SOURCE_KIND,
-        received_at=1_000.0,
-    )
-    await gate.enqueue(pre_stt_key, _pending(_text_event("$typed:localhost", "typed follow-up", 1_000_200)))
-
-    voice_ready.set()
-    await gate.drain_all()
-
-    assert [(batch.coalescing_key, batch.source_event_ids) for batch in batches] == [
-        (post_stt_key, ["$voice:localhost", "$typed:localhost"]),
     ]
 
 

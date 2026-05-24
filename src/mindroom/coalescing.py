@@ -98,7 +98,6 @@ class _QueuedEvent:
 class ReadyPendingEvent:
     """Resolved event returned by async ingress normalization."""
 
-    key: CoalescingKey
     pending_event: PendingEvent
 
 
@@ -111,7 +110,7 @@ class _ReadyAdmission:
 
     @property
     def key(self) -> CoalescingKey:
-        return self.ready_event.key
+        return self.admission_key
 
     @property
     def pending_event(self) -> PendingEvent:
@@ -286,10 +285,7 @@ class CoalescingGate:
         return key
 
     def _alias_target_is_live(self, key: CoalescingKey) -> bool:
-        if key in self._gates:
-            return True
-        room_gate = self._gates.get(CoalescingKey(key.room_id, None, key.requester_user_id))
-        return room_gate is not None and room_gate.phase is GatePhase.IN_FLIGHT
+        return key in self._gates
 
     def _drop_aliases_for_key(self, key: CoalescingKey) -> None:
         self._key_aliases = {
@@ -323,8 +319,6 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> None:
-        if key.thread_id is None:
-            return
         for pending_event in pending_events:
             if pending_event.source_kind != VOICE_SOURCE_KIND:
                 continue
@@ -353,35 +347,6 @@ class CoalescingGate:
             ):
                 return gate_key
         return key
-
-    @staticmethod
-    def _voice_owner_key(key: CoalescingKey) -> CoalescingKey:
-        return CoalescingKey(key.room_id, None, key.requester_user_id)
-
-    @staticmethod
-    def _gate_has_unresolved_voice(gate: _GateEntry) -> bool:
-        return any(
-            queued.source_kind == VOICE_SOURCE_KIND and queued.ready_result is None
-            for queued in [*gate.claimed_admissions, *gate.queue]
-        )
-
-    def _unresolved_voice_gate_key(self, key: CoalescingKey) -> CoalescingKey | None:
-        for gate_key, gate in self._gates.items():
-            if gate_key.room_id != key.room_id or gate_key.requester_user_id != key.requester_user_id:
-                continue
-            if self._gate_has_unresolved_voice(gate):
-                return gate_key
-        return None
-
-    def _merge_room_requester_gates_into(self, owner_key: CoalescingKey) -> None:
-        for gate_key in list(self._gates):
-            if (
-                gate_key == owner_key
-                or gate_key.room_id != owner_key.room_id
-                or gate_key.requester_user_id != owner_key.requester_user_id
-            ):
-                continue
-            self.retarget(gate_key, owner_key)
 
     @staticmethod
     def _gate_work_count(gate: _GateEntry) -> int:
@@ -630,12 +595,13 @@ class CoalescingGate:
         Compatibility wrapper for callers that already have a ready event.
         New Matrix ingress should use ``admit`` before async normalization.
         """
+        canonical_key = self._key_for_pending_voice_source_event(key)
         await self.admit(
-            key,
+            canonical_key,
             received_at=pending_event.enqueue_time,
             source_event_id=pending_event.event.event_id,
             source_kind=pending_event.source_kind,
-            ready_result=ReadyPendingEvent(key=key, pending_event=pending_event),
+            ready_result=ReadyPendingEvent(pending_event=pending_event),
         )
 
     async def admit(
@@ -653,16 +619,7 @@ class CoalescingGate:
             msg = "ready_task is required when ready_result is not provided"
             raise ValueError(msg)
         enqueue_start = time.monotonic()
-        canonical_key = self._canonical_key(provisional_key)
-        if source_kind == VOICE_SOURCE_KIND and ready_result is None:
-            provisional_key = self._voice_owner_key(canonical_key)
-            self._merge_room_requester_gates_into(provisional_key)
-        else:
-            provisional_key = self._unresolved_voice_gate_key(
-                canonical_key,
-            ) or self._key_for_pending_voice_source_event(
-                canonical_key,
-            )
+        provisional_key = self._key_for_pending_voice_source_event(provisional_key)
         gate = self._get_or_create_gate(provisional_key)
         self._next_received_order += 1
         admission = _QueuedEvent(
@@ -887,46 +844,9 @@ class CoalescingGate:
         index: int,
     ) -> CoalescingKey:
         ready_admission = ready_admissions[index]
-        pending_event = ready_admission.pending_event
-        if pending_event.source_kind == VOICE_SOURCE_KIND:
-            dispatch_key = ready_admission.key
-        elif ready_admission.admission_key != provisional_key:
-            dispatch_key = provisional_key
-        else:
-            dispatch_key = CoalescingGate._voice_resolved_key_for_admission(ready_admissions, index)
-            if dispatch_key is None:
-                dispatch_key = ready_admission.key
-        return dispatch_key
-
-    @staticmethod
-    def _voice_resolved_key_for_admission(
-        ready_admissions: list[_ReadyAdmission],
-        index: int,
-    ) -> CoalescingKey | None:
-        admission_thread_id = ready_admissions[index].admission_key.thread_id
-        ready_thread_id = ready_admissions[index].key.thread_id
-
-        def matches_admission(voice_admission: _ReadyAdmission) -> bool:
-            if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
-                return False
-            return voice_admission.pending_event.event.event_id in {admission_thread_id, ready_thread_id}
-
-        for previous_index in range(index - 1, -1, -1):
-            previous_admission = ready_admissions[previous_index]
-            if matches_admission(previous_admission):
-                return previous_admission.key
-        for next_index in range(index + 1, len(ready_admissions)):
-            next_admission = ready_admissions[next_index]
-            if matches_admission(next_admission):
-                return next_admission.key
-        return None
-
-    @staticmethod
-    def _owner_voice_batch_key(ready_admissions: list[_ReadyAdmission]) -> CoalescingKey | None:
-        for ready_admission in reversed(ready_admissions):
-            if ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
-                return ready_admission.key
-        return None
+        if ready_admission.admission_key != provisional_key:
+            return provisional_key
+        return ready_admission.key
 
     @staticmethod
     def _can_merge_ready_segment(
@@ -945,11 +865,6 @@ class CoalescingGate:
         provisional_key: CoalescingKey,
         ready_admissions: list[_ReadyAdmission],
     ) -> list[tuple[CoalescingKey, list[PendingEvent]]]:
-        if provisional_key.thread_id is None:
-            voice_batch_key = CoalescingGate._owner_voice_batch_key(ready_admissions)
-            if voice_batch_key is not None:
-                return [(voice_batch_key, [ready_admission.pending_event for ready_admission in ready_admissions])]
-
         segments: list[tuple[CoalescingKey, list[PendingEvent]]] = []
         for index, ready_admission in enumerate(ready_admissions):
             key = CoalescingGate._dispatch_key_for_ready_admissions(provisional_key, ready_admissions, index)

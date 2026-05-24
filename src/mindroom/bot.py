@@ -409,7 +409,6 @@ class AgentBot:
                 logger=self.logger,
                 storage_path=self.storage_path,
                 runtime_paths=self.runtime_paths,
-                conversation_resolver=self._conversation_resolver,
             ),
         )
         self._delivery_gateway = DeliveryGateway(

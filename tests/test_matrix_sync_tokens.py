@@ -383,7 +383,6 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     async def ready_event() -> object:
         await release_ready.wait()
         return ReadyPendingEvent(
-            key=key,
             pending_event=PendingEvent(event=event, room=room, source_kind="message"),
         )
 
@@ -445,7 +444,6 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     async def waiting_ready() -> object:
         await waiting_release.wait()
         return ReadyPendingEvent(
-            key=key,
             pending_event=PendingEvent(event=text_event("$waiting", "waiting"), room=room, source_kind="message"),
         )
 
@@ -459,7 +457,6 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
 
     async def next_ready() -> object:
         return ReadyPendingEvent(
-            key=key,
             pending_event=PendingEvent(event=text_event("$next", "next"), room=room, source_kind="message"),
         )
 

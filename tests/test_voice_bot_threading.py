@@ -28,10 +28,8 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -242,7 +240,6 @@ def _normalized_voice_result(
             server_timestamp=event.server_timestamp,
             source_kind_override=VOICE_SOURCE_KIND,
         ),
-        effective_thread_id=thread_id,
     )
 
 
@@ -465,13 +462,9 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
 
     queued_signal.begin_response_turn()
     task: asyncio.Task[None] | None = None
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$voice-blocked")
     try:
         with (
-            patch.object(
-                bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(return_value="$thread_root"),
-            ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
@@ -544,7 +537,6 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             server_timestamp=voice_event.server_timestamp,
             source_kind_override="voice",
         ),
-        effective_thread_id="$thread_root",
     )
 
     async def fail_visible_echo(*_args: object, **_kwargs: object) -> None:
@@ -552,13 +544,9 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         raise echo_error
 
     queued_signal.begin_response_turn()
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$voice-echo-fails")
     try:
         with (
-            patch.object(
-                bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(return_value="$thread_root"),
-            ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
@@ -615,12 +603,8 @@ async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_d
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
 
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$voice-visible-echo")
     with (
-        patch.object(
-            bot._turn_controller.deps.resolver,
-            "coalescing_thread_id",
-            new=AsyncMock(return_value="$thread_root"),
-        ),
         patch.object(
             bot._turn_controller.deps.normalizer,
             "prepare_voice_event",
@@ -641,10 +625,10 @@ async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_d
 
 
 @pytest.mark.asyncio
-async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
+async def test_voice_message_uses_resolved_target_for_queued_notice_before_stt(
     mock_home_bot: AgentBot,
 ) -> None:
-    """A post-STT target change should cancel the pre-STT notice and reserve the final target."""
+    """Voice reserves the already-resolved dispatch target instead of retargeting after STT."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -673,7 +657,6 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
     )
     normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
         event=normalized_event,
-        effective_thread_id="$post_stt_thread",
     )
     pre_stt_target = bot._turn_controller.deps.resolver.build_message_target(
         room_id=room.room_id,
@@ -706,8 +689,8 @@ async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
         with (
             patch.object(
                 bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(return_value="$pre_stt_thread"),
+                "resolve_dispatch_target",
+                new=AsyncMock(return_value=post_stt_target),
             ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
@@ -764,7 +747,6 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             server_timestamp=voice_event.server_timestamp,
             source_kind_override="voice",
         ),
-        effective_thread_id=None,
     )
     target = bot._turn_controller.deps.resolver.build_message_target(
         room_id=room.room_id,
@@ -795,13 +777,9 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
 
     queued_signal.begin_response_turn()
     task: asyncio.Task[None] | None = None
+    _stub_resolve_dispatch_target(bot, None, "$room-mode-voice")
     try:
         with (
-            patch.object(
-                bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(return_value=None),
-            ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
@@ -889,13 +867,14 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
 
     first_task: asyncio.Task[None] | None = None
     second_task: asyncio.Task[None] | None = None
+    unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
+        side_effect=[
+            MessageTarget.resolve(room.room_id, "$thread_root", "$voice1"),
+            MessageTarget.resolve(room.room_id, "$thread_root", "$voice2"),
+        ],
+    )
     try:
         with (
-            patch.object(
-                bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(return_value="$thread_root"),
-            ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
@@ -998,13 +977,9 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
 
     voice_task: asyncio.Task[None] | None = None
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$voice")
     try:
         with (
-            patch.object(
-                bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(return_value="$thread_root"),
-            ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
@@ -1045,10 +1020,10 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
 
 
 @pytest.mark.asyncio
-async def test_voice_admits_before_thread_resolution_so_text_reply_waits(
+async def test_voice_admitted_after_target_resolution_so_text_reply_waits_on_stt(
     mock_home_bot: AgentBot,
 ) -> None:
-    """A typed reply must not outrun an earlier raw voice event while voice ingress resolves."""
+    """A typed reply must not outrun an earlier raw voice event while STT is pending."""
     bot = mock_home_bot
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.02)
@@ -1074,23 +1049,15 @@ async def test_voice_admits_before_thread_resolution_so_text_reply_waits(
         thread_id="$voice",
         server_timestamp=1_712_350_000_002,
     )
-    voice_thread_resolution_started = asyncio.Event()
-    release_voice_thread_resolution = asyncio.Event()
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
     dispatches: list[tuple[list[str], str]] = []
-
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: object) -> str | None:
-        event_id = cast("nio.RoomMessage", event).event_id
-        if event_id == "$voice":
-            voice_thread_resolution_started.set()
-            await release_voice_thread_resolution.wait()
-            return None
-        if event_id == "$typed":
-            return "$voice"
-        return None
 
     async def prepare_voice_event(
         request: inbound_turn_normalizer.VoiceNormalizationRequest,
     ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        prepare_started.set()
+        await release_prepare.wait()
         return _normalized_voice_result(event=request.event, text="voice transcript", thread_id="$voice")
 
     async def resolve_text_event(
@@ -1118,8 +1085,8 @@ async def test_voice_admits_before_thread_resolution_so_text_reply_waits(
         with (
             patch.object(
                 bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(side_effect=coalescing_thread_id),
+                "resolve_dispatch_target",
+                new=AsyncMock(return_value=MessageTarget.resolve(room.room_id, None, "$voice")),
             ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
@@ -1137,17 +1104,17 @@ async def test_voice_admits_before_thread_resolution_so_text_reply_waits(
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
-            await asyncio.wait_for(voice_thread_resolution_started.wait(), timeout=1.0)
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             await bot._on_message(room, typed_event)
             await asyncio.sleep(0.05)
 
             assert dispatches == []
 
-            release_voice_thread_resolution.set()
+            release_prepare.set()
             await voice_task
             await drain_coalescing(bot)
     finally:
-        release_voice_thread_resolution.set()
+        release_prepare.set()
         if voice_task is not None and not voice_task.done():
             voice_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -1194,20 +1161,15 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
         thread_id="$thread_root",
         server_timestamp=1_712_350_000_002,
     )
-    voice_thread_resolution_started = asyncio.Event()
-    release_voice_thread_resolution = asyncio.Event()
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
     dispatches: list[tuple[list[str], str]] = []
-
-    async def coalescing_thread_id(_room: nio.MatrixRoom, event: object) -> str | None:
-        event_id = cast("nio.RoomMessage", event).event_id
-        if event_id == "$voice":
-            voice_thread_resolution_started.set()
-            await release_voice_thread_resolution.wait()
-        return "$thread_root"
 
     async def prepare_voice_event(
         request: inbound_turn_normalizer.VoiceNormalizationRequest,
     ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        prepare_started.set()
+        await release_prepare.wait()
         return _normalized_voice_result(event=request.event, text="voice transcript", thread_id="$thread_root")
 
     async def resolve_text_event(
@@ -1235,8 +1197,8 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
         with (
             patch.object(
                 bot._turn_controller.deps.resolver,
-                "coalescing_thread_id",
-                new=AsyncMock(side_effect=coalescing_thread_id),
+                "resolve_dispatch_target",
+                new=AsyncMock(return_value=MessageTarget.resolve(room.room_id, "$thread_root", "$voice")),
             ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
@@ -1254,17 +1216,17 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
-            await asyncio.wait_for(voice_thread_resolution_started.wait(), timeout=1.0)
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             await bot._on_message(room, typed_event)
             await asyncio.sleep(0.05)
 
             assert dispatches == []
 
-            release_voice_thread_resolution.set()
+            release_prepare.set()
             await voice_task
             await drain_coalescing(bot)
     finally:
-        release_voice_thread_resolution.set()
+        release_prepare.set()
         if voice_task is not None and not voice_task.done():
             voice_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -1311,12 +1273,13 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
     ) -> None:
         dispatches.append(_handled_source_event_ids(handled_turn))
 
+    unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
+        side_effect=[
+            MessageTarget.resolve(room.room_id, None, "$voice1"),
+            MessageTarget.resolve(room.room_id, None, "$voice2"),
+        ],
+    )
     with (
-        patch.object(
-            bot._turn_controller.deps.resolver,
-            "coalescing_thread_id",
-            new=AsyncMock(return_value=None),
-        ),
         patch.object(
             bot._turn_controller.deps.normalizer,
             "prepare_voice_event",
@@ -1411,42 +1374,6 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
 
 
 @pytest.mark.asyncio
-async def test_ready_voice_event_cancels_thread_resolution_when_cancelled(mock_home_bot: AgentBot) -> None:
-    """Cancelling voice readiness should cancel in-progress thread resolution."""
-    bot = mock_home_bot
-    room = _threaded_room()
-    voice_event = _make_threaded_voice_event(event_id="$voice-cancelled")
-    thread_resolution_started = asyncio.Event()
-    never_release = asyncio.Event()
-
-    async def waiting_thread_id(*_args: object) -> str | None:
-        thread_resolution_started.set()
-        await never_release.wait()
-        return "$thread_root"
-
-    with patch.object(
-        bot._turn_controller.deps.resolver,
-        "coalescing_thread_id",
-        new=AsyncMock(side_effect=waiting_thread_id),
-    ):
-        ready_task = asyncio.create_task(
-            bot._turn_controller._ready_voice_event(
-                room=room,
-                prechecked_event=_PrecheckedEvent(event=voice_event, requester_user_id="@user:example.com"),
-                event_info=EventInfo.from_event(voice_event.source),
-                dispatch_timing=None,
-            ),
-        )
-
-        await thread_resolution_started.wait()
-        ready_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await ready_task
-
-    assert ready_task.cancelled()
-
-
-@pytest.mark.asyncio
 async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
     """Unexpected normalization errors should terminate visibly instead of dropping live ingress."""
     bot = mock_home_bot
@@ -1464,12 +1391,8 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
 
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$audio-fails")
     with (
-        patch.object(
-            bot._turn_controller.deps.resolver,
-            "coalescing_thread_id",
-            new=AsyncMock(return_value="$thread_root"),
-        ),
         patch.object(
             bot._turn_controller.deps.normalizer,
             "prepare_voice_event",
@@ -1516,7 +1439,7 @@ async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guess(moc
     with (
         patch.object(
             bot._turn_controller.deps.resolver,
-            "coalescing_thread_id",
+            "resolve_dispatch_target",
             new=AsyncMock(side_effect=RuntimeError("thread lookup failed")),
         ),
         patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()),

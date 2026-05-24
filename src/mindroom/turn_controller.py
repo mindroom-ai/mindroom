@@ -2323,7 +2323,7 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
-        """Admit raw audio before async normalization and reuse text dispatch once ready."""
+        """Admit raw audio after canonical thread resolution and defer only voice normalization."""
         event = prechecked_event.event
 
         if self._managed_entity_name_for_sender(event.sender) is not None:
@@ -2335,17 +2335,43 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
+        await self._append_live_event_with_timing(
+            room.room_id,
+            event,
+            event_info=event_info,
+            dispatch_timing=dispatch_timing,
+        )
+        try:
+            voice_target = await self.deps.resolver.resolve_dispatch_target(
+                room,
+                event,
+                caller_label="voice_admission",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Voice target resolution failed; leaving audio event unhandled for replay",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                exception_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            return
+        coalescing_thread_id = voice_target.source_thread_id
+
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
                 prechecked_event=prechecked_event,
-                event_info=event_info,
                 dispatch_timing=dispatch_timing,
+                coalescing_thread_id=coalescing_thread_id,
+                voice_target=voice_target,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
         await self.deps.coalescing_gate.admit(
-            CoalescingKey(room.room_id, None, prechecked_event.requester_user_id),
+            CoalescingKey(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
             ready_task=ready_task,
             source_event_id=event.event_id,
             source_kind=VOICE_SOURCE_KIND,
@@ -2356,31 +2382,17 @@ class TurnController:
         *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
-        event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
+        coalescing_thread_id: str | None,
+        voice_target: MessageTarget,
     ) -> ReadyPendingEvent | None:
-        """Normalize a raw voice event after receive-time admission."""
+        """Normalize a raw voice event after canonical thread admission."""
         event = prechecked_event.event
-        coalescing_thread_id: str | None = None
-        thread_resolved = False
         queued_notice_reservation = None
         preliminary_target = None
         reservation_released_or_handed_off = False
         try:
-            coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-            thread_resolved = True
-            await self._append_live_event_with_timing(
-                room.room_id,
-                event,
-                event_info=event_info,
-                dispatch_timing=dispatch_timing,
-            )
-            preliminary_target = self.deps.resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id=coalescing_thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            )
+            preliminary_target = voice_target
             envelope = self.deps.resolver.build_ingress_envelope(
                 room_id=room.room_id,
                 event=cast("DispatchEvent", event),
@@ -2395,7 +2407,7 @@ class TurnController:
             normalized_event, effective_thread_id = await self._normalize_voice_event_or_fallback(
                 room=room,
                 event=event,
-                thread_id=coalescing_thread_id,
+                thread_id=voice_target.resolved_thread_id,
                 dispatch_timing=dispatch_timing,
             )
             if normalized_event is None:
@@ -2443,7 +2455,6 @@ class TurnController:
             )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
-                key=CoalescingKey(room.room_id, effective_thread_id, prechecked_event.requester_user_id),
                 pending_event=PendingEvent(
                     event=normalized_event,
                     room=room,
@@ -2465,8 +2476,6 @@ class TurnController:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
                 queued_notice_reservation = None
-            if not thread_resolved:
-                raise
             return self._ready_voice_fallback_event(
                 room=room,
                 event=event,
@@ -2538,7 +2547,6 @@ class TurnController:
                 error=str(metadata_error),
             )
         return ReadyPendingEvent(
-            key=CoalescingKey(room.room_id, thread_id, requester_user_id),
             pending_event=PendingEvent(
                 event=fallback_event,
                 room=room,
@@ -2567,6 +2575,7 @@ class TurnController:
                 VoiceNormalizationRequest(
                     room=room,
                     event=event,
+                    thread_id=thread_id,
                 ),
             )
         except Exception as exc:
@@ -2583,7 +2592,7 @@ class TurnController:
             if normalized_voice is None:
                 return None, None
             normalized_event = normalized_voice.event
-            effective_thread_id = normalized_voice.effective_thread_id
+            effective_thread_id = thread_id
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_ready")
         attach_dispatch_pipeline_timing(

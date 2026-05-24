@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.constants import RuntimePaths
-    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
@@ -61,14 +60,14 @@ class VoiceNormalizationRequest:
 
     room: nio.MatrixRoom
     event: AudioMessageEvent
+    thread_id: str | None
 
 
 @dataclass(frozen=True)
 class _VoiceNormalizationResult:
-    """Normalized text event plus resolved delivery thread for one audio turn."""
+    """Normalized text event for one audio turn."""
 
     event: PreparedTextEvent
-    effective_thread_id: str | None
 
 
 @dataclass(frozen=True)
@@ -119,7 +118,6 @@ class InboundTurnNormalizerDeps:
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths
-    conversation_resolver: ConversationResolver
 
 
 @dataclass(frozen=True)
@@ -159,12 +157,7 @@ class InboundTurnNormalizer:
     async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult | None:
         """Normalize one audio message into a prepared text event."""
         client = self._client()
-        target = await self.deps.conversation_resolver.resolve_dispatch_target(
-            request.room,
-            request.event,
-            caller_label="voice_normalization",
-        )
-        effective_thread_id = target.resolved_thread_id
+        effective_thread_id = request.thread_id
         with bound_log_context(room_id=request.room.room_id, thread_id=effective_thread_id):
             prepared_voice = await prepare_voice_message(
                 client,
@@ -193,7 +186,6 @@ class InboundTurnNormalizer:
                     server_timestamp=request.event.server_timestamp,
                     source_kind_override=VOICE_SOURCE_KIND,
                 ),
-                effective_thread_id=effective_thread_id,
             )
 
     async def prepare_file_sidecar_text_event(
