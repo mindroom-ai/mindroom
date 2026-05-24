@@ -410,7 +410,7 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
             requester_user_id="@user:localhost",
         )
         assert calls == []
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: calls == [("hello", ["$m1"], [])])
 
     assert calls == [("hello", ["$m1"], [])]
 
@@ -527,7 +527,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [
         (
@@ -933,7 +933,7 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: len(calls) == 2)
 
     assert sorted(calls) == [["$m1"], ["$m2"]]
 
@@ -980,7 +980,7 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: len(calls) == 2)
 
     assert sorted(calls) == [["$reply"], ["$roommsg"]]
 
@@ -1050,7 +1050,7 @@ async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_pat
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: len(calls) == 2)
 
     assert sorted(calls) == [["$reply-a"], ["$reply-b"]]
 
@@ -1140,14 +1140,14 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: len(calls) >= 2)
 
-        assert calls == [
+        assert calls[:2] == [
             ("first", ["$m1"]),
             ("!help", ["$m2"]),
         ]
 
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: len(calls) == 3)
 
     assert calls == [
         ("first", ["$m1"]),
@@ -1283,7 +1283,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         assert calls == [["$m1"]]
 
         release_first_dispatch.set()
-        await asyncio.sleep(0.05)
+        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
 
@@ -4182,7 +4182,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.03)
+        await _wait_for(lambda: _coalescing_gate_is_idle(bot._coalescing_gate))
 
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
 

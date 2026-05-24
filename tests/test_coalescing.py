@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 import pytest
 
-from mindroom.coalescing import CoalescingGate
+from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import PendingEvent
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 
@@ -79,6 +79,24 @@ def _pending(event: nio.RoomMessageText | nio.RoomMessageImage) -> PendingEvent:
         room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind="message",
     )
+
+
+def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEvent:
+    """Wrap one normalized voice transcript as pending voice ingress."""
+    return PendingEvent(
+        event=_text_event(event_id, body, origin_server_ts),
+        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=VOICE_SOURCE_KIND,
+    )
+
+
+async def _ready_after(
+    release: asyncio.Event,
+    key: tuple[str, str | None, str],
+    pending_event: PendingEvent,
+) -> ReadyPendingEvent:
+    await release.wait()
+    return ReadyPendingEvent(key=key, pending_event=pending_event)
 
 
 @pytest.mark.asyncio
@@ -215,3 +233,131 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
 
     assert [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]]
     assert "quick succession" in batches[0].prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> None:
+    """A slow STT result must not let later text join an expired voice debounce window."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.03,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", "$thread:localhost", "@user:localhost")
+    voice_ready = asyncio.Event()
+
+    voice_pending = _voice_pending("$voice:localhost", "voice transcript", 1_000_000)
+    voice_task = asyncio.create_task(_ready_after(voice_ready, key, voice_pending))
+
+    await gate.admit(
+        key,
+        ready_task=voice_task,
+        source_event_id="$voice:localhost",
+        source_kind=VOICE_SOURCE_KIND,
+        received_at=1_000.0,
+    )
+    await asyncio.sleep(0.08)
+    await gate.enqueue(key, _pending(_text_event("$typed:localhost", "typed follow-up", 1_000_800)))
+
+    assert batches == []
+
+    voice_ready.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$voice:localhost"],
+        ["$typed:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_thread_voice_retarget_moves_same_window_text_to_resolved_key() -> None:
+    """Text admitted with an explicit pre-STT thread should follow the voice's resolved thread."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 1.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    pre_stt_key = ("!room:localhost", "$pre-stt-thread:localhost", "@user:localhost")
+    post_stt_key = ("!room:localhost", "$post-stt-thread:localhost", "@user:localhost")
+    voice_ready = asyncio.Event()
+
+    voice_pending = _voice_pending("$voice:localhost", "voice transcript", 1_000_000)
+    voice_task = asyncio.create_task(_ready_after(voice_ready, post_stt_key, voice_pending))
+
+    await gate.admit(
+        pre_stt_key,
+        ready_task=voice_task,
+        source_event_id="$voice:localhost",
+        source_kind=VOICE_SOURCE_KIND,
+        received_at=1_000.0,
+    )
+    await gate.enqueue(pre_stt_key, _pending(_text_event("$typed:localhost", "typed follow-up", 1_000_200)))
+
+    voice_ready.set()
+    await gate.drain_all()
+
+    assert [(batch.coalescing_key, batch.source_event_ids) for batch in batches] == [
+        (post_stt_key, ["$voice:localhost", "$typed:localhost"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retarget_updates_in_flight_voice_root_aliases() -> None:
+    """Follow-ups to a retargeted voice root should stay behind the canonical in-flight gate."""
+    old_key = ("!room:localhost", "$old-thread:localhost", "@user:localhost")
+    new_key = ("!room:localhost", "$new-thread:localhost", "@user:localhost")
+    voice_root_key = ("!room:localhost", "$voice-root:localhost", "@user:localhost")
+    batches: list[CoalescedBatch] = []
+    second_voice_started = asyncio.Event()
+    release_second_voice = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+        if batch.source_event_ids == ["$voice-root:localhost"]:
+            await gate.enqueue(new_key, _voice_pending("$voice-2:localhost", "second voice", 1_000_200))
+            await second_voice_started.wait()
+            gate.retarget(old_key, new_key)
+            return
+        if batch.source_event_ids == ["$voice-2:localhost"]:
+            second_voice_started.set()
+            await release_second_voice.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(old_key, _voice_pending("$voice-root:localhost", "first voice", 1_000_000))
+    await asyncio.wait_for(second_voice_started.wait(), timeout=0.5)
+
+    await gate.enqueue(voice_root_key, _pending(_text_event("$follow-up:localhost", "follow-up", 1_000_400)))
+    await asyncio.sleep(0.05)
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$voice-root:localhost"],
+        ["$voice-2:localhost"],
+    ]
+
+    release_second_voice.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$voice-root:localhost"],
+        ["$voice-2:localhost"],
+        ["$follow-up:localhost"],
+    ]

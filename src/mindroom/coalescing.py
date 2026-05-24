@@ -77,6 +77,7 @@ class _QueueKind(enum.Enum):
 
 @dataclass
 class _QueuedEvent:
+    admission_key: CoalescingKey
     received_order: int
     received_at: float
     source_event_id: str | None
@@ -102,6 +103,22 @@ class ReadyPendingEvent:
 
     key: CoalescingKey
     pending_event: PendingEvent
+
+
+@dataclass(frozen=True)
+class _ReadyAdmission:
+    """One receive-time admission resolved to a dispatchable pending event."""
+
+    admission_key: CoalescingKey
+    ready_event: ReadyPendingEvent
+
+    @property
+    def key(self) -> CoalescingKey:
+        return self.ready_event.key
+
+    @property
+    def pending_event(self) -> PendingEvent:
+        return self.ready_event.pending_event
 
 
 @dataclass
@@ -203,6 +220,15 @@ class CoalescingGate:
         self._retired_in_flight_drain_tasks.add(task)
         task.add_done_callback(self._retired_in_flight_drain_tasks.discard)
 
+    def _retarget_aliases(self, old_key: CoalescingKey, new_key: CoalescingKey) -> None:
+        updated_aliases: dict[CoalescingKey, CoalescingKey] = {}
+        for alias_key, canonical_key in self._key_aliases.items():
+            updated_alias_key = new_key if alias_key == old_key else alias_key
+            updated_canonical_key = new_key if canonical_key == old_key else canonical_key
+            if updated_alias_key != updated_canonical_key:
+                updated_aliases[updated_alias_key] = updated_canonical_key
+        self._key_aliases = updated_aliases
+
     def retarget(self, old_key: CoalescingKey, new_key: CoalescingKey) -> None:
         """Re-key one live gate after thread resolution changes the canonical scope."""
         old_key = self._canonical_key(old_key)
@@ -215,12 +241,14 @@ class CoalescingGate:
         existing_gate = self._gates.get(new_key)
         if existing_gate is None:
             self._gates[new_key] = self._gates.pop(old_key)
+            self._retarget_aliases(old_key, new_key)
             self._ensure_drain_task(new_key, gate)
             self._wake(gate)
             return
         if existing_gate is gate:
             self._gates.pop(old_key, None)
             self._gates[new_key] = gate
+            self._retarget_aliases(old_key, new_key)
             self._ensure_drain_task(new_key, gate)
             self._wake(gate)
             return
@@ -241,6 +269,7 @@ class CoalescingGate:
         retired_gate.queue.clear()
         self._gates.pop(old_key, None)
         self._gates[new_key] = owner_gate
+        self._retarget_aliases(old_key, new_key)
         retired_drain_task = retired_gate.drain_task
         if retired_drain_task is not None and not retired_drain_task.done():
             if retired_gate.phase is GatePhase.IN_FLIGHT:
@@ -272,17 +301,11 @@ class CoalescingGate:
             if key not in (alias_key, canonical_key)
         }
 
-    def _drop_stale_aliases(self) -> None:
-        self._key_aliases = {
-            alias_key: canonical_key
-            for alias_key, canonical_key in self._key_aliases.items()
-            if self._alias_target_is_live(canonical_key)
-        }
-
     def _remove_gate(self, key: CoalescingKey) -> None:
         self._gates.pop(key, None)
         self._drop_aliases_for_key(key)
-        self._drop_stale_aliases()
+        if not self._gates:
+            self._key_aliases.clear()
 
     def _resolve_gate_entry(
         self,
@@ -721,6 +744,7 @@ class CoalescingGate:
         gate = self._get_or_create_gate(provisional_key)
         self._next_received_order += 1
         admission = _QueuedEvent(
+            admission_key=provisional_key,
             received_order=self._next_received_order,
             received_at=received_at if received_at is not None else time.time(),
             source_event_id=source_event_id,
@@ -768,6 +792,7 @@ class CoalescingGate:
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
         self._gates.clear()
+        self._key_aliases.clear()
 
     def _upload_grace_hard_cap_seconds(self) -> float:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
@@ -895,17 +920,8 @@ class CoalescingGate:
             queued.ready_result.pending_event.enqueue_time = queued.received_at
         return queued.ready_result
 
-    async def _resolve_front_ready_event(self, gate: _GateEntry) -> ReadyPendingEvent | None:
-        """Resolve or discard front admissions until one dispatchable event remains."""
-        while gate.queue:
-            ready = await self._resolve_queued_event(gate.queue[0])
-            if ready is not None:
-                return ready
-            gate.queue.popleft()
-        return None
-
     @staticmethod
-    def _front_ready_events_have_voice(gate: _GateEntry) -> bool:
+    def _front_admissions_have_voice(gate: _GateEntry) -> bool:
         for queued in gate.queue:
             if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
                 break
@@ -917,80 +933,110 @@ class CoalescingGate:
 
     @staticmethod
     def _should_coalesce_normal_events(key: CoalescingKey, gate: _GateEntry) -> bool:
-        return key[1] is not None or CoalescingGate._front_ready_events_have_voice(gate)
+        return key[1] is not None or CoalescingGate._front_admissions_have_voice(gate)
 
     async def _resolve_claimed_admissions(
         self,
         admissions: list[_QueuedEvent],
-    ) -> list[ReadyPendingEvent]:
+    ) -> list[_ReadyAdmission]:
         results = await asyncio.gather(*(self._resolve_queued_event(admission) for admission in admissions))
-        return [result for result in results if result is not None]
+        return [
+            _ReadyAdmission(admission_key=admission.admission_key, ready_event=result)
+            for admission, result in zip(admissions, results, strict=True)
+            if result is not None
+        ]
 
     async def _resolve_claimed_admissions_or_requeue(
         self,
         gate: _GateEntry,
         admissions: list[_QueuedEvent],
-    ) -> list[ReadyPendingEvent]:
+    ) -> list[_ReadyAdmission]:
         try:
-            ready_events = await self._resolve_claimed_admissions(admissions)
+            ready_admissions = await self._resolve_claimed_admissions(admissions)
         except BaseException:
             self._requeue_claimed_admissions(gate, admissions)
             raise
         self._clear_claimed_admissions(gate, admissions)
-        return ready_events
+        return ready_admissions
 
     @staticmethod
-    def _dispatch_key_for_ready_events(
-        ready_events: list[ReadyPendingEvent],
+    def _dispatch_key_for_ready_admissions(
+        ready_admissions: list[_ReadyAdmission],
         index: int,
     ) -> CoalescingKey:
-        key = ready_events[index].key
-        if key[1] is not None:
-            for ready_event in ready_events:
-                if (
-                    ready_event.pending_event.source_kind == VOICE_SOURCE_KIND
-                    and ready_event.pending_event.event.event_id == key[1]
-                    and ready_event.key[1] is not None
-                ):
-                    return ready_event.key
-            return key
+        ready_admission = ready_admissions[index]
+        pending_event = ready_admission.pending_event
+        admission_key = ready_admission.admission_key
+        if pending_event.source_kind == VOICE_SOURCE_KIND:
+            dispatch_key = ready_admission.key
+        elif admission_key[1] is not None:
+            dispatch_key = CoalescingGate._voice_resolved_key_for_admission(admission_key, ready_admissions)
+            if dispatch_key is None:
+                dispatch_key = admission_key
+        else:
+            dispatch_key = CoalescingGate._neighbor_thread_key(ready_admissions, index) or admission_key
+        return dispatch_key
+
+    @staticmethod
+    def _voice_resolved_key_for_admission(
+        admission_key: CoalescingKey,
+        ready_admissions: list[_ReadyAdmission],
+    ) -> CoalescingKey | None:
+        for voice_admission in ready_admissions:
+            if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND or voice_admission.key[1] is None:
+                continue
+            if voice_admission.admission_key == admission_key:
+                return voice_admission.key
+            if voice_admission.pending_event.event.event_id == admission_key[1]:
+                return voice_admission.key
+        return None
+
+    @staticmethod
+    def _neighbor_thread_key(
+        ready_admissions: list[_ReadyAdmission],
+        index: int,
+    ) -> CoalescingKey | None:
         for previous_index in range(index - 1, -1, -1):
-            previous_key = ready_events[previous_index].key
+            previous_key = ready_admissions[previous_index].key
             if previous_key[1] is not None:
                 return previous_key
-        for next_index in range(index + 1, len(ready_events)):
-            next_key = ready_events[next_index].key
+        for next_index in range(index + 1, len(ready_admissions)):
+            next_key = ready_admissions[next_index].key
             if next_key[1] is not None:
                 return next_key
-        return key
+        return None
 
     @staticmethod
     def _room_voice_batch_key(
-        ready_events: list[ReadyPendingEvent],
+        ready_admissions: list[_ReadyAdmission],
     ) -> CoalescingKey | None:
-        if not any(ready_event.pending_event.source_kind == VOICE_SOURCE_KIND for ready_event in ready_events):
+        if not any(
+            ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND for ready_admission in ready_admissions
+        ):
             return None
-        for ready_event in reversed(ready_events):
-            if ready_event.key[1] is not None:
-                return ready_event.key
-        return ready_events[-1].key if ready_events else None
+        for ready_admission in reversed(ready_admissions):
+            if ready_admission.key[1] is not None:
+                return ready_admission.key
+        return ready_admissions[-1].admission_key if ready_admissions else None
 
     @staticmethod
-    def _ready_event_segments(
+    def _ready_admission_segments(
         provisional_key: CoalescingKey,
-        ready_events: list[ReadyPendingEvent],
+        ready_admissions: list[_ReadyAdmission],
     ) -> list[tuple[CoalescingKey, list[PendingEvent]]]:
         if provisional_key[1] is None:
-            room_voice_key = CoalescingGate._room_voice_batch_key(ready_events)
+            room_voice_key = CoalescingGate._room_voice_batch_key(ready_admissions)
             if room_voice_key is not None:
-                return [(room_voice_key, [ready_event.pending_event for ready_event in ready_events])]
+                return [
+                    (room_voice_key, [ready_admission.pending_event for ready_admission in ready_admissions]),
+                ]
         segments: list[tuple[CoalescingKey, list[PendingEvent]]] = []
-        for index, ready_event in enumerate(ready_events):
-            key = CoalescingGate._dispatch_key_for_ready_events(ready_events, index)
+        for index, ready_admission in enumerate(ready_admissions):
+            key = CoalescingGate._dispatch_key_for_ready_admissions(ready_admissions, index)
             if segments and segments[-1][0] == key:
-                segments[-1][1].append(ready_event.pending_event)
+                segments[-1][1].append(ready_admission.pending_event)
             else:
-                segments.append((key, [ready_event.pending_event]))
+                segments.append((key, [ready_admission.pending_event]))
         return segments
 
     def _log_dispatch_failure(
@@ -1119,28 +1165,28 @@ class CoalescingGate:
                     self._remove_gate(current_key)
                     return
 
-                if await self._resolve_front_ready_event(gate) is None:
-                    continue
-                settled_key, settled_gate = await self._settle_key_hints_for_gate(current_key, gate)
-                if settled_key is None or settled_gate is None:
-                    return
-                current_key = settled_key
-                gate = settled_gate
-                if not gate.queue:
-                    continue
-                if await self._resolve_front_ready_event(gate) is None:
-                    continue
                 front = gate.queue[0]
                 front_kind = self._queued_kind(front)
                 if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
+                    settled_key, settled_gate = await self._settle_key_hints_for_gate(current_key, gate)
+                    if settled_key is None or settled_gate is None:
+                        return
+                    current_key = settled_key
+                    gate = settled_gate
+                    if not gate.queue:
+                        continue
+                    front = gate.queue[0]
+                    front_kind = self._queued_kind(front)
+                    if front_kind not in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
+                        continue
                     claimed_admissions = self._claim_front_events(gate, 1)
-                    ready_events = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
-                    if not ready_events:
+                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
+                    if not ready_admissions:
                         continue
                     await self._dispatch_claimed_events(
-                        ready_events[0].key,
+                        self._dispatch_key_for_ready_admissions(ready_admissions, 0),
                         gate,
-                        [ready_events[0].pending_event],
+                        [ready_admissions[0].pending_event],
                         bypass_grace=True,
                         gate_key=current_key,
                     )
@@ -1168,8 +1214,6 @@ class CoalescingGate:
                 gate = settled_gate
                 if not gate.queue:
                     continue
-                if await self._resolve_front_ready_event(gate) is None:
-                    continue
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
                 coalesce_normal_events = self._should_coalesce_normal_events(current_key, gate)
@@ -1181,10 +1225,10 @@ class CoalescingGate:
                 if candidate_count == 0:
                     continue
                 claimed_admissions = self._claim_front_events(gate, candidate_count)
-                ready_events = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
-                if not ready_events:
+                ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
+                if not ready_admissions:
                     continue
-                segments = self._ready_event_segments(current_key, ready_events)
+                segments = self._ready_admission_segments(current_key, ready_admissions)
                 candidate_events = [event for _key, pending_events in segments for event in pending_events]
                 if (
                     use_upload_grace
@@ -1201,8 +1245,8 @@ class CoalescingGate:
                         timing_scope=timing_scope,
                     )
                     claimed_admissions = self._claim_front_events(gate, candidate_count)
-                    ready_events = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
-                    segments = self._ready_event_segments(current_key, ready_events)
+                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
+                    segments = self._ready_admission_segments(current_key, ready_admissions)
                     bypass_grace = True
                 if not gate.queue:
                     gate.drain_all_requested = False
@@ -1227,7 +1271,11 @@ class CoalescingGate:
         finally:
             resolved_key, resolved_gate = self._resolve_gate_entry(current_key or key, gate)
             if resolved_key is not None and resolved_gate is not None:
-                if resolved_gate.drain_task is asyncio.current_task():
+                try:
+                    current_task = asyncio.current_task()
+                except RuntimeError:
+                    current_task = None
+                if resolved_gate.drain_task is current_task:
                     resolved_gate.drain_task = None
                 if self._gate_work_count(resolved_gate) == 0:
                     self._remove_gate(resolved_key)
