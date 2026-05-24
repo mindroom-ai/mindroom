@@ -81,7 +81,7 @@ class _QueuedEvent:
     received_at: float
     source_event_id: str | None
     source_kind: str
-    ready_task: asyncio.Task[ReadyPendingEvent | None]
+    ready_task: asyncio.Task[ReadyPendingEvent | None] | None
     key_hint_task: asyncio.Task[CoalescingKey | None] | None = None
     key_hint_result: CoalescingKey | None = None
     key_hint_resolved: bool = False
@@ -102,7 +102,6 @@ class ReadyPendingEvent:
 
     key: CoalescingKey
     pending_event: PendingEvent
-    barrier: bool = False
 
 
 @dataclass
@@ -482,8 +481,6 @@ class CoalescingGate:
     def _queued_kind(queued: _QueuedEvent) -> _QueueKind:
         if queued.ready_result is None:
             return _QueueKind.NORMAL
-        if queued.ready_result.barrier:
-            return _QueueKind.BYPASS
         return CoalescingGate._queue_kind(queued.ready_result.pending_event)
 
     @staticmethod
@@ -497,9 +494,16 @@ class CoalescingGate:
             gate.claimed_admissions = []
 
     @staticmethod
-    def _front_normal_run_length(gate: _GateEntry, *, coalesce_normal_events: bool) -> int:
+    def _front_normal_run_length(
+        gate: _GateEntry,
+        *,
+        coalesce_normal_events: bool,
+        max_received_order: int | None = None,
+    ) -> int:
         count = 0
         for queued in gate.queue:
+            if max_received_order is not None and queued.received_order > max_received_order:
+                break
             if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
                 break
             if count > 0 and not coalesce_normal_events:
@@ -682,17 +686,8 @@ class CoalescingGate:
         Compatibility wrapper for callers that already have a ready event.
         New Matrix ingress should use ``admit`` before async normalization.
         """
-
-        async def ready_pending_event() -> ReadyPendingEvent:
-            return ReadyPendingEvent(key=key, pending_event=pending_event)
-
-        ready_task = asyncio.create_task(
-            ready_pending_event(),
-            name=f"ready_pending:{pending_event.event.event_id}",
-        )
         await self.admit(
             key,
-            ready_task=ready_task,
             received_at=pending_event.enqueue_time,
             source_event_id=pending_event.event.event_id,
             source_kind=pending_event.source_kind,
@@ -703,7 +698,7 @@ class CoalescingGate:
         self,
         provisional_key: CoalescingKey,
         *,
-        ready_task: asyncio.Task[ReadyPendingEvent | None],
+        ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         received_at: float | None = None,
         source_event_id: str | None = None,
         source_kind: str = "pending",
@@ -711,6 +706,9 @@ class CoalescingGate:
         key_hint_task: asyncio.Task[CoalescingKey | None] | None = None,
     ) -> None:
         """Admit one Matrix receive-time item without awaiting async normalization."""
+        if ready_task is None and ready_result is None:
+            msg = "ready_task is required when ready_result is not provided"
+            raise ValueError(msg)
         enqueue_start = time.monotonic()
         provisional_key = self._key_for_pending_voice_source_event(self._canonical_key(provisional_key))
         gate = self._get_or_create_gate(provisional_key)
@@ -863,6 +861,9 @@ class CoalescingGate:
         """Return one ready result, logging normalization failures as skipped ingress."""
         if queued.ready_result is not None:
             return queued.ready_result
+        if queued.ready_task is None:
+            msg = "Queued admission has neither ready_result nor ready_task"
+            raise RuntimeError(msg)
         try:
             queued.ready_result = await asyncio.shield(queued.ready_task)
         except asyncio.CancelledError:
@@ -1100,8 +1101,6 @@ class CoalescingGate:
 
                 if await self._resolve_front_ready_event(gate) is None:
                     continue
-                front = gate.queue[0]
-                front_kind = self._queued_kind(front)
                 settled_key, settled_gate = await self._settle_key_hints_for_gate(current_key, gate)
                 if settled_key is None or settled_gate is None:
                     return
@@ -1135,13 +1134,14 @@ class CoalescingGate:
                         entry,
                     ),
                 )
+                claim_max_received_order = self._next_received_order
                 # Freeze the debounce boundary before resolving hints so late arrivals
                 # cannot keep moving this claim forward indefinitely.
                 settled_key, settled_gate = await self._settle_key_hints_for_gate(
                     current_key,
                     gate,
                     include_later_gate_hints=True,
-                    max_received_order=self._next_received_order,
+                    max_received_order=claim_max_received_order,
                 )
                 if settled_key is None or settled_gate is None:
                     return
@@ -1157,6 +1157,7 @@ class CoalescingGate:
                 candidate_count = self._front_normal_run_length(
                     gate,
                     coalesce_normal_events=coalesce_normal_events,
+                    max_received_order=claim_max_received_order,
                 )
                 if candidate_count == 0:
                     continue

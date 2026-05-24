@@ -1451,6 +1451,69 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
 
 
 @pytest.mark.asyncio
+async def test_late_same_thread_text_does_not_join_expired_debounce_while_waiting_on_key_hint() -> None:
+    """Resolving key hints after debounce must not move the claim boundary forward."""
+    room = _make_room()
+    first = _text_event(event_id="$typed1", body="first", server_timestamp=1000, thread_id="$thread-a")
+    second = _text_event(event_id="$typed2", body="second", server_timestamp=1002, thread_id="$thread-a")
+    voice = _text_event(
+        event_id="$voice",
+        body="voice transcript",
+        server_timestamp=1001,
+        thread_id="$thread-b",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    text_key = (room.room_id, "$thread-a", "@user:localhost")
+    voice_key = (room.room_id, "$thread-b", "@user:localhost")
+    key_hint_started = asyncio.Event()
+    release_key_hint = asyncio.Event()
+    release_voice = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def voice_key_hint() -> CoalescingKey:
+        key_hint_started.set()
+        await release_key_hint.wait()
+        return voice_key
+
+    async def ready_voice() -> ReadyPendingEvent:
+        await release_voice.wait()
+        return ReadyPendingEvent(
+            key=voice_key,
+            pending_event=PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.02,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(text_key, PendingEvent(event=first, room=room, source_kind="message"))
+    await gate.admit(
+        voice_key,
+        ready_task=asyncio.create_task(ready_voice()),
+        source_kind=VOICE_SOURCE_KIND,
+        key_hint_task=asyncio.create_task(voice_key_hint()),
+    )
+    await asyncio.wait_for(key_hint_started.wait(), timeout=0.2)
+    await asyncio.sleep(0.03)
+    await gate.enqueue(text_key, PendingEvent(event=second, room=room, source_kind="message"))
+
+    release_key_hint.set()
+    await _wait_for(lambda: bool(calls), deadline_seconds=0.2)
+
+    assert calls[0] == ["$typed1"]
+
+    release_voice.set()
+    await gate.drain_all()
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_resolved_voice_handoff_retargets_in_flight_gate_for_followups() -> None:
     """Follow-ups on a resolved voice thread should buffer behind the in-flight voice dispatch."""
     room = _make_room()
