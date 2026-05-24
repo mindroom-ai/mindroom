@@ -642,7 +642,7 @@ class TurnController:
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
-                coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -700,7 +700,7 @@ class TurnController:
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
-                coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -756,7 +756,7 @@ class TurnController:
             room,
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
-            coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+            coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
         )
 
     async def _should_skip_router_before_shared_ingress_work(
@@ -828,7 +828,7 @@ class TurnController:
         requester_user_id: str,
     ) -> CoalescingKey:
         """Return the sender or thread scoped dispatch key for one event."""
-        return (
+        return CoalescingKey(
             room.room_id,
             await self.deps.resolver.coalescing_thread_id(room, event),
             requester_user_id,
@@ -976,7 +976,7 @@ class TurnController:
         emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch.coalescing_key",
             coalescing_key_start,
-            thread_id=resolved_key[1],
+            thread_id=resolved_key.thread_id,
             timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
@@ -1817,7 +1817,7 @@ class TurnController:
         """Dispatch one flushed batch through the normal text pipeline."""
         reservation = _queued_notice_reservation_from_metadata(
             batch.dispatch_metadata,
-            target_key=(batch.room.room_id, batch.coalescing_key[1]),
+            target_key=(batch.room.room_id, batch.coalescing_key.thread_id),
         )
         try:
             handoff = build_dispatch_handoff(batch)
@@ -1827,11 +1827,11 @@ class TurnController:
                 dispatch_timing.mark("gate_exit")
             retarget_start = time.monotonic()
             batch_coalescing_key = batch.gate_key
-            canonical_key = (
+            canonical_key = CoalescingKey(
                 batch.room.room_id,
                 self.deps.resolver.build_message_target(
                     room_id=batch.room.room_id,
-                    thread_id=batch.coalescing_key[1],
+                    thread_id=batch.coalescing_key.thread_id,
                     reply_to_event_id=handoff.event.event_id,
                     event_source=handoff.event.source,
                 ).resolved_thread_id,
@@ -1841,8 +1841,8 @@ class TurnController:
             emit_elapsed_timing(
                 "coalescing.handle_batch.retarget",
                 retarget_start,
-                original_thread_id=batch_coalescing_key[1],
-                resolved_thread_id=canonical_key[1],
+                original_thread_id=batch_coalescing_key.thread_id,
+                resolved_thread_id=canonical_key.thread_id,
                 timing_scope=timing_scope,
             )
             async with self.deps.resolver.turn_thread_cache_scope():
@@ -2345,7 +2345,7 @@ class TurnController:
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
         await self.deps.coalescing_gate.admit(
-            (room.room_id, None, prechecked_event.requester_user_id),
+            CoalescingKey(room.room_id, None, prechecked_event.requester_user_id),
             ready_task=ready_task,
             source_event_id=event.event_id,
             source_kind=VOICE_SOURCE_KIND,
@@ -2443,7 +2443,7 @@ class TurnController:
             )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
-                key=(room.room_id, effective_thread_id, prechecked_event.requester_user_id),
+                key=CoalescingKey(room.room_id, effective_thread_id, prechecked_event.requester_user_id),
                 pending_event=PendingEvent(
                     event=normalized_event,
                     room=room,
@@ -2538,7 +2538,7 @@ class TurnController:
                 error=str(metadata_error),
             )
         return ReadyPendingEvent(
-            key=(room.room_id, thread_id, requester_user_id),
+            key=CoalescingKey(room.room_id, thread_id, requester_user_id),
             pending_event=PendingEvent(
                 event=fallback_event,
                 room=room,

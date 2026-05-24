@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
@@ -21,7 +21,13 @@ from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_
 if TYPE_CHECKING:
     import nio
 
-type CoalescingKey = tuple[str, str | None, str]
+
+class CoalescingKey(NamedTuple):
+    """Physical coalescing scope for one requester in one room or thread."""
+
+    room_id: str
+    thread_id: str | None
+    requester_user_id: str
 
 
 @dataclass
@@ -184,7 +190,7 @@ def build_coalesced_batch(
         gate_key=gate_key or key,
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
-        requester_user_id=key[2],
+        requester_user_id=key.requester_user_id,
         pending_events=tuple(ordered_pending_events),
         prompt=coalesced_prompt(
             [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],

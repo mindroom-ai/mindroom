@@ -823,7 +823,7 @@ def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> N
     )
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [PendingEvent(event=voice_event, room=room, source_kind="voice")],
     )
 
@@ -845,7 +845,7 @@ def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> N
     )
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(event=synthetic_event, room=room, source_kind="voice", enqueue_time=50_000.0),
             PendingEvent(event=real_event, room=room, source_kind="message"),
@@ -863,7 +863,7 @@ def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> 
     text_event = _text_event(event_id="$m2", body="describe it", server_timestamp=1001)
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(event=image_event, room=room, source_kind="image"),
             PendingEvent(event=text_event, room=room, source_kind="message"),
@@ -887,7 +887,7 @@ def test_build_coalesced_batch_prefers_voice_source_kind_over_media_and_text() -
     text_event = _text_event(event_id="$m2", body="follow-up", server_timestamp=1001)
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(event=voice_event, room=room, source_kind="voice", enqueue_time=0.5),
             PendingEvent(event=image_event, room=room, source_kind="image"),
@@ -1219,7 +1219,7 @@ async def test_already_queued_command_barrier_flushes_normal_without_debounce() 
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
     await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
@@ -1313,7 +1313,7 @@ async def test_in_flight_command_barrier_flushes_buffered_normal_without_debounc
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
     await entered_first_dispatch.wait()
@@ -1355,7 +1355,7 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
     await entered_first_dispatch.wait()
@@ -1391,7 +1391,7 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time()
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind="message"))
     await asyncio.sleep(0.01)
@@ -1431,7 +1431,7 @@ async def test_room_scope_text_then_pending_voice_waits_for_voice_class_admissio
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=text, room=room, source_kind="message"))
     await asyncio.sleep(0.01)
@@ -1463,8 +1463,8 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
         thread_id="$thread-b",
         source_kind=VOICE_SOURCE_KIND,
     )
-    text_key = (room.room_id, "$thread-a", "@user:localhost")
-    voice_key = (room.room_id, "$thread-b", "@user:localhost")
+    text_key = CoalescingKey(room.room_id, "$thread-a", "@user:localhost")
+    voice_key = CoalescingKey(room.room_id, "$thread-b", "@user:localhost")
     release_voice = asyncio.Event()
     calls: list[list[str]] = []
 
@@ -1507,7 +1507,7 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
 async def test_front_command_does_not_wait_for_later_unresolved_voice() -> None:
     """A front command is a barrier and must not wait on later voice resolution."""
     room = _make_room()
-    key = (room.room_id, "$thread", "@user:localhost")
+    key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
     command = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$thread")
     voice = _text_event(
         event_id="$voice",
@@ -1556,7 +1556,7 @@ async def test_front_command_does_not_wait_for_later_unresolved_voice() -> None:
 async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
     """A cancelled drain should not lose admissions already claimed from the queue."""
     room = _make_room()
-    key = (room.room_id, "$thread", "@user:localhost")
+    key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
     first = _text_event(event_id="$first", body="first")
     second = _text_event(event_id="$second", body="second")
     release_second = asyncio.Event()
@@ -1612,8 +1612,8 @@ async def test_resolved_voice_handoff_retargets_in_flight_gate_for_followups() -
         server_timestamp=1001,
         thread_id="$voice_thread",
     )
-    provisional_key = (room.room_id, None, "@user:localhost")
-    resolved_key = (room.room_id, "$voice_thread", "@user:localhost")
+    provisional_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$voice_thread", "@user:localhost")
     entered_voice_dispatch = asyncio.Event()
     release_voice_dispatch = asyncio.Event()
     calls: list[list[str]] = []
@@ -1658,8 +1658,8 @@ async def test_resolved_voice_handoff_retargets_in_flight_gate_for_followups() -
 async def test_unresolved_voice_merges_existing_destination_gate_queue_without_dropping_claimed_work() -> None:
     """Admitting unresolved voice into an existing gate must not drop claimed destination events."""
     room = _make_room()
-    provisional_key = (room.room_id, None, "@user:localhost")
-    resolved_key = (room.room_id, "$voice_thread", "@user:localhost")
+    provisional_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$voice_thread", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -1731,8 +1731,8 @@ async def test_unresolved_voice_merges_existing_destination_gate_queue_without_d
 async def test_threaded_text_reply_to_pending_room_voice_waits_for_voice_root() -> None:
     """A reply to a pending room-level voice root must not outrun slow STT."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    thread_key = (room.room_id, "$voice", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    thread_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -1785,9 +1785,9 @@ async def test_threaded_text_reply_to_pending_room_voice_waits_for_voice_root() 
 async def test_room_voice_reply_resolution_keeps_pending_audio_reply_in_room_batch() -> None:
     """A typed reply to pending audio should follow a proven room-level voice resolution."""
     room = _make_room()
-    provisional_key = (room.room_id, "$normal-message", "@user:localhost")
-    typed_reply_key = (room.room_id, "$voice", "@user:localhost")
-    room_key = (room.room_id, None, "@user:localhost")
+    provisional_key = CoalescingKey(room.room_id, "$normal-message", "@user:localhost")
+    typed_reply_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -1841,8 +1841,8 @@ async def test_room_voice_reply_resolution_keeps_pending_audio_reply_in_room_bat
 async def test_voice_before_text_uses_resolved_key_from_ready_event() -> None:
     """Slow voice thread resolution should not let later text outrun the voice."""
     room = _make_room()
-    voice_owner_key = (room.room_id, None, "@user:localhost")
-    resolved_key = (room.room_id, "$thread-root", "@user:localhost")
+    voice_owner_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -1895,8 +1895,8 @@ async def test_voice_before_text_uses_resolved_key_from_ready_event() -> None:
 async def test_text_before_voice_uses_resolved_key_from_ready_event() -> None:
     """A later unresolved voice should join already queued text after resolving to the same thread."""
     room = _make_room()
-    voice_owner_key = (room.room_id, None, "@user:localhost")
-    resolved_key = (room.room_id, "$thread-root", "@user:localhost")
+    voice_owner_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -1949,8 +1949,8 @@ async def test_text_before_voice_uses_resolved_key_from_ready_event() -> None:
 async def test_room_gate_voice_resolution_does_not_use_stale_pending_audio_reply_key() -> None:
     """A room-level voice batch should not inherit a typed reply's stale pending-audio thread."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    typed_reply_key = (room.room_id, "$voice", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    typed_reply_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2003,9 +2003,9 @@ async def test_room_gate_voice_resolution_does_not_use_stale_pending_audio_reply
 async def test_pending_audio_reply_after_voice_claim_follows_resolved_voice_gate() -> None:
     """A reply admitted behind a claimed voice source should not retarget the resolved gate backward."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    typed_reply_key = (room.room_id, "$voice", "@user:localhost")
-    resolved_key = (room.room_id, "$post-stt-thread", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    typed_reply_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
+    resolved_key = CoalescingKey(room.room_id, "$post-stt-thread", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2063,8 +2063,8 @@ async def test_pending_audio_reply_after_voice_claim_follows_resolved_voice_gate
 async def test_same_thread_followup_after_voice_claim_follows_retargeted_gate() -> None:
     """A follow-up queued while voice is claimed should not move a retargeted gate backward."""
     room = _make_room()
-    pre_key = (room.room_id, "$pre-stt-thread", "@user:localhost")
-    post_key = (room.room_id, "$post-stt-thread", "@user:localhost")
+    pre_key = CoalescingKey(room.room_id, "$pre-stt-thread", "@user:localhost")
+    post_key = CoalescingKey(room.room_id, "$post-stt-thread", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2114,7 +2114,7 @@ async def test_same_thread_followup_after_voice_claim_follows_retargeted_gate() 
     await gate.drain_all()
 
     assert calls == [
-        (post_key, (room.room_id, None, "@user:localhost"), ["$voice"]),
+        (post_key, CoalescingKey(room.room_id, None, "@user:localhost"), ["$voice"]),
         (post_key, post_key, ["$typed"]),
     ]
     assert _coalescing_gate_is_idle(gate)
@@ -2124,9 +2124,9 @@ async def test_same_thread_followup_after_voice_claim_follows_retargeted_gate() 
 async def test_unresolved_room_voice_waits_before_thread_text_dispatch() -> None:
     """Thread text that arrives behind unresolved room voice should preserve receive order."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    voice_key = (room.room_id, "$voice", "@user:localhost")
-    unrelated_thread_key = (room.room_id, "$thread-root", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    voice_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
+    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2178,8 +2178,8 @@ async def test_unresolved_room_voice_waits_before_thread_text_dispatch() -> None
 async def test_plain_reply_voice_resolution_batches_related_text() -> None:
     """A resolved voice should merge related text that waited behind audio readiness."""
     room = _make_room()
-    child_key = (room.room_id, "$thread-child", "@user:localhost")
-    root_key = (room.room_id, "$thread-root", "@user:localhost")
+    child_key = CoalescingKey(room.room_id, "$thread-child", "@user:localhost")
+    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2231,8 +2231,8 @@ async def test_plain_reply_voice_resolution_batches_related_text() -> None:
 async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() -> None:
     """A later voice reply may still belong to a text gate that is debouncing."""
     room = _make_room()
-    child_key = (room.room_id, "$thread-child", "@user:localhost")
-    root_key = (room.room_id, "$thread-root", "@user:localhost")
+    child_key = CoalescingKey(room.room_id, "$thread-child", "@user:localhost")
+    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2286,9 +2286,9 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 async def test_later_unresolved_voice_does_not_overtake_earlier_text() -> None:
     """A later unresolved voice should not dispatch ahead of earlier queued text."""
     room = _make_room()
-    text_key = (room.room_id, "$thread-a-root", "@user:localhost")
-    voice_child_key = (room.room_id, "$thread-b-child", "@user:localhost")
-    voice_root_key = (room.room_id, "$thread-b-root", "@user:localhost")
+    text_key = CoalescingKey(room.room_id, "$thread-a-root", "@user:localhost")
+    voice_child_key = CoalescingKey(room.room_id, "$thread-b-child", "@user:localhost")
+    voice_root_key = CoalescingKey(room.room_id, "$thread-b-root", "@user:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2341,9 +2341,9 @@ async def test_later_unresolved_voice_does_not_overtake_earlier_text() -> None:
 async def test_reply_to_pending_voice_event_joins_voice_gate_before_dispatch() -> None:
     """A direct reply to a pending voice event should not outrun that voice turn."""
     room = _make_room()
-    child_key = (room.room_id, "$thread-child", "@user:localhost")
-    root_key = (room.room_id, "$thread-root", "@user:localhost")
-    voice_reply_key = (room.room_id, "$voice", "@user:localhost")
+    child_key = CoalescingKey(room.room_id, "$thread-child", "@user:localhost")
+    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
+    voice_reply_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2395,7 +2395,7 @@ async def test_reply_to_pending_voice_event_joins_voice_gate_before_dispatch() -
 async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> None:
     """A failed voice admission should not make unrelated room roots share a turn."""
     room = _make_room()
-    key = (room.room_id, None, "@user:localhost")
+    key = CoalescingKey(room.room_id, None, "@user:localhost")
     first = _text_event(event_id="$first", body="first", server_timestamp=1000)
     second = _text_event(event_id="$second", body="second", server_timestamp=1002)
     calls: list[list[str]] = []
@@ -2433,8 +2433,8 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
 async def test_reply_to_failed_pending_room_voice_keeps_reply_thread_key() -> None:
     """A reply admitted through a failed voice gate should keep its own ready key."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    voice_reply_key = (room.room_id, "$voice", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    voice_reply_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -2475,8 +2475,8 @@ async def test_reply_to_failed_pending_room_voice_keeps_reply_thread_key() -> No
 async def test_command_after_pending_voice_waits_for_same_resolved_thread() -> None:
     """Commands stay solo but must not jump ahead of earlier voice in the same thread."""
     room = _make_room()
-    child_key = (room.room_id, "$thread-child", "@user:localhost")
-    root_key = (room.room_id, "$thread-root", "@user:localhost")
+    child_key = CoalescingKey(room.room_id, "$thread-child", "@user:localhost")
+    root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2528,9 +2528,9 @@ async def test_command_after_pending_voice_waits_for_same_resolved_thread() -> N
 async def test_same_pre_thread_text_follows_nearest_resolved_voice_boundary() -> None:
     """Text after two retargeted voices should follow the latest receive-order voice."""
     room = _make_room()
-    pre_key = (room.room_id, "$pre_stt_thread", "@user:localhost")
-    first_key = (room.room_id, "$post_one", "@user:localhost")
-    second_key = (room.room_id, "$post_two", "@user:localhost")
+    pre_key = CoalescingKey(room.room_id, "$pre_stt_thread", "@user:localhost")
+    first_key = CoalescingKey(room.room_id, "$post_one", "@user:localhost")
+    second_key = CoalescingKey(room.room_id, "$post_two", "@user:localhost")
     first_voice = _text_event(
         event_id="$voice1",
         body="first voice",
@@ -2593,9 +2593,9 @@ async def test_same_pre_thread_text_follows_nearest_resolved_voice_boundary() ->
 async def test_unresolved_thread_voice_does_not_capture_unrelated_thread_text() -> None:
     """A pending voice admission in one thread must not steal another thread's turn."""
     room = _make_room()
-    voice_key = (room.room_id, "$thread-a-child", "@user:localhost")
-    resolved_voice_key = (room.room_id, "$thread-a-root", "@user:localhost")
-    unrelated_thread_key = (room.room_id, "$thread-b-root", "@user:localhost")
+    voice_key = CoalescingKey(room.room_id, "$thread-a-child", "@user:localhost")
+    resolved_voice_key = CoalescingKey(room.room_id, "$thread-a-root", "@user:localhost")
+    unrelated_thread_key = CoalescingKey(room.room_id, "$thread-b-root", "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -2657,9 +2657,9 @@ async def test_unresolved_thread_voice_does_not_capture_unrelated_thread_text() 
 async def test_threaded_text_reply_to_pending_room_voice_burst_stays_one_turn() -> None:
     """A reply to one unresolved room voice root must not split the voice burst."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    first_voice_key = (room.room_id, "$voice1", "@user:localhost")
-    second_voice_key = (room.room_id, "$voice2", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    first_voice_key = CoalescingKey(room.room_id, "$voice1", "@user:localhost")
+    second_voice_key = CoalescingKey(room.room_id, "$voice2", "@user:localhost")
     first_voice = _text_event(
         event_id="$voice1",
         body="first voice transcript",
@@ -2753,7 +2753,7 @@ async def test_room_scope_voice_burst_coalesces_under_null_thread_key() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=first_voice, room=room, source_kind=VOICE_SOURCE_KIND))
     await gate.enqueue(key, PendingEvent(event=second_voice, room=room, source_kind=VOICE_SOURCE_KIND))
@@ -2779,7 +2779,7 @@ async def test_room_scope_voice_burst_stays_one_turn_after_each_voice_resolves_t
         server_timestamp=1001,
         source_kind=VOICE_SOURCE_KIND,
     )
-    key = (room.room_id, None, "@user:localhost")
+    key = CoalescingKey(room.room_id, None, "@user:localhost")
     calls: list[tuple[tuple[str, str | None, str], list[str]]] = []
 
     async def ready_voice(
@@ -2803,19 +2803,23 @@ async def test_room_scope_voice_burst_stays_one_turn_after_each_voice_resolves_t
 
     await gate.admit(
         key,
-        ready_task=asyncio.create_task(ready_voice(first_voice, (room.room_id, "$voice1", "@user:localhost"))),
+        ready_task=asyncio.create_task(
+            ready_voice(first_voice, CoalescingKey(room.room_id, "$voice1", "@user:localhost")),
+        ),
         source_event_id="$voice1",
         source_kind=VOICE_SOURCE_KIND,
     )
     await gate.admit(
         key,
-        ready_task=asyncio.create_task(ready_voice(second_voice, (room.room_id, "$voice2", "@user:localhost"))),
+        ready_task=asyncio.create_task(
+            ready_voice(second_voice, CoalescingKey(room.room_id, "$voice2", "@user:localhost")),
+        ),
         source_event_id="$voice2",
         source_kind=VOICE_SOURCE_KIND,
     )
     await gate.drain_all()
 
-    assert calls == [((room.room_id, "$voice2", "@user:localhost"), ["$voice1", "$voice2"])]
+    assert calls == [(CoalescingKey(room.room_id, "$voice2", "@user:localhost"), ["$voice1", "$voice2"])]
     assert _coalescing_gate_is_idle(gate)
 
 
@@ -2823,9 +2827,9 @@ async def test_room_scope_voice_burst_stays_one_turn_after_each_voice_resolves_t
 async def test_followup_to_earlier_voice_root_waits_behind_in_flight_room_voice_burst() -> None:
     """Voice-root aliases in one room burst should share the in-flight gate."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
-    first_voice_key = (room.room_id, "$voice1", "@user:localhost")
-    second_voice_key = (room.room_id, "$voice2", "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    first_voice_key = CoalescingKey(room.room_id, "$voice1", "@user:localhost")
+    second_voice_key = CoalescingKey(room.room_id, "$voice2", "@user:localhost")
     first_voice = _text_event(
         event_id="$voice1",
         body="first voice transcript",
@@ -2943,7 +2947,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
             timeout=0.05,
         )
 
-        retargeted_key = ("!room:localhost", "$m1", "@user:localhost")
+        retargeted_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
         assert [
             queued.pending_event.event.event_id for queued in bot._coalescing_gate._gates[retargeted_key].queue
         ] == ["$m2"]
@@ -3023,7 +3027,7 @@ async def test_pending_dispatch_policy_preserves_active_followup_without_bypassi
     )
 
     await gate.enqueue(
-        ("!room:localhost", "$thread", "@user:localhost"),
+        CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
         PendingEvent(
             event=event,
             room=room,
@@ -3108,7 +3112,7 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
     await gate.enqueue(key, PendingEvent(event=hook, room=room, source_kind="hook"))
@@ -3149,7 +3153,7 @@ async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_norma
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(
         key,
@@ -3447,7 +3451,7 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
         )
         await entered_dispatch.wait()
 
-        retargeted_key = ("!room:localhost", "$m1", "@user:localhost")
+        retargeted_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
         assert set(bot._coalescing_gate._gates) == {retargeted_key}
         assert bot._coalescing_gate._gates[retargeted_key].phase is GatePhase.IN_FLIGHT
 
@@ -3484,8 +3488,8 @@ async def test_retargeted_sleeping_timer_flushes_under_current_key() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    old_key = ("!room:localhost", None, "@user:localhost")
-    new_key = ("!room:localhost", "$m1", "@user:localhost")
+    old_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    new_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
 
     await gate.enqueue(
         old_key,
@@ -3518,8 +3522,8 @@ async def test_retarget_merges_existing_destination_gate_queue() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    old_key = ("!room:localhost", None, "@user:localhost")
-    new_key = ("!room:localhost", "$m1", "@user:localhost")
+    old_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    new_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
 
     await gate.enqueue(
         old_key,
@@ -3575,8 +3579,8 @@ async def test_retarget_preserves_in_flight_destination_dispatch() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    old_key = ("!room:localhost", None, "@user:localhost")
-    new_key = ("!room:localhost", "$m1", "@user:localhost")
+    old_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    new_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
 
     await gate.enqueue(
         new_key,
@@ -3635,8 +3639,8 @@ async def test_retarget_preserves_both_in_flight_dispatches() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    old_key = ("!room:localhost", None, "@user:localhost")
-    new_key = ("!room:localhost", "$m1", "@user:localhost")
+    old_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    new_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
 
     await gate.enqueue(
         old_key,
@@ -3692,8 +3696,8 @@ async def test_retarget_tracks_retired_in_flight_source_until_dispatch_finishes(
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    old_key = ("!room:localhost", None, "@user:localhost")
-    new_key = ("!room:localhost", "$m1", "@user:localhost")
+    old_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    new_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
 
     await gate.enqueue(
         old_key,
@@ -3743,7 +3747,7 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
 
     with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -3774,7 +3778,7 @@ async def test_zero_debounce_with_upload_grace_logs_scheduled_grace_outcome() ->
 
     with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -3807,7 +3811,7 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
             room,
             source_kind="message",
             requester_user_id="@user:localhost",
-            coalescing_key=(room.room_id, None, "@user:localhost"),
+            coalescing_key=CoalescingKey(room.room_id, None, "@user:localhost"),
         )
 
     handoff_calls = [
@@ -3878,7 +3882,7 @@ async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_p
     bot = _make_bot(tmp_path)
     room = _make_room()
     batch = build_coalesced_batch(
-        (room.room_id, None, "@user:localhost"),
+        CoalescingKey(room.room_id, None, "@user:localhost"),
         [
             PendingEvent(
                 event=_text_event(event_id="$m1", body="hello"),
@@ -3917,12 +3921,12 @@ async def test_handle_coalesced_batch_uses_resolved_key_for_room_scoped_primary(
     )
     typed = _text_event(event_id="$typed", body="typed follow-up", server_timestamp=1001)
     batch = build_coalesced_batch(
-        (room.room_id, "$voice_thread", "@user:localhost"),
+        CoalescingKey(room.room_id, "$voice_thread", "@user:localhost"),
         [
             PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
             PendingEvent(event=typed, room=room, source_kind="message"),
         ],
-        gate_key=(room.room_id, None, "@user:localhost"),
+        gate_key=CoalescingKey(room.room_id, None, "@user:localhost"),
     )
 
     with (
@@ -3932,8 +3936,8 @@ async def test_handle_coalesced_batch_uses_resolved_key_for_room_scoped_primary(
         await bot._turn_controller.handle_coalesced_batch(batch)
 
     mock_retarget.assert_called_once_with(
-        (room.room_id, None, "@user:localhost"),
-        (room.room_id, "$voice_thread", "@user:localhost"),
+        CoalescingKey(room.room_id, None, "@user:localhost"),
+        CoalescingKey(room.room_id, "$voice_thread", "@user:localhost"),
     )
     dispatched_event = mock_dispatch.await_args.args[1]
     assert isinstance(dispatched_event, PreparedTextEvent)
@@ -3944,7 +3948,7 @@ async def test_handle_coalesced_batch_uses_resolved_key_for_room_scoped_primary(
 def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> None:
     """A room-resolved voice batch must not dispatch through a typed reply's stale thread relation."""
     room = _make_room()
-    room_key = (room.room_id, None, "@user:localhost")
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
     voice = _text_event(
         event_id="$voice",
         body="voice transcript",
@@ -3964,7 +3968,7 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
             PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
             PendingEvent(event=typed, room=room, source_kind="message"),
         ],
-        gate_key=(room.room_id, "$pre-stt-thread", "@user:localhost"),
+        gate_key=CoalescingKey(room.room_id, "$pre-stt-thread", "@user:localhost"),
     )
 
     handoff = build_dispatch_handoff(batch)
@@ -3976,7 +3980,7 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
 def test_single_followup_batch_uses_resolved_coalescing_thread_relation() -> None:
     """A single follow-up batch retargeted by voice resolution should dispatch on the resolved thread."""
     room = _make_room()
-    post_key = (room.room_id, "$post-stt-thread", "@user:localhost")
+    post_key = CoalescingKey(room.room_id, "$post-stt-thread", "@user:localhost")
     typed = _text_event(
         event_id="$typed",
         body="typed follow-up",
@@ -4125,7 +4129,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
 
     with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -4153,7 +4157,7 @@ async def test_coalescing_enqueue_logs_pending_count() -> None:
 
     with patch("mindroom.coalescing.logger.info") as mock_info:
         await gate.enqueue(
-            ("!room:localhost", "$thread", "@user:localhost"),
+            CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -4184,7 +4188,7 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
         patch("mindroom.coalescing.logger.warning") as mock_warning,
     ):
         await gate.enqueue(
-            ("!room:localhost", "$thread", "@user:localhost"),
+            CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -4228,7 +4232,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
     try:
         with patch("mindroom.coalescing.logger.exception") as mock_exception:
             await gate.enqueue(
-                ("!room:localhost", None, "@user:localhost"),
+                CoalescingKey("!room:localhost", None, "@user:localhost"),
                 PendingEvent(
                     event=_text_event(event_id="$m1", body="first"),
                     room=room,
@@ -4271,7 +4275,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
 
     with patch("mindroom.coalescing.logger.exception") as mock_exception:
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -4283,7 +4287,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     assert _coalescing_gate_is_idle(gate)
 
     await gate.enqueue(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         PendingEvent(
             event=_text_event(event_id="$m2", body="second"),
             room=room,
@@ -4321,7 +4325,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
 
     with patch("mindroom.coalescing.logger.exception") as mock_exception:
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -4330,7 +4334,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         )
         await entered_first_dispatch.wait()
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m2", body="second"),
                 room=room,
@@ -4368,7 +4372,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     )
 
     await gate.enqueue(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         PendingEvent(
             event=_text_event(event_id="$m1", body="first"),
             room=room,
@@ -4385,7 +4389,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     assert _coalescing_gate_is_idle(gate)
 
     await gate.enqueue(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         PendingEvent(
             event=_text_event(event_id="$m2", body="second"),
             room=room,
@@ -4420,7 +4424,7 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     )
 
     await gate.enqueue(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         PendingEvent(
             event=_text_event(event_id="$m1", body="first"),
             room=room,
@@ -4429,7 +4433,7 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     )
     await entered_first_dispatch.wait()
     await gate.enqueue(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         PendingEvent(
             event=_text_event(event_id="$m2", body="second"),
             room=room,
@@ -4459,7 +4463,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
 
     with patch("mindroom.coalescing.logger.debug") as mock_debug:
         await gate.enqueue(
-            ("!room:localhost", None, "@user:localhost"),
+            CoalescingKey("!room:localhost", None, "@user:localhost"),
             PendingEvent(
                 event=_text_event(event_id="$m1", body="first"),
                 room=room,
@@ -5258,7 +5262,7 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
     followup_event = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(event=mention_event, room=room, source_kind="message"),
             PendingEvent(event=followup_event, room=room, source_kind="message"),
@@ -5291,7 +5295,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     text_event = _text_event(event_id="$m2", body="and this too", server_timestamp=1001)
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(
                 event=voice_event,
@@ -5321,7 +5325,7 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
     )
 
     batch = build_coalesced_batch(
-        ("!room:localhost", "$thread", "@user:localhost"),
+        CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
         [
             PendingEvent(
                 event=event,
@@ -5346,7 +5350,7 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
     event = _text_event(event_id="$relay", body="@agent relay", server_timestamp=1000)
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(
                 event=event,
@@ -5387,7 +5391,7 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
     )
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@real_user:remote"),
+        CoalescingKey("!room:localhost", None, "@real_user:remote"),
         [
             PendingEvent(
                 event=relay_event,
@@ -5434,7 +5438,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
     )
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(
                 event=event_with_attachment,
@@ -5999,7 +6003,7 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
     followup = _text_event(event_id="$m2", body="follow up", server_timestamp=1001)
 
     batch = build_coalesced_batch(
-        ("!room:localhost", None, "@user:localhost"),
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(event=pill_event, room=room, source_kind="message"),
             PendingEvent(event=followup, room=room, source_kind="message"),

@@ -13,7 +13,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -373,7 +373,7 @@ async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
             },
         ),
     )
-    key = (room.room_id, "$thread", "@user:localhost")
+    key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
     release_ready = asyncio.Event()
     dispatched: list[list[str]] = []
 
@@ -411,7 +411,7 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     """A shutdown drain should not prevent a later clean sync generation from admitting prompts."""
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
-    key = (room.room_id, "$thread", "@user:localhost")
+    key = CoalescingKey(room.room_id, "$thread", "@user:localhost")
     dispatched: list[list[str]] = []
 
     def text_event(event_id: str, body: str) -> nio.RoomMessageText:

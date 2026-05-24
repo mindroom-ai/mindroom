@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ async def test_room_level_messages_do_not_coalesce() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, _pending(_text_event("$gmail:localhost", "gmail setup", 1_000_000)))
     await gate.enqueue(key, _pending(_text_event("$extras:localhost", "message extras", 1_000_600)))
@@ -141,7 +141,7 @@ async def test_room_level_messages_do_not_coalesce_during_upload_grace() -> None
         upload_grace_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
     await gate.enqueue(key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
@@ -169,7 +169,7 @@ async def test_room_level_text_waits_for_late_media_upload_grace() -> None:
         upload_grace_seconds=lambda: 0.05,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
     await asyncio.sleep(0.01)
@@ -194,7 +194,7 @@ async def test_voice_class_text_does_not_wait_for_upload_grace() -> None:
         upload_grace_seconds=lambda: 0.5,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", None, "@user:localhost")
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await gate.enqueue(
         key,
@@ -224,7 +224,7 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", "$thread:localhost", "@user:localhost")
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
     await gate.enqueue(key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
     await gate.enqueue(key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
@@ -249,7 +249,7 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    key = ("!room:localhost", "$thread:localhost", "@user:localhost")
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
     voice_ready = asyncio.Event()
 
     voice_pending = _voice_pending("$voice:localhost", "voice transcript", 1_000_000)
@@ -290,8 +290,8 @@ async def test_explicit_thread_voice_retarget_moves_same_window_text_to_resolved
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    pre_stt_key = ("!room:localhost", "$pre-stt-thread:localhost", "@user:localhost")
-    post_stt_key = ("!room:localhost", "$post-stt-thread:localhost", "@user:localhost")
+    pre_stt_key = CoalescingKey("!room:localhost", "$pre-stt-thread:localhost", "@user:localhost")
+    post_stt_key = CoalescingKey("!room:localhost", "$post-stt-thread:localhost", "@user:localhost")
     voice_ready = asyncio.Event()
 
     voice_pending = _voice_pending("$voice:localhost", "voice transcript", 1_000_000)
@@ -317,9 +317,9 @@ async def test_explicit_thread_voice_retarget_moves_same_window_text_to_resolved
 @pytest.mark.asyncio
 async def test_retarget_updates_in_flight_voice_root_aliases() -> None:
     """Follow-ups to a retargeted voice root should stay behind the canonical in-flight gate."""
-    old_key = ("!room:localhost", "$old-thread:localhost", "@user:localhost")
-    new_key = ("!room:localhost", "$new-thread:localhost", "@user:localhost")
-    voice_root_key = ("!room:localhost", "$voice-root:localhost", "@user:localhost")
+    old_key = CoalescingKey("!room:localhost", "$old-thread:localhost", "@user:localhost")
+    new_key = CoalescingKey("!room:localhost", "$new-thread:localhost", "@user:localhost")
+    voice_root_key = CoalescingKey("!room:localhost", "$voice-root:localhost", "@user:localhost")
     batches: list[CoalescedBatch] = []
     second_voice_started = asyncio.Event()
     release_second_voice = asyncio.Event()

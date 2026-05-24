@@ -285,7 +285,7 @@ def _thread_relation_event_id(content: dict[str, Any]) -> str | None:
 
 
 def _normalize_batch_thread_relation(content: dict[str, Any], batch: CoalescedBatch) -> None:
-    thread_id = batch.coalescing_key[1]
+    thread_id = batch.coalescing_key.thread_id
     if thread_id is None:
         if _thread_relation_event_id(content) is not None:
             content.pop("m.relates_to", None)
@@ -297,8 +297,8 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
     content = event_content_dict(event)
     current_thread_id = _thread_relation_event_id(content) if content is not None else None
     if current_thread_id is not None:
-        return current_thread_id != batch.coalescing_key[1]
-    return batch.source_kind == VOICE_SOURCE_KIND and batch.coalescing_key[1] is not None
+        return current_thread_id != batch.coalescing_key.thread_id
+    return batch.source_kind == VOICE_SOURCE_KIND and batch.coalescing_key.thread_id is not None
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:

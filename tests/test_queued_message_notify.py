@@ -28,7 +28,7 @@ from mindroom.ai_runtime import (
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing_batch import PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -1946,7 +1946,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         batch = build_coalesced_batch(
-            (room.room_id, "$thread", "@user:localhost"),
+            CoalescingKey(room.room_id, "$thread", "@user:localhost"),
             [
                 PendingEvent(
                     event=event,
@@ -2018,7 +2018,7 @@ async def test_retargeted_coalesced_batch_uses_queued_notice_for_final_thread(tm
         assert pre_reservation is not None
         assert post_reservation is not None
         batch = build_coalesced_batch(
-            (room.room_id, "$post_stt_thread", "@user:localhost"),
+            CoalescingKey(room.room_id, "$post_stt_thread", "@user:localhost"),
             [
                 PendingEvent(
                     event=typed_event,
@@ -2035,7 +2035,7 @@ async def test_retargeted_coalesced_batch_uses_queued_notice_for_final_thread(tm
                     dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
                 ),
             ],
-            gate_key=(room.room_id, "$pre_stt_thread", "@user:localhost"),
+            gate_key=CoalescingKey(room.room_id, "$pre_stt_thread", "@user:localhost"),
         )
 
         with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
@@ -2223,7 +2223,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
         assert reservation is not None
         with pytest.raises(ValueError, match="solo batches"):
             build_coalesced_batch(
-                (room.room_id, "$thread", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread", "@user:localhost"),
                 [
                     PendingEvent(
                         event=_prepared_text_event(event_id="$reserved"),

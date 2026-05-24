@@ -41,7 +41,7 @@ from mindroom.attachments import _attachment_id_for_event, register_local_attach
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import ReadyPendingEvent
-from mindroom.coalescing_batch import PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -11237,7 +11237,7 @@ class TestAgentBot:
         mock_dispatch.assert_not_awaited()
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
-        assert key == (room.room_id, None, "@user:localhost")
+        assert key == CoalescingKey(room.room_id, None, "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -11350,7 +11350,7 @@ class TestAgentBot:
         mock_dispatch.assert_not_awaited()
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
-        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
@@ -11488,7 +11488,7 @@ class TestAgentBot:
             )
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == (room.room_id, None, "@user:localhost")
+            assert key == CoalescingKey(room.room_id, None, "@user:localhost")
             ready_event = await mock_admit.await_args.kwargs["ready_task"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
@@ -11498,7 +11498,7 @@ class TestAgentBot:
         assert reserved_target.resolved_thread_id == "$thread_root"
         reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
-        assert ready_event.key == (room.room_id, "$thread_root", "@user:localhost")
+        assert ready_event.key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
@@ -11596,7 +11596,7 @@ class TestAgentBot:
         mock_dispatch.assert_not_awaited()
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
-        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
@@ -11698,7 +11698,7 @@ class TestAgentBot:
         mock_reserve_waiting_human_message.assert_called_once()
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
-        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND

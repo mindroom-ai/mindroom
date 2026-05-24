@@ -288,7 +288,7 @@ class CoalescingGate:
     def _alias_target_is_live(self, key: CoalescingKey) -> bool:
         if key in self._gates:
             return True
-        room_gate = self._gates.get((key[0], None, key[2]))
+        room_gate = self._gates.get(CoalescingKey(key.room_id, None, key.requester_user_id))
         return room_gate is not None and room_gate.phase is GatePhase.IN_FLIGHT
 
     def _drop_aliases_for_key(self, key: CoalescingKey) -> None:
@@ -323,12 +323,12 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> None:
-        if key[1] is None:
+        if key.thread_id is None:
             return
         for pending_event in pending_events:
             if pending_event.source_kind != VOICE_SOURCE_KIND:
                 continue
-            alias_key = (key[0], pending_event.event.event_id, key[2])
+            alias_key = CoalescingKey(key.room_id, pending_event.event.event_id, key.requester_user_id)
             if alias_key != key:
                 self._key_aliases[alias_key] = key
 
@@ -341,15 +341,14 @@ class CoalescingGate:
 
     def _key_for_pending_voice_source_event(self, key: CoalescingKey) -> CoalescingKey:
         key = self._canonical_key(key)
-        room_id, thread_id, requester_user_id = key
-        if thread_id is None:
+        if key.thread_id is None:
             return key
         for gate_key, gate in self._gates.items():
-            if gate_key[0] != room_id or gate_key[2] != requester_user_id:
+            if gate_key.room_id != key.room_id or gate_key.requester_user_id != key.requester_user_id:
                 continue
             pending_admissions = [*gate.claimed_admissions, *gate.queue]
             if any(
-                queued.source_kind == VOICE_SOURCE_KIND and queued.source_event_id == thread_id
+                queued.source_kind == VOICE_SOURCE_KIND and queued.source_event_id == key.thread_id
                 for queued in pending_admissions
             ):
                 return gate_key
@@ -357,7 +356,7 @@ class CoalescingGate:
 
     @staticmethod
     def _voice_owner_key(key: CoalescingKey) -> CoalescingKey:
-        return (key[0], None, key[2])
+        return CoalescingKey(key.room_id, None, key.requester_user_id)
 
     @staticmethod
     def _gate_has_unresolved_voice(gate: _GateEntry) -> bool:
@@ -368,7 +367,7 @@ class CoalescingGate:
 
     def _unresolved_voice_gate_key(self, key: CoalescingKey) -> CoalescingKey | None:
         for gate_key, gate in self._gates.items():
-            if gate_key[0] != key[0] or gate_key[2] != key[2]:
+            if gate_key.room_id != key.room_id or gate_key.requester_user_id != key.requester_user_id:
                 continue
             if self._gate_has_unresolved_voice(gate):
                 return gate_key
@@ -376,7 +375,11 @@ class CoalescingGate:
 
     def _merge_room_requester_gates_into(self, owner_key: CoalescingKey) -> None:
         for gate_key in list(self._gates):
-            if gate_key == owner_key or gate_key[0] != owner_key[0] or gate_key[2] != owner_key[2]:
+            if (
+                gate_key == owner_key
+                or gate_key.room_id != owner_key.room_id
+                or gate_key.requester_user_id != owner_key.requester_user_id
+            ):
                 continue
             self.retarget(gate_key, owner_key)
 
@@ -498,9 +501,9 @@ class CoalescingGate:
     ) -> None:
         logger.debug(
             "coalescing_gate_enqueue",
-            room_id=key[0],
-            thread_id=key[1],
-            requester_user_id=key[2],
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=key.requester_user_id,
             path=path,
             source_kind=source_kind,
             pending_count=self._gate_work_count(gate),
@@ -517,9 +520,9 @@ class CoalescingGate:
     ) -> None:
         logger.info(
             "coalescing_gate_message_enqueued",
-            room_id=key[0],
-            thread_id=key[1],
-            requester_user_id=key[2],
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=key.requester_user_id,
             event_id=pending_event.event.event_id,
             pending_count=pending_count,
             source_kind=pending_event.source_kind,
@@ -542,9 +545,9 @@ class CoalescingGate:
             pending_count=pending_count,
             timing_scope=timing_scope,
             log_context={
-                "room_id": key[0],
-                "thread_id": key[1],
-                "requester_user_id": key[2],
+                "room_id": key.room_id,
+                "thread_id": key.thread_id,
+                "requester_user_id": key.requester_user_id,
                 "pending_count": pending_count,
                 "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
                 "bypass_grace": bypass_grace,
@@ -576,7 +579,7 @@ class CoalescingGate:
             return
         gate.drain_task = asyncio.create_task(
             self._drain_gate(key, gate),
-            name=f"coalescing_drain:{key[0]}:{key[1] or 'room'}:{key[2]}",
+            name=f"coalescing_drain:{key.room_id}:{key.thread_id or 'room'}:{key.requester_user_id}",
         )
 
     def _schedule_drain(self, key: CoalescingKey, gate: _GateEntry) -> None:
@@ -851,7 +854,7 @@ class CoalescingGate:
 
     @staticmethod
     def _should_coalesce_normal_events(key: CoalescingKey, gate: _GateEntry) -> bool:
-        return key[1] is not None or CoalescingGate._front_admissions_have_voice(gate)
+        return key.thread_id is not None or CoalescingGate._front_admissions_have_voice(gate)
 
     async def _resolve_claimed_admissions(
         self,
@@ -900,8 +903,8 @@ class CoalescingGate:
         ready_admissions: list[_ReadyAdmission],
         index: int,
     ) -> CoalescingKey | None:
-        admission_thread_id = ready_admissions[index].admission_key[1]
-        ready_thread_id = ready_admissions[index].key[1]
+        admission_thread_id = ready_admissions[index].admission_key.thread_id
+        ready_thread_id = ready_admissions[index].key.thread_id
 
         def matches_admission(voice_admission: _ReadyAdmission) -> bool:
             if voice_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
@@ -931,7 +934,7 @@ class CoalescingGate:
         pending_events: list[PendingEvent],
         next_event: PendingEvent,
     ) -> bool:
-        if key[1] is not None:
+        if key.thread_id is not None:
             return True
         if _pending_has_voice_source([*pending_events, next_event]):
             return True
@@ -942,7 +945,7 @@ class CoalescingGate:
         provisional_key: CoalescingKey,
         ready_admissions: list[_ReadyAdmission],
     ) -> list[tuple[CoalescingKey, list[PendingEvent]]]:
-        if provisional_key[1] is None:
+        if provisional_key.thread_id is None:
             voice_batch_key = CoalescingGate._owner_voice_batch_key(ready_admissions)
             if voice_batch_key is not None:
                 return [(voice_batch_key, [ready_admission.pending_event for ready_admission in ready_admissions])]
@@ -968,9 +971,9 @@ class CoalescingGate:
     ) -> None:
         logger.exception(
             "Coalescing drain failed",
-            room_id=key[0],
-            thread_id=key[1],
-            requester_user_id=key[2],
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=key.requester_user_id,
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
             exception_type=error.__class__.__name__,
@@ -995,9 +998,9 @@ class CoalescingGate:
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(pending_events[-1].event.event_id)
         log_context: dict[str, object] = {
-            "room_id": key[0],
-            "thread_id": key[1],
-            "requester_user_id": key[2],
+            "room_id": key.room_id,
+            "thread_id": key.thread_id,
+            "requester_user_id": key.requester_user_id,
             "pending_count": pending_count,
             "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
             "bypass_grace": bypass_grace,
@@ -1069,9 +1072,9 @@ class CoalescingGate:
         outcome = "finished"
         logger.debug(
             "coalescing_drain_start",
-            room_id=key[0],
-            thread_id=key[1],
-            requester_user_id=key[2],
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=key.requester_user_id,
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
         )
@@ -1187,9 +1190,9 @@ class CoalescingGate:
                     self._wake(resolved_gate)
             logger.debug(
                 "coalescing_drain_finish",
-                room_id=(resolved_key or current_key or key)[0],
-                thread_id=(resolved_key or current_key or key)[1],
-                requester_user_id=(resolved_key or current_key or key)[2],
+                room_id=(resolved_key or current_key or key).room_id,
+                thread_id=(resolved_key or current_key or key).thread_id,
+                requester_user_id=(resolved_key or current_key or key).requester_user_id,
                 outcome=outcome,
                 pending_count=self._gate_work_count(resolved_gate) if resolved_gate is not None else 0,
                 oldest_pending_age_ms=(
