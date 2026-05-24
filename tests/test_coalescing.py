@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.coalescing import CoalescingGate
 from mindroom.coalescing_batch import PendingEvent
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -159,6 +160,36 @@ async def test_room_level_text_waits_for_late_media_upload_grace() -> None:
     await _wait_for(lambda: len(batches) >= 1)
 
     assert [batch.source_event_ids for batch in batches] == [["$text:localhost", "$image:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_voice_class_text_does_not_wait_for_upload_grace() -> None:
+    """Voice transcripts are text-shaped but should not wait for image upload grace."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.5,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(
+        key,
+        PendingEvent(
+            event=_text_event("$voice:localhost", "voice transcript", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=VOICE_SOURCE_KIND,
+        ),
+    )
+
+    await _wait_for(lambda: len(batches) == 1, deadline_seconds=0.1)
+
+    assert [batch.source_event_ids for batch in batches] == [["$voice:localhost"]]
 
 
 @pytest.mark.asyncio

@@ -168,6 +168,13 @@ def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
     )
 
 
+def _pending_has_voice_source(pending_events: list[PendingEvent]) -> bool:
+    return any(
+        pending_event.source_kind == VOICE_SOURCE_KIND or is_voice_event(pending_event.event)
+        for pending_event in pending_events
+    )
+
+
 class CoalescingGate:
     """Debounce/grace state machine for live inbound message batching.
 
@@ -1160,7 +1167,11 @@ class CoalescingGate:
                     continue
                 segments = self._ready_event_segments(current_key, ready_events)
                 candidate_events = [event for _key, pending_events in segments for event in pending_events]
-                if use_upload_grace and _pending_has_only_text(candidate_events):
+                if (
+                    use_upload_grace
+                    and _pending_has_only_text(candidate_events)
+                    and not _pending_has_voice_source(candidate_events)
+                ):
                     timing_scope = event_timing_scope(
                         build_coalesced_batch(current_key, candidate_events).primary_event.event_id,
                     )
