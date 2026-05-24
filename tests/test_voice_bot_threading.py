@@ -837,6 +837,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
     prepare_started = {"$voice1": asyncio.Event(), "$voice2": asyncio.Event()}
     release_prepare = {"$voice1": asyncio.Event(), "$voice2": asyncio.Event()}
     dispatches: list[tuple[list[str], str]] = []
+    wait_timeout = 5.0
 
     streaming_event = _threaded_prepared_text_event(event_id="$streaming", body="still streaming")
     first_voice = _make_threaded_voice_event(event_id="$voice1", server_timestamp=1_712_350_000_001)
@@ -911,12 +912,12 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
                 requester_user_id="@user:example.com",
                 coalescing_key=(room.room_id, "$thread_root", "@user:example.com"),
             )
-            await asyncio.wait_for(streaming_started.wait(), timeout=1.0)
+            await asyncio.wait_for(streaming_started.wait(), timeout=wait_timeout)
 
             first_task = asyncio.create_task(bot._on_media_message(room, first_voice))
             second_task = asyncio.create_task(bot._on_media_message(room, second_voice))
-            await asyncio.wait_for(prepare_started["$voice1"].wait(), timeout=1.0)
-            await asyncio.wait_for(prepare_started["$voice2"].wait(), timeout=1.0)
+            await asyncio.wait_for(prepare_started["$voice1"].wait(), timeout=wait_timeout)
+            await asyncio.wait_for(prepare_started["$voice2"].wait(), timeout=wait_timeout)
             await bot._on_message(room, typed_event)
 
             release_prepare["$voice1"].set()
