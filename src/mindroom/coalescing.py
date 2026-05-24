@@ -494,6 +494,13 @@ class CoalescingGate:
             gate.claimed_admissions = []
 
     @staticmethod
+    def _requeue_claimed_admissions(gate: _GateEntry, admissions: list[_QueuedEvent]) -> None:
+        if not admissions:
+            return
+        gate.queue.extendleft(reversed(admissions))
+        CoalescingGate._clear_claimed_admissions(gate, admissions)
+
+    @staticmethod
     def _front_normal_run_length(
         gate: _GateEntry,
         *,
@@ -919,6 +926,19 @@ class CoalescingGate:
         results = await asyncio.gather(*(self._resolve_queued_event(admission) for admission in admissions))
         return [result for result in results if result is not None]
 
+    async def _resolve_claimed_admissions_or_requeue(
+        self,
+        gate: _GateEntry,
+        admissions: list[_QueuedEvent],
+    ) -> list[ReadyPendingEvent]:
+        try:
+            ready_events = await self._resolve_claimed_admissions(admissions)
+        except BaseException:
+            self._requeue_claimed_admissions(gate, admissions)
+            raise
+        self._clear_claimed_admissions(gate, admissions)
+        return ready_events
+
     @staticmethod
     def _dispatch_key_for_ready_events(
         ready_events: list[ReadyPendingEvent],
@@ -1114,8 +1134,7 @@ class CoalescingGate:
                 front_kind = self._queued_kind(front)
                 if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
                     claimed_admissions = self._claim_front_events(gate, 1)
-                    ready_events = await self._resolve_claimed_admissions(claimed_admissions)
-                    self._clear_claimed_admissions(gate, claimed_admissions)
+                    ready_events = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
                     if not ready_events:
                         continue
                     await self._dispatch_claimed_events(
@@ -1162,8 +1181,7 @@ class CoalescingGate:
                 if candidate_count == 0:
                     continue
                 claimed_admissions = self._claim_front_events(gate, candidate_count)
-                ready_events = await self._resolve_claimed_admissions(claimed_admissions)
-                self._clear_claimed_admissions(gate, claimed_admissions)
+                ready_events = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
                 if not ready_events:
                     continue
                 segments = self._ready_event_segments(current_key, ready_events)
@@ -1183,8 +1201,7 @@ class CoalescingGate:
                         timing_scope=timing_scope,
                     )
                     claimed_admissions = self._claim_front_events(gate, candidate_count)
-                    ready_events = await self._resolve_claimed_admissions(claimed_admissions)
-                    self._clear_claimed_admissions(gate, claimed_admissions)
+                    ready_events = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
                     segments = self._ready_event_segments(current_key, ready_events)
                     bypass_grace = True
                 if not gate.queue:

@@ -1510,6 +1510,51 @@ async def test_late_same_thread_text_does_not_join_expired_debounce_while_waitin
 
     release_voice.set()
     await gate.drain_all()
+    assert sorted(calls[1:]) == [["$typed2"], ["$voice"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_claimed_admission_is_retried_on_next_drain() -> None:
+    """A cancelled drain should not lose admissions already claimed from the queue."""
+    room = _make_room()
+    key = (room.room_id, "$thread", "@user:localhost")
+    first = _text_event(event_id="$first", body="first")
+    second = _text_event(event_id="$second", body="second")
+    release_second = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def ready_second() -> ReadyPendingEvent:
+        await release_second.wait()
+        return ReadyPendingEvent(
+            key=key,
+            pending_event=PendingEvent(event=second, room=room, source_kind="message"),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
+    await gate.admit(key, ready_task=asyncio.create_task(ready_second()))
+    [gate_entry] = gate._gates.values()
+    await _wait_for(lambda: bool(gate_entry.claimed_admissions), deadline_seconds=0.2)
+
+    assert gate_entry.drain_task is not None
+    gate_entry.drain_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await gate_entry.drain_task
+
+    release_second.set()
+    await gate.drain_all()
+
+    assert calls == [["$first", "$second"]]
     assert _coalescing_gate_is_idle(gate)
 
 
