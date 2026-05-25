@@ -1972,8 +1972,8 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
 
 
 @pytest.mark.asyncio
-async def test_retargeted_coalesced_batch_uses_queued_notice_for_final_thread(tmp_path: Path) -> None:
-    """A retargeted mixed batch should keep the reservation for the final response target."""
+async def test_coalesced_batch_uses_queued_notice_for_batch_thread(tmp_path: Path) -> None:
+    """A mixed batch should keep the reservation for its single coalescing target."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2035,7 +2035,6 @@ async def test_retargeted_coalesced_batch_uses_queued_notice_for_final_thread(tm
                     dispatch_metadata=_targeted_queued_notice_metadata(post_reservation, post_target),
                 ),
             ],
-            gate_key=CoalescingKey(room.room_id, "$pre_stt_thread", "@user:localhost"),
         )
 
         with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):

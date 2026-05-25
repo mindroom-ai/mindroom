@@ -679,6 +679,7 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
+        canonical_thread_id = target.resolved_thread_id
         if self._should_bypass_coalescing_for_active_thread_follow_up(
             envelope=envelope,
         ):
@@ -687,7 +688,7 @@ class TurnController:
                 event=dispatch_event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
+                coalescing_thread_id=canonical_thread_id,
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -703,7 +704,7 @@ class TurnController:
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=CoalescingKey(room.room_id, canonical_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -734,6 +735,7 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
+        canonical_thread_id = target.resolved_thread_id
         envelope = self.deps.resolver.build_ingress_envelope(
             room_id=room.room_id,
             event=event,
@@ -749,7 +751,7 @@ class TurnController:
                 event=event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
+                coalescing_thread_id=canonical_thread_id,
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
             )
@@ -759,7 +761,7 @@ class TurnController:
             room,
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
-            coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+            coalescing_key=CoalescingKey(room.room_id, canonical_thread_id, requester_user_id),
         )
 
     async def _should_skip_router_before_shared_ingress_work(
@@ -830,35 +832,19 @@ class TurnController:
         event: DispatchEvent,
         requester_user_id: str,
     ) -> CoalescingKey:
-        """Return the sender or thread scoped dispatch key for one event."""
+        """Return the canonical sender/thread scope for one event."""
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=coalescing_thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
         return CoalescingKey(
             room.room_id,
-            await self.deps.resolver.coalescing_thread_id(room, event),
+            target.resolved_thread_id,
             requester_user_id,
         )
-
-    def _voice_receive_time_coalescing_key(
-        self,
-        room: nio.MatrixRoom,
-        *,
-        event_info: EventInfo,
-        requester_user_id: str,
-    ) -> CoalescingKey:
-        """Return the immediate receive-time lane for raw audio before async target lookup."""
-        if (
-            self.deps.runtime.config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=room.room_id,
-            )
-            == "room"
-        ):
-            thread_id = None
-        elif event_info.thread_id is not None:
-            thread_id = event_info.thread_id
-        else:
-            thread_id = event_info.reply_to_event_id
-        return CoalescingKey(room.room_id, thread_id, requester_user_id)
 
     async def _append_live_event_with_timing(
         self,
@@ -909,6 +895,7 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
+        canonical_thread_id = target.resolved_thread_id
         original_sender = self._trusted_human_original_sender_for_event(prepared_event)
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
         prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
@@ -942,7 +929,7 @@ class TurnController:
                 room,
                 prepared_event,
                 self.deps.agent_name,
-                resolved_thread_id=coalescing_thread_id,
+                resolved_thread_id=canonical_thread_id,
             )
             if selection is not None:
                 await self.handle_interactive_selection(
@@ -957,7 +944,7 @@ class TurnController:
             prepared_event=prepared_event,
             dispatch_event=dispatch_event,
             envelope=envelope,
-            coalescing_thread_id=coalescing_thread_id,
+            coalescing_thread_id=canonical_thread_id,
             requester_user_id=requester_user_id,
             dispatch_timing=dispatch_timing,
         )
@@ -1851,26 +1838,6 @@ class TurnController:
             dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
             if dispatch_timing is not None:
                 dispatch_timing.mark("gate_exit")
-            retarget_start = time.monotonic()
-            batch_coalescing_key = batch.gate_key
-            canonical_key = CoalescingKey(
-                batch.room.room_id,
-                self.deps.resolver.build_message_target(
-                    room_id=batch.room.room_id,
-                    thread_id=batch.coalescing_key.thread_id,
-                    reply_to_event_id=handoff.event.event_id,
-                    event_source=handoff.event.source,
-                ).resolved_thread_id,
-                batch.requester_user_id,
-            )
-            self.deps.coalescing_gate.retarget(batch_coalescing_key, canonical_key)
-            emit_elapsed_timing(
-                "coalescing.handle_batch.retarget",
-                retarget_start,
-                original_thread_id=batch_coalescing_key.thread_id,
-                resolved_thread_id=canonical_key.thread_id,
-                timing_scope=timing_scope,
-            )
             async with self.deps.resolver.turn_thread_cache_scope():
                 dispatch_start = time.monotonic()
                 handled_turn = HandledTurnState.create(
@@ -2349,7 +2316,7 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
-        """Admit raw audio at receive time and defer target lookup plus voice normalization."""
+        """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
         if self._managed_entity_name_for_sender(event.sender) is not None:
@@ -2361,33 +2328,47 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        admission_key = self._voice_receive_time_coalescing_key(
-            room,
-            event_info=event_info,
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-        target_task = asyncio.create_task(
-            self._resolve_ready_voice_target(
+        try:
+            voice_target, admission_key = await self._resolve_ready_voice_target(
                 room,
                 event,
                 event_info=event_info,
                 requester_user_id=prechecked_event.requester_user_id,
                 dispatch_timing=dispatch_timing,
-            ),
-            name=f"voice_target:{room.room_id}:{event.event_id}",
-        )
-        target_key_task = asyncio.create_task(
-            self._voice_target_key_from_result(target_task),
-            name=f"voice_target_key:{room.room_id}:{event.event_id}",
-        )
-        fallback_thread_id = admission_key.thread_id if event_info.thread_id is not None else None
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            fallback_target = self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=event_info.thread_id,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
+            fallback_thread_id = fallback_target.resolved_thread_id
+            fallback_key = CoalescingKey(room.room_id, fallback_thread_id, prechecked_event.requester_user_id)
+            fallback_ready = await self._ready_voice_fallback_event(
+                room=room,
+                event=event,
+                requester_user_id=prechecked_event.requester_user_id,
+                thread_id=fallback_thread_id,
+                dispatch_timing=dispatch_timing,
+                error=exc,
+            )
+            await self.deps.coalescing_gate.admit(
+                fallback_key,
+                ready_result=fallback_ready,
+                received_at=event.server_timestamp / 1000 if isinstance(event.server_timestamp, int) else None,
+                source_event_id=event.event_id,
+                source_kind=VOICE_SOURCE_KIND,
+            )
+            return
+
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
                 prechecked_event=prechecked_event,
-                admission_key=admission_key,
-                fallback_thread_id=fallback_thread_id,
-                target_task=target_task,
+                voice_target=voice_target,
                 dispatch_timing=dispatch_timing,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
@@ -2395,7 +2376,7 @@ class TurnController:
         await self.deps.coalescing_gate.admit(
             admission_key,
             ready_task=ready_task,
-            target_key_task=target_key_task,
+            received_at=event.server_timestamp / 1000 if isinstance(event.server_timestamp, int) else None,
             source_event_id=event.event_id,
             source_kind=VOICE_SOURCE_KIND,
         )
@@ -2415,59 +2396,38 @@ class TurnController:
             event_info=event_info,
             dispatch_timing=dispatch_timing,
         )
-        voice_target = await self.deps.resolver.resolve_dispatch_target(
-            room,
-            event,
-            caller_label="voice_admission",
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        voice_target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=coalescing_thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
         )
-        dispatch_key = CoalescingKey(room.room_id, voice_target.resolved_thread_id, requester_user_id)
-        return voice_target, dispatch_key
-
-    @staticmethod
-    async def _voice_target_key_from_result(
-        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey]],
-    ) -> CoalescingKey | None:
-        """Expose target-key readiness separately from STT readiness."""
-        try:
-            _voice_target, dispatch_key = await target_task
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return None
-        return dispatch_key
+        admission_key = CoalescingKey(room.room_id, voice_target.resolved_thread_id, requester_user_id)
+        return voice_target, admission_key
 
     async def _ready_voice_event(
         self,
         *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
-        admission_key: CoalescingKey,
-        fallback_thread_id: str | None,
-        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey]],
+        voice_target: MessageTarget,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> ReadyPendingEvent | None:
-        """Resolve target and normalize a raw voice event after receive-time admission."""
+        """Normalize a raw voice event after its conversation key is fixed."""
         event = prechecked_event.event
-        dispatch_key = CoalescingKey(
-            admission_key.room_id,
-            fallback_thread_id,
-            admission_key.requester_user_id,
-        )
         queued_notice_reservation = None
-        preliminary_target = None
         reservation_released_or_handed_off = False
         try:
-            voice_target, dispatch_key = await target_task
-            preliminary_target = voice_target
             envelope = self.deps.resolver.build_ingress_envelope(
                 room_id=room.room_id,
                 event=cast("DispatchEvent", event),
                 requester_user_id=prechecked_event.requester_user_id,
-                target=preliminary_target,
+                target=voice_target,
                 source_kind=VOICE_SOURCE_KIND,
             )
             queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                target=preliminary_target,
+                target=voice_target,
                 response_envelope=envelope,
             )
             normalized_event, effective_thread_id = await self._normalize_voice_event_or_fallback(
@@ -2511,14 +2471,13 @@ class TurnController:
                 source_kind=VOICE_SOURCE_KIND,
             )
             active_follow_up, queued_notice_reservation = self._voice_active_follow_up_reservation(
-                preliminary_target=preliminary_target,
+                preliminary_target=voice_target,
                 target=normalized_target,
                 envelope=envelope,
                 queued_notice_reservation=queued_notice_reservation,
             )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
-                dispatch_key=dispatch_key,
                 pending_event=PendingEvent(
                     event=normalized_event,
                     room=room,
@@ -2544,10 +2503,7 @@ class TurnController:
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
-                thread_id=(
-                    preliminary_target.resolved_thread_id if preliminary_target is not None else fallback_thread_id
-                ),
-                dispatch_key=dispatch_key,
+                thread_id=voice_target.resolved_thread_id,
                 dispatch_timing=dispatch_timing,
                 error=exc,
             )
@@ -2590,7 +2546,6 @@ class TurnController:
         event: AudioMessageEvent,
         requester_user_id: str,
         thread_id: str | None,
-        dispatch_key: CoalescingKey,
         dispatch_timing: DispatchPipelineTiming | None,
         error: Exception,
     ) -> ReadyPendingEvent:
@@ -2609,7 +2564,6 @@ class TurnController:
         hook_source = None
         message_received_depth = 0
         target = None
-        fallback_dispatch_key = dispatch_key
         try:
             target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
@@ -2617,7 +2571,6 @@ class TurnController:
                 reply_to_event_id=fallback_event.event_id,
                 event_source=fallback_event.source,
             )
-            fallback_dispatch_key = CoalescingKey(room.room_id, target.resolved_thread_id, requester_user_id)
             envelope = self.deps.resolver.build_ingress_envelope(
                 room_id=room.room_id,
                 event=fallback_event,
@@ -2645,7 +2598,6 @@ class TurnController:
                 error=str(metadata_error),
             )
         return ReadyPendingEvent(
-            dispatch_key=fallback_dispatch_key,
             pending_event=PendingEvent(
                 event=fallback_event,
                 room=room,

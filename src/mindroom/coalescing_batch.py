@@ -50,7 +50,6 @@ class CoalescedBatch:
     """One flushed batch ready to dispatch through the text pipeline."""
 
     coalescing_key: CoalescingKey
-    gate_key: CoalescingKey
     room: nio.MatrixRoom
     primary_event: DispatchEvent
     requester_user_id: str
@@ -178,8 +177,6 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
 def build_coalesced_batch(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
-    *,
-    gate_key: CoalescingKey | None = None,
 ) -> CoalescedBatch:
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
@@ -187,7 +184,6 @@ def build_coalesced_batch(
     original_sender, raw_audio_fallback = _batch_metadata(ordered_pending_events)
     return CoalescedBatch(
         coalescing_key=key,
-        gate_key=gate_key or key,
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
         requester_user_id=key.requester_user_id,

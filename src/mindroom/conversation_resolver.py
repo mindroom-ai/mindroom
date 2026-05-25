@@ -708,29 +708,6 @@ class ConversationResolver:
         )
         return DispatchContextResult(context=context, thread_context=None)
 
-    async def resolve_dispatch_target(
-        self,
-        room: nio.MatrixRoom,
-        event: DispatchEvent | MatrixMediaEvent,
-        *,
-        caller_label: str,
-    ) -> MessageTarget:
-        """Resolve a bounded stable target for non-response dispatch helpers."""
-        context_result = await self.extract_dispatch_context(
-            room,
-            event,
-            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
-            caller_label=caller_label,
-        )
-        if context_result.thread_context is not None:
-            return context_result.thread_context.stable_target
-        return self.build_message_target(
-            room_id=room.room_id,
-            thread_id=context_result.context.thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-
     async def extract_message_context(
         self,
         room: nio.MatrixRoom,

@@ -1244,9 +1244,6 @@ class TestCommandThreadContextRoomMode:
         bot.client = AsyncMock()
         bot._send_response = AsyncMock(return_value="$reply")
         install_send_response_mock(bot, bot._send_response)
-        unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
-            return_value=MessageTarget.resolve("!room:localhost", None, "$event123"),
-        )
 
         room = _matrix_room("!room:localhost")
 
@@ -1306,8 +1303,6 @@ class TestCommandThreadContextRoomMode:
         bot.client = AsyncMock()
         bot._send_response = AsyncMock(return_value="$reply")
         install_send_response_mock(bot, bot._send_response)
-        resolve_target = AsyncMock(side_effect=AssertionError("command dispatch re-resolved target"))
-        unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = resolve_target
 
         room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
@@ -1341,7 +1336,6 @@ class TestCommandThreadContextRoomMode:
                 target=stable_target,
             )
 
-        resolve_target.assert_not_awaited()
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
         assert bot._send_response.await_args.kwargs["target"].resolved_thread_id == "$stable_thread"
 

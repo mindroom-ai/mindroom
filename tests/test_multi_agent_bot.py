@@ -249,12 +249,8 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
-def _assert_ready_voice_text_fallback(
-    ready_event: ReadyPendingEvent | None,
-    dispatch_key: CoalescingKey,
-) -> None:
+def _assert_ready_voice_text_fallback(ready_event: ReadyPendingEvent | None) -> None:
     assert ready_event is not None
-    assert ready_event.dispatch_key == dispatch_key
     assert ready_event.pending_event.source_kind == VOICE_SOURCE_KIND
     assert isinstance(ready_event.pending_event.event, PreparedTextEvent)
     assert ready_event.pending_event.event.body == "🎤 [Attached voice message]"
@@ -7221,12 +7217,12 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_audio_dispatch_admits_before_thread_resolution(
+    async def test_audio_dispatch_resolves_thread_key_before_admit_and_defers_stt(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should enter the gate before async thread/cache work."""
+        """Audio dispatch should fix the coalescing key before admitting deferred STT work."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -7240,34 +7236,33 @@ class TestAgentBot:
         async def record_append(*_args: object, **_kwargs: object) -> None:
             call_order.append("append")
 
-        async def record_target(_room: object, _event: object, *, caller_label: str) -> MessageTarget:
-            assert caller_label == "voice_admission"
-            call_order.append("resolve")
-            return MessageTarget.resolve(room.room_id, "$thread_root", "$voice_event")
+        async def record_thread_id(_room: object, _event: object) -> str:
+            call_order.append("coalescing_thread")
+            return "$thread_root"
 
         async def record_admit(
             key: CoalescingKey,
             *,
             ready_task: asyncio.Task[ReadyPendingEvent | None],
-            target_key_task: asyncio.Task[CoalescingKey | None],
+            received_at: float | None,
             source_event_id: str,
             source_kind: str,
         ) -> None:
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert call_order == ["admit"]
-            assert key == CoalescingKey("!test:localhost", None, "@user:localhost")
+            assert call_order == ["append", "coalescing_thread", "admit"]
+            assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
+            assert received_at is not None
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             admitted_ready_task = ready_task
-            assert not target_key_task.done()
 
         async def record_voice_normalization(*_args: object, **_kwargs: object) -> None:
             call_order.append("normalize")
             await release_stt.wait()
 
         bot._conversation_cache.append_live_event = AsyncMock(side_effect=record_append)
-        bot._conversation_resolver.resolve_dispatch_target = AsyncMock(side_effect=record_target)
+        bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
@@ -7280,20 +7275,16 @@ class TestAgentBot:
         ):
             await bot._turn_controller._handle_media_message_inner(room, event)
             mock_admit.assert_awaited_once()
-            assert call_order == ["admit"]
+            assert call_order == ["append", "coalescing_thread", "admit"]
             assert admitted_ready_task is not None
             release_stt.set()
             ready_event = await admitted_ready_task
-        _assert_ready_voice_text_fallback(
-            ready_event,
-            CoalescingKey("!test:localhost", "$thread_root", "@user:localhost"),
-        )
-        assert call_order == ["admit", "append", "resolve", "normalize"]
+        _assert_ready_voice_text_fallback(ready_event)
+        assert call_order == ["append", "coalescing_thread", "admit", "normalize"]
         bot._conversation_cache.append_live_event.assert_awaited_once()
-        bot._conversation_resolver.resolve_dispatch_target.assert_awaited_once_with(
+        bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(
             room,
             event,
-            caller_label="voice_admission",
         )
         bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
@@ -11282,7 +11273,7 @@ class TestAgentBot:
         mock_dispatch.assert_not_awaited()
         mock_start.assert_awaited_once()
         key, pending_event = mock_start.await_args.args
-        assert key == CoalescingKey(room.room_id, None, "@user:localhost")
+        assert key == CoalescingKey(room.room_id, "$relay", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -11361,11 +11352,6 @@ class TestAgentBot:
             ),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
-            patch.object(
-                bot._conversation_resolver,
-                "resolve_dispatch_target",
-                new=AsyncMock(return_value=MessageTarget.resolve(room.room_id, "$thread_root", "$voice-followup")),
-            ),
             patch.object(
                 bot._response_runner,
                 "has_active_response_for_target",
@@ -11507,11 +11493,6 @@ class TestAgentBot:
                 ),
             ),
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
-            patch.object(
-                bot._conversation_resolver,
-                "resolve_dispatch_target",
-                new=AsyncMock(return_value=MessageTarget.resolve(room.room_id, "$thread_root", "$voice-followup")),
-            ),
             patch.object(
                 bot._response_runner,
                 "has_active_response_for_target",
