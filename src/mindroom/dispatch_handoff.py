@@ -276,29 +276,24 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _thread_relation_event_id(content: dict[str, Any]) -> str | None:
-    relates_to = content.get("m.relates_to")
-    if not isinstance(relates_to, dict) or relates_to.get("rel_type") != "m.thread":
-        return None
-    event_id = relates_to.get("event_id")
-    return event_id if isinstance(event_id, str) else None
-
-
 def _normalize_batch_thread_relation(content: dict[str, Any], batch: CoalescedBatch) -> None:
     thread_id = batch.coalescing_key.thread_id
     if thread_id is None:
-        if _thread_relation_event_id(content) is not None:
-            content.pop("m.relates_to", None)
+        content.pop("m.relates_to", None)
         return
     content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
 
 
 def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: CoalescedBatch) -> bool:
     content = event_content_dict(event)
-    current_thread_id = _thread_relation_event_id(content) if content is not None else None
-    if current_thread_id is not None:
-        return current_thread_id != batch.coalescing_key.thread_id
-    return batch.source_kind == VOICE_SOURCE_KIND and batch.coalescing_key.thread_id is not None
+    thread_id = batch.coalescing_key.thread_id
+    if content is None:
+        return thread_id is not None and batch.source_kind == VOICE_SOURCE_KIND
+    if thread_id is None:
+        return "m.relates_to" in content
+    if "m.relates_to" in content:
+        return content["m.relates_to"] != {"rel_type": "m.thread", "event_id": thread_id}
+    return batch.source_kind == VOICE_SOURCE_KIND
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:

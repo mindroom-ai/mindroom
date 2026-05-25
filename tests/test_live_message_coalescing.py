@@ -43,7 +43,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -3162,6 +3162,26 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
             PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND),
             PendingEvent(event=typed, room=room, source_kind="message"),
         ],
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert isinstance(handoff.event, PreparedTextEvent)
+    assert "m.relates_to" not in handoff.event.source["content"]
+
+
+def test_room_level_batch_removes_plain_reply_relation() -> None:
+    """A room-level batch should discard plain reply relations from its primary event."""
+    room = _make_room()
+    typed_reply = _reply_event(
+        event_id="$typed",
+        reply_to_event_id="$voice",
+        body="typed follow-up",
+        server_timestamp=1001,
+    )
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, None, "@user:localhost"),
+        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
     )
 
     handoff = build_dispatch_handoff(batch)
