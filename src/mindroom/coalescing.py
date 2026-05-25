@@ -876,6 +876,9 @@ class CoalescingGate:
             target_key = await self._resolve_target_key(queued)
             if target_key is not None and target_key != queued.admission_key:
                 self.retarget(queued.admission_key, target_key)
+                canonical_target_key = self._canonical_key(target_key)
+                if canonical_target_key in self._gates and queued.admission_key != canonical_target_key:
+                    self._key_aliases[queued.admission_key] = canonical_target_key
 
     @staticmethod
     def _front_admissions_have_voice(gate: _GateEntry) -> bool:
@@ -937,7 +940,12 @@ class CoalescingGate:
                 None,
             )
             return self._canonical_key(first_voice.key) if first_voice is not None else ready_key
-        if not has_voice_admission and ready_admission.admission_key != provisional_key:
+        if (
+            not has_voice_admission
+            and ready_admission.admission_key != provisional_key
+            and ready_key.thread_id is None
+            and provisional_key.thread_id is not None
+        ):
             return provisional_key
         if ready_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
             for previous_admission in reversed(ready_admissions[:index]):

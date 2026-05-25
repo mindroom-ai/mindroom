@@ -20,6 +20,7 @@ from mindroom.coalescing import CoalescingGate
 from mindroom.coalescing_batch import CoalescingKey
 from mindroom.config.main import Config
 from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
@@ -1427,6 +1428,7 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$audio-fails")
+    voice_event.source["content"][ATTACHMENT_IDS_KEY] = ["voice-attachment"]
     dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
@@ -1459,6 +1461,7 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     assert dispatched_event.body == "🎤 [Attached voice message]"
     assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    assert dispatched_event.source["content"][ATTACHMENT_IDS_KEY] == ["voice-attachment"]
     assert dispatched_event.source["content"]["m.relates_to"] == {
         "rel_type": "m.thread",
         "event_id": "$thread_root",

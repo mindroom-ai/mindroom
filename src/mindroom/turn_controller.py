@@ -194,6 +194,9 @@ def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None
     inherited_mentions = original_content.get("m.mentions")
     if isinstance(inherited_mentions, dict):
         content["m.mentions"] = inherited_mentions
+    attachment_ids = parse_attachment_ids_from_event_source(source)
+    if attachment_ids:
+        content[ATTACHMENT_IDS_KEY] = attachment_ids
     inherited_relation = original_content.get("m.relates_to")
     if isinstance(inherited_relation, dict):
         content["m.relates_to"] = inherited_relation
