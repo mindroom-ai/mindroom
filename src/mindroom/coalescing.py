@@ -40,8 +40,10 @@ if TYPE_CHECKING:
 __all__ = [
     "CoalescingGate",
     "GatePhase",
+    "IngressAdmissionClosedError",
     "IngressOrderReservation",
     "ReadyPendingEvent",
+    "close_ready_task_result_metadata",
     "is_coalescing_exempt_source_kind",
 ]
 
@@ -74,6 +76,10 @@ class _QueueKind(enum.Enum):
     NORMAL = "normal"
     COMMAND = "command"
     BYPASS = "bypass"
+
+
+class IngressAdmissionClosedError(RuntimeError):
+    """Raised when ingress tries to admit a released reservation."""
 
 
 @dataclass
@@ -123,6 +129,14 @@ class ReadyPendingEvent:
     """Resolved event returned by async ingress normalization."""
 
     pending_event: PendingEvent
+
+
+def close_ready_task_result_metadata(result: object) -> int:
+    """Close dispatch metadata for a ready-task result and report closures."""
+    if isinstance(result, ReadyPendingEvent):
+        close_pending_event_metadata([result.pending_event])
+        return 1
+    return 0
 
 
 @dataclass(frozen=True)
@@ -618,6 +632,9 @@ class CoalescingGate:
         if ready_task is None and ready_result is None:
             msg = "ready_task is required when ready_result is not provided"
             raise ValueError(msg)
+        if order_reservation is not None and order_reservation.released:
+            msg = "Cannot admit a released ingress reservation"
+            raise IngressAdmissionClosedError(msg)
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
         if order_reservation is None:

@@ -11545,11 +11545,18 @@ class TestAgentBot:
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
+
+            async def admit_spy(*_args: object, **kwargs: object) -> None:
+                bot._coalescing_gate.release_order_reservation(kwargs["order_reservation"])
+
+            mock_admit.side_effect = admit_spy
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._on_audio_media_message(
                 room,
                 _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
                 event_info=EventInfo.from_event(voice_event.source),
                 dispatch_timing=None,
+                reservation_owner=reservation_owner,
             )
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]

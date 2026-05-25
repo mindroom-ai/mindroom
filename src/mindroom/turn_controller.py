@@ -12,7 +12,13 @@ import nio
 from mindroom import interactive
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
-from mindroom.coalescing import ReadyPendingEvent
+from mindroom.coalescing import (
+    CoalescingGate,
+    IngressAdmissionClosedError,
+    IngressOrderReservation,
+    ReadyPendingEvent,
+    close_ready_task_result_metadata,
+)
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
@@ -121,7 +127,6 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.coalescing import CoalescingGate
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
@@ -234,6 +239,66 @@ class _PrecheckedEvent[T]:
     requester_user_id: str
 
 
+@dataclass
+class _PromptIngressReservationOwner:
+    """Own one prompt ingress reservation until it is admitted or released."""
+
+    gate: CoalescingGate
+    reservation: IngressOrderReservation
+    admitted: bool = False
+    ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
+
+    async def admit(
+        self,
+        key: CoalescingKey,
+        *,
+        source_event_id: str | None,
+        source_kind: str,
+        ready_result: ReadyPendingEvent | None = None,
+        ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
+    ) -> None:
+        """Transfer this reservation and any ready metadata to the coalescing gate."""
+        if ready_task is not None:
+            self.ready_task = ready_task
+        metadata_transferred = False
+        try:
+            await self.gate.admit(
+                key,
+                ready_result=ready_result,
+                ready_task=ready_task,
+                source_event_id=source_event_id,
+                source_kind=source_kind,
+                order_reservation=self.reservation,
+            )
+            metadata_transferred = True
+        except BaseException:
+            await self.cancel_ready_task()
+            if ready_result is not None and not metadata_transferred:
+                close_ready_task_result_metadata(ready_result)
+            raise
+        self.admitted = True
+        self.ready_task = None
+
+    async def cancel_ready_task(self) -> None:
+        """Cancel or collect the owned ready task once."""
+        if self.ready_task is None:
+            return
+        ready_task = self.ready_task
+        self.ready_task = None
+        if not ready_task.done():
+            await asyncio.sleep(0)
+            ready_task.cancel()
+        result = await asyncio.gather(ready_task, return_exceptions=True)
+        close_ready_task_result_metadata(result[0])
+
+    async def release(self) -> None:
+        """Release this reservation if admission did not transfer ownership."""
+        if self.admitted:
+            return
+        await self.cancel_ready_task()
+        self.gate.release_order_reservation(self.reservation)
+
+
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
@@ -322,6 +387,20 @@ class TurnController:
             source_dict,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+        )
+
+    def _reserve_prompt_ingress_order(
+        self,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+    ) -> _PromptIngressReservationOwner:
+        """Reserve receive order for one prompt-like Matrix ingress item."""
+        return _PromptIngressReservationOwner(
+            gate=self.deps.coalescing_gate,
+            reservation=self.deps.coalescing_gate.reserve_order(
+                room_id=room.room_id,
+                requester_user_id=requester_user_id,
+            ),
         )
 
     def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
@@ -2257,15 +2336,36 @@ class TurnController:
         attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
         event_info = EventInfo.from_event(prechecked_event.event.source)
         if is_audio_message_event(prechecked_event.event):
-            await self._on_audio_media_message(
-                room,
-                _PrecheckedEvent(
-                    event=prechecked_event.event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                ),
-                event_info=event_info,
-                dispatch_timing=dispatch_timing,
-            )
+            if self._managed_entity_name_for_sender(prechecked_event.event.sender) is not None:
+                self.deps.logger.debug(
+                    "Ignoring agent audio event for voice transcription",
+                    event_id=prechecked_event.event.event_id,
+                    sender=prechecked_event.event.sender,
+                )
+                self._mark_source_events_responded(
+                    HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
+                )
+                return
+            reservation_owner = self._reserve_prompt_ingress_order(room, prechecked_event.requester_user_id)
+            try:
+                await self._on_audio_media_message(
+                    room,
+                    _PrecheckedEvent(
+                        event=prechecked_event.event,
+                        requester_user_id=prechecked_event.requester_user_id,
+                    ),
+                    event_info=event_info,
+                    dispatch_timing=dispatch_timing,
+                    reservation_owner=reservation_owner,
+                )
+            except IngressAdmissionClosedError:
+                self.deps.logger.debug(
+                    "Voice ingress admission closed",
+                    event_id=prechecked_event.event.event_id,
+                    room_id=room.room_id,
+                )
+            finally:
+                await reservation_owner.release()
             return
         # Prime transitive ancestor lookups before writing advisory cache membership.
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
@@ -2315,84 +2415,62 @@ class TurnController:
         *,
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
+        reservation_owner: _PromptIngressReservationOwner,
     ) -> None:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
-        if self._managed_entity_name_for_sender(event.sender) is not None:
-            self.deps.logger.debug(
-                "Ignoring agent audio event for voice transcription",
-                event_id=event.event_id,
-                sender=event.sender,
-            )
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return
-
-        received_at = event.server_timestamp / 1000 if isinstance(event.server_timestamp, int) else None
-        order_reservation = self.deps.coalescing_gate.reserve_order(
-            room_id=room.room_id,
-            requester_user_id=prechecked_event.requester_user_id,
-            received_at=received_at,
-        )
-        reservation_admitted = False
         try:
-            try:
-                voice_target, admission_key = await self._resolve_ready_voice_target(
-                    room,
-                    event,
-                    event_info=event_info,
-                    requester_user_id=prechecked_event.requester_user_id,
-                    dispatch_timing=dispatch_timing,
-                )
-            except Exception as exc:
-                fallback_target = self.deps.resolver.build_message_target(
-                    room_id=room.room_id,
-                    thread_id=event_info.thread_id,
-                    reply_to_event_id=event.event_id,
-                    event_source=event.source,
-                )
-                fallback_thread_id = fallback_target.resolved_thread_id
-                fallback_key = CoalescingKey(room.room_id, fallback_thread_id, prechecked_event.requester_user_id)
-                fallback_ready = await self._ready_voice_fallback_event(
+            voice_target, admission_key = await self._resolve_ready_voice_target(
+                room,
+                event,
+                event_info=event_info,
+                requester_user_id=prechecked_event.requester_user_id,
+                dispatch_timing=dispatch_timing,
+            )
+        except Exception as exc:
+            fallback_target = self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=event_info.thread_id,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
+            fallback_thread_id = fallback_target.resolved_thread_id
+            fallback_key = CoalescingKey(room.room_id, fallback_thread_id, prechecked_event.requester_user_id)
+            fallback_ready_task = asyncio.create_task(
+                self._ready_voice_fallback_event(
                     room=room,
                     event=event,
                     requester_user_id=prechecked_event.requester_user_id,
                     thread_id=fallback_thread_id,
                     dispatch_timing=dispatch_timing,
                     error=exc,
-                )
-                await self.deps.coalescing_gate.admit(
-                    fallback_key,
-                    ready_result=fallback_ready,
-                    received_at=received_at,
-                    source_event_id=event.event_id,
-                    source_kind=VOICE_SOURCE_KIND,
-                    order_reservation=order_reservation,
-                )
-                reservation_admitted = True
-                return
-
-            ready_task = asyncio.create_task(
-                self._ready_voice_event(
-                    room=room,
-                    prechecked_event=prechecked_event,
-                    voice_target=voice_target,
-                    dispatch_timing=dispatch_timing,
                 ),
-                name=f"voice_ready:{room.room_id}:{event.event_id}",
+                name=f"voice_fallback_ready:{room.room_id}:{event.event_id}",
             )
-            await self.deps.coalescing_gate.admit(
-                admission_key,
-                ready_task=ready_task,
-                received_at=received_at,
+            await reservation_owner.admit(
+                fallback_key,
+                ready_task=fallback_ready_task,
                 source_event_id=event.event_id,
                 source_kind=VOICE_SOURCE_KIND,
-                order_reservation=order_reservation,
             )
-            reservation_admitted = True
-        finally:
-            if not reservation_admitted:
-                self.deps.coalescing_gate.release_order_reservation(order_reservation)
+            return
+
+        ready_task = asyncio.create_task(
+            self._ready_voice_event(
+                room=room,
+                prechecked_event=prechecked_event,
+                voice_target=voice_target,
+                dispatch_timing=dispatch_timing,
+            ),
+            name=f"voice_ready:{room.room_id}:{event.event_id}",
+        )
+        await reservation_owner.admit(
+            admission_key,
+            ready_task=ready_task,
+            source_event_id=event.event_id,
+            source_kind=VOICE_SOURCE_KIND,
+        )
 
     async def _resolve_ready_voice_target(
         self,

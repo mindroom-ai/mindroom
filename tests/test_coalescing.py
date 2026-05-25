@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
+from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 
@@ -133,6 +133,28 @@ def test_reserve_order_uses_local_monotonic_receipt_time(monkeypatch: pytest.Mon
     assert first.receipt_time == 10.0
     assert second.receipt_time == 10.5
     assert first.received_order < second.received_order
+
+
+@pytest.mark.asyncio
+async def test_admit_rejects_released_reservation() -> None:
+    """Late admission must not recreate work after the reservation was released."""
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    gate.release_order_reservation(reservation)
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await gate.admit(
+            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            ready_result=ReadyPendingEvent(
+                pending_event=_pending(_text_event("$late:localhost", "late", 1000)),
+            ),
+            order_reservation=reservation,
+        )
 
 
 def test_release_order_removes_unadmitted_reservation_from_owner_work() -> None:

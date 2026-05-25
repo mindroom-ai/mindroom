@@ -11,13 +11,17 @@ import pytest
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
+from mindroom.coalescing import IngressAdmissionClosedError, IngressOrderReservation, ReadyPendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
+from mindroom.turn_controller import _PromptIngressReservationOwner
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -53,6 +57,127 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
     except TimeoutError as exc:
         msg = "Timed out waiting for async test condition"
         raise AssertionError(msg) from exc
+
+
+def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
+    """Build one plain Matrix text event."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": body, "msgtype": "m.text"},
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
+def _pending(event: nio.RoomMessageText) -> PendingEvent:
+    """Wrap one Matrix event as pending user ingress."""
+    return PendingEvent(
+        event=event,
+        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+
+
+@pytest.mark.asyncio
+async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() -> None:
+    """Owner cleanup should close completed ready-task metadata once after late admit rejection."""
+    close_count = 0
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
+    pending_event.dispatch_metadata = (
+        PendingDispatchMetadata(
+            kind="test",
+            payload=object(),
+            close=close_metadata,
+            requires_solo_batch=False,
+        ),
+    )
+
+    async def ready() -> ReadyPendingEvent:
+        return ReadyPendingEvent(pending_event=pending_event)
+
+    class RejectingGate:
+        async def admit(self, *_args: object, **_kwargs: object) -> None:
+            msg = "closed"
+            raise IngressAdmissionClosedError(msg)
+
+        def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
+            reservation.released = True
+            reservation.settled.set()
+
+    reservation = IngressOrderReservation(
+        room_id="!room:localhost",
+        requester_user_id="@user:localhost",
+        received_order=1,
+        receipt_time=1.0,
+    )
+    owner = _PromptIngressReservationOwner(gate=RejectingGate(), reservation=reservation)
+    ready_task = asyncio.create_task(ready())
+    await ready_task
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await owner.admit(
+            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            ready_task=ready_task,
+            source_event_id="$late:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+
+    await owner.release()
+
+    assert close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cancellation() -> None:
+    """Owner cancellation should close metadata even when a task returns a ready result while cancelling."""
+    close_count = 0
+    cancelled = asyncio.Event()
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
+    pending_event.dispatch_metadata = (
+        PendingDispatchMetadata(
+            kind="test",
+            payload=object(),
+            close=close_metadata,
+            requires_solo_batch=False,
+        ),
+    )
+
+    async def ready() -> ReadyPendingEvent:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            return ReadyPendingEvent(pending_event=pending_event)
+
+    reservation = IngressOrderReservation(
+        room_id="!room:localhost",
+        requester_user_id="@user:localhost",
+        received_order=1,
+        receipt_time=1.0,
+    )
+    owner = _PromptIngressReservationOwner(gate=MagicMock(), reservation=reservation)
+    owner.ready_task = asyncio.create_task(ready())
+
+    await owner.cancel_ready_task()
+
+    assert cancelled.is_set()
+    assert close_count == 1
+    await owner.cancel_ready_task()
+    assert close_count == 1
 
 
 @pytest.mark.asyncio
