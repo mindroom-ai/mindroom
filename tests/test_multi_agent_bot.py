@@ -56,6 +56,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -246,6 +247,18 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
     if isinstance(outcome, str) or outcome is None:
         return outcome
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
+
+
+def _assert_ready_voice_text_fallback(
+    ready_event: ReadyPendingEvent | None,
+    dispatch_key: CoalescingKey,
+) -> None:
+    assert ready_event is not None
+    assert ready_event.dispatch_key == dispatch_key
+    assert ready_event.pending_event.source_kind == VOICE_SOURCE_KIND
+    assert isinstance(ready_event.pending_event.event, PreparedTextEvent)
+    assert ready_event.pending_event.event.body == "🎤 [Attached voice message]"
+    assert ready_event.pending_event.event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 
 async def _run_orchestrator_start_until_ready(orchestrator: _MultiAgentOrchestrator) -> None:
@@ -7271,7 +7284,10 @@ class TestAgentBot:
             assert admitted_ready_task is not None
             release_stt.set()
             ready_event = await admitted_ready_task
-        assert ready_event is None
+        _assert_ready_voice_text_fallback(
+            ready_event,
+            CoalescingKey("!test:localhost", "$thread_root", "@user:localhost"),
+        )
         assert call_order == ["admit", "append", "resolve", "normalize"]
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.resolve_dispatch_target.assert_awaited_once_with(

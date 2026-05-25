@@ -846,6 +846,7 @@ class CoalescingGate:
         key: CoalescingKey,
         *,
         max_received_order: int,
+        await_unresolved_before_order: int | None = None,
         skip_gate: _GateEntry | None = None,
     ) -> list[_QueuedEvent]:
         """Return same-requester admissions whose target key can still move a gate."""
@@ -864,9 +865,15 @@ class CoalescingGate:
                     or id(queued) in seen
                 ):
                     continue
-                # Cross-lane target resolution is opportunistic. Awaiting an unresolved
-                # target from another provisional thread would couple unrelated turns.
-                if gate_key != key and not queued.target_key_task.done():
+                # Older unresolved target work can still prove that this gate is the
+                # same conversation; later unresolved work must not hold the front.
+                if (
+                    gate_key != key
+                    and not queued.target_key_task.done()
+                    and (
+                        await_unresolved_before_order is None or queued.received_order >= await_unresolved_before_order
+                    )
+                ):
                     continue
                 admissions.append(queued)
                 seen.add(id(queued))
@@ -877,12 +884,14 @@ class CoalescingGate:
         key: CoalescingKey,
         *,
         max_received_order: int,
+        await_unresolved_before_order: int | None = None,
         skip_gate: _GateEntry | None = None,
     ) -> None:
         """Resolve target keys that must be known before this gate may flush."""
         for queued in self._unsettled_target_key_admissions(
             key,
             max_received_order=max_received_order,
+            await_unresolved_before_order=await_unresolved_before_order,
             skip_gate=skip_gate,
         ):
             target_key = await self._resolve_target_key(queued)
@@ -1166,6 +1175,7 @@ class CoalescingGate:
                 await self._settle_target_keys_through_received_order(
                     current_key,
                     max_received_order=gate.queue[0].received_order,
+                    await_unresolved_before_order=gate.queue[0].received_order,
                 )
                 current_key, current_gate = self._resolve_gate_entry(current_key, gate)
                 if current_key is None or current_gate is None:
@@ -1206,6 +1216,7 @@ class CoalescingGate:
                 await self._settle_target_keys_through_received_order(
                     current_key,
                     max_received_order=claim_max_received_order,
+                    await_unresolved_before_order=gate.queue[0].received_order,
                     skip_gate=gate,
                 )
                 resolved_key, resolved_gate = self._resolve_gate_entry(current_key, gate)

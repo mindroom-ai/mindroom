@@ -2479,9 +2479,6 @@ class TurnController:
                 thread_id=voice_target.resolved_thread_id,
                 dispatch_timing=dispatch_timing,
             )
-            if normalized_event is None:
-                self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-                return None
 
             try:
                 await self._maybe_send_visible_voice_echo(
@@ -2667,7 +2664,7 @@ class TurnController:
         event: AudioMessageEvent,
         thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> tuple[PreparedTextEvent | None, str | None]:
+    ) -> tuple[PreparedTextEvent, str | None]:
         """Normalize voice or return a raw-audio fallback event for unexpected failures."""
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_start")
@@ -2695,8 +2692,19 @@ class TurnController:
             effective_thread_id = thread_id
         else:
             if normalized_voice is None:
-                return None, None
-            normalized_event = normalized_voice.event
+                self.deps.logger.warning(
+                    "Voice normalization returned no event; dispatching raw-audio fallback",
+                    event_id=event.event_id,
+                    room_id=room.room_id,
+                    thread_id=thread_id,
+                )
+                normalized_event = await self._prepare_raw_voice_fallback_event(
+                    room=room,
+                    event=event,
+                    thread_id=thread_id,
+                )
+            else:
+                normalized_event = normalized_voice.event
             effective_thread_id = thread_id
         if dispatch_timing is not None:
             dispatch_timing.mark("ingress_normalize_ready")
