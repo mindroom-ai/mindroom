@@ -834,14 +834,14 @@ class TurnController:
             requester_user_id,
         )
 
-    def _voice_receive_time_coalescing_key(
+    async def _voice_receive_time_coalescing_key(
         self,
         room: nio.MatrixRoom,
         *,
         event_info: EventInfo,
         requester_user_id: str,
     ) -> CoalescingKey:
-        """Return the narrow receive-time gate for raw audio before async target lookup."""
+        """Return the canonical receive-time gate for raw audio before voice normalization."""
         if (
             self.deps.runtime.config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -853,8 +853,16 @@ class TurnController:
             thread_id = None
         elif event_info.thread_id is not None:
             thread_id = event_info.thread_id
+        elif event_info.reply_to_event_id is not None:
+            thread_id = (
+                await self.deps.conversation_cache.get_thread_id_for_event(
+                    room.room_id,
+                    event_info.reply_to_event_id,
+                )
+                or event_info.reply_to_event_id
+            )
         else:
-            thread_id = event_info.reply_to_event_id
+            thread_id = None
         return CoalescingKey(room.room_id, thread_id, requester_user_id)
 
     async def _append_live_event_with_timing(
@@ -2358,7 +2366,7 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        admission_key = self._voice_receive_time_coalescing_key(
+        admission_key = await self._voice_receive_time_coalescing_key(
             room,
             event_info=event_info,
             requester_user_id=prechecked_event.requester_user_id,
