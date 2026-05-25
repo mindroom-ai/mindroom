@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
@@ -776,6 +776,75 @@ def _visible_message(
         event_id=event_id,
         timestamp=timestamp,
         content=content,
+    )
+
+
+_MediaKind = Literal["audio", "image", "file", "video"]
+_MEDIA_MIME_TYPES: dict[_MediaKind, str] = {
+    "audio": "audio/wav",
+    "image": "image/png",
+    "file": "text/plain",
+    "video": "video/mp4",
+}
+
+
+def _payload_media_for_kind(payload: DispatchPayload, kind: _MediaKind) -> Sequence[Any]:
+    return {
+        "audio": payload.media.audio,
+        "image": payload.media.images,
+        "file": payload.media.files,
+        "video": payload.media.videos,
+    }[kind]
+
+
+def _register_payload_media_attachment(
+    storage_path: Path,
+    *,
+    kind: _MediaKind = "image",
+    attachment_id: str,
+    filename: str,
+    content: bytes | None = None,
+    local_path: Path | None = None,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = "$thread",
+) -> str:
+    """Register one resolvable media attachment and return its local filepath."""
+    media_path = local_path or storage_path / filename
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    if local_path is None:
+        media_path.write_bytes(content or (b"media:" + attachment_id.encode("utf-8")))
+    record = register_local_attachment(
+        storage_path,
+        media_path,
+        kind=kind,
+        attachment_id=attachment_id,
+        filename=filename,
+        mime_type=_MEDIA_MIME_TYPES[kind],
+        room_id=room_id,
+        thread_id=thread_id,
+        source_event_id=f"${attachment_id}",
+        sender="@user:localhost",
+    )
+    assert record is not None
+    return str(record.local_path)
+
+
+def _register_payload_image_attachment(
+    storage_path: Path,
+    *,
+    attachment_id: str,
+    filename: str,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = "$thread",
+) -> str:
+    return _register_payload_media_attachment(
+        storage_path,
+        kind="image",
+        attachment_id=attachment_id,
+        filename=filename,
+        content=b"\x89PNG\r\n\x1a\n" + attachment_id.encode("utf-8"),
+        room_id=room_id,
+        thread_id=thread_id,
     )
 
 
@@ -7811,20 +7880,21 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(
-                    [current_attachment_id, history_attachment_id],
-                    [],
-                    [image],
-                    [],
-                    [],
-                ),
+                return_value=([current_attachment_id, history_attachment_id], [], [image], [], []),
             ) as mock_resolve_media,
         ):
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        mock_resolve_media.assert_called_once()
-        assert mock_resolve_media.call_args.args[1] == [current_attachment_id, history_attachment_id]
+        assert mock_resolve_media.call_args_list == [
+            call(
+                tmp_path,
+                [current_attachment_id, history_attachment_id],
+                room_id="!test:localhost",
+                thread_id="$thread_root",
+                current_attachment_ids={current_attachment_id},
+            ),
+        ]
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -7847,6 +7917,238 @@ class TestAgentBot:
             ),
         )
 
+    @pytest.mark.parametrize("kind", ["audio", "image", "file", "video"])
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_dedupes_same_content_across_history(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        kind: _MediaKind,
+    ) -> None:
+        """Inline media should keep one copy while IDs stay thread/history-scoped."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = f"att_current_{kind}"
+        thread_attachment_id = f"att_thread_{kind}"
+        history_attachment_id = f"att_history_{kind}"
+        same_content = b"same media bytes"
+        current_path = _register_payload_media_attachment(
+            tmp_path,
+            kind=kind,
+            attachment_id=current_attachment_id,
+            filename=f"current-{kind}.bin",
+            content=same_content,
+        )
+        _register_payload_media_attachment(
+            tmp_path,
+            kind=kind,
+            attachment_id=thread_attachment_id,
+            filename=f"thread-{kind}.bin",
+            content=same_content,
+        )
+        _register_payload_media_attachment(
+            tmp_path,
+            kind=kind,
+            attachment_id=history_attachment_id,
+            filename=f"history-{kind}.bin",
+            content=same_content,
+        )
+        thread_history = [
+            _visible_message(
+                sender="@user:localhost",
+                event_id="$history",
+                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+            ),
+        ]
+
+        with patch(
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=[thread_attachment_id],
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt="describe this",
+                    current_attachment_ids=[current_attachment_id],
+                    thread_id="$thread",
+                    media_thread_id="$thread",
+                    thread_history=thread_history,
+                ),
+            )
+
+        inline_media = _payload_media_for_kind(payload, kind)
+        assert len(inline_media) == 1
+        assert inline_media[0].id == current_attachment_id
+        assert inline_media[0].filepath == current_path
+        assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_distinct_content_all_kept(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Distinct images should each remain inline across current, thread, and history."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = "att_current_image"
+        thread_attachment_id = "att_thread_image"
+        history_attachment_id = "att_history_image"
+        current_path = _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=current_attachment_id,
+            filename="current.png",
+        )
+        thread_path = _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=thread_attachment_id,
+            filename="thread.png",
+        )
+        history_path = _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=history_attachment_id,
+            filename="history.png",
+        )
+        thread_history = [
+            _visible_message(
+                sender="@user:localhost",
+                event_id="$history",
+                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+            ),
+        ]
+
+        with patch(
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=[thread_attachment_id],
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt="describe these",
+                    current_attachment_ids=[current_attachment_id],
+                    thread_id="$thread",
+                    media_thread_id="$thread",
+                    thread_history=thread_history,
+                ),
+            )
+
+        inline_image_paths = [image.filepath for image in payload.media.images]
+        assert inline_image_paths == [current_path, thread_path, history_path]
+        assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_current_event_wins_over_history_duplicate(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The current event's media copy should be the inline representative for duplicates."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = "att_current_duplicate"
+        history_attachment_id = "att_history_duplicate"
+        same_content = b"\x89PNG\r\n\x1a\nsame"
+        current_path = _register_payload_media_attachment(
+            tmp_path,
+            kind="image",
+            attachment_id=current_attachment_id,
+            filename="current-wins.png",
+            content=same_content,
+        )
+        _register_payload_media_attachment(
+            tmp_path,
+            kind="image",
+            attachment_id=history_attachment_id,
+            filename="history-duplicate.png",
+            content=same_content,
+        )
+        thread_history = [
+            _visible_message(
+                sender="@user:localhost",
+                event_id="$history",
+                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+            ),
+        ]
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="describe this",
+                current_attachment_ids=[current_attachment_id],
+                thread_id=None,
+                media_thread_id="$thread",
+                thread_history=thread_history,
+            ),
+        )
+
+        assert len(payload.media.images) == 1
+        assert payload.media.images[0].id == current_attachment_id
+        assert payload.media.images[0].filepath == current_path
+        assert payload.attachment_ids == [current_attachment_id, history_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_empty_when_no_attachments(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Payloads without attachments should have empty inline media and no tool-visible IDs."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="check in",
+                current_attachment_ids=[],
+                thread_id=None,
+                media_thread_id=None,
+                thread_history=[],
+            ),
+        )
+
+        assert payload.media.images == ()
+        assert payload.media.audio == ()
+        assert payload.media.files == ()
+        assert payload.media.videos == ()
+        assert payload.attachment_ids is None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_fallback_images_preserved(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Fallback images should still populate inline media when no current IDs resolve."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="describe fallback",
+                current_attachment_ids=[],
+                thread_id=None,
+                media_thread_id=None,
+                thread_history=[],
+                fallback_images=[fallback_image],
+            ),
+        )
+
+        assert list(payload.media.images) == [fallback_image]
+        assert payload.media.audio == ()
+        assert payload.media.files == ()
+        assert payload.media.videos == ()
+        assert payload.attachment_ids is None
+
     @pytest.mark.asyncio
     async def test_build_dispatch_payload_merges_fallback_images_with_registered_attachments(
         self,
@@ -7857,8 +8159,8 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        stored_image = MagicMock(spec=Image)
-        fallback_image = MagicMock(spec=Image)
+        stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
+        fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
 
         with (
             patch(
@@ -7900,7 +8202,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        stored_image = MagicMock(spec=Image)
+        stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
 
         with (
             patch(

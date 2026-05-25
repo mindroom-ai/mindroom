@@ -1,5 +1,6 @@
 """Persisted history compaction helpers."""
 
+from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     agent_tool_definition_payloads_for_logging,
     compute_prompt_token_breakdown,
@@ -56,6 +57,8 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+
+agno_team_patch.apply_patch()
 
 __all__ = [
     "CompactionDecision",

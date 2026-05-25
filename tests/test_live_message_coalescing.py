@@ -3559,6 +3559,9 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
         f"Available attachment IDs: {attachment_id}. Use tool calls to inspect or process them."
     )
     assert len(payload.media.images) == 1
+    assert payload.media.audio == ()
+    assert payload.media.files == ()
+    assert payload.media.videos == ()
     record = load_attachment(tmp_path, attachment_id)
     assert record is not None
     assert record.source_event_id == "$img-history"

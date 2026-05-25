@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
@@ -111,6 +112,7 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.attachment_id == "att_payload"
     assert loaded.local_path == file_path.resolve()
+    assert loaded.content_sha256 == hashlib.sha256(file_path.read_bytes()).hexdigest()
 
     resolved = resolve_attachments(tmp_path, ["att_payload", "att_missing"])
     assert [record.attachment_id for record in resolved] == ["att_payload"]
@@ -118,6 +120,7 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     resolved_ids, _, _, files, videos = resolve_attachment_media(tmp_path, ["att_payload"])
     assert resolved_ids == ["att_payload"]
     assert len(files) == 1
+    assert files[0].id == "att_payload"
     assert files[0].filename == "payload.zip"
     assert str(files[0].filepath) == str(file_path.resolve())
     assert videos == []
@@ -174,6 +177,7 @@ def test_resolve_attachment_media_includes_images(tmp_path: Path) -> None:
     assert resolved_ids == ["att_image"]
     assert audio == []
     assert len(images) == 1
+    assert images[0].id == "att_image"
     assert str(images[0].filepath) == str(image_path.resolve())
     assert files == []
     assert videos == []

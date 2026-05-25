@@ -71,6 +71,7 @@ class AttachmentRecord:
     source_event_id: str | None = None
     sender: str | None = None
     size_bytes: int | None = None
+    content_sha256: str | None = None
     created_at: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
@@ -86,6 +87,7 @@ class AttachmentRecord:
             "source_event_id": self.source_event_id,
             "sender": self.sender,
             "size_bytes": self.size_bytes,
+            "content_sha256": self.content_sha256,
             "created_at": self.created_at,
         }
 
@@ -413,11 +415,16 @@ def register_local_attachment(
         logger.warning("Attachment path does not exist", path=str(local_path), kind=kind)
         return None
 
+    hasher = hashlib.sha256()
     try:
+        with local_path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                hasher.update(chunk)
         size_bytes = local_path.stat().st_size
     except OSError:
-        logger.exception("Failed to read attachment file metadata", path=str(local_path))
+        logger.exception("Failed to hash attachment file", path=str(local_path))
         return None
+    content_sha256 = hasher.hexdigest()
 
     resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
     normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
@@ -436,6 +443,7 @@ def register_local_attachment(
         source_event_id=source_event_id,
         sender=sender,
         size_bytes=size_bytes,
+        content_sha256=content_sha256,
         created_at=datetime.now(UTC).isoformat(),
     )
 
@@ -611,6 +619,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
     source_event_id = raw_payload.get("source_event_id")
     sender = raw_payload.get("sender")
     size_bytes = raw_payload.get("size_bytes")
+    content_sha256 = raw_payload.get("content_sha256")
     created_at = raw_payload.get("created_at")
 
     return AttachmentRecord(
@@ -624,6 +633,7 @@ def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord 
         source_event_id=source_event_id if isinstance(source_event_id, str) else None,
         sender=sender if isinstance(sender, str) else None,
         size_bytes=size_bytes if isinstance(size_bytes, int) else None,
+        content_sha256=content_sha256 if isinstance(content_sha256, str) else None,
         created_at=created_at if isinstance(created_at, str) else None,
     )
 
