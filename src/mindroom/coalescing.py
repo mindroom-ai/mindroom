@@ -330,6 +330,14 @@ class CoalescingGate:
             if alias_key != key:
                 self._key_aliases[alias_key] = key
 
+    def _register_claimed_voice_root_aliases(
+        self,
+        key: CoalescingKey,
+        segments: list[tuple[CoalescingKey, list[PendingEvent]]],
+    ) -> None:
+        for _dispatch_key, pending_events in segments:
+            self._register_in_flight_voice_root_aliases(key, pending_events)
+
     def _get_or_create_gate(self, key: CoalescingKey) -> _GateEntry:
         gate = self._gates.get(key)
         if gate is None:
@@ -1206,7 +1214,7 @@ class CoalescingGate:
                 await self._settle_target_keys_through_received_order(
                     current_key,
                     max_received_order=claim_max_received_order,
-                    await_unresolved_before_order=gate.queue[0].received_order,
+                    await_unresolved_before_order=claim_max_received_order + 1,
                     skip_gate=gate,
                 )
                 resolved_key, resolved_gate = self._resolve_gate_entry(current_key, gate)
@@ -1252,6 +1260,7 @@ class CoalescingGate:
                     bypass_grace = True
                 if not gate.queue:
                     gate.drain_all_requested = False
+                self._register_claimed_voice_root_aliases(current_key, segments)
                 for dispatch_key, pending_events in segments:
                     await self._dispatch_claimed_events(
                         dispatch_key,

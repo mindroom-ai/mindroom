@@ -1565,6 +1565,77 @@ async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(m
 
 
 @pytest.mark.asyncio
+async def test_raw_voice_root_target_failures_dispatch_separate_audio_fallbacks(mock_home_bot: AgentBot) -> None:
+    """Fallback voice roots should dispatch under their built thread targets, not the room key."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+    first_voice = _make_voice_event(
+        event_id="$target-fails-1",
+        source={
+            "event_id": "$target-fails-1",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1_712_350_000_001,
+            "type": "m.room.message",
+            "room_id": "!test:server",
+            "content": {"body": "voice.ogg", "msgtype": "m.audio"},
+        },
+        server_timestamp=1_712_350_000_001,
+    )
+    second_voice = _make_voice_event(
+        event_id="$target-fails-2",
+        source={
+            "event_id": "$target-fails-2",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1_712_350_000_002,
+            "type": "m.room.message",
+            "room_id": "!test:server",
+            "content": {"body": "voice.ogg", "msgtype": "m.audio"},
+        },
+        server_timestamp=1_712_350_000_002,
+    )
+    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "resolve_dispatch_target",
+            new=AsyncMock(side_effect=RuntimeError("thread lookup failed")),
+        ),
+        patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)),
+        patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await asyncio.gather(
+            bot._on_media_message(room, first_voice),
+            bot._on_media_message(room, second_voice),
+        )
+        await drain_coalescing(bot)
+
+    assert [handled_source_ids for _event, handled_source_ids in dispatches] == [
+        ["$target-fails-1"],
+        ["$target-fails-2"],
+    ]
+    assert [
+        cast("dict[str, str]", event.source["content"]["m.relates_to"])["event_id"]
+        for event, _handled_source_ids in dispatches
+        if isinstance(event, PreparedTextEvent)
+    ] == ["$target-fails-1", "$target-fails-2"]
+
+
+@pytest.mark.asyncio
 async def test_raw_voice_cache_append_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
     """Cache append failures after admission should terminate visibly."""
     bot = mock_home_bot

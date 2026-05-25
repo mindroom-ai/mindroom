@@ -2609,6 +2609,7 @@ class TurnController:
         hook_source = None
         message_received_depth = 0
         target = None
+        fallback_dispatch_key = dispatch_key
         try:
             target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
@@ -2616,6 +2617,7 @@ class TurnController:
                 reply_to_event_id=fallback_event.event_id,
                 event_source=fallback_event.source,
             )
+            fallback_dispatch_key = CoalescingKey(room.room_id, target.resolved_thread_id, requester_user_id)
             envelope = self.deps.resolver.build_ingress_envelope(
                 room_id=room.room_id,
                 event=fallback_event,
@@ -2643,7 +2645,7 @@ class TurnController:
                 error=str(metadata_error),
             )
         return ReadyPendingEvent(
-            dispatch_key=dispatch_key,
+            dispatch_key=fallback_dispatch_key,
             pending_event=PendingEvent(
                 event=fallback_event,
                 room=room,

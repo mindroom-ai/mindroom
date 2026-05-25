@@ -2461,10 +2461,11 @@ async def test_text_first_joins_later_voice_when_target_resolves_during_debounce
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
     )
-    await asyncio.sleep(0.005)
-    release_target.set()
-
     await asyncio.sleep(0.06)
+    assert calls == []
+
+    release_target.set()
+    await asyncio.sleep(0.01)
     assert calls == []
 
     release_voice.set()
@@ -2525,9 +2526,12 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
     )
-    await _wait_for(lambda: calls == [["$typed"]], deadline_seconds=0.2)
+    await asyncio.sleep(0.06)
+    assert calls == []
 
     release_target.set()
+    await _wait_for(lambda: calls == [["$typed"]], deadline_seconds=0.2)
+
     release_voice.set()
     await _wait_for(lambda: calls == [["$typed"], ["$voice"]], deadline_seconds=0.2)
     assert _coalescing_gate_is_idle(gate)
@@ -3070,6 +3074,79 @@ async def test_followup_to_earlier_voice_root_waits_behind_in_flight_room_voice_
 
     release_voice_dispatch.set()
     await _wait_for(lambda: calls == [["$voice1", "$voice2"], ["$followup"]], deadline_seconds=0.2)
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_followup_to_later_split_voice_root_waits_for_that_voice_segment() -> None:
+    """Replies to claimed-but-not-yet-dispatched voice roots must not outrun them."""
+    room = _make_room()
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    first_key = CoalescingKey(room.room_id, "$thread-one", "@user:localhost")
+    second_key = CoalescingKey(room.room_id, "$thread-two", "@user:localhost")
+    second_voice_reply_key = CoalescingKey(room.room_id, "$voice2", "@user:localhost")
+    first_voice = _text_event(
+        event_id="$voice1",
+        body="first voice transcript",
+        server_timestamp=1000,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    second_voice = _text_event(
+        event_id="$voice2",
+        body="second voice transcript",
+        server_timestamp=1001,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    followup = _text_event(
+        event_id="$followup",
+        body="follow up to the second voice",
+        server_timestamp=1002,
+        thread_id="$voice2",
+    )
+    entered_first_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def ready_voice(event: nio.RoomMessageText, key: CoalescingKey) -> ReadyPendingEvent:
+        return ReadyPendingEvent(
+            dispatch_key=key,
+            pending_event=PendingEvent(event=event, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        gate.retarget(batch.gate_key, batch.coalescing_key)
+        calls.append(list(batch.source_event_ids))
+        if batch.source_event_ids == ["$voice1"]:
+            entered_first_dispatch.set()
+            await release_first_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.admit(
+        room_key,
+        ready_task=asyncio.create_task(ready_voice(first_voice, first_key)),
+        source_event_id="$voice1",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await gate.admit(
+        room_key,
+        ready_task=asyncio.create_task(ready_voice(second_voice, second_key)),
+        source_event_id="$voice2",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await asyncio.wait_for(entered_first_dispatch.wait(), timeout=0.2)
+
+    await gate.enqueue(second_voice_reply_key, PendingEvent(event=followup, room=room, source_kind="message"))
+    await asyncio.sleep(0.02)
+    assert calls == [["$voice1"]]
+
+    release_first_dispatch.set()
+    await _wait_for(lambda: calls == [["$voice1"], ["$voice2"], ["$followup"]], deadline_seconds=0.2)
     assert _coalescing_gate_is_idle(gate)
 
 
