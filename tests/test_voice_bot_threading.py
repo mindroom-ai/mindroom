@@ -1149,10 +1149,10 @@ async def test_voice_admitted_before_target_resolution_so_text_reply_waits(
 
 
 @pytest.mark.asyncio
-async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
+async def test_plain_reply_voice_to_thread_child_joins_root_text_after_target_resolves(
     mock_home_bot: AgentBot,
 ) -> None:
-    """A plain-reply voice to a thread child should not be outrun by root-scoped typed text."""
+    """A plain-reply voice resolving during debounce should join root-scoped typed text."""
     bot = mock_home_bot
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.02)
@@ -1264,12 +1264,12 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(cache_started.wait(), timeout=1.0)
             await bot._on_message(room, typed_event)
+            release_cache.set()
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             await asyncio.sleep(0.05)
 
             assert dispatches == []
 
-            release_cache.set()
-            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             release_prepare.set()
             await voice_task
             await drain_coalescing(bot)

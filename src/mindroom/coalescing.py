@@ -864,6 +864,10 @@ class CoalescingGate:
                     or id(queued) in seen
                 ):
                     continue
+                # Cross-lane target resolution is opportunistic. Awaiting an unresolved
+                # target from another provisional thread would couple unrelated turns.
+                if gate_key != key and not queued.target_key_task.done():
+                    continue
                 admissions.append(queued)
                 seen.add(id(queued))
         return sorted(admissions, key=lambda queued: queued.received_order)

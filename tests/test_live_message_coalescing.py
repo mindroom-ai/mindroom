@@ -2343,8 +2343,8 @@ async def test_text_first_waits_for_plain_reply_voice_ready_during_debounce() ->
 
 
 @pytest.mark.asyncio
-async def test_text_first_waits_for_later_voice_target_resolution_during_debounce() -> None:
-    """A later voice resolving into the same thread should join a text debounce window."""
+async def test_text_first_joins_later_voice_when_target_resolves_during_debounce() -> None:
+    """A later voice resolving into the same thread during debounce should join text."""
     room = _make_room()
     root_key = CoalescingKey(room.room_id, "$thread-root", "@user:localhost")
     child_key = CoalescingKey(room.room_id, "$thread-child", "@user:localhost")
@@ -2395,11 +2395,12 @@ async def test_text_first_waits_for_later_voice_target_resolution_during_debounc
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
     )
+    await asyncio.sleep(0.005)
+    release_target.set()
 
     await asyncio.sleep(0.06)
     assert calls == []
 
-    release_target.set()
     release_voice.set()
     await gate.drain_all()
 
@@ -2425,8 +2426,13 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
         server_timestamp=1001,
         source_kind=VOICE_SOURCE_KIND,
     )
+    release_target = asyncio.Event()
     release_voice = asyncio.Event()
     calls: list[list[str]] = []
+
+    async def target_key() -> CoalescingKey:
+        await release_target.wait()
+        return voice_root_key
 
     async def ready_voice() -> ReadyPendingEvent:
         await release_voice.wait()
@@ -2449,11 +2455,13 @@ async def test_later_different_thread_voice_does_not_hold_earlier_text() -> None
     await gate.admit(
         voice_root_key,
         ready_task=asyncio.create_task(ready_voice()),
+        target_key_task=asyncio.create_task(target_key()),
         source_event_id="$voice",
         source_kind=VOICE_SOURCE_KIND,
     )
     await _wait_for(lambda: calls == [["$typed"]], deadline_seconds=0.2)
 
+    release_target.set()
     release_voice.set()
     await _wait_for(lambda: calls == [["$typed"], ["$voice"]], deadline_seconds=0.2)
     assert _coalescing_gate_is_idle(gate)
