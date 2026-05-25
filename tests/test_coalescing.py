@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
@@ -96,6 +98,92 @@ async def _ready_after(
 ) -> ReadyPendingEvent:
     await release.wait()
     return ReadyPendingEvent(pending_event=pending_event)
+
+
+class FakeMonotonicClock:
+    """Mutable monotonic clock for reservation timing tests."""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        """Return the current fake monotonic time."""
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        """Advance the fake monotonic clock."""
+        self.value += seconds
+
+
+def test_reserve_order_uses_local_monotonic_receipt_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reservations should capture local monotonic receipt time."""
+    fake_clock = FakeMonotonicClock(10.0)
+    monkeypatch.setattr(time, "monotonic", fake_clock)
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.3,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    first = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    fake_clock.advance(0.5)
+    second = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+
+    assert first.receipt_time == 10.0
+    assert second.receipt_time == 10.5
+    assert first.received_order < second.received_order
+
+
+def test_release_order_removes_unadmitted_reservation_from_owner_work() -> None:
+    """Reservation release should clear owner-work tracking and be idempotent."""
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.3,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+
+    assert gate._has_older_owner_work(key, reservation.received_order + 1)
+
+    reservation.release()
+    reservation.release()
+
+    assert not gate._has_older_owner_work(key, reservation.received_order + 1)
+    assert reservation.released
+    assert reservation.settled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_admit_with_reservation_keeps_wall_clock_enqueue_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reservation monotonic receipt time must not be stored as event enqueue time."""
+    fake_clock = FakeMonotonicClock(10.0)
+    monkeypatch.setattr(time, "monotonic", fake_clock)
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    pending = _pending(_text_event("$typed:localhost", "typed", 1_000_000))
+    reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=pending),
+        order_reservation=reservation,
+    )
+
+    queued = gate._gates[key].queue[0]
+    assert reservation.receipt_time == 10.0
+    assert queued.received_at == 1_000.0
+    assert pending.enqueue_time != reservation.receipt_time
+
+    await gate.drain_all()
 
 
 @pytest.mark.asyncio
@@ -334,7 +422,7 @@ async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
     reservation = gate.reserve_order(
         room_id=key.room_id,
         requester_user_id=key.requester_user_id,
-        received_at=1_000.0,
+        receipt_time=1_000.0,
     )
 
     drain_task = asyncio.create_task(gate.drain_all())

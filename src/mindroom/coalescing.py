@@ -102,9 +102,20 @@ class IngressOrderReservation:
     room_id: str
     requester_user_id: str
     received_order: int
-    received_at: float
+    receipt_time: float
     released: bool = False
     settled: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+    _release: Callable[[IngressOrderReservation], None] | None = field(default=None, repr=False, compare=False)
+
+    def release(self) -> None:
+        """Release this reservation if it will not be admitted."""
+        if self._release is None:
+            if self.released:
+                return
+            self.released = True
+            self.settled.set()
+            return
+        self._release(self)
 
 
 @dataclass(frozen=True)
@@ -353,14 +364,17 @@ class CoalescingGate:
         *,
         room_id: str,
         requester_user_id: str,
+        receipt_time: float | None = None,
         received_at: float | None = None,
     ) -> IngressOrderReservation:
         """Reserve receive order before async work can resolve the final coalescing key."""
+        _ = received_at
         reservation = IngressOrderReservation(
             room_id=room_id,
             requester_user_id=requester_user_id,
             received_order=self._next_order(),
-            received_at=received_at if received_at is not None else time.time(),
+            receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
+            _release=self.release_order_reservation,
         )
         self._order_reservations.append(reservation)
         self._wake_owner(room_id, requester_user_id)
@@ -614,7 +628,7 @@ class CoalescingGate:
                 msg = "Ingress order reservation owner must match admitted coalescing key"
                 raise ValueError(msg)
             received_order = order_reservation.received_order
-            resolved_received_at = received_at if received_at is not None else order_reservation.received_at
+            resolved_received_at = received_at if received_at is not None else time.time()
             self._release_order_reservation(order_reservation, wake=False)
         admission = _QueuedEvent(
             admission_key=key,
