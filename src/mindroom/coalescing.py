@@ -59,6 +59,9 @@ _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
+_ROOM_SCOPE_BATCHING_SOURCE_KINDS: frozenset[str] = frozenset(
+    {VOICE_SOURCE_KIND, IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND},
+)
 logger = get_logger(__name__)
 
 
@@ -153,6 +156,23 @@ class _ReadyAdmission:
     @property
     def pending_event(self) -> PendingEvent:
         return self.ready_event.pending_event
+
+
+@dataclass
+class _ClaimedSegmentOwner:
+    """Own metadata closure for one resolved dispatch segment."""
+
+    pending_events: list[PendingEvent]
+    metadata_closed: bool = False
+
+    def event_ids(self) -> set[str]:
+        return {pending_event.event.event_id for pending_event in self.pending_events}
+
+    def close_metadata_once(self) -> None:
+        if self.metadata_closed:
+            return
+        close_pending_event_metadata(self.pending_events)
+        self.metadata_closed = True
 
 
 @dataclass
@@ -307,6 +327,14 @@ class CoalescingGate:
             and self._reservation_matches_key(reservation, key)
             and reservation.received_order < before_order
         ]
+
+    def _has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:
+        return any(
+            not reservation.released
+            and self._reservation_matches_key(reservation, key)
+            and reservation.received_order < received_order
+            for reservation in self._order_reservations
+        )
 
     async def _wait_until_front_claimable(
         self,
@@ -468,6 +496,26 @@ class CoalescingGate:
                 break
             count += 1
         return count
+
+    def _claimable_front_normal_run_length(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        *,
+        coalesce_normal_events: bool,
+        max_received_order: int | None = None,
+    ) -> int:
+        base_count = self._front_normal_run_length(
+            gate,
+            coalesce_normal_events=coalesce_normal_events,
+            max_received_order=max_received_order,
+        )
+        claimable_count = 0
+        for queued in list(gate.queue)[:base_count]:
+            if self._has_older_unresolved_owner_reservation(key, queued.received_order):
+                break
+            claimable_count += 1
+        return claimable_count
 
     @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
@@ -859,19 +907,20 @@ class CoalescingGate:
         return queued.ready_result
 
     @staticmethod
-    def _front_admissions_have_voice(gate: _GateEntry) -> bool:
+    def _front_admissions_allow_room_scope_coalescing(gate: _GateEntry) -> bool:
+        """Return whether front normal admissions allow room-level batching policy."""
         for queued in gate.queue:
             if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
-                break
-            if queued.source_kind == VOICE_SOURCE_KIND:
+                return False
+            if queued.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS:
                 return True
-            if queued.ready_result is not None and queued.ready_result.pending_event.source_kind == VOICE_SOURCE_KIND:
+            if queued.ready_result is not None and is_media_dispatch_event(queued.ready_result.pending_event.event):
                 return True
         return False
 
     @staticmethod
     def _should_coalesce_normal_events(key: CoalescingKey, gate: _GateEntry) -> bool:
-        return key.thread_id is not None or CoalescingGate._front_admissions_have_voice(gate)
+        return key.thread_id is not None or CoalescingGate._front_admissions_allow_room_scope_coalescing(gate)
 
     async def _resolve_claimed_admissions(
         self,
@@ -884,22 +933,6 @@ class CoalescingGate:
             if result is not None
         ]
 
-    async def _resolve_claimed_admissions_or_requeue(
-        self,
-        key: CoalescingKey,
-        gate: _GateEntry,
-        admissions: list[_QueuedEvent],
-    ) -> list[_ReadyAdmission]:
-        try:
-            ready_admissions = await self._resolve_claimed_admissions(admissions)
-        except BaseException:
-            self._requeue_claimed_admissions(gate, admissions)
-            raise
-        self._clear_claimed_admissions(gate, admissions)
-        if len(ready_admissions) != len(admissions):
-            self._wake_owner_gates(key)
-        return ready_admissions
-
     @staticmethod
     def _key_for_ready_admission(
         ready_admissions: list[_ReadyAdmission],
@@ -908,33 +941,48 @@ class CoalescingGate:
         return ready_admissions[index].key
 
     @staticmethod
-    def _can_merge_ready_segment(
-        key: CoalescingKey,
-        pending_events: list[PendingEvent],
-        next_event: PendingEvent,
+    def _ready_admissions_allow_room_scope_coalescing(ready_admissions: list[_ReadyAdmission]) -> bool:
+        return any(
+            ready_admission.pending_event.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS
+            or is_media_dispatch_event(ready_admission.pending_event.event)
+            for ready_admission in ready_admissions
+        )
+
+    @staticmethod
+    def _can_merge_room_scope_segment(
+        current_key: CoalescingKey,
+        next_key: CoalescingKey,
+        *,
+        room_scope_batching_allowed: bool,
     ) -> bool:
-        if key.thread_id is not None:
+        if current_key != next_key:
+            return False
+        if current_key.thread_id is not None:
             return True
-        if _pending_has_voice_source([*pending_events, next_event]):
-            return True
-        return any(is_media_dispatch_event(pending_event.event) for pending_event in [*pending_events, next_event])
+        return room_scope_batching_allowed
 
     def _ready_admission_segments(
         self,
         ready_admissions: list[_ReadyAdmission],
+        *,
+        room_scope_batching_allowed: bool,
     ) -> list[tuple[CoalescingKey, list[PendingEvent]]]:
         segments: list[tuple[CoalescingKey, list[PendingEvent]]] = []
         for index, ready_admission in enumerate(ready_admissions):
             key = self._key_for_ready_admission(ready_admissions, index)
-            if (
-                segments
-                and segments[-1][0] == key
-                and CoalescingGate._can_merge_ready_segment(key, segments[-1][1], ready_admission.pending_event)
+            if segments and self._can_merge_room_scope_segment(
+                segments[-1][0],
+                key,
+                room_scope_batching_allowed=room_scope_batching_allowed,
             ):
                 segments[-1][1].append(ready_admission.pending_event)
             else:
                 segments.append((key, [ready_admission.pending_event]))
         return segments
+
+    @staticmethod
+    def _should_wait_for_upload_grace(candidate_events: list[PendingEvent]) -> bool:
+        return _pending_has_only_text(candidate_events) and not _pending_has_voice_source(candidate_events)
 
     def _log_dispatch_failure(
         self,
@@ -1020,18 +1068,102 @@ class CoalescingGate:
         self,
         key: CoalescingKey,
         gate: _GateEntry,
-        pending_events: list[PendingEvent],
+        segment_owner: _ClaimedSegmentOwner,
         *,
         bypass_grace: bool,
     ) -> None:
         try:
-            await self._dispatch_events(key, gate, pending_events, bypass_grace=bypass_grace)
+            await self._dispatch_events(key, gate, segment_owner.pending_events, bypass_grace=bypass_grace)
         except asyncio.CancelledError:
-            close_pending_event_metadata(pending_events)
+            segment_owner.close_metadata_once()
             raise
         except Exception as error:
-            close_pending_event_metadata(pending_events)
+            segment_owner.close_metadata_once()
             self._log_dispatch_failure(key, gate, error)
+
+    async def _dispatch_claim(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        admissions: list[_QueuedEvent],
+        *,
+        bypass_grace: bool,
+        allow_upload_grace: bool,
+    ) -> None:
+        """Resolve and dispatch one claimed admission set with one cleanup owner."""
+        ready_admissions: list[_ReadyAdmission] = []
+        closed_or_transferred: set[str] = set()
+        unresolved_segment_owners: list[_ClaimedSegmentOwner] = []
+        try:
+            try:
+                ready_admissions = await self._resolve_claimed_admissions(admissions)
+            except BaseException:
+                self._requeue_claimed_admissions(gate, admissions)
+                raise
+            if not ready_admissions:
+                return
+            room_scope_batching_allowed = self._ready_admissions_allow_room_scope_coalescing(ready_admissions)
+            segments = self._ready_admission_segments(
+                ready_admissions,
+                room_scope_batching_allowed=room_scope_batching_allowed,
+            )
+            candidate_events = [event for _segment_key, pending_events in segments for event in pending_events]
+            if allow_upload_grace and self._should_wait_for_upload_grace(candidate_events):
+                timing_scope = event_timing_scope(
+                    build_coalesced_batch(key, candidate_events).primary_event.event_id,
+                )
+                self._requeue_claimed_admissions(gate, admissions)
+                closed_or_transferred.update(
+                    ready_admission.pending_event.event.event_id for ready_admission in ready_admissions
+                )
+                ready_admissions = []
+                candidate_count = await self._wait_for_upload_grace(
+                    gate,
+                    len(admissions),
+                    timing_scope=timing_scope,
+                )
+                claimable_count = self._claimable_front_normal_run_length(
+                    key,
+                    gate,
+                    coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
+                    max_received_order=self._next_received_order,
+                )
+                candidate_count = min(candidate_count, claimable_count)
+                if candidate_count > 0:
+                    next_admissions = self._claim_front_events(gate, candidate_count)
+                    await self._dispatch_claim(
+                        key,
+                        gate,
+                        next_admissions,
+                        bypass_grace=True,
+                        allow_upload_grace=False,
+                    )
+                return
+            for segment_key, pending_events in segments:
+                segment_owner = _ClaimedSegmentOwner(pending_events=list(pending_events))
+                unresolved_segment_owners.append(segment_owner)
+                await self._dispatch_claimed_events(
+                    segment_key,
+                    gate,
+                    segment_owner,
+                    bypass_grace=bypass_grace,
+                )
+                closed_or_transferred.update(segment_owner.event_ids())
+                unresolved_segment_owners.remove(segment_owner)
+        except BaseException:
+            for segment_owner in unresolved_segment_owners:
+                segment_owner.close_metadata_once()
+                closed_or_transferred.update(segment_owner.event_ids())
+            unresolved_events = [
+                ready_admission.pending_event
+                for ready_admission in ready_admissions
+                if ready_admission.pending_event.event.event_id not in closed_or_transferred
+            ]
+            close_pending_event_metadata(unresolved_events)
+            raise
+        finally:
+            self._clear_claimed_admissions(gate, admissions)
+            self._wake_owner_gates(key)
 
     async def _drain_gate(self, key: CoalescingKey, gate: _GateEntry) -> None:  # noqa: C901, PLR0912, PLR0915
         """Own debounce, grace, and dispatch for one coalescing key."""
@@ -1059,14 +1191,12 @@ class CoalescingGate:
                 front_kind = self._queued_kind(front)
                 if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
                     claimed_admissions = self._claim_front_events(gate, 1)
-                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(key, gate, claimed_admissions)
-                    if not ready_admissions:
-                        continue
-                    await self._dispatch_claimed_events(
-                        self._key_for_ready_admission(ready_admissions, 0),
+                    await self._dispatch_claim(
+                        key,
                         gate,
-                        [ready_admissions[0].pending_event],
+                        claimed_admissions,
                         bypass_grace=True,
+                        allow_upload_grace=False,
                     )
                     continue
 
@@ -1090,7 +1220,8 @@ class CoalescingGate:
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
                 coalesce_normal_events = self._should_coalesce_normal_events(key, gate)
-                candidate_count = self._front_normal_run_length(
+                candidate_count = self._claimable_front_normal_run_length(
+                    key,
                     gate,
                     coalesce_normal_events=coalesce_normal_events,
                     max_received_order=claim_max_received_order,
@@ -1098,38 +1229,15 @@ class CoalescingGate:
                 if candidate_count == 0:
                     continue
                 claimed_admissions = self._claim_front_events(gate, candidate_count)
-                ready_admissions = await self._resolve_claimed_admissions_or_requeue(key, gate, claimed_admissions)
-                if not ready_admissions:
-                    continue
-                segments = self._ready_admission_segments(ready_admissions)
-                candidate_events = [event for _key, pending_events in segments for event in pending_events]
-                if (
-                    use_upload_grace
-                    and _pending_has_only_text(candidate_events)
-                    and not _pending_has_voice_source(candidate_events)
-                ):
-                    timing_scope = event_timing_scope(
-                        build_coalesced_batch(key, candidate_events).primary_event.event_id,
-                    )
-                    gate.queue.extendleft(reversed(claimed_admissions))
-                    candidate_count = await self._wait_for_upload_grace(
-                        gate,
-                        candidate_count,
-                        timing_scope=timing_scope,
-                    )
-                    claimed_admissions = self._claim_front_events(gate, candidate_count)
-                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(key, gate, claimed_admissions)
-                    segments = self._ready_admission_segments(ready_admissions)
-                    bypass_grace = True
+                await self._dispatch_claim(
+                    key,
+                    gate,
+                    claimed_admissions,
+                    bypass_grace=bypass_grace,
+                    allow_upload_grace=use_upload_grace,
+                )
                 if not gate.queue:
                     gate.drain_all_requested = False
-                for segment_key, pending_events in segments:
-                    await self._dispatch_claimed_events(
-                        segment_key,
-                        gate,
-                        pending_events,
-                        bypass_grace=bypass_grace,
-                    )
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise

@@ -10,10 +10,10 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
+from mindroom.coalescing import CoalescingGate, GatePhase, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -84,6 +84,10 @@ def _pending(event: nio.RoomMessageText | nio.RoomMessageImage) -> PendingEvent:
     )
 
 
+def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
+    return not gate._gates
+
+
 def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEvent:
     """Wrap one normalized voice transcript as pending voice ingress."""
     return PendingEvent(
@@ -99,6 +103,11 @@ async def _ready_after(
 ) -> ReadyPendingEvent:
     await release.wait()
     return ReadyPendingEvent(pending_event=pending_event)
+
+
+async def _none_after(release: asyncio.Event) -> ReadyPendingEvent | None:
+    await release.wait()
+    return None
 
 
 async def _admit_ready(
@@ -721,3 +730,321 @@ async def test_front_bypass_does_not_wait_for_later_unresolved_reservation() -> 
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$bypass:localhost"], ["$voice:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_claim_count_stops_before_unresolved_older_reservation() -> None:
+    """A normal claim must not cross an unresolved older same-owner reservation."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    reservation = gate.reserve_order(
+        room_id=key.room_id,
+        requester_user_id=key.requester_user_id,
+        receipt_time=time.monotonic() + 60.0,
+    )
+    await _admit_ready(gate, key, _pending(_text_event("$third:localhost", "third", 1_000_002)))
+
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost"]])
+    assert gate._gates[key].queue[0].source_event_id == "$third:localhost"
+
+    reservation.release()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$first:localhost"], ["$third:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_different_canonical_threads_do_not_serialize_after_admission() -> None:
+    """Same-owner canonical thread gates should dispatch independently after admission."""
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    batches: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch.source_event_ids)
+        if batch.coalescing_key.thread_id == "$thread-a:localhost":
+            first_started.set()
+            await release_first.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
+    second_key = CoalescingKey("!room:localhost", "$thread-b:localhost", "@user:localhost")
+
+    await _admit_ready(gate, first_key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await _wait_for(first_started.is_set)
+    await _admit_ready(gate, second_key, _pending(_text_event("$second:localhost", "second", 1_000_001)))
+
+    await _wait_for(
+        lambda: [ids for ids in batches if ids == ["$second:localhost"]] == [["$second:localhost"]],
+    )
+    release_first.set()
+    await gate.drain_all()
+
+    assert batches == [["$first:localhost"], ["$second:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_zero_ready_claim_clears_claimed_state_and_wakes_waiters() -> None:
+    """A claimed admission that resolves to None should clear and let later work drain."""
+    batches: list[CoalescedBatch] = []
+    release_none = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
+    second_key = CoalescingKey("!room:localhost", "$thread-b:localhost", "@user:localhost")
+
+    await gate.admit(
+        first_key,
+        ready_task=asyncio.create_task(_none_after(release_none)),
+        source_event_id="$none:localhost",
+    )
+    first_gate = gate._gates[first_key]
+    await _wait_for(lambda: bool(first_gate.claimed_admissions))
+
+    release_none.set()
+    await _wait_for(lambda: not first_gate.claimed_admissions)
+    await _admit_ready(gate, second_key, _pending(_text_event("$later:localhost", "later", 1_000_001)))
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$later:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_partial_ready_failure_dispatches_ready_events_and_clears_claim() -> None:
+    """A partial ready failure should dispatch surviving events and clear the claim."""
+    batches: list[CoalescedBatch] = []
+    release_none = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$ready:localhost", "ready", 1_000_000)))
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(_none_after(release_none)),
+        source_event_id="$none:localhost",
+    )
+    gate_entry = gate._gates[key]
+    await _wait_for(lambda: len(gate_entry.claimed_admissions) == 2)
+
+    release_none.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$ready:localhost"]]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_resolve_requeues_claimed_admissions() -> None:
+    """Cancelling while resolving readiness should put the claimed admission back."""
+    release_ready = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        _ = batch
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    pending = _pending(_text_event("$slow:localhost", "slow", 1_000_000))
+
+    await gate.admit(key, ready_task=asyncio.create_task(_ready_after(release_ready, pending)))
+    gate_entry = gate._gates[key]
+    await _wait_for(lambda: bool(gate_entry.claimed_admissions))
+    [claimed] = gate_entry.claimed_admissions
+
+    assert gate_entry.drain_task is not None
+    gate_entry.drain_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await gate_entry.drain_task
+
+    assert list(gate_entry.queue) == [claimed]
+    assert gate_entry.claimed_admissions == []
+
+    release_ready.set()
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_upload_grace_requeue_removes_admissions_from_claimed_state() -> None:
+    """Upload grace should requeue claimed text before awaiting the grace timer."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.2,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "text", 1_000_000)))
+    gate_entry = gate._gates[key]
+
+    await _wait_for(lambda: gate_entry.phase is GatePhase.GRACE)
+    assert gate_entry.claimed_admissions == []
+    assert [queued.source_event_id for queued in gate_entry.queue] == ["$text:localhost"]
+
+    await gate.drain_all()
+    assert [batch.source_event_ids for batch in batches] == [["$text:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_failed_room_media_signal_does_not_merge_surviving_room_text_roots() -> None:
+    """A dropped media-like admission must not make room-level text roots coalesce."""
+    batches: list[CoalescedBatch] = []
+    release_media = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(_none_after(release_media)),
+        source_event_id="$image:localhost",
+        source_kind=IMAGE_SOURCE_KIND,
+    )
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_002)))
+
+    gate_entry = gate._gates[key]
+    await _wait_for(lambda: len(gate_entry.claimed_admissions) == 3)
+    release_media.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$first:localhost"],
+        ["$second:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_same_window_reservation_resolving_to_different_thread_waits_then_splits() -> None:
+    """A same-window unresolved event should hold debounce, then dispatch under its resolved key."""
+    batches: list[tuple[CoalescingKey, list[str]]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append((batch.coalescing_key, batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.03,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    first_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
+    second_key = CoalescingKey("!room:localhost", "$thread-b:localhost", "@user:localhost")
+
+    await _admit_ready(gate, first_key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await asyncio.sleep(0.005)
+    reservation = gate.reserve_order(room_id=first_key.room_id, requester_user_id=first_key.requester_user_id)
+    await asyncio.sleep(0.05)
+
+    assert batches == []
+
+    await gate.admit(
+        second_key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$second:localhost", "second", 1_000_010)),
+        ),
+        order_reservation=reservation,
+    )
+    await gate.drain_all()
+
+    assert sorted(batches) == sorted(
+        [
+            (first_key, ["$first:localhost"]),
+            (second_key, ["$second:localhost"]),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_segment_claim_remains_visible_until_last_segment_finishes() -> None:
+    """Claimed admissions should remain visible while split dispatch segments run."""
+    release_media = asyncio.Event()
+    first_dispatch_started = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    batches: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch.source_event_ids)
+        if batch.source_event_ids == ["$first:localhost"]:
+            first_dispatch_started.set()
+            await release_first_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", None, "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(_none_after(release_media)),
+        source_event_id="$image:localhost",
+        source_kind=IMAGE_SOURCE_KIND,
+    )
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_002)))
+
+    gate_entry = gate._gates[key]
+    await _wait_for(lambda: len(gate_entry.claimed_admissions) == 3)
+    release_media.set()
+    await _wait_for(first_dispatch_started.is_set)
+
+    assert len(gate_entry.claimed_admissions) == 3
+
+    release_first_dispatch.set()
+    await gate.drain_all()
+
+    assert batches == [["$first:localhost"], ["$second:localhost"]]
