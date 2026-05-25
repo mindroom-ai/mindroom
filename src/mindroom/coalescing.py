@@ -298,9 +298,9 @@ def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
     )
 
 
-def _pending_has_voice_source(pending_events: list[PendingEvent]) -> bool:
+def _pending_has_room_scope_source(pending_events: list[PendingEvent]) -> bool:
     return any(
-        pending_event.source_kind == VOICE_SOURCE_KIND or is_voice_event(pending_event.event)
+        pending_event.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS or is_voice_event(pending_event.event)
         for pending_event in pending_events
     )
 
@@ -1210,7 +1210,7 @@ class CoalescingGate:
 
     @staticmethod
     def _should_wait_for_upload_grace(candidate_events: list[PendingEvent]) -> bool:
-        return _pending_has_only_text(candidate_events) and not _pending_has_voice_source(candidate_events)
+        return _pending_has_only_text(candidate_events) and not _pending_has_room_scope_source(candidate_events)
 
     def _log_dispatch_failure(
         self,
