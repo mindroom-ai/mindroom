@@ -178,6 +178,14 @@ class _FlushDiagnostics:
     log_context: dict[str, object]
 
 
+@dataclass(frozen=True)
+class _DebounceWaitResult:
+    """Boundary discovered during one debounce wait."""
+
+    quiet_deadline: float
+    before_order: int | None = None
+
+
 def _effective_source_kind(
     event: DispatchEvent,
     fallback_source_kind: str | None = None,
@@ -286,34 +294,60 @@ class CoalescingGate:
             if other_key != key and self._same_owner(other_key, key):
                 self._wake(other_gate)
 
-    def _has_older_owner_work(self, key: CoalescingKey, received_order: int) -> bool:
-        if any(
-            not reservation.released
-            and self._reservation_matches_key(reservation, key)
-            and reservation.received_order < received_order
+    def _older_owner_reservations(
+        self,
+        key: CoalescingKey,
+        *,
+        before_order: int,
+    ) -> list[IngressOrderReservation]:
+        return [
+            reservation
             for reservation in self._order_reservations
-        ):
-            return True
-        for other_key, other_gate in self._gates.items():
-            if other_key == key or not self._same_owner(other_key, key):
-                continue
-            if any(queued.received_order < received_order for queued in other_gate.claimed_admissions):
-                return True
-            if any(queued.received_order < received_order for queued in other_gate.queue):
-                return True
-        return False
+            if not reservation.released
+            and self._reservation_matches_key(reservation, key)
+            and reservation.received_order < before_order
+        ]
 
-    async def _wait_for_older_owner_work(
+    async def _wait_until_front_claimable(
         self,
         key: CoalescingKey,
         gate: _GateEntry,
-        received_order: int,
+        *,
+        front_order: int,
     ) -> None:
-        while self._has_older_owner_work(key, received_order):
-            gate.wake_event.clear()
-            if not self._has_older_owner_work(key, received_order):
-                return
-            await gate.wake_event.wait()
+        await self._wait_for_reservations(
+            gate,
+            self._older_owner_reservations(key, before_order=front_order),
+        )
+
+    async def _wait_for_reservations(
+        self,
+        gate: _GateEntry,
+        reservations: list[IngressOrderReservation],
+    ) -> None:
+        _ = gate
+        unsettled = [reservation for reservation in reservations if not reservation.released]
+        if not unsettled:
+            return
+        await asyncio.gather(*(reservation.settled.wait() for reservation in unsettled))
+
+    def _unsettled_owner_reservations_in_window(
+        self,
+        key: CoalescingKey,
+        *,
+        after_order: int,
+        before_order: int | None,
+        before_or_at_receipt_time: float,
+    ) -> list[IngressOrderReservation]:
+        return [
+            reservation
+            for reservation in self._order_reservations
+            if not reservation.released
+            and self._reservation_matches_key(reservation, key)
+            and reservation.received_order > after_order
+            and (before_order is None or reservation.received_order < before_order)
+            and reservation.receipt_time <= before_or_at_receipt_time
+        ]
 
     @staticmethod
     def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
@@ -450,12 +484,18 @@ class CoalescingGate:
         return count
 
     @staticmethod
-    def _has_barrier_after_front_normal_run(gate: _GateEntry, *, coalesce_normal_events: bool) -> bool:
+    def _first_barrier_after_front_normal_run_order(
+        gate: _GateEntry,
+        *,
+        coalesce_normal_events: bool,
+    ) -> int | None:
         normal_count = CoalescingGate._front_normal_run_length(
             gate,
             coalesce_normal_events=coalesce_normal_events,
         )
-        return normal_count < len(gate.queue)
+        if normal_count < len(gate.queue):
+            return gate.queue[normal_count].received_order
+        return None
 
     @staticmethod
     def _has_item_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
@@ -715,28 +755,32 @@ class CoalescingGate:
         gate: _GateEntry,
         *,
         coalesce_normal_events: Callable[[], bool],
-    ) -> None:
+    ) -> _DebounceWaitResult:
         """Wait for the normal debounce window, returning early when a barrier appears."""
         gate.phase = GatePhase.DEBOUNCE
         gate.grace_deadline = None
         debounce_seconds = max(self._debounce_seconds(), 0.0)
         if debounce_seconds <= 0 or self._is_shutting_down() or gate.drain_all_requested:
             gate.deadline = time.monotonic()
-            return
-        if self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce_normal_events()):
+            return _DebounceWaitResult(quiet_deadline=gate.deadline)
+        barrier_order = self._first_barrier_after_front_normal_run_order(
+            gate,
+            coalesce_normal_events=coalesce_normal_events(),
+        )
+        if barrier_order is not None:
             gate.deadline = time.monotonic()
-            return
+            return _DebounceWaitResult(quiet_deadline=gate.deadline, before_order=barrier_order)
         gate.deadline = time.monotonic() + debounce_seconds
         while True:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
-                return
-            if (
-                self._is_shutting_down()
-                or gate.drain_all_requested
-                or self._has_barrier_after_front_normal_run(gate, coalesce_normal_events=coalesce_normal_events())
-            ):
-                return
+                return _DebounceWaitResult(quiet_deadline=deadline)
+            barrier_order = self._first_barrier_after_front_normal_run_order(
+                gate,
+                coalesce_normal_events=coalesce_normal_events(),
+            )
+            if self._is_shutting_down() or gate.drain_all_requested or barrier_order is not None:
+                return _DebounceWaitResult(quiet_deadline=time.monotonic(), before_order=barrier_order)
             gate.deadline = time.monotonic() + debounce_seconds
 
     async def _wait_for_upload_grace(
@@ -1008,7 +1052,7 @@ class CoalescingGate:
                     return
 
                 front = gate.queue[0]
-                await self._wait_for_older_owner_work(key, gate, front.received_order)
+                await self._wait_until_front_claimable(key, gate, front_order=front.received_order)
                 if not gate.queue:
                     continue
                 front = gate.queue[0]
@@ -1026,13 +1070,23 @@ class CoalescingGate:
                     )
                     continue
 
-                await self._wait_for_debounce(
+                debounce_result = await self._wait_for_debounce(
                     gate,
                     coalesce_normal_events=lambda key=key, entry=gate: self._should_coalesce_normal_events(key, entry),
                 )
-                claim_max_received_order = self._next_received_order
                 if not gate.queue:
                     continue
+                front = gate.queue[0]
+                same_window_reservations = self._unsettled_owner_reservations_in_window(
+                    key,
+                    after_order=front.received_order,
+                    before_order=debounce_result.before_order,
+                    before_or_at_receipt_time=debounce_result.quiet_deadline,
+                )
+                if same_window_reservations:
+                    await self._wait_for_reservations(gate, same_window_reservations)
+                    continue
+                claim_max_received_order = self._next_received_order
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
                 coalesce_normal_events = self._should_coalesce_normal_events(key, gate)

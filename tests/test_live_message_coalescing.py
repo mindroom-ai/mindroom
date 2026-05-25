@@ -1129,8 +1129,8 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
     """Flush pending messages before dispatching a command event."""
     bot = _make_bot(tmp_path)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="tell me more", server_timestamp=1000)
-    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001)
+    first = _text_event(event_id="$m1", body="tell me more", server_timestamp=1000, thread_id="$thread")
+    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001, thread_id="$thread")
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -1173,9 +1173,9 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
     """Drop stale debounce timers after a command-triggered flush."""
     bot = _make_bot(tmp_path, debounce_ms=40)
     room = _make_room()
-    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
-    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001)
-    second = _text_event(event_id="$m3", body="second", server_timestamp=1002)
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
+    command = _text_event(event_id="$m2", body="!help", server_timestamp=1001, thread_id="$thread")
+    second = _text_event(event_id="$m3", body="second", server_timestamp=1002, thread_id="$thread")
     calls: list[tuple[str, list[str]]] = []
 
     async def record_dispatch(
@@ -2236,16 +2236,15 @@ async def test_pending_thread_voice_does_not_capture_unrelated_thread_text() -> 
         source_kind=VOICE_SOURCE_KIND,
     )
     await _admit_ready(gate, unrelated_thread_key, PendingEvent(event=typed, room=room, source_kind="message"))
-    await asyncio.sleep(0.02)
-    assert calls == []
+    await _wait_for(lambda: calls == [(unrelated_thread_key, ["$typed"])])
 
     release_voice.set()
     await _wait_for(
         lambda: (
             calls
             == [
-                (voice_key, ["$voice"]),
                 (unrelated_thread_key, ["$typed"]),
+                (voice_key, ["$voice"]),
             ]
         ),
         deadline_seconds=0.2,
@@ -3005,7 +3004,7 @@ async def test_enqueue_for_dispatch_timing_events_include_explicit_scope(tmp_pat
     event = _text_event(event_id="$m1", body="hello")
 
     with (
-        patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()),
+        patch.object(bot._coalescing_gate, "admit", new=AsyncMock()),
         patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
     ):
         await _enqueue_for_dispatch(
