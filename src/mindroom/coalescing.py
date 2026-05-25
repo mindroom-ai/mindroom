@@ -846,12 +846,15 @@ class CoalescingGate:
         key: CoalescingKey,
         *,
         max_received_order: int,
+        skip_gate: _GateEntry | None = None,
     ) -> list[_QueuedEvent]:
-        """Return older same-requester admissions whose target key can still move a gate."""
+        """Return same-requester admissions whose target key can still move a gate."""
         admissions: list[_QueuedEvent] = []
         seen: set[int] = set()
         for gate_key, gate in self._gates.items():
             if gate_key.room_id != key.room_id or gate_key.requester_user_id != key.requester_user_id:
+                continue
+            if gate is skip_gate:
                 continue
             for queued in (*gate.claimed_admissions, *gate.queue):
                 if (
@@ -865,14 +868,19 @@ class CoalescingGate:
                 seen.add(id(queued))
         return sorted(admissions, key=lambda queued: queued.received_order)
 
-    async def _settle_older_target_keys(
+    async def _settle_target_keys_through_received_order(
         self,
         key: CoalescingKey,
         *,
         max_received_order: int,
+        skip_gate: _GateEntry | None = None,
     ) -> None:
         """Resolve target keys that must be known before this gate may flush."""
-        for queued in self._unsettled_target_key_admissions(key, max_received_order=max_received_order):
+        for queued in self._unsettled_target_key_admissions(
+            key,
+            max_received_order=max_received_order,
+            skip_gate=skip_gate,
+        ):
             target_key = await self._resolve_target_key(queued)
             if target_key is not None and target_key != queued.admission_key:
                 self.retarget(queued.admission_key, target_key)
@@ -948,13 +956,52 @@ class CoalescingGate:
         ):
             return provisional_key
         if ready_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
-            for previous_admission in reversed(ready_admissions[:index]):
-                if previous_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
-                    return self._canonical_key(previous_admission.key)
-            for next_admission in ready_admissions[index + 1 :]:
-                if next_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
-                    return self._canonical_key(next_admission.key)
+            return self._non_voice_dispatch_key_for_mixed_voice_batch(ready_key, ready_admissions, index)
         return ready_key
+
+    def _non_voice_dispatch_key_for_mixed_voice_batch(
+        self,
+        ready_key: CoalescingKey,
+        ready_admissions: list[_ReadyAdmission],
+        index: int,
+    ) -> CoalescingKey:
+        if ready_key.thread_id is not None:
+            voice_admission = self._voice_admission_for_event_id(ready_admissions, ready_key.thread_id)
+            return self._canonical_key(voice_admission.key) if voice_admission is not None else ready_key
+        voice_admission = self._nearest_voice_admission(ready_admissions, index)
+        return self._canonical_key(voice_admission.key) if voice_admission is not None else ready_key
+
+    @staticmethod
+    def _voice_admission_for_event_id(
+        ready_admissions: list[_ReadyAdmission],
+        event_id: str,
+    ) -> _ReadyAdmission | None:
+        return next(
+            (
+                admission
+                for admission in ready_admissions
+                if admission.pending_event.source_kind == VOICE_SOURCE_KIND
+                and admission.pending_event.event.event_id == event_id
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _nearest_voice_admission(
+        ready_admissions: list[_ReadyAdmission],
+        index: int,
+    ) -> _ReadyAdmission | None:
+        for previous_admission in reversed(ready_admissions[:index]):
+            if previous_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
+                return previous_admission
+        return next(
+            (
+                admission
+                for admission in ready_admissions[index + 1 :]
+                if admission.pending_event.source_kind == VOICE_SOURCE_KIND
+            ),
+            None,
+        )
 
     @staticmethod
     def _can_merge_ready_segment(
@@ -1112,7 +1159,7 @@ class CoalescingGate:
                     self._remove_gate(current_key)
                     return
 
-                await self._settle_older_target_keys(
+                await self._settle_target_keys_through_received_order(
                     current_key,
                     max_received_order=gate.queue[0].received_order,
                 )
@@ -1152,6 +1199,16 @@ class CoalescingGate:
                 current_key = resolved_key
                 gate = resolved_gate
                 claim_max_received_order = self._next_received_order
+                await self._settle_target_keys_through_received_order(
+                    current_key,
+                    max_received_order=claim_max_received_order,
+                    skip_gate=gate,
+                )
+                resolved_key, resolved_gate = self._resolve_gate_entry(current_key, gate)
+                if resolved_key is None or resolved_gate is None:
+                    return
+                current_key = resolved_key
+                gate = resolved_gate
                 if not gate.queue:
                     continue
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
