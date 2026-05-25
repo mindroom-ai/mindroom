@@ -379,17 +379,21 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
 
     team_user_id = ids["t1"].full_id
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
-    event = MagicMock()
-    event.sender = "@user:localhost"
-    event.body = "@t1 please continue"
-    event.event_id = "$evt_plain_reply"
-    event.source = {
-        "content": {
-            "body": event.body,
-            "m.mentions": {"user_ids": [team_user_id]},
-            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}},
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$evt_plain_reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "@t1 please continue",
+                "m.mentions": {"user_ids": [team_user_id]},
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}},
+            },
         },
-    }
+    )
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"

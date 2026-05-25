@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 import nio
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
@@ -285,8 +286,8 @@ def _normalize_batch_thread_relation(content: dict[str, Any], batch: CoalescedBa
 
 
 def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: CoalescedBatch) -> bool:
-    content = event_content_dict(event)
     thread_id = batch.coalescing_key.thread_id
+    content = event_content_dict(event)
     if content is None:
         return thread_id is not None and batch.source_kind == VOICE_SOURCE_KIND
     if thread_id is None:
@@ -294,6 +295,15 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
     if "m.relates_to" in content:
         return content["m.relates_to"] != {"rel_type": "m.thread", "event_id": thread_id}
     return batch.source_kind == VOICE_SOURCE_KIND
+
+
+def _single_event_should_preserve_matrix_relation(event: DispatchEvent, batch: CoalescedBatch) -> bool:
+    if len(batch.pending_events) != 1 or batch.source_kind == VOICE_SOURCE_KIND:
+        return False
+    if isinstance(event, nio.RoomMessageText | PreparedTextEvent) and command_parser.parse(event.body) is not None:
+        return True
+    content = event_content_dict(event)
+    return content is not None and "m.mentions" in content
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
@@ -331,7 +341,10 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     if (
         len(batch.pending_events) == 1
         and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
-        and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
+        and (
+            _single_event_should_preserve_matrix_relation(batch.primary_event, batch)
+            or not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
+        )
     ):
         if isinstance(batch.primary_event, PreparedTextEvent):
             return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)

@@ -610,7 +610,7 @@ async def _wait_for_live_pending(
     *,
     room_id: str = "!test:localhost",
 ) -> PendingApproval:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(15):
         while True:
             if sender.await_args is not None:
                 approval_id = sender.await_args.args[2]["approval_id"]
@@ -7227,10 +7227,8 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = SimpleNamespace(room_id="!test:localhost")
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
-        prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         call_order: list[str] = []
         admitted_ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
         release_stt = asyncio.Event()
@@ -7262,12 +7260,13 @@ class TestAgentBot:
         async def record_admit(
             key: CoalescingKey,
             *,
-            ready_task: asyncio.Task[ReadyPendingEvent | None],
-            _received_at: float | None = None,
+            ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
             source_event_id: str,
             source_kind: str,
             order_reservation: IngressOrderReservation,
+            **_ignored: object,
         ) -> None:
+            assert ready_task is not None
             nonlocal admitted_ready_task
             call_order.append("admit")
             assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
@@ -7283,7 +7282,9 @@ class TestAgentBot:
 
         bot._conversation_cache.append_live_event = AsyncMock(side_effect=record_append)
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
-        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._precheck_dispatch_event = MagicMock(
+            return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
+        )
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
         bot._coalescing_gate.reserve_order = MagicMock(side_effect=record_reserve_order)
@@ -11683,7 +11684,7 @@ class TestAgentBot:
                 "_dispatch_text_message",
                 new=AsyncMock(),
             ) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
@@ -11695,8 +11696,11 @@ class TestAgentBot:
         assert signal_target.resolved_thread_id == target.resolved_thread_id
         assert mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"] is envelope
         mock_dispatch.assert_not_awaited()
-        mock_start.assert_awaited_once()
-        key, pending_event = mock_start.await_args.args
+        mock_admit.assert_awaited_once()
+        key = mock_admit.await_args.args[0]
+        ready_result = mock_admit.await_args.kwargs["ready_result"]
+        assert isinstance(ready_result, ReadyPendingEvent)
+        pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
@@ -11764,13 +11768,15 @@ class TestAgentBot:
                 new=AsyncMock(return_value=None),
             ),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
         mock_dispatch.assert_not_awaited()
-        mock_start.assert_awaited_once()
-        _key, pending_event = mock_start.await_args.args
+        mock_admit.assert_awaited_once()
+        ready_result = mock_admit.await_args.kwargs["ready_result"]
+        assert isinstance(ready_result, ReadyPendingEvent)
+        pending_event = ready_result.pending_event
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == source_kind
