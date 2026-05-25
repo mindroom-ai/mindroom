@@ -487,7 +487,7 @@ class ConversationResolver:
             )
             return None
         else:
-            return resolution.thread_id or resolution.candidate_thread_root_id
+            return resolution.thread_id
 
     async def _explicit_thread_id_for_event(
         self,

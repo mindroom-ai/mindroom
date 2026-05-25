@@ -29,6 +29,7 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -436,6 +437,41 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice789"))
     assert attachment is not None
     assert attachment.thread_id == "$thread_root"
+
+
+@pytest.mark.asyncio
+async def test_voice_plain_reply_unproven_thread_candidate_coalesces_room_level(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Unproven related-event candidates must not become canonical voice thread keys."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_voice_event(
+        event_id="$voice-unproven",
+        source={
+            "event_id": "$voice-unproven",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1_712_350_000_000,
+            "type": "m.room.message",
+            "room_id": "!test:server",
+            "content": {
+                "body": "voice.ogg",
+                "msgtype": "m.audio",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe-thread-root"}},
+            },
+        },
+    )
+
+    with patch(
+        "mindroom.conversation_resolver.resolve_event_thread_membership",
+        new=AsyncMock(
+            return_value=ThreadResolution.indeterminate(
+                RuntimeError("proof unavailable"),
+                candidate_thread_root_id="$maybe-thread-root",
+            ),
+        ),
+    ):
+        assert await bot._conversation_resolver.coalescing_thread_id(room, voice_event) is None
 
 
 @pytest.mark.asyncio
@@ -1007,6 +1043,104 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
             await drain_coalescing(bot)
     finally:
         release_prepare.set()
+        if voice_task is not None and not voice_task.done():
+            voice_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await voice_task
+
+    assert dispatches == [
+        (
+            ["$voice", "$typed"],
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\n"
+            "voice transcript\ntyped follow-up",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_voice_first_text_second_waits_for_slow_thread_resolution(
+    mock_home_bot: AgentBot,
+) -> None:
+    """A later typed message must not jump ahead while earlier voice thread lookup is pending."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+
+    voice_event = _make_threaded_voice_event(event_id="$voice", server_timestamp=1_712_350_000_001)
+    typed_event = _threaded_text_event(
+        event_id="$typed",
+        body="typed follow-up",
+        server_timestamp=1_712_350_000_002,
+    )
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+    dispatches: list[tuple[list[str], str]] = []
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+        if event.event_id == "$voice":
+            lookup_started.set()
+            await release_lookup.wait()
+        return "$thread_root"
+
+    async def prepare_voice_event(
+        request: inbound_turn_normalizer.VoiceNormalizationRequest,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        return _normalized_voice_result(event=request.event, text="voice transcript")
+
+    async def resolve_text_event(
+        request: inbound_turn_normalizer.TextNormalizationRequest,
+    ) -> PreparedTextEvent:
+        return _threaded_prepared_text_event(
+            event_id=request.event.event_id,
+            body=request.event.body,
+            server_timestamp=request.event.server_timestamp,
+        )
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
+
+    voice_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "resolve_text_event",
+                new=AsyncMock(side_effect=resolve_text_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
+            await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
+            await bot._on_message(room, typed_event)
+            await asyncio.sleep(0.05)
+            assert dispatches == []
+
+            release_lookup.set()
+            await voice_task
+            await drain_coalescing(bot)
+    finally:
+        release_lookup.set()
         if voice_task is not None and not voice_task.done():
             voice_task.cancel()
             with suppress(asyncio.CancelledError):

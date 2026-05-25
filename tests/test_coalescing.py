@@ -273,3 +273,44 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
         ["$voice:localhost"],
         ["$typed:localhost"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_failed_older_owner_admission_wakes_newer_thread_gate() -> None:
+    """A failed older voice admission must not deadlock newer same-user thread work."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    older_key = CoalescingKey("!room:localhost", "$thread-a:localhost", "@user:localhost")
+    newer_key = CoalescingKey("!room:localhost", "$thread-b:localhost", "@user:localhost")
+    fail_voice = asyncio.Event()
+
+    async def failed_voice() -> ReadyPendingEvent:
+        await fail_voice.wait()
+        msg = "voice failed"
+        raise RuntimeError(msg)
+
+    await gate.admit(
+        older_key,
+        ready_task=asyncio.create_task(failed_voice()),
+        source_event_id="$voice:localhost",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    older_gate = gate._gates[older_key]
+    await _wait_for(lambda: bool(older_gate.claimed_admissions))
+
+    await gate.enqueue(newer_key, _pending(_text_event("$newer:localhost", "newer", 1_000_001)))
+    await gate.enqueue(older_key, _pending(_text_event("$older-later:localhost", "older later", 1_000_002)))
+    fail_voice.set()
+
+    await _wait_for(
+        lambda: [batch.source_event_ids for batch in batches] == [["$newer:localhost"], ["$older-later:localhost"]],
+    )

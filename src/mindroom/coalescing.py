@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CoalescingGate",
     "GatePhase",
+    "IngressOrderReservation",
     "ReadyPendingEvent",
     "is_coalescing_exempt_source_kind",
 ]
@@ -92,6 +93,17 @@ class _QueuedEvent:
             msg = "Queued admission has not resolved to a pending event"
             raise RuntimeError(msg)
         return self.ready_result.pending_event
+
+
+@dataclass
+class IngressOrderReservation:
+    """Receive-order placeholder for ingress that must resolve its canonical key first."""
+
+    room_id: str
+    requester_user_id: str
+    received_order: int
+    received_at: float
+    released: bool = False
 
 
 @dataclass(frozen=True)
@@ -208,6 +220,7 @@ class CoalescingGate:
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
         self._gates: dict[CoalescingKey, _GateEntry] = {}
+        self._order_reservations: list[IngressOrderReservation] = []
         self._next_received_order = 0
 
     def _remove_gate(self, key: CoalescingKey) -> None:
@@ -229,12 +242,32 @@ class CoalescingGate:
     def _same_owner(left: CoalescingKey, right: CoalescingKey) -> bool:
         return left.room_id == right.room_id and left.requester_user_id == right.requester_user_id
 
+    @staticmethod
+    def _reservation_matches_key(reservation: IngressOrderReservation, key: CoalescingKey) -> bool:
+        return reservation.room_id == key.room_id and reservation.requester_user_id == key.requester_user_id
+
+    def _next_order(self) -> int:
+        self._next_received_order += 1
+        return self._next_received_order
+
+    def _wake_owner(self, room_id: str, requester_user_id: str) -> None:
+        for gate_key, gate in self._gates.items():
+            if gate_key.room_id == room_id and gate_key.requester_user_id == requester_user_id:
+                self._wake(gate)
+
     def _wake_owner_gates(self, key: CoalescingKey) -> None:
         for other_key, other_gate in self._gates.items():
             if other_key != key and self._same_owner(other_key, key):
                 self._wake(other_gate)
 
     def _has_older_owner_work(self, key: CoalescingKey, received_order: int) -> bool:
+        if any(
+            not reservation.released
+            and self._reservation_matches_key(reservation, key)
+            and reservation.received_order < received_order
+            for reservation in self._order_reservations
+        ):
+            return True
         for other_key, other_gate in self._gates.items():
             if other_key == key or not self._same_owner(other_key, key):
                 continue
@@ -305,6 +338,47 @@ class CoalescingGate:
             return
         gate.queue.extendleft(reversed(admissions))
         CoalescingGate._clear_claimed_admissions(gate, admissions)
+
+    @staticmethod
+    def _insert_queued_event(gate: _GateEntry, admission: _QueuedEvent) -> None:
+        for index, queued in enumerate(gate.queue):
+            if admission.received_order < queued.received_order:
+                gate.queue.insert(index, admission)
+                return
+        gate.queue.append(admission)
+
+    def reserve_order(
+        self,
+        *,
+        room_id: str,
+        requester_user_id: str,
+        received_at: float | None = None,
+    ) -> IngressOrderReservation:
+        """Reserve receive order before async work can resolve the final coalescing key."""
+        reservation = IngressOrderReservation(
+            room_id=room_id,
+            requester_user_id=requester_user_id,
+            received_order=self._next_order(),
+            received_at=received_at if received_at is not None else time.time(),
+        )
+        self._order_reservations.append(reservation)
+        self._wake_owner(room_id, requester_user_id)
+        return reservation
+
+    def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
+        """Release a receive-order reservation that will not become a queued admission."""
+        self._release_order_reservation(reservation, wake=True)
+
+    def _release_order_reservation(self, reservation: IngressOrderReservation, *, wake: bool) -> None:
+        if reservation.released:
+            return
+        reservation.released = True
+        for index, current_reservation in enumerate(self._order_reservations):
+            if current_reservation is reservation:
+                del self._order_reservations[index]
+                break
+        if wake:
+            self._wake_owner(reservation.room_id, reservation.requester_user_id)
 
     @staticmethod
     def _front_normal_run_length(
@@ -515,6 +589,7 @@ class CoalescingGate:
         source_event_id: str | None = None,
         source_kind: str = "pending",
         ready_result: ReadyPendingEvent | None = None,
+        order_reservation: IngressOrderReservation | None = None,
     ) -> None:
         """Admit one Matrix ingress item under its stable coalescing key."""
         if ready_task is None and ready_result is None:
@@ -522,18 +597,28 @@ class CoalescingGate:
             raise ValueError(msg)
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
-        self._next_received_order += 1
+        if order_reservation is None:
+            received_order = self._next_order()
+            resolved_received_at = received_at if received_at is not None else time.time()
+        else:
+            if not self._reservation_matches_key(order_reservation, key):
+                msg = "Ingress order reservation owner must match admitted coalescing key"
+                raise ValueError(msg)
+            received_order = order_reservation.received_order
+            resolved_received_at = received_at if received_at is not None else order_reservation.received_at
+            self._release_order_reservation(order_reservation, wake=False)
         admission = _QueuedEvent(
             admission_key=key,
-            received_order=self._next_received_order,
-            received_at=received_at if received_at is not None else time.time(),
+            received_order=received_order,
+            received_at=resolved_received_at,
             source_event_id=source_event_id,
             source_kind=source_kind,
             ready_task=ready_task,
             ready_result=ready_result,
         )
-        gate.queue.append(admission)
+        self._insert_queued_event(gate, admission)
         self._schedule_drain(key, gate)
+        self._wake_owner_gates(key)
         kind = self._queued_kind(admission)
         path = self._enqueue_path(kind)
         if ready_result is not None:
@@ -725,6 +810,7 @@ class CoalescingGate:
 
     async def _resolve_claimed_admissions_or_requeue(
         self,
+        key: CoalescingKey,
         gate: _GateEntry,
         admissions: list[_QueuedEvent],
     ) -> list[_ReadyAdmission]:
@@ -734,6 +820,8 @@ class CoalescingGate:
             self._requeue_claimed_admissions(gate, admissions)
             raise
         self._clear_claimed_admissions(gate, admissions)
+        if len(ready_admissions) != len(admissions):
+            self._wake_owner_gates(key)
         return ready_admissions
 
     @staticmethod
@@ -895,7 +983,7 @@ class CoalescingGate:
                 front_kind = self._queued_kind(front)
                 if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
                     claimed_admissions = self._claim_front_events(gate, 1)
-                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
+                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(key, gate, claimed_admissions)
                     if not ready_admissions:
                         continue
                     await self._dispatch_claimed_events(
@@ -924,7 +1012,7 @@ class CoalescingGate:
                 if candidate_count == 0:
                     continue
                 claimed_admissions = self._claim_front_events(gate, candidate_count)
-                ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
+                ready_admissions = await self._resolve_claimed_admissions_or_requeue(key, gate, claimed_admissions)
                 if not ready_admissions:
                     continue
                 segments = self._ready_admission_segments(ready_admissions)
@@ -944,7 +1032,7 @@ class CoalescingGate:
                         timing_scope=timing_scope,
                     )
                     claimed_admissions = self._claim_front_events(gate, candidate_count)
-                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(gate, claimed_admissions)
+                    ready_admissions = await self._resolve_claimed_admissions_or_requeue(key, gate, claimed_admissions)
                     segments = self._ready_admission_segments(ready_admissions)
                     bypass_grace = True
                 if not gate.queue:

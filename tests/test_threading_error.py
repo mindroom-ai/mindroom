@@ -9400,7 +9400,7 @@ class TestThreadingBehavior:
         ):
             thread_id = await resolver.coalescing_thread_id(room, event)
 
-        assert thread_id == "$thread_root:localhost"
+        assert thread_id is None
         mock_access.assert_called_once_with(
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="coalescing_thread_id",
@@ -9413,8 +9413,8 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
-    async def test_coalescing_thread_id_keeps_lookup_failure_candidate(self, bot: AgentBot) -> None:
-        """Lookup-failed plain replies should still coalesce by candidate root."""
+    async def test_coalescing_thread_id_demotes_lookup_failure_candidate(self, bot: AgentBot) -> None:
+        """Lookup-failed plain replies should not use unproven candidate roots for coalescing."""
         room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
@@ -9438,7 +9438,7 @@ class TestThreadingBehavior:
         ):
             thread_id = await resolver.coalescing_thread_id(room, event)
 
-        assert thread_id == "$maybe_root:localhost"
+        assert thread_id is None
 
     @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(

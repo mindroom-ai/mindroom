@@ -983,7 +983,7 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
 
 @pytest.mark.asyncio
 async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_path: Path) -> None:
-    """Candidate roots should scope coalescing even when dispatch proof cannot read their history."""
+    """Unproven roots demote to room-level coalescing and still dispatch separately."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     reply_a = _reply_event(
@@ -3700,7 +3700,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await asyncio.sleep(0.05)
+        await _wait_for(lambda: bot._turn_store.is_handled("$m1"))
 
     assert bot._turn_store.is_handled("$m1")
     assert bot._turn_store.is_handled("$m2")

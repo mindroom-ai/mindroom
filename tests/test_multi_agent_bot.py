@@ -40,7 +40,7 @@ from mindroom.approval_manager import (
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import ReadyPendingEvent
+from mindroom.coalescing import IngressOrderReservation, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -7222,7 +7222,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should fix the coalescing key before admitting deferred STT work."""
+        """Audio dispatch should reserve receive order, then admit under a resolved key."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -7240,6 +7240,21 @@ class TestAgentBot:
             call_order.append("coalescing_thread")
             return "$thread_root"
 
+        original_reserve_order = bot._coalescing_gate.reserve_order
+
+        def record_reserve_order(
+            *,
+            room_id: str,
+            requester_user_id: str,
+            received_at: float | None,
+        ) -> IngressOrderReservation:
+            call_order.append("reserve")
+            return original_reserve_order(
+                room_id=room_id,
+                requester_user_id=requester_user_id,
+                received_at=received_at,
+            )
+
         async def record_admit(
             key: CoalescingKey,
             *,
@@ -7247,14 +7262,16 @@ class TestAgentBot:
             received_at: float | None,
             source_event_id: str,
             source_kind: str,
+            order_reservation: IngressOrderReservation,
         ) -> None:
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert call_order == ["append", "coalescing_thread", "admit"]
+            assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
             assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
             assert received_at is not None
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
+            assert order_reservation.released is False
             admitted_ready_task = ready_task
 
         async def record_voice_normalization(*_args: object, **_kwargs: object) -> None:
@@ -7266,6 +7283,7 @@ class TestAgentBot:
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
+        bot._coalescing_gate.reserve_order = MagicMock(side_effect=record_reserve_order)
         mock_admit = AsyncMock(side_effect=record_admit)
         bot._coalescing_gate.admit = mock_admit
 
@@ -7275,19 +7293,18 @@ class TestAgentBot:
         ):
             await bot._turn_controller._handle_media_message_inner(room, event)
             mock_admit.assert_awaited_once()
-            assert call_order == ["append", "coalescing_thread", "admit"]
+            assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
             assert admitted_ready_task is not None
             release_stt.set()
             ready_event = await admitted_ready_task
         _assert_ready_voice_text_fallback(ready_event)
-        assert call_order == ["append", "coalescing_thread", "admit", "normalize"]
+        assert call_order == ["reserve", "append", "coalescing_thread", "admit", "normalize"]
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(
             room,
             event,
         )
         bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
-        bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_media_message_merges_thread_history_attachment_ids(

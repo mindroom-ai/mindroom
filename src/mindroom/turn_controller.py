@@ -2328,6 +2328,13 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
+        received_at = event.server_timestamp / 1000 if isinstance(event.server_timestamp, int) else None
+        order_reservation = self.deps.coalescing_gate.reserve_order(
+            room_id=room.room_id,
+            requester_user_id=prechecked_event.requester_user_id,
+            received_at=received_at,
+        )
+        reservation_admitted = False
         try:
             voice_target, admission_key = await self._resolve_ready_voice_target(
                 room,
@@ -2358,28 +2365,36 @@ class TurnController:
             await self.deps.coalescing_gate.admit(
                 fallback_key,
                 ready_result=fallback_ready,
-                received_at=event.server_timestamp / 1000 if isinstance(event.server_timestamp, int) else None,
+                received_at=received_at,
                 source_event_id=event.event_id,
                 source_kind=VOICE_SOURCE_KIND,
+                order_reservation=order_reservation,
             )
+            reservation_admitted = True
             return
 
-        ready_task = asyncio.create_task(
-            self._ready_voice_event(
-                room=room,
-                prechecked_event=prechecked_event,
-                voice_target=voice_target,
-                dispatch_timing=dispatch_timing,
-            ),
-            name=f"voice_ready:{room.room_id}:{event.event_id}",
-        )
-        await self.deps.coalescing_gate.admit(
-            admission_key,
-            ready_task=ready_task,
-            received_at=event.server_timestamp / 1000 if isinstance(event.server_timestamp, int) else None,
-            source_event_id=event.event_id,
-            source_kind=VOICE_SOURCE_KIND,
-        )
+        try:
+            ready_task = asyncio.create_task(
+                self._ready_voice_event(
+                    room=room,
+                    prechecked_event=prechecked_event,
+                    voice_target=voice_target,
+                    dispatch_timing=dispatch_timing,
+                ),
+                name=f"voice_ready:{room.room_id}:{event.event_id}",
+            )
+            await self.deps.coalescing_gate.admit(
+                admission_key,
+                ready_task=ready_task,
+                received_at=received_at,
+                source_event_id=event.event_id,
+                source_kind=VOICE_SOURCE_KIND,
+                order_reservation=order_reservation,
+            )
+            reservation_admitted = True
+        finally:
+            if not reservation_admitted:
+                self.deps.coalescing_gate.release_order_reservation(order_reservation)
 
     async def _resolve_ready_voice_target(
         self,
