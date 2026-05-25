@@ -2336,44 +2336,42 @@ class TurnController:
         )
         reservation_admitted = False
         try:
-            voice_target, admission_key = await self._resolve_ready_voice_target(
-                room,
-                event,
-                event_info=event_info,
-                requester_user_id=prechecked_event.requester_user_id,
-                dispatch_timing=dispatch_timing,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            fallback_target = self.deps.resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id=event_info.thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            )
-            fallback_thread_id = fallback_target.resolved_thread_id
-            fallback_key = CoalescingKey(room.room_id, fallback_thread_id, prechecked_event.requester_user_id)
-            fallback_ready = await self._ready_voice_fallback_event(
-                room=room,
-                event=event,
-                requester_user_id=prechecked_event.requester_user_id,
-                thread_id=fallback_thread_id,
-                dispatch_timing=dispatch_timing,
-                error=exc,
-            )
-            await self.deps.coalescing_gate.admit(
-                fallback_key,
-                ready_result=fallback_ready,
-                received_at=received_at,
-                source_event_id=event.event_id,
-                source_kind=VOICE_SOURCE_KIND,
-                order_reservation=order_reservation,
-            )
-            reservation_admitted = True
-            return
+            try:
+                voice_target, admission_key = await self._resolve_ready_voice_target(
+                    room,
+                    event,
+                    event_info=event_info,
+                    requester_user_id=prechecked_event.requester_user_id,
+                    dispatch_timing=dispatch_timing,
+                )
+            except Exception as exc:
+                fallback_target = self.deps.resolver.build_message_target(
+                    room_id=room.room_id,
+                    thread_id=event_info.thread_id,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                )
+                fallback_thread_id = fallback_target.resolved_thread_id
+                fallback_key = CoalescingKey(room.room_id, fallback_thread_id, prechecked_event.requester_user_id)
+                fallback_ready = await self._ready_voice_fallback_event(
+                    room=room,
+                    event=event,
+                    requester_user_id=prechecked_event.requester_user_id,
+                    thread_id=fallback_thread_id,
+                    dispatch_timing=dispatch_timing,
+                    error=exc,
+                )
+                await self.deps.coalescing_gate.admit(
+                    fallback_key,
+                    ready_result=fallback_ready,
+                    received_at=received_at,
+                    source_event_id=event.event_id,
+                    source_kind=VOICE_SOURCE_KIND,
+                    order_reservation=order_reservation,
+                )
+                reservation_admitted = True
+                return
 
-        try:
             ready_task = asyncio.create_task(
                 self._ready_voice_event(
                     room=room,

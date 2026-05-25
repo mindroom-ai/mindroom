@@ -7307,6 +7307,29 @@ class TestAgentBot:
         bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_audio_dispatch_releases_receive_order_when_target_resolution_is_cancelled(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Cancelled pre-admission audio resolution must not leave gate work behind."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
+        prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
+
+        bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
+        bot._turn_controller._resolve_ready_voice_target = AsyncMock(side_effect=asyncio.CancelledError)
+
+        with pytest.raises(asyncio.CancelledError):
+            await bot._turn_controller._handle_media_message_inner(room, event)
+
+        assert bot._coalescing_gate._order_reservations == []
+
+    @pytest.mark.asyncio
     async def test_media_message_merges_thread_history_attachment_ids(
         self,
         mock_agent_user: AgentMatrixUser,

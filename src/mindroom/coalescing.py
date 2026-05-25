@@ -104,6 +104,7 @@ class IngressOrderReservation:
     received_order: int
     received_at: float
     released: bool = False
+    settled: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -377,8 +378,16 @@ class CoalescingGate:
             if current_reservation is reservation:
                 del self._order_reservations[index]
                 break
+        reservation.settled.set()
         if wake:
             self._wake_owner(reservation.room_id, reservation.requester_user_id)
+
+    async def _wait_for_order_reservations(self) -> None:
+        while True:
+            reservations = [reservation for reservation in self._order_reservations if not reservation.released]
+            if not reservations:
+                return
+            await asyncio.gather(*(reservation.settled.wait() for reservation in reservations))
 
     @staticmethod
     def _front_normal_run_length(
@@ -641,19 +650,23 @@ class CoalescingGate:
 
     async def drain_all(self) -> None:
         """Flush every active gate and await owned drain tasks."""
-        for key, gate in list(self._gates.items()):
-            gate.drain_all_requested = True
-            gate.deadline = time.monotonic()
-            gate.grace_deadline = None
-            self._ensure_drain_task(key, gate)
-            self._wake(gate)
-        tasks_to_await = [
-            gate.drain_task
-            for gate in self._gates.values()
-            if gate.drain_task is not None and not gate.drain_task.done()
-        ]
-        if tasks_to_await:
-            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+        while True:
+            await self._wait_for_order_reservations()
+            for key, gate in list(self._gates.items()):
+                gate.drain_all_requested = True
+                gate.deadline = time.monotonic()
+                gate.grace_deadline = None
+                self._ensure_drain_task(key, gate)
+                self._wake(gate)
+            tasks_to_await = [
+                gate.drain_task
+                for gate in self._gates.values()
+                if gate.drain_task is not None and not gate.drain_task.done()
+            ]
+            if tasks_to_await:
+                await asyncio.gather(*tasks_to_await, return_exceptions=True)
+            if not any(not reservation.released for reservation in self._order_reservations):
+                break
         self._gates.clear()
 
     def _upload_grace_hard_cap_seconds(self) -> float:
@@ -764,6 +777,7 @@ class CoalescingGate:
             if queued.ready_task.cancelled():
                 logger.warning(
                     "coalescing_gate_ready_task_cancelled",
+                    source_event_id=queued.source_event_id,
                     received_order=queued.received_order,
                     age_ms=elapsed_ms_since(queued.received_at, clock=time.time),
                 )
@@ -772,6 +786,7 @@ class CoalescingGate:
         except Exception as error:
             logger.exception(
                 "coalescing_gate_ready_task_failed",
+                source_event_id=queued.source_event_id,
                 received_order=queued.received_order,
                 age_ms=elapsed_ms_since(queued.received_at, clock=time.time),
                 exception_type=error.__class__.__name__,

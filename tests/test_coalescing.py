@@ -314,3 +314,42 @@ async def test_failed_older_owner_admission_wakes_newer_thread_gate() -> None:
     await _wait_for(
         lambda: [batch.source_event_ids for batch in batches] == [["$newer:localhost"], ["$older-later:localhost"]],
     )
+
+
+@pytest.mark.asyncio
+async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
+    """Shutdown drains must treat receive-order reservations as pending ingress work."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    reservation = gate.reserve_order(
+        room_id=key.room_id,
+        requester_user_id=key.requester_user_id,
+        received_at=1_000.0,
+    )
+
+    drain_task = asyncio.create_task(gate.drain_all())
+    await asyncio.sleep(0)
+
+    assert drain_task.done() is False
+
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_voice_pending("$voice:localhost", "voice transcript", 1_000_000),
+        ),
+        source_kind=VOICE_SOURCE_KIND,
+        order_reservation=reservation,
+    )
+    await drain_task
+
+    assert [batch.source_event_ids for batch in batches] == [["$voice:localhost"]]
