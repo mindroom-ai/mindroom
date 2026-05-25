@@ -692,6 +692,15 @@ class TestCommandHandling:
             _sync_turn_policy_runtime(bot)
             bot._turn_controller._execute_command = AsyncMock()
             bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
+            bot._conversation_cache.get_thread_history = AsyncMock(
+                return_value=thread_history_result([], is_full_history=True),
+            )
+            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+                return_value=thread_history_result([], is_full_history=True),
+            )
+            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+                return_value=thread_history_result([], is_full_history=False),
+            )
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             event = nio.RoomMessageText.from_dict(

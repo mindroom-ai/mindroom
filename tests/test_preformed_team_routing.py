@@ -354,7 +354,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     config_with_team: Config,
     tmp_path: Path,
 ) -> None:
-    """TeamBot should treat a plain reply as a plain reply even if it points at a threaded event."""
+    """TeamBot should answer the prompt event instead of following a stale plain-reply target."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
@@ -416,8 +416,8 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     assert bot.client.room_send.call_count >= 1
     first_content = bot.client.room_send.call_args_list[0].kwargs["content"]
     assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$evt_plain_reply"
-    assert first_content["m.relates_to"].get("rel_type") is None
-    assert first_content["m.relates_to"].get("event_id") is None
+    assert first_content["m.relates_to"]["rel_type"] == "m.thread"
+    assert first_content["m.relates_to"]["event_id"] == "$evt_plain_reply"
 
 
 @pytest.mark.asyncio

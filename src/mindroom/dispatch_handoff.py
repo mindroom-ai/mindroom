@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 import nio
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
@@ -297,25 +296,6 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
     return batch.source_kind == VOICE_SOURCE_KIND
 
 
-def _plain_reply_relation(content: dict[str, object]) -> bool:
-    relates_to = content.get("m.relates_to")
-    if not isinstance(relates_to, dict):
-        return False
-    relation = cast("dict[str, object]", relates_to)
-    return relation.get("rel_type") is None and "m.in_reply_to" in relation
-
-
-def _single_event_should_preserve_plain_reply_relation(event: DispatchEvent, batch: CoalescedBatch) -> bool:
-    if len(batch.pending_events) != 1 or batch.source_kind == VOICE_SOURCE_KIND:
-        return False
-    content = event_content_dict(event)
-    if content is None or not _plain_reply_relation(content):
-        return False
-    if isinstance(event, nio.RoomMessageText | PreparedTextEvent) and command_parser.parse(event.body) is not None:
-        return True
-    return "m.mentions" in content
-
-
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
     primary_source: dict[str, Any] = batch.primary_event.source if isinstance(batch.primary_event.source, dict) else {}
     merged: dict[str, Any] = dict(primary_source)
@@ -351,10 +331,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     if (
         len(batch.pending_events) == 1
         and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
-        and (
-            _single_event_should_preserve_plain_reply_relation(batch.primary_event, batch)
-            or not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
-        )
+        and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
     ):
         if isinstance(batch.primary_event, PreparedTextEvent):
             return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)

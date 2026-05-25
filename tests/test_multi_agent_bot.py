@@ -4697,7 +4697,9 @@ class TestAgentBot:
         try:
             await bot._on_message(room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            bot._turn_controller.handle_text_event.assert_awaited_once()
+            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
+            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
             editor.assert_not_awaited()
             assert task.done() is False
 
@@ -4752,7 +4754,9 @@ class TestAgentBot:
         try:
             await bot._on_message(room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            bot._turn_controller.handle_text_event.assert_awaited_once()
+            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
+            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
             event_cache.get_event.assert_not_awaited()
             assert store is get_approval_store()
         finally:
@@ -4788,7 +4792,9 @@ class TestAgentBot:
         try:
             await bot._on_message(room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            bot._turn_controller.handle_text_event.assert_awaited_once()
+            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
+            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
         finally:
             await _shutdown_approval_store()
 
@@ -4905,7 +4911,9 @@ class TestAgentBot:
 
             await bot._on_message(room, event)
 
-            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            bot._turn_controller.handle_text_event.assert_awaited_once()
+            assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
+            assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
         finally:
             if not task.done():
                 task.cancel()

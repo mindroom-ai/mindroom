@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +12,7 @@ import pytest
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
-from mindroom.coalescing import IngressAdmissionClosedError, IngressOrderReservation, ReadyPendingEvent
+from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, IngressOrderReservation, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -163,13 +164,14 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
             cancelled.set()
             return ReadyPendingEvent(pending_event=pending_event)
 
-    reservation = IngressOrderReservation(
-        room_id="!room:localhost",
-        requester_user_id="@user:localhost",
-        received_order=1,
-        receipt_time=1.0,
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
     )
-    owner = _PromptIngressReservationOwner(gate=MagicMock(), reservation=reservation)
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    owner = _PromptIngressReservationOwner(gate=gate, reservation=reservation)
     owner.ready_task = asyncio.create_task(ready())
 
     await owner.cancel_ready_task()
@@ -178,6 +180,37 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
     assert close_count == 1
     await owner.cancel_ready_task()
     assert close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_release_settles_reservation_when_cancelled_during_ready_task_cleanup() -> None:
+    """Owner release must settle reservation even if callback cancellation interrupts task cleanup."""
+
+    async def never_ready() -> ReadyPendingEvent | None:
+        await asyncio.Event().wait()
+        return None
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    owner = _PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    owner.ready_task = asyncio.create_task(never_ready())
+
+    release_task = asyncio.create_task(owner.release())
+    await asyncio.sleep(0)
+    release_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await release_task
+
+    assert reservation.released
+    assert reservation.settled.is_set()
+    if owner.ready_task is not None:
+        owner.ready_task.cancel()
+        await asyncio.gather(owner.ready_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

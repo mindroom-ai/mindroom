@@ -296,8 +296,10 @@ class _PromptIngressReservationOwner:
         """Release this reservation if admission did not transfer ownership."""
         if self.admitted:
             return
-        await self.cancel_ready_task()
-        self.gate.release_order_reservation(self.reservation)
+        try:
+            await self.cancel_ready_task()
+        finally:
+            self.gate.release_order_reservation(self.reservation)
 
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
@@ -400,6 +402,8 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
+        *,
+        receipt_time: float | None = None,
     ) -> _PromptIngressReservationOwner:
         """Reserve receive order for one prompt-like Matrix ingress item."""
         return _PromptIngressReservationOwner(
@@ -407,6 +411,7 @@ class TurnController:
             reservation=self.deps.coalescing_gate.reserve_order(
                 room_id=room.room_id,
                 requester_user_id=requester_user_id,
+                receipt_time=receipt_time,
             ),
         )
 
@@ -1987,15 +1992,23 @@ class TurnController:
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
         )
 
-    async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def handle_text_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        *,
+        receipt_time: float | None = None,
+    ) -> None:
         """Handle one inbound text event."""
         async with self.deps.resolver.turn_thread_cache_scope():
-            await self._handle_message_inner(room, event)
+            await self._handle_message_inner(room, event, receipt_time=receipt_time)
 
     async def _handle_message_inner(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
+        *,
+        receipt_time: float | None = None,
     ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
@@ -2031,7 +2044,11 @@ class TurnController:
             )
             return
 
-        reservation_owner = self._reserve_prompt_ingress_order(room, prechecked_event.requester_user_id)
+        reservation_owner = self._reserve_prompt_ingress_order(
+            room,
+            prechecked_event.requester_user_id,
+            receipt_time=receipt_time,
+        )
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
             if await self._should_skip_router_before_shared_ingress_work(
@@ -2359,15 +2376,19 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         event: MatrixMediaEvent,
+        *,
+        receipt_time: float | None = None,
     ) -> None:
         """Handle one inbound media event."""
         async with self.deps.resolver.turn_thread_cache_scope():
-            await self._handle_media_message_inner(room, event)
+            await self._handle_media_message_inner(room, event, receipt_time=receipt_time)
 
     async def _handle_media_message_inner(
         self,
         room: nio.MatrixRoom,
         event: MatrixMediaEvent,
+        *,
+        receipt_time: float | None = None,
     ) -> None:
         """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
@@ -2392,7 +2413,11 @@ class TurnController:
                 HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
             )
             return
-        reservation_owner = self._reserve_prompt_ingress_order(room, prechecked_event.requester_user_id)
+        reservation_owner = self._reserve_prompt_ingress_order(
+            room,
+            prechecked_event.requester_user_id,
+            receipt_time=receipt_time,
+        )
         try:
             if is_audio_message_event(prechecked_event.event):
                 await self._on_audio_media_message(

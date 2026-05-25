@@ -1319,13 +1319,6 @@ class AgentBot:
 
         await self.prepare_for_sync_shutdown()
 
-        # Wait for any pending background tasks (like memory saves) to complete
-        try:
-            await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)  # 5 second timeout
-            self.logger.info("Background tasks completed")
-        except Exception as e:
-            self.logger.warning("background_tasks_incomplete", error=str(e))
-
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
             if cleared_queued_tasks > 0:
@@ -1407,16 +1400,20 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._cancel_deferred_overdue_task_drain()
+        background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
-        if drain_result.completed and self._sync_trust_state is SyncTrustState.CERTIFIED:
+        if background_tasks_completed and drain_result.completed and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)
-        elif not drain_result.completed:
+        elif not background_tasks_completed or not drain_result.completed:
             self._sync_trust_state = SyncTrustState.UNCERTAIN
             self._sync_checkpoint = None
             self._clear_saved_sync_token()
             self.logger.warning(
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
                 agent_name=self.agent_name,
+                background_tasks_completed=background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,
                 failed_ready_count=drain_result.failed_ready_count,
@@ -1424,10 +1421,6 @@ class AgentBot:
                 dispatch_failure_count=drain_result.dispatch_failure_count,
                 dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
             )
-        if self.agent_name != ROUTER_AGENT_NAME:
-            return
-
-        await self._cancel_deferred_overdue_task_drain()
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
@@ -1465,6 +1458,7 @@ class AgentBot:
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
+        receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
         if await maybe_handle_tool_approval_reply(
             room=room,
@@ -1475,7 +1469,7 @@ class AgentBot:
             logger=self.logger,
         ):
             return
-        await self._turn_controller.handle_text_event(room, event)
+        await self._turn_controller.handle_text_event(room, event, receipt_time=receipt_time)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""
@@ -1665,8 +1659,9 @@ class AgentBot:
         event: MatrixMediaEvent,
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
+        receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
-        await self._turn_controller.handle_media_event(room, event)
+        await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
         """Return whether an agent can issue Matrix message actions."""

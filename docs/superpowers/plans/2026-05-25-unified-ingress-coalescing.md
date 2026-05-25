@@ -37,8 +37,8 @@ The violated invariant is:
    It does not carry a guessed thread key.
 3. Admission requires one resolved canonical `CoalescingKey(room_id, thread_id, requester_user_id)`.
    That key is never retargeted.
-4. Prompt-like Matrix ingress must not call `CoalescingGate.enqueue()` or an ownerless `_enqueue_for_dispatch()` path.
-   Ownerless enqueue is allowed only for explicitly internal, non-Matrix dispatch entry points that already have a canonical key.
+4. Prompt-like Matrix ingress must not call `CoalescingGate.admit()` without a reservation owner or use an ownerless `_enqueue_for_dispatch()` path.
+   Ownerless direct admission is allowed only for explicitly internal, non-Matrix dispatch entry points that already have a canonical key.
 5. Room-level batching policy may decide whether several ready room-level events with the same canonical room key form one dispatch segment.
    It must never merge different canonical keys, and it must not merge surviving room-level text roots after the media-like event that justified wider room batching resolved to `None`.
 6. Drain, metadata, cancellation, and shutdown code is lifecycle ownership only.
@@ -248,15 +248,15 @@ def reserve_order(
     return reservation
 ```
 
-Change `CoalescingGate.enqueue()` so compatibility callers also get local monotonic receipt time.
-It should call `admit` with `receipt_time=time.monotonic()` or omit timing and let `admit` capture `time.monotonic()`.
+Change `CoalescingGate.admit()` so direct internal callers also get local monotonic receipt time.
+It should use `order_reservation.receipt_time` when a reservation exists, otherwise it should capture `time.monotonic()` during admission.
 It must not derive `_QueuedEvent.receipt_time` from `pending_event.enqueue_time`.
 
 Add this test:
 
 ```python
 @pytest.mark.asyncio
-async def test_enqueue_uses_gate_monotonic_receipt_time(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_admit_uses_gate_monotonic_receipt_time(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_clock = FakeMonotonicClock(20.0)
     monkeypatch.setattr(time, "monotonic", fake_clock)
     batches: list[CoalescedBatch] = []
@@ -274,7 +274,7 @@ async def test_enqueue_uses_gate_monotonic_receipt_time(monkeypatch: pytest.Monk
     pending = _pending(_text_event("$event:localhost", "body", 1000))
     pending.enqueue_time = 1.0
 
-    await gate.enqueue(key, pending)
+    await _admit_ready(gate, key, pending)
     gate_entry = gate._gates[key]
 
     assert gate_entry.queue[0].receipt_time == 20.0
@@ -284,7 +284,7 @@ async def test_enqueue_uses_gate_monotonic_receipt_time(monkeypatch: pytest.Monk
 - [ ] **Step 4: Run focused gate timing tests**
 
 ```bash
-uv run pytest tests/test_coalescing.py::test_reserve_order_uses_local_monotonic_receipt_time tests/test_coalescing.py::test_enqueue_uses_gate_monotonic_receipt_time -n auto --no-cov -q
+uv run pytest tests/test_coalescing.py::test_reserve_order_uses_local_monotonic_receipt_time tests/test_coalescing.py::test_admit_uses_gate_monotonic_receipt_time -n auto --no-cov -q
 ```
 
 Expected: PASS.
@@ -765,7 +765,7 @@ Split prompt-like Matrix admission from internal enqueue.
 `_enqueue_for_dispatch` must require `reservation_owner: _PromptIngressReservationOwner` and is used only by prompt-like Matrix ingress.
 Create a separate `_enqueue_internal_for_dispatch` helper only for internal, scheduled, hook, or already-synthetic dispatch entry points that do not originate as prompt-like Matrix ingress.
 The internal helper must require an already resolved `CoalescingKey` and must reject `MESSAGE_SOURCE_KIND`, `VOICE_SOURCE_KIND`, `IMAGE_SOURCE_KIND`, and `MEDIA_SOURCE_KIND`.
-No Matrix text/media/voice path may call `CoalescingGate.enqueue()` directly.
+No Matrix text/media/voice path may call `CoalescingGate.admit()` directly.
 
 ```python
 async def _enqueue_for_dispatch(
@@ -832,7 +832,12 @@ async def _enqueue_internal_for_dispatch(
     }:
         msg = f"prompt-like Matrix ingress requires a reservation owner: {pending_event.source_kind}"
         raise AssertionError(msg)
-    await self.deps.coalescing_gate.enqueue(key, pending_event)
+    await self.deps.coalescing_gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=pending_event),
+        source_event_id=pending_event.event.event_id,
+        source_kind=pending_event.source_kind,
+    )
 ```
 
 If this helper returns `CONSUMED` or `IGNORED` from an earlier branch, it must close or consume any owned metadata before returning.
@@ -885,7 +890,7 @@ async def test_debounce_waits_for_later_same_owner_reservation_inside_window() -
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "typed first", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed first", 1_000_000)))
     await asyncio.sleep(0.005)
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     await asyncio.sleep(0.05)
@@ -919,7 +924,7 @@ async def test_debounce_does_not_wait_for_later_reservation_outside_window() -> 
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "typed first", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed first", 1_000_000)))
     await asyncio.sleep(0.03)
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     await asyncio.sleep(0.01)
@@ -957,8 +962,8 @@ async def test_debounce_still_releases_prompt_when_command_barrier_arrives() -> 
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
-    await gate.enqueue(key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
     await asyncio.sleep(0.05)
 
     assert [batch.source_event_ids for batch in batches] == [["$text:localhost"], ["$command:localhost"]]
@@ -984,8 +989,8 @@ async def test_command_barrier_does_not_wait_for_unresolved_reservation_after_ba
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
-    await gate.enqueue(key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$command:localhost", "!help", 1_000_001)))
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     await asyncio.sleep(0.05)
 
@@ -1028,8 +1033,8 @@ async def test_bypass_barrier_does_not_wait_for_unresolved_reservation_after_bar
         PendingDispatchMetadata(kind="test", payload=object(), close=lambda: None, requires_solo_batch=True),
     )
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
-    await gate.enqueue(key, bypass)
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "normal", 1_000_000)))
+    await _admit_ready(gate, key, bypass)
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     await asyncio.sleep(0.05)
 
@@ -1068,7 +1073,7 @@ async def test_front_command_does_not_wait_for_later_unresolved_reservation() ->
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$command:localhost", "!help", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$command:localhost", "!help", 1_000_000)))
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     await asyncio.sleep(0.05)
 
@@ -1105,7 +1110,7 @@ async def test_front_bypass_does_not_wait_for_later_unresolved_reservation() -> 
         PendingDispatchMetadata(kind="test", payload=object(), close=lambda: None, requires_solo_batch=True),
     )
 
-    await gate.enqueue(key, bypass)
+    await _admit_ready(gate, key, bypass)
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     await asyncio.sleep(0.05)
 
@@ -1903,7 +1908,7 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
 
     gate._wait_for_reservations = spy_wait_for_reservations
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "typed", 1000)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1000)))
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     target_reservation = reservation
     await asyncio.wait_for(wait_entered.wait(), timeout=1.0)
@@ -1934,7 +1939,7 @@ async def test_shutdown_in_flight_dispatch_failure_marks_drain_incomplete() -> N
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "typed", 1000)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1000)))
     await dispatch_entered.wait()
 
     drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
@@ -1971,7 +1976,7 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
         is_shutting_down=lambda: True,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "typed", 1000)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1000)))
     await dispatch_entered.wait()
 
     drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
@@ -2357,7 +2362,7 @@ Ask reviewers to evaluate these claims specifically:
 
 1. Does every prompt-like Matrix ingress path reserve receive order before async lookup, cache append, media prep, fallback prep, or STT?
 2. Does every post-reservation path either admit or release exactly once?
-3. Is there no ownerless `_enqueue_for_dispatch` or direct `CoalescingGate.enqueue()` path for prompt-like Matrix ingress?
+3. Is there no ownerless `_enqueue_for_dispatch` or direct `CoalescingGate.admit()` path for prompt-like Matrix ingress?
 4. Do text, non-audio media, file sidecar preview, voice normal, and voice fallback all prove reservation before their first meaningful await?
 5. Does debounce use local monotonic receipt time rather than Matrix origin timestamp?
 6. Can a later event dispatch before an earlier same-room/requester unresolved reservation that arrived inside the debounce window?

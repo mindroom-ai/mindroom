@@ -3049,7 +3049,9 @@ async def test_matrix_ingress_logging_includes_receive_lag(tmp_path: Path) -> No
         origin_server_ts_ms=1000,
         matrix_event_receive_lag_ms=1500.0,
     )
-    bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+    bot._turn_controller.handle_text_event.assert_awaited_once()
+    assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
+    assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
 
 
 @pytest.mark.asyncio
@@ -3075,7 +3077,9 @@ async def test_matrix_ingress_logging_handles_missing_origin_timestamp(tmp_path:
         "agent_name": "test_agent",
         "receive_timestamp_ms": 2500,
     }
-    bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+    bot._turn_controller.handle_text_event.assert_awaited_once()
+    assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
+    assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
 
 
 @pytest.mark.asyncio
@@ -3198,6 +3202,29 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
         body="@agent follow-up",
         server_timestamp=1001,
         thread_id="$stale-thread",
+    )
+    typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, None, "@user:localhost"),
+        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert isinstance(handoff.event, PreparedTextEvent)
+    content = handoff.event.source["content"]
+    assert "m.relates_to" not in content
+    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+
+
+def test_room_level_mention_batch_removes_plain_reply_relation() -> None:
+    """Mention metadata must not preserve stale plain reply relations."""
+    room = _make_room()
+    typed_reply = _reply_event(
+        event_id="$typed",
+        reply_to_event_id="$old-reply",
+        body="@agent follow-up",
+        server_timestamp=1001,
     )
     typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
     batch = build_coalesced_batch(

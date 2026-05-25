@@ -384,6 +384,22 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(t
 
 
 @pytest.mark.asyncio
+async def test_shutdown_timeout_does_not_save_checkpoint_for_unsettled_callbacks(tmp_path: Path) -> None:
+    """Shutdown must not checkpoint if callback tasks timed out before the gate drain."""
+    bot = _agent_bot(tmp_path)
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_shutdown")
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=False)):
+        await bot.prepare_for_sync_shutdown()
+
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_incomplete_shutdown_drain_poison_persists_across_repeated_shutdown(tmp_path: Path) -> None:
     """A later no-op shutdown call must not save a checkpoint after unsafe drain work."""
     bot = _agent_bot(tmp_path)

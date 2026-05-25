@@ -860,7 +860,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
     """Voice and typed follow-ups sent during one active reply should produce one ordered follow-up."""
     bot = mock_home_bot
     room = _threaded_room()
-    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+    _install_test_coalescing_gate(bot, debounce_seconds=0.1)
 
     streaming_started = asyncio.Event()
     release_streaming = asyncio.Event()
@@ -980,7 +980,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
     """A later typed message must not jump ahead of an earlier voice event while STT is pending."""
     bot = mock_home_bot
     room = _threaded_room()
-    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+    _install_test_coalescing_gate(bot, debounce_seconds=0.1)
 
     voice_event = _make_threaded_voice_event(event_id="$voice", server_timestamp=1_712_350_000_001)
     typed_event = _threaded_text_event(
@@ -1039,7 +1039,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             await bot._on_message(room, typed_event)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
             release_prepare.set()
             await voice_task
             await drain_coalescing(bot)

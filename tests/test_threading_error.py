@@ -9522,7 +9522,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
-        """Plain-reply commands should stay plain replies without thread promotion."""
+        """Plain-reply commands should answer the command event without following stale reply targets."""
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
@@ -9624,7 +9624,8 @@ class TestThreadingBehavior:
             content = call_args.kwargs["content"]
 
             assert "m.relates_to" in content
-            assert "rel_type" not in content["m.relates_to"]
+            assert content["m.relates_to"]["rel_type"] == "m.thread"
+            assert content["m.relates_to"]["event_id"] == "$cmd_reply:localhost"
             assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
 
     @pytest.mark.asyncio
