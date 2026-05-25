@@ -930,11 +930,13 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:example.com")
             await bot._turn_controller._enqueue_for_dispatch(
                 streaming_event,
                 room,
                 source_kind="message",
                 requester_user_id="@user:example.com",
+                reservation_owner=reservation_owner,
                 coalescing_key=CoalescingKey(room.room_id, "$thread_root", "@user:example.com"),
             )
             await asyncio.wait_for(streaming_started.wait(), timeout=wait_timeout)
@@ -1231,13 +1233,17 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
     ):
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:example.com")
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=echo_event,
             dispatch_event=echo_event,
             requester_user_id="@user:example.com",
             dispatch_timing=None,
+            reservation_owner=reservation_owner,
+            coalescing_thread_id="$thread_root",
         )
+        await reservation_owner.release()
         await drain_coalescing(bot)
 
     mock_dispatch.assert_not_awaited()
@@ -1268,13 +1274,17 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
     ):
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:example.com")
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=forged_event,
             dispatch_event=forged_event,
             requester_user_id="@user:example.com",
             dispatch_timing=None,
+            reservation_owner=reservation_owner,
+            coalescing_thread_id="$thread_root",
         )
+        await reservation_owner.release()
         await drain_coalescing(bot)
 
     mock_dispatch.assert_awaited_once()

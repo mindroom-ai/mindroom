@@ -603,20 +603,6 @@ class CoalescingGate:
             timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
-    async def enqueue(self, key: CoalescingKey, pending_event: PendingEvent) -> None:
-        """Queue one pending event and schedule its eventual flush.
-
-        Compatibility wrapper for callers that already have a ready event.
-        New Matrix ingress should use ``admit`` before async normalization.
-        """
-        await self.admit(
-            key,
-            received_at=pending_event.enqueue_time,
-            source_event_id=pending_event.event.event_id,
-            source_kind=pending_event.source_kind,
-            ready_result=ReadyPendingEvent(pending_event=pending_event),
-        )
-
     async def admit(
         self,
         key: CoalescingKey,

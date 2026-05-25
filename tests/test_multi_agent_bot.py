@@ -40,8 +40,8 @@ from mindroom.approval_manager import (
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.coalescing import IngressOrderReservation, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing import CoalescingGate, IngressOrderReservation, ReadyPendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -137,7 +137,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from mindroom.turn_controller import TurnController, _PrecheckedEvent
+from mindroom.turn_controller import TurnController, _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
@@ -7197,6 +7197,7 @@ class TestAgentBot:
         """Image/file media dispatch should update the live cache before enqueueing dispatch."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
@@ -7204,7 +7205,7 @@ class TestAgentBot:
         bot._conversation_cache.append_live_event = AsyncMock()
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
 
         await bot._turn_controller._handle_media_message_inner(room, event)
@@ -7225,6 +7226,7 @@ class TestAgentBot:
         """Audio dispatch should reserve receive order, then admit under a resolved key."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
@@ -7246,12 +7248,14 @@ class TestAgentBot:
             *,
             room_id: str,
             requester_user_id: str,
-            received_at: float | None,
+            receipt_time: float | None = None,
+            received_at: float | None = None,
         ) -> IngressOrderReservation:
             call_order.append("reserve")
             return original_reserve_order(
                 room_id=room_id,
                 requester_user_id=requester_user_id,
+                receipt_time=receipt_time,
                 received_at=received_at,
             )
 
@@ -7259,7 +7263,7 @@ class TestAgentBot:
             key: CoalescingKey,
             *,
             ready_task: asyncio.Task[ReadyPendingEvent | None],
-            received_at: float | None,
+            _received_at: float | None = None,
             source_event_id: str,
             source_kind: str,
             order_reservation: IngressOrderReservation,
@@ -7268,7 +7272,6 @@ class TestAgentBot:
             call_order.append("admit")
             assert call_order == ["reserve", "append", "coalescing_thread", "admit"]
             assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
-            assert received_at is not None
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             assert order_reservation.released is False
@@ -7281,7 +7284,7 @@ class TestAgentBot:
         bot._conversation_cache.append_live_event = AsyncMock(side_effect=record_append)
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
         bot._coalescing_gate.reserve_order = MagicMock(side_effect=record_reserve_order)
         mock_admit = AsyncMock(side_effect=record_admit)
@@ -7315,19 +7318,287 @@ class TestAgentBot:
         """Cancelled pre-admission audio resolution must not leave gate work behind."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
 
         bot._turn_controller._precheck_dispatch_event = MagicMock(return_value=prechecked_event)
-        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=False)
+        bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
         bot._turn_controller._resolve_ready_voice_target = AsyncMock(side_effect=asyncio.CancelledError)
 
         with pytest.raises(asyncio.CancelledError):
             await bot._turn_controller._handle_media_message_inner(room, event)
 
         assert bot._coalescing_gate._order_reservations == []
+
+    @pytest.mark.asyncio
+    async def test_text_reserves_receive_order_before_thread_lookup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An earlier text message must not be overtaken by a later voice message."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$typed")
+        text_event.body = "typed first"
+        text_event.source = {
+            "event_id": "$typed",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "typed first"},
+        }
+        voice_event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice")
+        release_text_lookup = asyncio.Event()
+        dispatches: list[list[str]] = []
+
+        async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event) -> str | None:
+            if event.event_id == "$typed":
+                await release_text_lookup.wait()
+            return "$thread-root"
+
+        async def dispatch_batch(batch: CoalescedBatch) -> None:
+            dispatches.append(list(batch.source_event_ids))
+
+        bot._coalescing_gate = CoalescingGate(
+            dispatch_batch=dispatch_batch,
+            debounce_seconds=lambda: 0.01,
+            upload_grace_seconds=lambda: 0.0,
+            is_shutting_down=lambda: False,
+        )
+        replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
+        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
+        bot._turn_controller._resolve_ready_voice_target = AsyncMock(
+            return_value=(
+                bot._turn_controller.deps.resolver.build_message_target(
+                    room_id=room.room_id,
+                    thread_id="$thread-root",
+                    reply_to_event_id=voice_event.event_id,
+                    event_source=voice_event.source,
+                ),
+                CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+            ),
+        )
+        bot._turn_controller._ready_voice_event = AsyncMock(
+            return_value=ReadyPendingEvent(
+                pending_event=PendingEvent(
+                    event=PreparedTextEvent(
+                        sender="@user:localhost",
+                        event_id="$voice",
+                        body="voice second",
+                        source={
+                            "content": {
+                                "body": "voice second",
+                                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+                                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                            },
+                        },
+                        source_kind_override=VOICE_SOURCE_KIND,
+                    ),
+                    room=room,
+                    source_kind=VOICE_SOURCE_KIND,
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(
+                    return_value=PreparedTextEvent(
+                        sender="@user:localhost",
+                        event_id="$typed",
+                        body="typed first",
+                        source=text_event.source,
+                        server_timestamp=1234567890,
+                    ),
+                ),
+            ),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        ):
+            text_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, text_event))
+            await asyncio.sleep(0)
+            await bot._turn_controller.handle_media_event(room, voice_event)
+            await asyncio.sleep(0.03)
+
+            assert dispatches == []
+
+            release_text_lookup.set()
+            await text_task
+            await bot._coalescing_gate.drain_all()
+
+        assert dispatches == [["$typed", "$voice"]]
+
+    @pytest.mark.asyncio
+    async def test_media_reserves_receive_order_before_thread_lookup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An earlier non-audio media event must reserve before thread lookup can block."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        image_event = self._make_handler_event("image", sender="@user:localhost", event_id="$image")
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$typed")
+        text_event.body = "typed second"
+        text_event.source = {
+            "event_id": "$typed",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "typed second"},
+        }
+        release_media_lookup = asyncio.Event()
+        dispatches: list[list[str]] = []
+
+        async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event) -> str | None:
+            if event.event_id == "$image":
+                await release_media_lookup.wait()
+            return "$thread-root"
+
+        async def dispatch_batch(batch: CoalescedBatch) -> None:
+            dispatches.append(list(batch.source_event_ids))
+
+        bot._coalescing_gate = CoalescingGate(
+            dispatch_batch=dispatch_batch,
+            debounce_seconds=lambda: 0.01,
+            upload_grace_seconds=lambda: 0.0,
+            is_shutting_down=lambda: False,
+        )
+        replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
+        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(
+                    return_value=PreparedTextEvent(
+                        sender="@user:localhost",
+                        event_id="$typed",
+                        body="typed second",
+                        source=text_event.source,
+                        server_timestamp=1234567891,
+                    ),
+                ),
+            ),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        ):
+            media_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, image_event))
+            await asyncio.sleep(0)
+            await bot._turn_controller.handle_text_event(room, text_event)
+            await asyncio.sleep(0.03)
+
+            assert dispatches == []
+
+            release_media_lookup.set()
+            await media_task
+            await bot._coalescing_gate.drain_all()
+
+        assert dispatches == [["$image", "$typed"]]
+
+    @pytest.mark.asyncio
+    async def test_file_sidecar_preview_reserves_receive_order_before_preview_normalization(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An earlier file sidecar text preview must reserve before preview normalization can block."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        sidecar_event = self._make_handler_event("file", sender="@user:localhost", event_id="$sidecar")
+        sidecar_event.source["content"]["io.mindroom.long_text"] = {
+            "version": 2,
+            "encoding": "matrix_event_content_json",
+        }
+        sidecar_event.source["content"]["info"] = {"mimetype": "application/json"}
+        text_event = self._make_handler_event("message", sender="@user:localhost", event_id="$typed")
+        text_event.body = "typed second"
+        text_event.source = {
+            "event_id": "$typed",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567891,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "typed second"},
+        }
+        prepared_sidecar = PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$sidecar",
+            body="sidecar first",
+            source={
+                "event_id": "$sidecar",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "sidecar first"},
+            },
+            server_timestamp=1234567890,
+        )
+        release_preview_normalization = asyncio.Event()
+        dispatches: list[list[str]] = []
+
+        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedTextEvent:
+            await release_preview_normalization.wait()
+            return prepared_sidecar
+
+        async def dispatch_batch(batch: CoalescedBatch) -> None:
+            dispatches.append(list(batch.source_event_ids))
+
+        bot._coalescing_gate = CoalescingGate(
+            dispatch_batch=dispatch_batch,
+            debounce_seconds=lambda: 0.01,
+            upload_grace_seconds=lambda: 0.0,
+            is_shutting_down=lambda: False,
+        )
+        replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
+        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                new=AsyncMock(side_effect=prepare_file_sidecar_text_event),
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(
+                    return_value=PreparedTextEvent(
+                        sender="@user:localhost",
+                        event_id="$typed",
+                        body="typed second",
+                        source=text_event.source,
+                        server_timestamp=1234567891,
+                    ),
+                ),
+            ),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        ):
+            sidecar_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, sidecar_event))
+            await asyncio.sleep(0)
+            await bot._turn_controller.handle_text_event(room, text_event)
+            await asyncio.sleep(0.03)
+
+            assert dispatches == []
+
+            release_preview_normalization.set()
+            await sidecar_task
+            await bot._coalescing_gate.drain_all()
+
+        assert dispatches == [["$sidecar", "$typed"]]
 
     @pytest.mark.asyncio
     async def test_media_message_merges_thread_history_attachment_ids(
@@ -11301,18 +11572,23 @@ class TestAgentBot:
 
         with (
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
             await bot._turn_controller._enqueue_for_dispatch(
                 event,
                 room,
                 source_kind=MESSAGE_SOURCE_KIND,
                 requester_user_id="@user:localhost",
+                reservation_owner=reservation_owner,
             )
 
         mock_dispatch.assert_not_awaited()
-        mock_start.assert_awaited_once()
-        key, pending_event = mock_start.await_args.args
+        mock_admit.assert_awaited_once()
+        key = mock_admit.await_args.args[0]
+        ready_result = mock_admit.await_args.kwargs["ready_result"]
+        assert isinstance(ready_result, ReadyPendingEvent)
+        pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$relay", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
@@ -11656,17 +11932,23 @@ class TestAgentBot:
                 new=AsyncMock(return_value="$thread_root"),
             ),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+                reservation_owner=reservation_owner,
+                coalescing_thread_id="$thread_root",
             )
 
-        assert handled is True
+        assert handled is _IngressAdmissionOutcome.ADMITTED
         mock_dispatch.assert_not_awaited()
-        mock_start.assert_awaited_once()
-        key, pending_event = mock_start.await_args.args
+        mock_admit.assert_awaited_once()
+        key = mock_admit.await_args.args[0]
+        ready_result = mock_admit.await_args.kwargs["ready_result"]
+        assert isinstance(ready_result, ReadyPendingEvent)
+        pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
@@ -11757,18 +12039,24 @@ class TestAgentBot:
                 return_value=MagicMock(),
             ) as mock_reserve_waiting_human_message,
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_start,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+                reservation_owner=reservation_owner,
+                coalescing_thread_id="$thread_root",
             )
 
-        assert handled is True
+        assert handled is _IngressAdmissionOutcome.ADMITTED
         mock_dispatch.assert_not_awaited()
         mock_reserve_waiting_human_message.assert_called_once()
-        mock_start.assert_awaited_once()
-        key, pending_event = mock_start.await_args.args
+        mock_admit.assert_awaited_once()
+        key = mock_admit.await_args.args[0]
+        ready_result = mock_admit.await_args.kwargs["ready_result"]
+        assert isinstance(ready_result, ReadyPendingEvent)
+        pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
@@ -301,6 +302,12 @@ class _PromptIngressReservationOwner:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
+
+
+class _IngressAdmissionOutcome(Enum):
+    ADMITTED = "admitted"
+    CONSUMED = "consumed"
+    IGNORED = "ignored"
 
 
 @dataclass(frozen=True)
@@ -701,9 +708,10 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
+        reservation_owner: _PromptIngressReservationOwner,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-    ) -> None:
+    ) -> _IngressAdmissionOutcome:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
         if dispatch_timing is not None:
             dispatch_timing.note(
@@ -724,6 +732,7 @@ class TurnController:
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
+                reservation_owner=reservation_owner,
                 coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
@@ -737,6 +746,8 @@ class TurnController:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
             raise
+        else:
+            return _IngressAdmissionOutcome.ADMITTED
 
     async def _enqueue_prepared_text_for_dispatch(
         self,
@@ -748,9 +759,10 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
+        reservation_owner: _PromptIngressReservationOwner,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-    ) -> None:
+    ) -> _IngressAdmissionOutcome:
         """Queue one normalized text event with shared active-follow-up handling."""
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
@@ -770,10 +782,11 @@ class TurnController:
                 coalescing_thread_id=canonical_thread_id,
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
+                reservation_owner=reservation_owner,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
                 queued_notice_reservation=queued_notice_reservation,
             )
-            return
+            return _IngressAdmissionOutcome.ADMITTED
         try:
             await self._enqueue_for_dispatch(
                 dispatch_event,
@@ -783,6 +796,7 @@ class TurnController:
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
+                reservation_owner=reservation_owner,
                 coalescing_key=CoalescingKey(room.room_id, canonical_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
@@ -796,6 +810,8 @@ class TurnController:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
             raise
+        else:
+            return _IngressAdmissionOutcome.ADMITTED
 
     async def _enqueue_media_for_dispatch(
         self,
@@ -805,7 +821,8 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> None:
+        reservation_owner: _PromptIngressReservationOwner,
+    ) -> _IngressAdmissionOutcome:
         """Queue one media event with the same active-follow-up policy as text."""
         source_kind = IMAGE_SOURCE_KIND if is_image_message_event(event) else MEDIA_SOURCE_KIND
         target = self.deps.resolver.build_message_target(
@@ -833,15 +850,18 @@ class TurnController:
                 coalescing_thread_id=canonical_thread_id,
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
+                reservation_owner=reservation_owner,
             )
-            return
+            return _IngressAdmissionOutcome.ADMITTED
         await self._enqueue_for_dispatch(
             event,
             room,
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
+            reservation_owner=reservation_owner,
             coalescing_key=CoalescingKey(room.room_id, canonical_thread_id, requester_user_id),
         )
+        return _IngressAdmissionOutcome.ADMITTED
 
     async def _should_skip_router_before_shared_ingress_work(
         self,
@@ -965,9 +985,10 @@ class TurnController:
         dispatch_event: TextDispatchEvent,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> None:
+        reservation_owner: _PromptIngressReservationOwner,
+        coalescing_thread_id: str | None,
+    ) -> _IngressAdmissionOutcome:
         """Run shared ingress dispatch for text events and sidecar text previews."""
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -984,7 +1005,7 @@ class TurnController:
             and self._is_trusted_router_relay_event(prepared_event)
         ):
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(prepared_event.event_id))
-            return
+            return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             VOICE_SOURCE_KIND,
@@ -1001,7 +1022,7 @@ class TurnController:
             event_id=prepared_event.event_id,
             envelope=envelope,
         ):
-            return
+            return _IngressAdmissionOutcome.CONSUMED
         if envelope.origin.may_answer_interactive_prompt:
             selection = await interactive.handle_text_response(
                 self._client(),
@@ -1017,8 +1038,8 @@ class TurnController:
                     user_id=envelope.requester_id,
                     source_event_id=prepared_event.event_id,
                 )
-                return
-        await self._enqueue_prepared_text_for_dispatch(
+                return _IngressAdmissionOutcome.CONSUMED
+        return await self._enqueue_prepared_text_for_dispatch(
             room=room,
             prepared_event=prepared_event,
             dispatch_event=dispatch_event,
@@ -1026,6 +1047,7 @@ class TurnController:
             coalescing_thread_id=canonical_thread_id,
             requester_user_id=requester_user_id,
             dispatch_timing=dispatch_timing,
+            reservation_owner=reservation_owner,
         )
 
     async def _enqueue_for_dispatch(
@@ -1035,6 +1057,7 @@ class TurnController:
         *,
         source_kind: str,
         requester_user_id: str,
+        reservation_owner: _PromptIngressReservationOwner,
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int = 0,
@@ -1042,7 +1065,7 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
-    ) -> None:
+    ) -> _IngressAdmissionOutcome:
         """Route one inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
@@ -1072,18 +1095,21 @@ class TurnController:
             timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
-        await self.deps.coalescing_gate.enqueue(
+        pending_event = PendingEvent(
+            event=event,
+            room=room,
+            source_kind=source_kind,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
+            trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+            dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target),
+        )
+        await reservation_owner.admit(
             resolved_key,
-            PendingEvent(
-                event=event,
-                room=room,
-                source_kind=source_kind,
-                dispatch_policy_source_kind=dispatch_policy_source_kind,
-                hook_source=hook_source,
-                message_received_depth=message_received_depth,
-                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target),
-            ),
+            source_event_id=event.event_id,
+            source_kind=source_kind,
+            ready_result=ReadyPendingEvent(pending_event=pending_event),
         )
         emit_elapsed_timing(
             "ingress_handoff.enqueue_for_dispatch.coalescing_gate",
@@ -1097,6 +1123,7 @@ class TurnController:
             source_kind=source_kind,
             timing_scope=timing_scope,
         )
+        return _IngressAdmissionOutcome.ADMITTED
 
     async def _maybe_send_visible_voice_echo(
         self,
@@ -1972,7 +1999,6 @@ class TurnController:
     ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
-        ingress_thread_id = None if event_info.is_edit else await self.deps.resolver.coalescing_thread_id(room, event)
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1981,44 +2007,22 @@ class TurnController:
             STREAM_STATUS_STREAMING,
         }:
             return
-
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
             return
-        if await self._should_skip_router_before_shared_ingress_work(
-            room,
-            prechecked_event.event,
-            requester_user_id=prechecked_event.requester_user_id,
-            thread_id=ingress_thread_id,
-        ):
-            self.deps.logger.debug(
-                "skip_router_shared_ingress_work",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                thread_id=ingress_thread_id,
-            )
-            return
 
-        self.deps.logger.info(
-            "Received message",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            sender=event.sender,
-            thread_id=ingress_thread_id,
-        )
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        await self._append_live_event_with_timing(
-            room.room_id,
-            event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
-
         if event_info.is_edit:
+            await self._append_live_event_with_timing(
+                room.room_id,
+                event,
+                event_info=event_info,
+                dispatch_timing=dispatch_timing,
+            )
             await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
@@ -2027,17 +2031,57 @@ class TurnController:
             )
             return
 
-        prepared_event = await self._resolve_text_event_with_ingress_timing(
-            prechecked_event.event,
-            dispatch_timing=dispatch_timing,
-        )
-        await self._dispatch_prepared_text_like_ingress(
-            room=room,
-            prepared_event=prepared_event,
-            dispatch_event=prechecked_event.event,
-            requester_user_id=prechecked_event.requester_user_id,
-            dispatch_timing=dispatch_timing,
-        )
+        reservation_owner = self._reserve_prompt_ingress_order(room, prechecked_event.requester_user_id)
+        try:
+            ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+            if await self._should_skip_router_before_shared_ingress_work(
+                room,
+                prechecked_event.event,
+                requester_user_id=prechecked_event.requester_user_id,
+                thread_id=ingress_thread_id,
+            ):
+                self.deps.logger.debug(
+                    "skip_router_shared_ingress_work",
+                    event_id=event.event_id,
+                    room_id=room.room_id,
+                    thread_id=ingress_thread_id,
+                )
+                return
+
+            self.deps.logger.info(
+                "Received message",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                sender=event.sender,
+                thread_id=ingress_thread_id,
+            )
+            await self._append_live_event_with_timing(
+                room.room_id,
+                event,
+                event_info=event_info,
+                dispatch_timing=dispatch_timing,
+            )
+            prepared_event = await self._resolve_text_event_with_ingress_timing(
+                prechecked_event.event,
+                dispatch_timing=dispatch_timing,
+            )
+            await self._dispatch_prepared_text_like_ingress(
+                room=room,
+                prepared_event=prepared_event,
+                dispatch_event=prechecked_event.event,
+                requester_user_id=prechecked_event.requester_user_id,
+                dispatch_timing=dispatch_timing,
+                reservation_owner=reservation_owner,
+                coalescing_thread_id=ingress_thread_id,
+            )
+        except IngressAdmissionClosedError:
+            self.deps.logger.debug(
+                "Text ingress admission closed",
+                event_id=prechecked_event.event.event_id,
+                room_id=room.room_id,
+            )
+        finally:
+            await reservation_owner.release()
 
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2335,19 +2379,22 @@ class TurnController:
         )
         attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
         event_info = EventInfo.from_event(prechecked_event.event.source)
-        if is_audio_message_event(prechecked_event.event):
-            if self._managed_entity_name_for_sender(prechecked_event.event.sender) is not None:
-                self.deps.logger.debug(
-                    "Ignoring agent audio event for voice transcription",
-                    event_id=prechecked_event.event.event_id,
-                    sender=prechecked_event.event.sender,
-                )
-                self._mark_source_events_responded(
-                    HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
-                )
-                return
-            reservation_owner = self._reserve_prompt_ingress_order(room, prechecked_event.requester_user_id)
-            try:
+        if (
+            is_audio_message_event(prechecked_event.event)
+            and self._managed_entity_name_for_sender(prechecked_event.event.sender) is not None
+        ):
+            self.deps.logger.debug(
+                "Ignoring agent audio event for voice transcription",
+                event_id=prechecked_event.event.event_id,
+                sender=prechecked_event.event.sender,
+            )
+            self._mark_source_events_responded(
+                HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
+            )
+            return
+        reservation_owner = self._reserve_prompt_ingress_order(room, prechecked_event.requester_user_id)
+        try:
+            if is_audio_message_event(prechecked_event.event):
                 await self._on_audio_media_message(
                     room,
                     _PrecheckedEvent(
@@ -2358,44 +2405,51 @@ class TurnController:
                     dispatch_timing=dispatch_timing,
                     reservation_owner=reservation_owner,
                 )
-            except IngressAdmissionClosedError:
-                self.deps.logger.debug(
-                    "Voice ingress admission closed",
-                    event_id=prechecked_event.event.event_id,
-                    room_id=room.room_id,
-                )
-            finally:
-                await reservation_owner.release()
-            return
-        # Prime transitive ancestor lookups before writing advisory cache membership.
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
-        await self._append_live_event_with_timing(
-            room.room_id,
-            prechecked_event.event,
-            event_info=event_info,
-            dispatch_timing=dispatch_timing,
-        )
+                return
+            # Prime transitive ancestor lookups before writing advisory cache membership.
+            coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+            await self._append_live_event_with_timing(
+                room.room_id,
+                prechecked_event.event,
+                event_info=event_info,
+                dispatch_timing=dispatch_timing,
+            )
 
-        if await self._dispatch_special_media_as_text(
-            room,
-            prechecked_event,
-        ):
-            return
-        if not is_matrix_media_dispatch_event(prechecked_event.event):
-            return
-        await self._enqueue_media_for_dispatch(
-            room=room,
-            event=prechecked_event.event,
-            coalescing_thread_id=coalescing_thread_id,
-            requester_user_id=prechecked_event.requester_user_id,
-            dispatch_timing=dispatch_timing,
-        )
+            outcome = await self._dispatch_special_media_as_text(
+                room,
+                prechecked_event,
+                reservation_owner=reservation_owner,
+                coalescing_thread_id=coalescing_thread_id,
+            )
+            if outcome is not _IngressAdmissionOutcome.IGNORED:
+                return
+            if not is_matrix_media_dispatch_event(prechecked_event.event):
+                return
+            await self._enqueue_media_for_dispatch(
+                room=room,
+                event=prechecked_event.event,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=prechecked_event.requester_user_id,
+                dispatch_timing=dispatch_timing,
+                reservation_owner=reservation_owner,
+            )
+        except IngressAdmissionClosedError:
+            self.deps.logger.debug(
+                "Media ingress admission closed",
+                event_id=prechecked_event.event.event_id,
+                room_id=room.room_id,
+            )
+        finally:
+            await reservation_owner.release()
 
     async def _dispatch_special_media_as_text(
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedInboundMediaEvent,
-    ) -> bool:
+        *,
+        reservation_owner: _PromptIngressReservationOwner,
+        coalescing_thread_id: str | None,
+    ) -> _IngressAdmissionOutcome:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
         if is_file_message_event(event):
@@ -2405,8 +2459,10 @@ class TurnController:
                     event=event,
                     requester_user_id=prechecked_event.requester_user_id,
                 ),
+                reservation_owner=reservation_owner,
+                coalescing_thread_id=coalescing_thread_id,
             )
-        return False
+        return _IngressAdmissionOutcome.IGNORED
 
     async def _on_audio_media_message(
         self,
@@ -2762,11 +2818,14 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[FileMessageEvent],
-    ) -> bool:
+        *,
+        reservation_owner: _PromptIngressReservationOwner,
+        coalescing_thread_id: str | None,
+    ) -> _IngressAdmissionOutcome:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
         event = prechecked_event.event
         if not is_v2_sidecar_text_preview(event.source):
-            return False
+            return _IngressAdmissionOutcome.IGNORED
 
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
         if dispatch_timing is not None:
@@ -2776,11 +2835,12 @@ class TurnController:
             dispatch_timing.mark("ingress_normalize_ready")
         assert prepared_text_event is not None
         attach_dispatch_pipeline_timing(prepared_text_event.source, dispatch_timing)
-        await self._dispatch_prepared_text_like_ingress(
+        return await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_text_event,
             dispatch_event=prepared_text_event,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=coalescing_thread_id,
         )
-        return True

@@ -49,7 +49,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
@@ -1797,16 +1797,23 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             new=AsyncMock(return_value=None),
         ) as mock_handle_text_response:
             assert isinstance(sidecar_event, nio.RoomMessageFile)
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(
+                room,
+                "@mindroom_router:localhost",
+            )
             handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(
                     event=sidecar_event,
                     requester_user_id="@mindroom_router:localhost",
                 ),
+                reservation_owner=reservation_owner,
+                coalescing_thread_id=None,
             )
+            await reservation_owner.release()
             await bot._coalescing_gate.drain_all()
 
-        assert handled is True
+        assert handled is _IngressAdmissionOutcome.ADMITTED
         assert "$question123" in interactive._active_questions
         mock_handle_text_response.assert_not_awaited()
         bot._turn_controller._dispatch_text_message.assert_awaited_once()
@@ -1863,15 +1870,22 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         new=AsyncMock(return_value=None),
     ) as mock_handle_text_response:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(
+            room,
+            "@mindroom_router:localhost",
+        )
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
             _PrecheckedEvent(
                 event=sidecar_event,
                 requester_user_id="@mindroom_router:localhost",
             ),
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=None,
         )
+        await reservation_owner.release()
 
-    assert handled is True
+    assert handled is _IngressAdmissionOutcome.CONSUMED
     mock_handle_text_response.assert_not_awaited()
     bot._turn_controller._dispatch_text_message.assert_not_awaited()
 

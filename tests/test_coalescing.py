@@ -100,6 +100,20 @@ async def _ready_after(
     return ReadyPendingEvent(pending_event=pending_event)
 
 
+async def _admit_ready(
+    gate: CoalescingGate,
+    key: CoalescingKey,
+    pending_event: PendingEvent,
+) -> None:
+    """Admit one already-ready event through the canonical gate API."""
+    await gate.admit(
+        key,
+        source_event_id=pending_event.event.event_id,
+        source_kind=pending_event.source_kind,
+        ready_result=ReadyPendingEvent(pending_event=pending_event),
+    )
+
+
 class FakeMonotonicClock:
     """Mutable monotonic clock for reservation timing tests."""
 
@@ -224,8 +238,8 @@ async def test_room_level_messages_do_not_coalesce() -> None:
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$gmail:localhost", "gmail setup", 1_000_000)))
-    await gate.enqueue(key, _pending(_text_event("$extras:localhost", "message extras", 1_000_600)))
+    await _admit_ready(gate, key, _pending(_text_event("$gmail:localhost", "gmail setup", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$extras:localhost", "message extras", 1_000_600)))
 
     await gate.drain_all()
 
@@ -252,8 +266,8 @@ async def test_room_level_messages_do_not_coalesce_during_upload_grace() -> None
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
-    await gate.enqueue(key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
 
     await gate.drain_all()
 
@@ -280,9 +294,9 @@ async def test_room_level_text_waits_for_late_media_upload_grace() -> None:
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
     await asyncio.sleep(0.01)
-    await gate.enqueue(key, _pending(_image_event("$image:localhost", 1_000_600)))
+    await _admit_ready(gate, key, _pending(_image_event("$image:localhost", 1_000_600)))
 
     await _wait_for(lambda: len(batches) >= 1)
 
@@ -305,7 +319,8 @@ async def test_voice_class_text_does_not_wait_for_upload_grace() -> None:
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
-    await gate.enqueue(
+    await _admit_ready(
+        gate,
         key,
         PendingEvent(
             event=_text_event("$voice:localhost", "voice transcript", 1_000_000),
@@ -335,8 +350,8 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
-    await gate.enqueue(key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
-    await gate.enqueue(key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_600)))
 
     await gate.drain_all()
 
@@ -372,7 +387,7 @@ async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> 
         received_at=1_000.0,
     )
     await asyncio.sleep(0.08)
-    await gate.enqueue(key, _pending(_text_event("$typed:localhost", "typed follow-up", 1_000_800)))
+    await _admit_ready(gate, key, _pending(_text_event("$typed:localhost", "typed follow-up", 1_000_800)))
 
     assert batches == []
 
@@ -417,8 +432,8 @@ async def test_failed_older_owner_admission_wakes_newer_thread_gate() -> None:
     older_gate = gate._gates[older_key]
     await _wait_for(lambda: bool(older_gate.claimed_admissions))
 
-    await gate.enqueue(newer_key, _pending(_text_event("$newer:localhost", "newer", 1_000_001)))
-    await gate.enqueue(older_key, _pending(_text_event("$older-later:localhost", "older later", 1_000_002)))
+    await _admit_ready(gate, newer_key, _pending(_text_event("$newer:localhost", "newer", 1_000_001)))
+    await _admit_ready(gate, older_key, _pending(_text_event("$older-later:localhost", "older later", 1_000_002)))
     fail_voice.set()
 
     await _wait_for(

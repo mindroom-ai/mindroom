@@ -2067,28 +2067,33 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         assert queued_signal.pending_human_messages == 1
-        with (
-            patch.object(
-                bot._turn_controller.deps.response_runner,
-                "reserve_waiting_human_message",
-                return_value=reservation,
-            ),
-            patch.object(
-                bot._turn_controller,
-                "_enqueue_for_dispatch",
-                new=AsyncMock(side_effect=asyncio.CancelledError),
-            ),
-            pytest.raises(asyncio.CancelledError),
-        ):
-            await bot._turn_controller._enqueue_active_thread_follow_up(
-                room=room,
-                event=event,
-                target=target,
-                envelope=envelope,
-                coalescing_thread_id="$thread",
-                requester_user_id="@user:localhost",
-                dispatch_timing=None,
-            )
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        try:
+            with (
+                patch.object(
+                    bot._turn_controller.deps.response_runner,
+                    "reserve_waiting_human_message",
+                    return_value=reservation,
+                ),
+                patch.object(
+                    bot._turn_controller,
+                    "_enqueue_for_dispatch",
+                    new=AsyncMock(side_effect=asyncio.CancelledError),
+                ),
+                pytest.raises(asyncio.CancelledError),
+            ):
+                await bot._turn_controller._enqueue_active_thread_follow_up(
+                    room=room,
+                    event=event,
+                    target=target,
+                    envelope=envelope,
+                    coalescing_thread_id="$thread",
+                    requester_user_id="@user:localhost",
+                    dispatch_timing=None,
+                    reservation_owner=reservation_owner,
+                )
+        finally:
+            await reservation_owner.release()
     finally:
         queued_signal.finish_response_turn()
 
