@@ -1407,9 +1407,20 @@ class AgentBot:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
-        await self._coalescing_gate.drain_all()
-        if self._sync_trust_state is SyncTrustState.CERTIFIED:
+        drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
+        if drain_result.completed and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)
+        elif not drain_result.completed:
+            self.logger.warning(
+                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+                agent_name=self.agent_name,
+                released_reservation_count=drain_result.released_reservation_count,
+                cancelled_unready_count=drain_result.cancelled_unready_count,
+                failed_ready_count=drain_result.failed_ready_count,
+                dropped_ready_count=drain_result.dropped_ready_count,
+                dispatch_failure_count=drain_result.dispatch_failure_count,
+                dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
+            )
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 

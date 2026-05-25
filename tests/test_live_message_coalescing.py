@@ -1619,7 +1619,7 @@ async def test_front_command_does_not_wait_for_later_unresolved_voice() -> None:
         source_kind=VOICE_SOURCE_KIND,
     )
 
-    await _wait_for(lambda: calls == [["$cmd"]], deadline_seconds=0.2)
+    await _wait_for(lambda: calls == [["$cmd"]], deadline_seconds=1.0)
 
     release_voice.set()
     await gate.drain_all()

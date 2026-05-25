@@ -12,11 +12,18 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing import (
+    CoalescingDrainResult,
+    CoalescingGate,
+    IngressAdmissionClosedError,
+    ReadyPendingEvent,
+)
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.dispatch_handoff import PendingDispatchMetadata
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
@@ -31,6 +38,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.coalescing import IngressOrderReservation, _GateEntry
 
 
 def _config(tmp_path: Path) -> Config:
@@ -75,6 +84,27 @@ def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
     if token_record is None:
         return None
     return token_record.token
+
+
+def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": body, "msgtype": "m.text"},
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
+def _pending(event: nio.RoomMessageText) -> PendingEvent:
+    return PendingEvent(
+        event=event,
+        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind="message",
+    )
 
 
 def test_load_sync_token_returns_none_when_missing(tmp_path: Path) -> None:
@@ -328,7 +358,7 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     bot.client.next_batch = "s_shutdown"
     bot._sync_trust_state = SyncTrustState.CERTIFIED
     bot._sync_checkpoint = SyncCheckpoint("s_shutdown")
-    bot._coalescing_gate.drain_all = AsyncMock()
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
 
     await bot.prepare_for_sync_shutdown()
 
@@ -339,11 +369,26 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(tmp_path: Path) -> None:
+    """Incomplete bounded drains must not save certified shutdown checkpoints."""
+    bot = _agent_bot(tmp_path)
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_shutdown")
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=CoalescingDrainResult(completed=False, cancelled_unready_count=1),
+    )
+
+    await bot.prepare_for_sync_shutdown()
+
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
     """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot._coalescing_gate.drain_all = AsyncMock()
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
     save_sync_token(tmp_path, bot.agent_name, "s_before_precallback")
     bot._runtime_view.mark_runtime_started()
     bot._restore_saved_sync_token()
@@ -464,3 +509,340 @@ async def test_receive_time_gate_shutdown_does_not_poison_later_generation() -> 
     await gate.drain_all()
 
     assert dispatched == [["$waiting"], ["$next"]]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drain_cancels_stuck_ready_task_without_cancelling_dispatch() -> None:
+    """Bounded drains should cancel unresolved ready work and report an unsafe result."""
+    cancelled = asyncio.Event()
+
+    async def stuck_ready() -> ReadyPendingEvent | None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        ready_task=asyncio.create_task(stuck_ready()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert result.completed is False
+    assert result.cancelled_unready_count == 1
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drain_releases_stuck_pre_admission_reservation() -> None:
+    """Bounded drains should release unresolved reservations and reject late admission."""
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert result.completed is False
+    assert result.released_reservation_count == 1
+    assert reservation.released is True
+    with pytest.raises(IngressAdmissionClosedError):
+        await gate.admit(
+            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            ready_result=ReadyPendingEvent(
+                pending_event=_pending(_text_event("$late:localhost", "late", 1000)),
+            ),
+            order_reservation=reservation,
+        )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_ready_timeout_closes_ready_result_returned_during_cancellation() -> None:
+    """Ready results produced while handling timeout cancellation should be closed once."""
+    close_count = 0
+    cancelled = asyncio.Event()
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    pending_event = _pending(_text_event("$voice:localhost", "voice", 1000))
+    pending_event.dispatch_metadata = (
+        PendingDispatchMetadata(
+            kind="test",
+            payload=object(),
+            close=close_metadata,
+            requires_solo_batch=False,
+        ),
+    )
+
+    async def ready() -> ReadyPendingEvent:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            return ReadyPendingEvent(pending_event=pending_event)
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        ready_task=asyncio.create_task(ready()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert cancelled.is_set()
+    assert close_count == 1
+    assert result.completed is False
+    assert result.cancelled_unready_count == 1
+    assert result.dropped_ready_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_reaches_already_running_ready_wait() -> None:
+    """Bounded shutdown should interrupt an already-running shielded ready wait."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def stuck_ready() -> ReadyPendingEvent | None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(stuck_ready()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await started.wait()
+    for _ in range(100):
+        if gate._gates[key].claimed_admissions:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("gate did not claim admission before shutdown drain")
+
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert result.completed is False
+    assert result.cancelled_unready_count == 1
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_ready_task_self_cancellation_finishes_no_ready() -> None:
+    """Ready tasks that cancel themselves should finish as no-ready work."""
+
+    async def cancelled_ready() -> ReadyPendingEvent | None:
+        raise asyncio.CancelledError
+
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        ready_task=asyncio.create_task(cancelled_ready()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+
+    await gate.drain_all()
+
+    assert batches == []
+
+
+@pytest.mark.asyncio
+async def test_reserve_order_during_active_bounded_shutdown_returns_released_counted_reservation() -> None:
+    """New reservations during bounded shutdown should be pre-released and counted."""
+    shutting_down = False
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: shutting_down,
+    )
+    old_reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    shutting_down = True
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.05))
+    await asyncio.sleep(0)
+
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+
+    assert reservation.released is True
+    assert reservation.settled.is_set()
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await gate.admit(
+            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            ready_result=ReadyPendingEvent(
+                pending_event=_pending(_text_event("$late:localhost", "late", 1000)),
+            ),
+            order_reservation=reservation,
+        )
+
+    result = await drain_task
+
+    assert old_reservation.released is True
+    assert result.completed is False
+    assert result.released_reservation_count == 2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_reaches_already_running_same_window_reservation_wait() -> None:
+    """Bounded shutdown should interrupt same-window reservation waits already in progress."""
+    shutting_down = False
+    wait_entered = asyncio.Event()
+    target_reservation: IngressOrderReservation | None = None
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: shutting_down,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    original_wait_for_reservations = gate._wait_for_reservations
+
+    async def spy_wait_for_reservations(
+        wait_gate: _GateEntry,
+        reservations: list[IngressOrderReservation],
+    ) -> None:
+        if target_reservation is not None and target_reservation in reservations:
+            wait_entered.set()
+        await original_wait_for_reservations(wait_gate, reservations)
+
+    gate._wait_for_reservations = spy_wait_for_reservations
+
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "typed", 1000))),
+    )
+    reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+    target_reservation = reservation
+    await asyncio.wait_for(wait_entered.wait(), timeout=1.0)
+
+    shutting_down = True
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert reservation.released is True
+    assert result.completed is False
+    assert result.released_reservation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_in_flight_dispatch_failure_marks_drain_incomplete() -> None:
+    """In-flight dispatch failures during bounded shutdown should make the result unsafe."""
+    dispatch_entered = asyncio.Event()
+    fail_dispatch = asyncio.Event()
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        dispatch_entered.set()
+        await fail_dispatch.wait()
+        message = "dispatch failed"
+        raise RuntimeError(message)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "typed", 1000))),
+    )
+    await dispatch_entered.wait()
+
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
+    for _ in range(100):
+        if gate._active_drain_context is not None and gate._gates[key].drain_context is gate._active_drain_context:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("drain context was not installed before dispatch failure")
+    fail_dispatch.set()
+    result = await drain_task
+
+    assert result.completed is False
+    assert result.dispatch_failure_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete() -> None:
+    """In-flight dispatch cancellation during bounded shutdown should make the result unsafe."""
+    dispatch_entered = asyncio.Event()
+    dispatch_raised_self_cancel = asyncio.Event()
+    cancel_dispatch = asyncio.Event()
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        dispatch_entered.set()
+        await cancel_dispatch.wait()
+        dispatch_raised_self_cancel.set()
+        raise asyncio.CancelledError
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "typed", 1000))),
+    )
+    await dispatch_entered.wait()
+
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
+    for _ in range(100):
+        if gate._active_drain_context is not None and gate._gates[key].drain_context is gate._active_drain_context:
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("drain context was not installed before dispatch cancellation")
+    cancel_dispatch.set()
+    result = await drain_task
+
+    assert dispatch_raised_self_cancel.is_set()
+    assert result.completed is False
+    assert result.dispatch_cancelled_count == 1

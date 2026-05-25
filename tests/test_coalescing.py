@@ -448,6 +448,7 @@ async def test_failed_older_owner_admission_wakes_newer_thread_gate() -> None:
 
     await _wait_for(
         lambda: [batch.source_event_ids for batch in batches] == [["$newer:localhost"], ["$older-later:localhost"]],
+        deadline_seconds=2.0,
     )
 
 
