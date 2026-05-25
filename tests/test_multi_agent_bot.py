@@ -7236,6 +7236,7 @@ class TestAgentBot:
             key: CoalescingKey,
             *,
             ready_task: asyncio.Task[ReadyPendingEvent | None],
+            target_key_task: asyncio.Task[CoalescingKey | None],
             source_event_id: str,
             source_kind: str,
         ) -> None:
@@ -7246,6 +7247,7 @@ class TestAgentBot:
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             admitted_ready_task = ready_task
+            assert not target_key_task.done()
 
         async def record_voice_normalization(*_args: object, **_kwargs: object) -> None:
             call_order.append("normalize")

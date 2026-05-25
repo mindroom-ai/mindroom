@@ -2275,8 +2275,8 @@ async def test_failed_room_voice_does_not_coalesce_surviving_room_roots() -> Non
 
 
 @pytest.mark.asyncio
-async def test_reply_to_failed_pending_room_voice_stays_with_admitted_room_scope() -> None:
-    """A reply admitted through a pending room voice gate should not invent a stale voice thread."""
+async def test_reply_to_failed_pending_voice_keeps_original_dispatch_key() -> None:
+    """A reply moved into a pending voice lane should keep its own dispatch thread if voice fails."""
     room = _make_room()
     room_key = CoalescingKey(room.room_id, None, "@user:localhost")
     voice_reply_key = CoalescingKey(room.room_id, "$voice", "@user:localhost")
@@ -2286,14 +2286,17 @@ async def test_reply_to_failed_pending_room_voice_stays_with_admitted_room_scope
         server_timestamp=1001,
         thread_id="$voice",
     )
-    calls: list[tuple[CoalescingKey, list[str]]] = []
+    calls: list[tuple[CoalescingKey, list[str], object]] = []
 
     async def failed_voice() -> ReadyPendingEvent:
         msg = "stt failed"
         raise RuntimeError(msg)
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
-        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+        handoff = build_dispatch_handoff(batch)
+        content = handoff.event.source.get("content") if isinstance(handoff.event.source, dict) else None
+        relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
+        calls.append((batch.coalescing_key, list(batch.source_event_ids), relates_to))
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
@@ -2312,7 +2315,13 @@ async def test_reply_to_failed_pending_room_voice_stays_with_admitted_room_scope
 
     await gate.drain_all()
 
-    assert calls == [(room_key, ["$typed"])]
+    assert calls == [
+        (
+            voice_reply_key,
+            ["$typed"],
+            {"rel_type": "m.thread", "event_id": "$voice"},
+        ),
+    ]
     assert _coalescing_gate_is_idle(gate)
 
 

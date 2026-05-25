@@ -834,14 +834,14 @@ class TurnController:
             requester_user_id,
         )
 
-    async def _voice_receive_time_coalescing_key(
+    def _voice_receive_time_coalescing_key(
         self,
         room: nio.MatrixRoom,
         *,
         event_info: EventInfo,
         requester_user_id: str,
     ) -> CoalescingKey:
-        """Return the canonical receive-time gate for raw audio before voice normalization."""
+        """Return the immediate receive-time lane for raw audio before async target lookup."""
         if (
             self.deps.runtime.config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -853,16 +853,8 @@ class TurnController:
             thread_id = None
         elif event_info.thread_id is not None:
             thread_id = event_info.thread_id
-        elif event_info.reply_to_event_id is not None:
-            thread_id = (
-                await self.deps.conversation_cache.get_thread_id_for_event(
-                    room.room_id,
-                    event_info.reply_to_event_id,
-                )
-                or event_info.reply_to_event_id
-            )
         else:
-            thread_id = None
+            thread_id = event_info.reply_to_event_id
         return CoalescingKey(room.room_id, thread_id, requester_user_id)
 
     async def _append_live_event_with_timing(
@@ -2366,17 +2358,30 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        admission_key = await self._voice_receive_time_coalescing_key(
+        admission_key = self._voice_receive_time_coalescing_key(
             room,
             event_info=event_info,
             requester_user_id=prechecked_event.requester_user_id,
+        )
+        target_task = asyncio.create_task(
+            self._resolve_ready_voice_target(
+                room,
+                event,
+                event_info=event_info,
+                requester_user_id=prechecked_event.requester_user_id,
+                dispatch_timing=dispatch_timing,
+            ),
+            name=f"voice_target:{room.room_id}:{event.event_id}",
+        )
+        target_key_task = asyncio.create_task(
+            self._voice_target_key_from_result(target_task),
+            name=f"voice_target_key:{room.room_id}:{event.event_id}",
         )
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
                 prechecked_event=prechecked_event,
-                event_info=event_info,
-                admission_key=admission_key,
+                target_task=target_task,
                 dispatch_timing=dispatch_timing,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
@@ -2384,6 +2389,7 @@ class TurnController:
         await self.deps.coalescing_gate.admit(
             admission_key,
             ready_task=ready_task,
+            target_key_task=target_key_task,
             source_event_id=event.event_id,
             source_kind=VOICE_SOURCE_KIND,
         )
@@ -2395,7 +2401,6 @@ class TurnController:
         *,
         event_info: EventInfo,
         requester_user_id: str,
-        admission_key: CoalescingKey,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> tuple[MessageTarget, CoalescingKey] | None:
         await self._append_live_event_with_timing(
@@ -2422,17 +2427,25 @@ class TurnController:
             )
             return None
         dispatch_key = CoalescingKey(room.room_id, voice_target.resolved_thread_id, requester_user_id)
-        if dispatch_key != admission_key:
-            self.deps.coalescing_gate.retarget(admission_key, dispatch_key)
         return voice_target, dispatch_key
+
+    @staticmethod
+    async def _voice_target_key_from_result(
+        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey] | None],
+    ) -> CoalescingKey | None:
+        """Expose target-key readiness separately from STT readiness."""
+        resolved_target = await target_task
+        if resolved_target is None:
+            return None
+        _voice_target, dispatch_key = resolved_target
+        return dispatch_key
 
     async def _ready_voice_event(
         self,
         *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
-        event_info: EventInfo,
-        admission_key: CoalescingKey,
+        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey] | None],
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> ReadyPendingEvent | None:
         """Resolve target and normalize a raw voice event after receive-time admission."""
@@ -2440,14 +2453,7 @@ class TurnController:
         queued_notice_reservation = None
         preliminary_target = None
         reservation_released_or_handed_off = False
-        resolved_target = await self._resolve_ready_voice_target(
-            room,
-            event,
-            event_info=event_info,
-            requester_user_id=prechecked_event.requester_user_id,
-            admission_key=admission_key,
-            dispatch_timing=dispatch_timing,
-        )
+        resolved_target = await target_task
         if resolved_target is None:
             return None
         voice_target, dispatch_key = resolved_target

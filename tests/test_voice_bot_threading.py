@@ -1178,11 +1178,18 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
         thread_id="$thread_root",
         server_timestamp=1_712_350_000_002,
     )
-    target_started = asyncio.Event()
-    release_target = asyncio.Event()
+    cache_started = asyncio.Event()
+    release_cache = asyncio.Event()
     prepare_started = asyncio.Event()
     release_prepare = asyncio.Event()
     dispatches: list[tuple[list[str], str]] = []
+
+    async def get_thread_id_for_event(_room_id: str, event_id: str) -> str | None:
+        if event_id != "$thread_child":
+            return None
+        cache_started.set()
+        await release_cache.wait()
+        return "$thread_root"
 
     async def resolve_dispatch_target(
         _room: nio.MatrixRoom,
@@ -1191,8 +1198,13 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
         caller_label: str,
     ) -> MessageTarget:
         assert caller_label == "voice_admission"
-        target_started.set()
-        await release_target.wait()
+        assert (
+            await bot._turn_controller.deps.conversation_cache.get_thread_id_for_event(
+                room.room_id,
+                "$thread_child",
+            )
+            == "$thread_root"
+        )
         return MessageTarget.resolve(room.room_id, "$thread_root", "$voice")
 
     async def prepare_voice_event(
@@ -1225,7 +1237,7 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
     voice_task: asyncio.Task[None] | None = None
     try:
         bot._turn_controller.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
-            side_effect=lambda _room_id, event_id: "$thread_root" if event_id == "$thread_child" else None,
+            side_effect=get_thread_id_for_event,
         )
         with (
             patch.object(
@@ -1249,19 +1261,19 @@ async def test_plain_reply_voice_to_thread_child_waits_with_thread_root_text(
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
-            await asyncio.wait_for(target_started.wait(), timeout=1.0)
+            await asyncio.wait_for(cache_started.wait(), timeout=1.0)
             await bot._on_message(room, typed_event)
             await asyncio.sleep(0.05)
 
             assert dispatches == []
 
-            release_target.set()
+            release_cache.set()
             await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             release_prepare.set()
             await voice_task
             await drain_coalescing(bot)
     finally:
-        release_target.set()
+        release_cache.set()
         release_prepare.set()
         if voice_task is not None and not voice_task.done():
             voice_task.cancel()
