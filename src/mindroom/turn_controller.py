@@ -2380,10 +2380,13 @@ class TurnController:
             self._voice_target_key_from_result(target_task),
             name=f"voice_target_key:{room.room_id}:{event.event_id}",
         )
+        fallback_thread_id = admission_key.thread_id if event_info.thread_id is not None else None
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
                 prechecked_event=prechecked_event,
+                admission_key=admission_key,
+                fallback_thread_id=fallback_thread_id,
                 target_task=target_task,
                 dispatch_timing=dispatch_timing,
             ),
@@ -2405,42 +2408,32 @@ class TurnController:
         event_info: EventInfo,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> tuple[MessageTarget, CoalescingKey] | None:
+    ) -> tuple[MessageTarget, CoalescingKey]:
         await self._append_live_event_with_timing(
             room.room_id,
             event,
             event_info=event_info,
             dispatch_timing=dispatch_timing,
         )
-        try:
-            voice_target = await self.deps.resolver.resolve_dispatch_target(
-                room,
-                event,
-                caller_label="voice_admission",
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Voice target resolution failed; leaving audio event unhandled for replay",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                exception_type=exc.__class__.__name__,
-                error=str(exc),
-            )
-            return None
+        voice_target = await self.deps.resolver.resolve_dispatch_target(
+            room,
+            event,
+            caller_label="voice_admission",
+        )
         dispatch_key = CoalescingKey(room.room_id, voice_target.resolved_thread_id, requester_user_id)
         return voice_target, dispatch_key
 
     @staticmethod
     async def _voice_target_key_from_result(
-        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey] | None],
+        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey]],
     ) -> CoalescingKey | None:
         """Expose target-key readiness separately from STT readiness."""
-        resolved_target = await target_task
-        if resolved_target is None:
+        try:
+            _voice_target, dispatch_key = await target_task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             return None
-        _voice_target, dispatch_key = resolved_target
         return dispatch_key
 
     async def _ready_voice_event(
@@ -2448,19 +2441,23 @@ class TurnController:
         *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
-        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey] | None],
+        admission_key: CoalescingKey,
+        fallback_thread_id: str | None,
+        target_task: asyncio.Task[tuple[MessageTarget, CoalescingKey]],
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> ReadyPendingEvent | None:
         """Resolve target and normalize a raw voice event after receive-time admission."""
         event = prechecked_event.event
+        dispatch_key = CoalescingKey(
+            admission_key.room_id,
+            fallback_thread_id,
+            admission_key.requester_user_id,
+        )
         queued_notice_reservation = None
         preliminary_target = None
         reservation_released_or_handed_off = False
-        resolved_target = await target_task
-        if resolved_target is None:
-            return None
-        voice_target, dispatch_key = resolved_target
         try:
+            voice_target, dispatch_key = await target_task
             preliminary_target = voice_target
             envelope = self.deps.resolver.build_ingress_envelope(
                 room_id=room.room_id,
@@ -2547,7 +2544,9 @@ class TurnController:
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
-                thread_id=voice_target.resolved_thread_id,
+                thread_id=(
+                    preliminary_target.resolved_thread_id if preliminary_target is not None else fallback_thread_id
+                ),
                 dispatch_key=dispatch_key,
                 dispatch_timing=dispatch_timing,
                 error=exc,

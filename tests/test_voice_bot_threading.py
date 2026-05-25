@@ -249,6 +249,26 @@ def _handled_source_event_ids(handled_turn: HandledTurnState | None) -> list[str
     return list(handled_turn.source_event_ids) if handled_turn is not None else []
 
 
+def _assert_voice_fallback_dispatch(
+    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]],
+    *,
+    source_event_id: str,
+    thread_id: str,
+) -> PreparedTextEvent:
+    assert len(dispatches) == 1
+    dispatched_event, handled_source_ids = dispatches[0]
+    assert isinstance(dispatched_event, PreparedTextEvent)
+    assert dispatched_event.body == "🎤 [Attached voice message]"
+    assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
+    assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    assert dispatched_event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": thread_id,
+    }
+    assert handled_source_ids == [source_event_id]
+    return dispatched_event
+
+
 def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.02) -> None:
     gate = CoalescingGate(
         dispatch_batch=bot._dispatch_coalesced_batch,
@@ -1455,12 +1475,11 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    assert len(dispatches) == 1
-    dispatched_event, handled_source_ids = dispatches[0]
-    assert isinstance(dispatched_event, PreparedTextEvent)
-    assert dispatched_event.body == "🎤 [Attached voice message]"
-    assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
-    assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    dispatched_event = _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$audio-fails",
+        thread_id="$thread_root",
+    )
     attachment_ids = dispatched_event.source["content"][ATTACHMENT_IDS_KEY]
     assert isinstance(attachment_ids, list)
     assert len(attachment_ids) == 1
@@ -1468,11 +1487,6 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     assert attachment is not None
     assert attachment.kind == "audio"
     assert attachment.source_event_id == "$audio-fails"
-    assert dispatched_event.source["content"]["m.relates_to"] == {
-        "rel_type": "m.thread",
-        "event_id": "$thread_root",
-    }
-    assert handled_source_ids == ["$audio-fails"]
 
 
 @pytest.mark.asyncio
@@ -1503,23 +1517,17 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    assert len(dispatches) == 1
-    dispatched_event, handled_source_ids = dispatches[0]
-    assert isinstance(dispatched_event, PreparedTextEvent)
-    assert dispatched_event.body == "🎤 [Attached voice message]"
-    assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
-    assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    dispatched_event = _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$audio-download-fails",
+        thread_id="$thread_root",
+    )
     assert ATTACHMENT_IDS_KEY not in dispatched_event.source["content"]
-    assert dispatched_event.source["content"]["m.relates_to"] == {
-        "rel_type": "m.thread",
-        "event_id": "$thread_root",
-    }
-    assert handled_source_ids == ["$audio-download-fails"]
 
 
 @pytest.mark.asyncio
-async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guess(mock_home_bot: AgentBot) -> None:
-    """Thread-resolution failures should not guess a fallback dispatch target."""
+async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
+    """Thread-resolution failures should terminate visibly instead of dropping live audio."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$thread-resolution-fails")
@@ -1549,5 +1557,52 @@ async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guess(moc
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    assert dispatches == []
-    assert not bot._turn_store.is_handled("$thread-resolution-fails")
+    _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$thread-resolution-fails",
+        thread_id="$thread_root",
+    )
+
+
+@pytest.mark.asyncio
+async def test_raw_voice_cache_append_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
+    """Cache append failures after admission should terminate visibly."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$cache-append-fails")
+    dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
+
+    resolve_target = AsyncMock(return_value=MessageTarget.resolve(room.room_id, "$thread_root", "$cache-append-fails"))
+    prepare_voice_event = AsyncMock()
+    with (
+        patch.object(
+            bot._turn_controller.deps.conversation_cache,
+            "append_live_event",
+            new=AsyncMock(side_effect=RuntimeError("cache append failed")),
+        ),
+        patch.object(bot._turn_controller.deps.resolver, "resolve_dispatch_target", new=resolve_target),
+        patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=prepare_voice_event),
+        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
+
+    _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$cache-append-fails",
+        thread_id="$thread_root",
+    )
+    resolve_target.assert_not_awaited()
+    prepare_voice_event.assert_not_awaited()
