@@ -34,7 +34,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
-from mindroom.voice_handler import prepare_voice_message
+from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -184,6 +184,39 @@ class InboundTurnNormalizer:
                         },
                     },
                     server_timestamp=request.event.server_timestamp,
+                    source_kind_override=VOICE_SOURCE_KIND,
+                ),
+            )
+
+    async def prepare_raw_voice_fallback_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult:
+        """Register raw audio and return a prepared fallback event without STT."""
+        client = self._client()
+        effective_thread_id = request.thread_id
+        with bound_log_context(room_id=request.room.room_id, thread_id=effective_thread_id):
+            prepared_voice = await prepare_raw_voice_fallback_message(
+                client,
+                self.deps.storage_path,
+                request.room,
+                request.event,
+                self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                thread_id=effective_thread_id,
+            )
+            return _VoiceNormalizationResult(
+                event=PreparedTextEvent(
+                    sender=request.event.sender,
+                    event_id=request.event.event_id,
+                    body=prepared_voice.text,
+                    source={
+                        **prepared_voice.source,
+                        "content": {
+                            **prepared_voice.source.get("content", {}),
+                            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                        },
+                    },
+                    server_timestamp=request.event.server_timestamp
+                    if isinstance(request.event.server_timestamp, int)
+                    else None,
                     source_kind_override=VOICE_SOURCE_KIND,
                 ),
             )

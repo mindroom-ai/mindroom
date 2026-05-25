@@ -2546,7 +2546,7 @@ class TurnController:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
                 queued_notice_reservation = None
-            return self._ready_voice_fallback_event(
+            return await self._ready_voice_fallback_event(
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
@@ -2559,7 +2559,35 @@ class TurnController:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
 
-    def _ready_voice_fallback_event(
+    async def _prepare_raw_voice_fallback_event(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        thread_id: str | None,
+    ) -> PreparedTextEvent:
+        try:
+            fallback = await self.deps.normalizer.prepare_raw_voice_fallback_event(
+                VoiceNormalizationRequest(
+                    room=room,
+                    event=event,
+                    thread_id=thread_id,
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Voice raw-audio fallback preparation failed; dispatching text-only fallback",
+                event_id=event.event_id,
+                room_id=room.room_id,
+                exception_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            return _raw_voice_fallback_event(event, thread_id=thread_id)
+        return fallback.event
+
+    async def _ready_voice_fallback_event(
         self,
         *,
         room: nio.MatrixRoom,
@@ -2578,7 +2606,7 @@ class TurnController:
             exception_type=error.__class__.__name__,
             error=str(error),
         )
-        fallback_event = _raw_voice_fallback_event(event, thread_id=thread_id)
+        fallback_event = await self._prepare_raw_voice_fallback_event(room=room, event=event, thread_id=thread_id)
         attach_dispatch_pipeline_timing(fallback_event.source, dispatch_timing)
         queued_notice_reservation = None
         dispatch_policy_source_kind = None
@@ -2659,7 +2687,11 @@ class TurnController:
                 exception_type=exc.__class__.__name__,
                 error=str(exc),
             )
-            normalized_event = _raw_voice_fallback_event(event, thread_id=thread_id)
+            normalized_event = await self._prepare_raw_voice_fallback_event(
+                room=room,
+                event=event,
+                thread_id=thread_id,
+            )
             effective_thread_id = thread_id
         else:
             if normalized_voice is None:

@@ -1428,7 +1428,6 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$audio-fails")
-    voice_event.source["content"][ATTACHMENT_IDS_KEY] = ["voice-attachment"]
     dispatches: list[tuple[PreparedTextEvent | nio.RoomMessageText, list[str]]] = []
 
     async def record_dispatch(
@@ -1448,6 +1447,7 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
             "prepare_voice_event",
             new=AsyncMock(side_effect=RuntimeError("stt failed")),
         ),
+        patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=b"raw audio bytes")),
         patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
@@ -1461,7 +1461,13 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
     assert dispatched_event.body == "🎤 [Attached voice message]"
     assert dispatched_event.source["content"][SOURCE_KIND_KEY] == VOICE_SOURCE_KIND
     assert dispatched_event.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
-    assert dispatched_event.source["content"][ATTACHMENT_IDS_KEY] == ["voice-attachment"]
+    attachment_ids = dispatched_event.source["content"][ATTACHMENT_IDS_KEY]
+    assert isinstance(attachment_ids, list)
+    assert len(attachment_ids) == 1
+    attachment = load_attachment(bot.storage_path, attachment_ids[0])
+    assert attachment is not None
+    assert attachment.kind == "audio"
+    assert attachment.source_event_id == "$audio-fails"
     assert dispatched_event.source["content"]["m.relates_to"] == {
         "rel_type": "m.thread",
         "event_id": "$thread_root",
