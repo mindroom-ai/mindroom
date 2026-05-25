@@ -2180,6 +2180,72 @@ async def test_text_reply_to_first_voice_keeps_key_after_second_voice_in_mixed_b
 
 
 @pytest.mark.asyncio
+async def test_failed_first_room_voice_target_does_not_steal_later_voice_key() -> None:
+    """A failed room-voice target hint must not erase a later voice's resolved key."""
+    room = _make_room()
+    room_key = CoalescingKey(room.room_id, None, "@user:localhost")
+    second_key = CoalescingKey(room.room_id, "$second-thread", "@user:localhost")
+    first_voice = _text_event(
+        event_id="$voice1",
+        body="first voice fallback",
+        server_timestamp=1000,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    second_voice = _text_event(
+        event_id="$voice2",
+        body="second voice transcript",
+        server_timestamp=1001,
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    calls: list[tuple[CoalescingKey, list[str]]] = []
+
+    async def ready_voice(event: nio.RoomMessageText, key: CoalescingKey) -> ReadyPendingEvent:
+        return ReadyPendingEvent(
+            dispatch_key=key,
+            pending_event=PendingEvent(event=event, room=room, source_kind=VOICE_SOURCE_KIND),
+        )
+
+    async def failed_target_key() -> CoalescingKey | None:
+        return None
+
+    async def second_target_key() -> CoalescingKey:
+        return second_key
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append((batch.coalescing_key, list(batch.source_event_ids)))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 5.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.admit(
+        room_key,
+        ready_task=asyncio.create_task(ready_voice(first_voice, room_key)),
+        target_key_task=asyncio.create_task(failed_target_key()),
+        source_event_id="$voice1",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+    await gate.admit(
+        room_key,
+        ready_task=asyncio.create_task(ready_voice(second_voice, second_key)),
+        target_key_task=asyncio.create_task(second_target_key()),
+        source_event_id="$voice2",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+
+    await gate.drain_all()
+
+    assert calls == [
+        (room_key, ["$voice1"]),
+        (second_key, ["$voice2"]),
+    ]
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
 async def test_same_thread_followup_after_voice_claim_stays_on_admitted_gate() -> None:
     """A follow-up queued while voice is claimed should stay on the stable admission key."""
     room = _make_room()

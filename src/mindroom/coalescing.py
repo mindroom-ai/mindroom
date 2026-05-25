@@ -951,16 +951,6 @@ class CoalescingGate:
         has_voice_admission = any(
             admission.pending_event.source_kind == VOICE_SOURCE_KIND for admission in ready_admissions
         )
-        if ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND and provisional_key.thread_id is None:
-            first_voice = next(
-                (
-                    admission
-                    for admission in ready_admissions
-                    if admission.pending_event.source_kind == VOICE_SOURCE_KIND
-                ),
-                None,
-            )
-            return self._canonical_key(first_voice.key) if first_voice is not None else ready_key
         if (
             not has_voice_admission
             and ready_admission.admission_key != provisional_key
