@@ -834,6 +834,29 @@ class TurnController:
             requester_user_id,
         )
 
+    def _voice_receive_time_coalescing_key(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        event_info: EventInfo,
+        requester_user_id: str,
+    ) -> CoalescingKey:
+        """Return the narrow receive-time gate for raw audio before async target lookup."""
+        if (
+            self.deps.runtime.config.get_entity_thread_mode(
+                self.deps.agent_name,
+                self.deps.runtime_paths,
+                room_id=room.room_id,
+            )
+            == "room"
+        ):
+            thread_id = None
+        elif event_info.thread_id is not None:
+            thread_id = event_info.thread_id
+        else:
+            thread_id = event_info.reply_to_event_id
+        return CoalescingKey(room.room_id, thread_id, requester_user_id)
+
     async def _append_live_event_with_timing(
         self,
         room_id: str,
@@ -2323,7 +2346,7 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
-        """Admit raw audio after canonical thread resolution and defer only voice normalization."""
+        """Admit raw audio at receive time and defer target lookup plus voice normalization."""
         event = prechecked_event.event
 
         if self._managed_entity_name_for_sender(event.sender) is not None:
@@ -2335,6 +2358,38 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
+        admission_key = self._voice_receive_time_coalescing_key(
+            room,
+            event_info=event_info,
+            requester_user_id=prechecked_event.requester_user_id,
+        )
+        ready_task = asyncio.create_task(
+            self._ready_voice_event(
+                room=room,
+                prechecked_event=prechecked_event,
+                event_info=event_info,
+                admission_key=admission_key,
+                dispatch_timing=dispatch_timing,
+            ),
+            name=f"voice_ready:{room.room_id}:{event.event_id}",
+        )
+        await self.deps.coalescing_gate.admit(
+            admission_key,
+            ready_task=ready_task,
+            source_event_id=event.event_id,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+
+    async def _resolve_ready_voice_target(
+        self,
+        room: nio.MatrixRoom,
+        event: AudioMessageEvent,
+        *,
+        event_info: EventInfo,
+        requester_user_id: str,
+        admission_key: CoalescingKey,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> tuple[MessageTarget, CoalescingKey] | None:
         await self._append_live_event_with_timing(
             room.room_id,
             event,
@@ -2357,40 +2412,37 @@ class TurnController:
                 exception_type=exc.__class__.__name__,
                 error=str(exc),
             )
-            return
-        coalescing_thread_id = voice_target.source_thread_id
-
-        ready_task = asyncio.create_task(
-            self._ready_voice_event(
-                room=room,
-                prechecked_event=prechecked_event,
-                dispatch_timing=dispatch_timing,
-                coalescing_thread_id=coalescing_thread_id,
-                voice_target=voice_target,
-            ),
-            name=f"voice_ready:{room.room_id}:{event.event_id}",
-        )
-        await self.deps.coalescing_gate.admit(
-            CoalescingKey(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
-            ready_task=ready_task,
-            source_event_id=event.event_id,
-            source_kind=VOICE_SOURCE_KIND,
-        )
+            return None
+        dispatch_key = CoalescingKey(room.room_id, voice_target.resolved_thread_id, requester_user_id)
+        if dispatch_key != admission_key:
+            self.deps.coalescing_gate.retarget(admission_key, dispatch_key)
+        return voice_target, dispatch_key
 
     async def _ready_voice_event(
         self,
         *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
+        event_info: EventInfo,
+        admission_key: CoalescingKey,
         dispatch_timing: DispatchPipelineTiming | None,
-        coalescing_thread_id: str | None,
-        voice_target: MessageTarget,
     ) -> ReadyPendingEvent | None:
-        """Normalize a raw voice event after canonical thread admission."""
+        """Resolve target and normalize a raw voice event after receive-time admission."""
         event = prechecked_event.event
         queued_notice_reservation = None
         preliminary_target = None
         reservation_released_or_handed_off = False
+        resolved_target = await self._resolve_ready_voice_target(
+            room,
+            event,
+            event_info=event_info,
+            requester_user_id=prechecked_event.requester_user_id,
+            admission_key=admission_key,
+            dispatch_timing=dispatch_timing,
+        )
+        if resolved_target is None:
+            return None
+        voice_target, dispatch_key = resolved_target
         try:
             preliminary_target = voice_target
             envelope = self.deps.resolver.build_ingress_envelope(
@@ -2455,6 +2507,7 @@ class TurnController:
             )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
+                dispatch_key=dispatch_key,
                 pending_event=PendingEvent(
                     event=normalized_event,
                     room=room,
@@ -2480,7 +2533,8 @@ class TurnController:
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
-                thread_id=coalescing_thread_id,
+                thread_id=voice_target.resolved_thread_id,
+                dispatch_key=dispatch_key,
                 dispatch_timing=dispatch_timing,
                 error=exc,
             )
@@ -2495,6 +2549,7 @@ class TurnController:
         event: AudioMessageEvent,
         requester_user_id: str,
         thread_id: str | None,
+        dispatch_key: CoalescingKey,
         dispatch_timing: DispatchPipelineTiming | None,
         error: Exception,
     ) -> ReadyPendingEvent:
@@ -2547,6 +2602,7 @@ class TurnController:
                 error=str(metadata_error),
             )
         return ReadyPendingEvent(
+            dispatch_key=dispatch_key,
             pending_event=PendingEvent(
                 event=fallback_event,
                 room=room,

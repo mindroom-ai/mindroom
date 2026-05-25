@@ -99,6 +99,7 @@ class ReadyPendingEvent:
     """Resolved event returned by async ingress normalization."""
 
     pending_event: PendingEvent
+    dispatch_key: CoalescingKey | None = None
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,7 @@ class _ReadyAdmission:
 
     @property
     def key(self) -> CoalescingKey:
-        return self.admission_key
+        return self.ready_event.dispatch_key or self.admission_key
 
     @property
     def pending_event(self) -> PendingEvent:
@@ -601,7 +602,7 @@ class CoalescingGate:
             received_at=pending_event.enqueue_time,
             source_event_id=pending_event.event.event_id,
             source_kind=pending_event.source_kind,
-            ready_result=ReadyPendingEvent(pending_event=pending_event),
+            ready_result=ReadyPendingEvent(dispatch_key=canonical_key, pending_event=pending_event),
         )
 
     async def admit(
@@ -844,8 +845,28 @@ class CoalescingGate:
         index: int,
     ) -> CoalescingKey:
         ready_admission = ready_admissions[index]
-        if ready_admission.admission_key != provisional_key:
+        has_voice_admission = any(
+            admission.pending_event.source_kind == VOICE_SOURCE_KIND for admission in ready_admissions
+        )
+        if ready_admission.pending_event.source_kind == VOICE_SOURCE_KIND and provisional_key.thread_id is None:
+            first_voice = next(
+                (
+                    admission
+                    for admission in ready_admissions
+                    if admission.pending_event.source_kind == VOICE_SOURCE_KIND
+                ),
+                None,
+            )
+            return first_voice.key if first_voice is not None else ready_admission.key
+        if not has_voice_admission and ready_admission.admission_key != provisional_key:
             return provisional_key
+        if ready_admission.pending_event.source_kind != VOICE_SOURCE_KIND:
+            for previous_admission in reversed(ready_admissions[:index]):
+                if previous_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
+                    return previous_admission.key
+            for next_admission in ready_admissions[index + 1 :]:
+                if next_admission.pending_event.source_kind == VOICE_SOURCE_KIND:
+                    return next_admission.key
         return ready_admission.key
 
     @staticmethod

@@ -1020,10 +1020,10 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
 
 
 @pytest.mark.asyncio
-async def test_voice_admitted_after_target_resolution_so_text_reply_waits_on_stt(
+async def test_voice_admitted_before_target_resolution_so_text_reply_waits(
     mock_home_bot: AgentBot,
 ) -> None:
-    """A typed reply must not outrun an earlier raw voice event while STT is pending."""
+    """A typed reply must not outrun an earlier raw voice event while target lookup is pending."""
     bot = mock_home_bot
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.02)
@@ -1051,7 +1051,20 @@ async def test_voice_admitted_after_target_resolution_so_text_reply_waits_on_stt
     )
     prepare_started = asyncio.Event()
     release_prepare = asyncio.Event()
+    target_started = asyncio.Event()
+    release_target = asyncio.Event()
     dispatches: list[tuple[list[str], str]] = []
+
+    async def resolve_dispatch_target(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageAudio,
+        *,
+        caller_label: str,
+    ) -> MessageTarget:
+        assert caller_label == "voice_admission"
+        target_started.set()
+        await release_target.wait()
+        return MessageTarget.resolve(room.room_id, None, "$voice")
 
     async def prepare_voice_event(
         request: inbound_turn_normalizer.VoiceNormalizationRequest,
@@ -1086,7 +1099,7 @@ async def test_voice_admitted_after_target_resolution_so_text_reply_waits_on_stt
             patch.object(
                 bot._turn_controller.deps.resolver,
                 "resolve_dispatch_target",
-                new=AsyncMock(return_value=MessageTarget.resolve(room.room_id, None, "$voice")),
+                new=AsyncMock(side_effect=resolve_dispatch_target),
             ),
             patch.object(
                 bot._turn_controller.deps.normalizer,
@@ -1104,16 +1117,19 @@ async def test_voice_admitted_after_target_resolution_so_text_reply_waits_on_stt
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             voice_task = asyncio.create_task(bot._on_media_message(room, voice_event))
-            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
+            await asyncio.wait_for(target_started.wait(), timeout=1.0)
             await bot._on_message(room, typed_event)
             await asyncio.sleep(0.05)
 
             assert dispatches == []
 
+            release_target.set()
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             release_prepare.set()
             await voice_task
             await drain_coalescing(bot)
     finally:
+        release_target.set()
         release_prepare.set()
         if voice_task is not None and not voice_task.done():
             voice_task.cancel()

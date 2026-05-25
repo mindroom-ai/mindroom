@@ -7208,12 +7208,12 @@ class TestAgentBot:
         bot._turn_controller._enqueue_for_dispatch.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_audio_dispatch_resolves_thread_before_admission(
+    async def test_audio_dispatch_admits_before_thread_resolution(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Audio dispatch should use a stable canonical thread key before admission."""
+        """Audio dispatch should enter the gate before async thread/cache work."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock()
@@ -7241,8 +7241,8 @@ class TestAgentBot:
         ) -> None:
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert call_order == ["append", "resolve", "admit"]
-            assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
+            assert call_order == ["admit"]
+            assert key == CoalescingKey("!test:localhost", None, "@user:localhost")
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             admitted_ready_task = ready_task
@@ -7265,11 +7265,12 @@ class TestAgentBot:
         ):
             await bot._turn_controller._handle_media_message_inner(room, event)
             mock_admit.assert_awaited_once()
-            assert call_order == ["append", "resolve", "admit"]
+            assert call_order == ["admit"]
             assert admitted_ready_task is not None
             release_stt.set()
             ready_event = await admitted_ready_task
         assert ready_event is None
+        assert call_order == ["admit", "append", "resolve", "normalize"]
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.resolve_dispatch_target.assert_awaited_once_with(
             room,
