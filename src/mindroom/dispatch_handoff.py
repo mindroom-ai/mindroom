@@ -297,13 +297,23 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
     return batch.source_kind == VOICE_SOURCE_KIND
 
 
-def _single_event_should_preserve_matrix_relation(event: DispatchEvent, batch: CoalescedBatch) -> bool:
+def _plain_reply_relation(content: dict[str, object]) -> bool:
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, dict):
+        return False
+    relation = cast("dict[str, object]", relates_to)
+    return relation.get("rel_type") is None and "m.in_reply_to" in relation
+
+
+def _single_event_should_preserve_plain_reply_relation(event: DispatchEvent, batch: CoalescedBatch) -> bool:
     if len(batch.pending_events) != 1 or batch.source_kind == VOICE_SOURCE_KIND:
+        return False
+    content = event_content_dict(event)
+    if content is None or not _plain_reply_relation(content):
         return False
     if isinstance(event, nio.RoomMessageText | PreparedTextEvent) and command_parser.parse(event.body) is not None:
         return True
-    content = event_content_dict(event)
-    return content is not None and "m.mentions" in content
+    return "m.mentions" in content
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
@@ -342,7 +352,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         len(batch.pending_events) == 1
         and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
         and (
-            _single_event_should_preserve_matrix_relation(batch.primary_event, batch)
+            _single_event_should_preserve_plain_reply_relation(batch.primary_event, batch)
             or not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
         )
     ):

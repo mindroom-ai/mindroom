@@ -384,6 +384,28 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(t
 
 
 @pytest.mark.asyncio
+async def test_incomplete_shutdown_drain_poison_persists_across_repeated_shutdown(tmp_path: Path) -> None:
+    """A later no-op shutdown call must not save a checkpoint after unsafe drain work."""
+    bot = _agent_bot(tmp_path)
+    save_sync_token(tmp_path, bot.agent_name, "s_previous")
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_shutdown")
+    bot._coalescing_gate.drain_all = AsyncMock(
+        side_effect=[
+            CoalescingDrainResult(completed=False, cancelled_unready_count=1),
+            CoalescingDrainResult(completed=True),
+        ],
+    )
+
+    await bot.prepare_for_sync_shutdown()
+    await bot.prepare_for_sync_shutdown()
+
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp_path: Path) -> None:
     """Shutdown must not flush a nio-advanced token before sync-response certification starts."""
     bot = _agent_bot(tmp_path)
@@ -540,6 +562,32 @@ async def test_shutdown_drain_cancels_stuck_ready_task_without_cancelling_dispat
     assert result.completed is False
     assert result.cancelled_unready_count == 1
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drain_counts_self_cancelled_ready_task_as_incomplete() -> None:
+    """Ready work that cancels itself still means admitted ingress was not dispatched."""
+
+    async def cancelled_ready() -> ReadyPendingEvent | None:
+        raise asyncio.CancelledError
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    await gate.admit(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        ready_task=asyncio.create_task(cancelled_ready()),
+        source_event_id="$voice",
+        source_kind=VOICE_SOURCE_KIND,
+    )
+
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert result.completed is False
+    assert result.cancelled_unready_count == 1
 
 
 @pytest.mark.asyncio

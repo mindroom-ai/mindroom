@@ -1411,6 +1411,9 @@ class AgentBot:
         if drain_result.completed and self._sync_trust_state is SyncTrustState.CERTIFIED:
             self._save_sync_checkpoint(self._sync_checkpoint)
         elif not drain_result.completed:
+            self._sync_trust_state = SyncTrustState.UNCERTAIN
+            self._sync_checkpoint = None
+            self._clear_saved_sync_token()
             self.logger.warning(
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
                 agent_name=self.agent_name,

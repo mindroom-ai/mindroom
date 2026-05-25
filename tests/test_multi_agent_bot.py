@@ -7247,14 +7247,12 @@ class TestAgentBot:
             room_id: str,
             requester_user_id: str,
             receipt_time: float | None = None,
-            received_at: float | None = None,
         ) -> IngressOrderReservation:
             call_order.append("reserve")
             return original_reserve_order(
                 room_id=room_id,
                 requester_user_id=requester_user_id,
                 receipt_time=receipt_time,
-                received_at=received_at,
             )
 
         async def record_admit(

@@ -516,10 +516,8 @@ class CoalescingGate:
         room_id: str,
         requester_user_id: str,
         receipt_time: float | None = None,
-        received_at: float | None = None,
     ) -> IngressOrderReservation:
         """Reserve receive order before async work can resolve the final coalescing key."""
-        _ = received_at
         drain_context = self._active_drain_context
         if self._is_bounded_drain(drain_context):
             assert drain_context is not None
@@ -1075,8 +1073,14 @@ class CoalescingGate:
             return None, True
         return result, False
 
-    @staticmethod
-    def _log_ready_task_cancelled(queued: _QueuedEvent) -> None:
+    def _log_ready_task_cancelled(
+        self,
+        queued: _QueuedEvent,
+        drain_context: _DrainContext | None,
+    ) -> None:
+        if self._is_bounded_drain(drain_context):
+            assert drain_context is not None
+            drain_context.result.cancelled_unready_count += 1
         logger.warning(
             "coalescing_gate_ready_task_cancelled",
             source_event_id=queued.source_event_id,
@@ -1118,7 +1122,7 @@ class CoalescingGate:
             queued.ready_result, timed_out = await self._await_ready_task(queued, drain_context)
         except asyncio.CancelledError:
             if queued.ready_task.cancelled():
-                self._log_ready_task_cancelled(queued)
+                self._log_ready_task_cancelled(queued, drain_context)
                 return None
             raise
         except Exception as error:

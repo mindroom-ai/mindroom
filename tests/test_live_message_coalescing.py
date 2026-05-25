@@ -3190,6 +3190,52 @@ def test_room_level_batch_removes_plain_reply_relation() -> None:
     assert "m.relates_to" not in handoff.event.source["content"]
 
 
+def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relation() -> None:
+    """Mention metadata must survive, but explicit stale threads come from the batch key."""
+    room = _make_room()
+    typed_reply = _text_event(
+        event_id="$typed",
+        body="@agent follow-up",
+        server_timestamp=1001,
+        thread_id="$stale-thread",
+    )
+    typed_reply.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, None, "@user:localhost"),
+        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert isinstance(handoff.event, PreparedTextEvent)
+    content = handoff.event.source["content"]
+    assert "m.relates_to" not in content
+    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+
+
+def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> None:
+    """Mentions must not preserve an explicit stale thread relation."""
+    room = _make_room()
+    typed = _text_event(
+        event_id="$typed",
+        body="@agent follow-up",
+        server_timestamp=1001,
+        thread_id="$old-thread",
+    )
+    typed.source["content"]["m.mentions"] = {"user_ids": ["@agent:localhost"]}
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, "$new-thread", "@user:localhost"),
+        [PendingEvent(event=typed, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert isinstance(handoff.event, PreparedTextEvent)
+    content = handoff.event.source["content"]
+    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$new-thread"}
+    assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+
+
 def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
     """A single follow-up batch dispatches on its coalescing key."""
     room = _make_room()
