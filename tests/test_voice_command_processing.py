@@ -834,10 +834,12 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
             requester_id="@alice:example.com",
             correlation_id="$voice_event",
             history_scope=HistoryScope(kind="agent", scope_id="home"),
-            conversation_target=MessageTarget.resolve(
+            conversation_target=MessageTarget(
                 room_id=room.room_id,
-                thread_id="$voice_event",
+                source_thread_id=None,
+                resolved_thread_id="$voice_event",
                 reply_to_event_id="$voice_event",
+                session_id=f"{room.room_id}:$voice_event",
             ),
         ),
     )

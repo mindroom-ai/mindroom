@@ -2467,16 +2467,6 @@ class TurnController:
                 HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
             )
             return
-        if is_audio_message_event(prechecked_event.event) and not self.deps.runtime.config.voice.enabled:
-            self.deps.logger.debug(
-                "Ignoring audio event because voice processing is disabled",
-                event_id=prechecked_event.event.event_id,
-                sender=prechecked_event.event.sender,
-            )
-            self._mark_source_events_responded(
-                HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
-            )
-            return
         reservation_owner = self._reserve_prompt_ingress_order(
             room,
             prechecked_event.requester_user_id,

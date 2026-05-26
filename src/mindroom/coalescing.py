@@ -415,12 +415,16 @@ class CoalescingGate:
         *,
         before_order: int,
     ) -> list[_GateEntry]:
+        if key.thread_id is None:
+            return []
         return [
             gate
             for gate_key, gate in self._gates.items()
             if gate_key != key
             and self._same_owner(gate_key, key)
+            and gate_key.thread_id is None
             and any(claimed.received_order < before_order for claimed in gate.claimed_admissions)
+            and any(claimed.source_event_id == key.thread_id for claimed in gate.claimed_admissions)
         ]
 
     def _has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:

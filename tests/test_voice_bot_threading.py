@@ -326,37 +326,6 @@ def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.
 
 
 @pytest.mark.asyncio
-async def test_voice_disabled_ignores_audio_without_dispatch(mock_home_bot: AgentBot) -> None:
-    """Disabled voice config should ignore audio instead of dispatching raw fallback."""
-    bot = mock_home_bot
-    bot.config.voice.enabled = False
-    room = _threaded_room()
-    voice_event = _make_voice_event(
-        event_id="$voice-disabled",
-        source={
-            "event_id": "$voice-disabled",
-            "sender": "@user:example.com",
-            "origin_server_ts": 1_712_350_000_000,
-            "type": "m.room.message",
-            "room_id": "!test:server",
-            "content": {"body": "voice.ogg", "msgtype": "m.audio"},
-        },
-    )
-
-    with (
-        patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()) as prepare_voice,
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-    ):
-        await bot._on_media_message(room, voice_event)
-        await drain_coalescing(bot)
-
-    prepare_voice.assert_not_awaited()
-    mock_dispatch.assert_not_awaited()
-    assert bot._turn_store.is_handled("$voice-disabled")
-
-
-@pytest.mark.asyncio
 async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot) -> None:
     """Audio in the main room should reply in a thread rooted at the audio event."""
     bot = mock_home_bot
