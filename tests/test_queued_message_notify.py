@@ -20,6 +20,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom import turn_controller
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     cleanup_queued_notice_state,
@@ -59,7 +60,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_lifecycle import QueuedHumanMessage, _QueuedMessageState, current_queued_human_messages
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -85,6 +86,10 @@ if TYPE_CHECKING:
 
     from mindroom.delivery_gateway import FinalDeliveryRequest
     from mindroom.turn_origin import TurnOrigin
+
+
+def _current_queued_human_event_ids() -> tuple[str, ...]:
+    return tuple(message.source_event_id for message in current_queued_human_messages())
 
 
 class _ReservationLike(Protocol):
@@ -383,9 +388,10 @@ class _StaticQueuedState:
 def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     """Queued-message state should track distinct source events, not anonymous increments."""
     state = _QueuedMessageState()
+    message = QueuedHumanMessage(source_event_id="$event", sender_id="@user:localhost", body="hello")
 
-    assert state.add_waiting_human_message("$event")
-    assert not state.add_waiting_human_message("$event")
+    assert state.add_waiting_human_message(message)
+    assert not state.add_waiting_human_message(message)
 
     assert state.has_pending_human_messages()
     assert state.pending_human_messages == 1
@@ -400,6 +406,67 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     assert not state.has_pending_human_messages()
     assert state.pending_human_messages == 0
     assert not state.is_set()
+
+
+def test_active_follow_up_backlog_uses_queued_receive_order() -> None:
+    """An active-stream backlog should render queued human messages once, even across senders."""
+    thread_history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="A first",
+            event_id="$a1",
+            timestamp=1,
+            thread_id="$thread",
+        ),
+        ResolvedVisibleMessage.synthetic(
+            sender="@bob:localhost",
+            body="B <context> & more",
+            event_id="$b1",
+            timestamp=2,
+            thread_id="$thread",
+        ),
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="A follow-up",
+            event_id="$a2",
+            timestamp=3,
+            thread_id="$thread",
+        ),
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_general:localhost",
+            body="Previous partial",
+            event_id="$agent",
+            timestamp=4,
+            thread_id="$thread",
+        ),
+    ]
+
+    backlog = turn_controller._active_follow_up_backlog(
+        queued_messages=(
+            QueuedHumanMessage(source_event_id="$a1", sender_id="@alice:localhost", body="A first"),
+            QueuedHumanMessage(source_event_id="$b1", sender_id="@bob:localhost", body="B <context> & more"),
+            QueuedHumanMessage(source_event_id="$a2", sender_id="@alice:localhost", body="A follow-up"),
+        ),
+        thread_history=thread_history,
+    )
+
+    assert backlog is not None
+    assert backlog.source_event_ids == ("$a1", "$b1", "$a2")
+    assert [message.event_id for message in backlog.thread_history] == ["$agent"]
+    assert backlog.source_event_prompts == {
+        "$a1": "A first",
+        "$b1": "B <context> & more",
+        "$a2": "A follow-up",
+    }
+    assert backlog.prompt == (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        "<queued_messages>\n"
+        '<msg event_id="$a1" from="@alice:localhost"><![CDATA[A first]]></msg>\n'
+        '<msg event_id="$b1" from="@bob:localhost"><![CDATA[B <context> & more]]></msg>\n'
+        '<msg event_id="$a2" from="@alice:localhost"><![CDATA[A follow-up]]></msg>\n'
+        "</queued_messages>"
+    )
 
 
 @contextmanager
@@ -811,9 +878,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lock = _PrelockBarrierLock()
-    response_envelope = _envelope()
-    response_target = response_envelope.target
-    observed_pending: dict[str, int] = {}
+    first_envelope = _envelope(source_event_id="$first")
+    second_envelope = _envelope(source_event_id="$second")
+    observed_backlog: dict[str, tuple[str, ...]] = {}
 
     async def fake_generate_response_locked(
         _self: ResponseRunner,
@@ -823,8 +890,7 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     ) -> str:
         del resolved_target
         user_id = str(request.user_id)
-        queued_signal = coordinator._lifecycle_coordinator._get_or_create_queued_signal(response_target)
-        observed_pending[user_id] = queued_signal.pending_human_messages
+        observed_backlog[user_id] = _current_queued_human_event_ids()
         return user_id
 
     with (
@@ -836,7 +902,7 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
                 prompt="hello",
                 thread_history=[],
                 user_id="first",
-                response_envelope=response_envelope,
+                response_envelope=first_envelope,
             ),
         )
         await lock.first_waiting.wait()
@@ -846,7 +912,7 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
                 prompt="stop",
                 thread_history=[],
                 user_id="second",
-                response_envelope=response_envelope,
+                response_envelope=second_envelope,
             ),
         )
 
@@ -854,9 +920,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         second_result = await second_task
         first_result = await first_task
 
-    assert second_result == "second"
+    assert second_result is None
     assert first_result == "first"
-    assert observed_pending["first"] == 1
+    assert observed_backlog == {"first": ("$second",)}
 
 
 @pytest.mark.asyncio
@@ -1355,8 +1421,8 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_generate_response_preserves_later_queued_human_message(tmp_path: Path) -> None:
-    """The next active turn must still see any later human messages that were already queued."""
+async def test_generate_response_drains_later_queued_human_message(tmp_path: Path) -> None:
+    """The first queued owner should drain later human messages that were already queued."""
     bot = _bot(tmp_path)
     response_envelope_b = _envelope(source_event_id="$event-b")
     response_envelope_c = _envelope(source_event_id="$event-c")
@@ -1366,11 +1432,13 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
+    observed_backlogs: list[tuple[str, ...]] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
     async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
+        observed_backlogs.append(_current_queued_human_event_ids())
         if len(observed_pending) == 1:
             second_turn_started.set()
         await allow_turns_to_finish.wait()
@@ -1404,22 +1472,23 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
 
             lifecycle_lock.release()
             await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
-            assert observed_pending == [True]
+            assert observed_pending == [False]
+            assert observed_backlogs == [("$event-b", "$event-c")]
 
             allow_turns_to_finish.set()
             assert await task_b == "$response-1"
-            assert await task_c == "$response-2"
+            assert await task_c is None
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert observed_pending == [True, False]
+    assert observed_pending == [False]
     assert not queued_signal.is_set()
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_preserves_later_queued_human_message(tmp_path: Path) -> None:
-    """Team queue notices must also survive when more than one human turn is waiting."""
+async def test_generate_team_response_drains_later_queued_human_message(tmp_path: Path) -> None:
+    """Team queue notices should also drain already queued human messages once."""
     bot = _bot(tmp_path)
     response_envelope_b = _envelope(source_event_id="$team-event-b")
     response_envelope_c = _envelope(source_event_id="$team-event-c")
@@ -1429,11 +1498,13 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
+    observed_backlogs: list[tuple[str, ...]] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
     async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
+        observed_backlogs.append(_current_queued_human_event_ids())
         if len(observed_pending) == 1:
             second_turn_started.set()
         await allow_turns_to_finish.wait()
@@ -1471,16 +1542,17 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
 
             lifecycle_lock.release()
             await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
-            assert observed_pending == [True]
+            assert observed_pending == [False]
+            assert observed_backlogs == [("$team-event-b", "$team-event-c")]
 
             allow_turns_to_finish.set()
             assert await task_b == "$team-response-1"
-            assert await task_c == "$team-response-2"
+            assert await task_c is None
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert observed_pending == [True, False]
+    assert observed_pending == [False]
     assert not queued_signal.is_set()
 
 
@@ -1548,6 +1620,78 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
 
     assert follow_up_observed_pending == [False]
     assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_consumes_active_backlog_once(tmp_path: Path) -> None:
+    """Only one queued turn should answer the human messages that arrived during an active reply."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    active_envelope = _envelope(source_event_id="$active", target=target)
+    active_started = asyncio.Event()
+    release_active = asyncio.Event()
+    follow_up_calls: list[str] = []
+
+    async def active_operation(_target: MessageTarget) -> str:
+        active_started.set()
+        await release_active.wait()
+        return "$active-response"
+
+    async def follow_up_operation(source_event_id: str, _target: MessageTarget) -> str:
+        follow_up_calls.append(source_event_id)
+        return f"$response-{source_event_id}"
+
+    active_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=active_envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=active_operation,
+        ),
+    )
+    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+
+    queued_items = []
+    for source_event_id, sender_id in (
+        ("$a1", "@alice:localhost"),
+        ("$b1", "@bob:localhost"),
+        ("$a2", "@alice:localhost"),
+    ):
+        envelope = _envelope(
+            source_event_id=source_event_id,
+            target=target,
+            requester_id=sender_id,
+            sender_id=sender_id,
+        )
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        queued_items.append((source_event_id, envelope, reservation))
+
+    follow_up_tasks = [
+        asyncio.create_task(
+            lifecycle.run_locked_response(
+                target=target,
+                response_envelope=envelope,
+                queued_notice_reservation=reservation,
+                pipeline_timing=None,
+                locked_operation=lambda locked_target, source_event_id=source_event_id: follow_up_operation(
+                    source_event_id,
+                    locked_target,
+                ),
+            ),
+        )
+        for source_event_id, envelope, reservation in queued_items
+    ]
+    await asyncio.sleep(0)
+    assert follow_up_calls == []
+
+    release_active.set()
+    assert await active_task == "$active-response"
+    assert await asyncio.gather(*follow_up_tasks) == ["$response-$a1", None, None]
+    assert follow_up_calls == ["$a1"]
 
 
 @pytest.mark.asyncio

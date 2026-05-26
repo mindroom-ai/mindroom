@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -15,7 +17,7 @@ from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Generator
 
     from agno.db.base import BaseDb
     from structlog.stdlib import BoundLogger
@@ -32,18 +34,65 @@ if TYPE_CHECKING:
 _LockedResponseResult = TypeVar("_LockedResponseResult")
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedHumanMessage:
+    """Snapshot of one human message queued behind an active response."""
+
+    source_event_id: str
+    sender_id: str
+    body: str
+    attachment_ids: tuple[str, ...] = ()
+    trusted_attachment_ids: tuple[str, ...] = ()
+    media_event: object | None = None
+
+
+_current_queued_human_messages_context: ContextVar[tuple[QueuedHumanMessage, ...]] = ContextVar(
+    "queued_human_messages_context",
+    default=(),
+)
+
+
+def _queued_human_message_from_envelope(response_envelope: MessageEnvelope) -> QueuedHumanMessage:
+    return QueuedHumanMessage(
+        source_event_id=response_envelope.source_event_id,
+        sender_id=response_envelope.requester_id,
+        body=response_envelope.body,
+    )
+
+
+@contextmanager
+def _queued_human_messages_context(messages: tuple[QueuedHumanMessage, ...]) -> Generator[None, None, None]:
+    """Bind active-thread backlog messages owned by this locked response."""
+    token = _current_queued_human_messages_context.set(messages)
+    try:
+        yield
+    finally:
+        _current_queued_human_messages_context.reset(token)
+
+
+def current_queued_human_messages() -> tuple[QueuedHumanMessage, ...]:
+    """Return active-thread backlog messages owned by the current locked response."""
+    return _current_queued_human_messages_context.get()
+
+
 @dataclass
 class _QueuedMessageState:
     """Track queued human ingress while one response lifecycle holds the lock."""
 
-    pending_human_message_event_ids: set[str] = field(default_factory=set)
+    _pending_human_messages: list[QueuedHumanMessage] = field(default_factory=list)
+    _consumed_human_message_event_ids: set[str] = field(default_factory=set)
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def pending_human_messages(self) -> int:
         """Return the number of distinct queued human events."""
-        return len(self.pending_human_message_event_ids)
+        return len(self._pending_human_messages)
+
+    @property
+    def pending_human_message_event_ids(self) -> tuple[str, ...]:
+        """Return pending human event ids in receive order."""
+        return tuple(message.source_event_id for message in self._pending_human_messages)
 
     def begin_response_turn(self) -> bool:
         existing_turn = self._active_response_turns > 0
@@ -55,18 +104,45 @@ class _QueuedMessageState:
             return
         self._active_response_turns -= 1
 
-    def add_waiting_human_message(self, source_event_id: str) -> bool:
-        previous_count = self.pending_human_messages
-        self.pending_human_message_event_ids.add(source_event_id)
+    def add_waiting_human_message(self, message: QueuedHumanMessage) -> bool:
+        source_event_id = message.source_event_id
+        if (
+            source_event_id in self.pending_human_message_event_ids
+            or source_event_id in self._consumed_human_message_event_ids
+        ):
+            return False
+        self._pending_human_messages.append(message)
         self._event.set()
-        return self.pending_human_messages != previous_count
+        return True
+
+    def update_waiting_human_message(self, message: QueuedHumanMessage) -> None:
+        for index, pending_message in enumerate(self._pending_human_messages):
+            if pending_message.source_event_id == message.source_event_id:
+                self._pending_human_messages[index] = message
+                return
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
         if source_event_id not in self.pending_human_message_event_ids:
             return
-        self.pending_human_message_event_ids.remove(source_event_id)
+        self._pending_human_messages = [
+            message for message in self._pending_human_messages if message.source_event_id != source_event_id
+        ]
         if self.pending_human_messages == 0:
             self._event.clear()
+
+    def consume_pending_human_messages(self) -> tuple[QueuedHumanMessage, ...]:
+        """Drain all pending human messages in receive order for one follow-up response."""
+        messages = tuple(self._pending_human_messages)
+        if not messages:
+            return ()
+        event_ids = tuple(message.source_event_id for message in messages)
+        self._pending_human_messages.clear()
+        self._consumed_human_message_event_ids.update(event_ids)
+        self._event.clear()
+        return messages
+
+    def has_consumed_human_message(self, source_event_id: str) -> bool:
+        return source_event_id in self._consumed_human_message_event_ids
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -98,6 +174,12 @@ class QueuedHumanNoticeReservation:
     def consume(self) -> None:
         """Mark the reservation as owned by the response lifecycle."""
         self._release_waiting_human_message()
+
+    def update_message(self, message: QueuedHumanMessage) -> None:
+        """Refresh the queued message snapshot while the reservation is active."""
+        if not self._active:
+            return
+        self._state.update_waiting_human_message(message)
 
     def cancel(self) -> None:
         """Release a reservation that will not reach response lifecycle ownership."""
@@ -173,6 +255,7 @@ class ResponseLifecycleCoordinator:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
+        queued_message: QueuedHumanMessage | None = None,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up."""
         self._assert_target_matches_envelope(target, response_envelope)
@@ -182,7 +265,8 @@ class ResponseLifecycleCoordinator:
         if not self._has_active_response_for_thread_key(thread_key):
             return None
         queued_signal = self._get_or_create_queued_signal(target)
-        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+        message = queued_message or _queued_human_message_from_envelope(response_envelope)
+        if not queued_signal.add_waiting_human_message(message):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
 
@@ -201,7 +285,7 @@ class ResponseLifecycleCoordinator:
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
-        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+        if not queued_signal.add_waiting_human_message(_queued_human_message_from_envelope(response_envelope)):
             return None
         return response_envelope.source_event_id
 
@@ -223,7 +307,7 @@ class ResponseLifecycleCoordinator:
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
-    ) -> _LockedResponseResult:
+    ) -> _LockedResponseResult | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
         lifecycle_lock = self._response_lifecycle_lock(target)
@@ -244,6 +328,16 @@ class ResponseLifecycleCoordinator:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
+                if queued_signal.has_consumed_human_message(response_envelope.source_event_id):
+                    if queued_notice_reservation is not None:
+                        queued_notice_reservation.consume()
+                        reservation_consumed = True
+                    notice = self._consume_queued_human_notice(
+                        notice=notice,
+                        queued_signal=queued_signal,
+                    )
+                    return None
+                queued_human_messages = queued_signal.consume_pending_human_messages()
                 if queued_notice_reservation is not None:
                     queued_notice_reservation.consume()
                     reservation_consumed = True
@@ -251,7 +345,10 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
-                with queued_message_signal_context(queued_signal):
+                with (
+                    queued_message_signal_context(queued_signal),
+                    _queued_human_messages_context(queued_human_messages),
+                ):
                     return await locked_operation(target)
             finally:
                 if lock_acquired:

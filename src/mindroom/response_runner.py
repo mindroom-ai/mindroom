@@ -68,6 +68,7 @@ from .delivery_gateway import (
 )
 from .media_inputs import MediaInputs
 from .response_lifecycle import (
+    QueuedHumanMessage,
     QueuedHumanNoticeReservation,
     ResponseLifecycle,
     ResponseLifecycleCoordinator,
@@ -524,11 +525,13 @@ class ResponseRunner:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope,
+        queued_message: QueuedHumanMessage | None = None,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self._lifecycle_coordinator.reserve_waiting_human_message(
             target=target,
             response_envelope=response_envelope,
+            queued_message=queued_message,
         )
 
     async def _run_in_tool_context(

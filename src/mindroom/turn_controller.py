@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 import nio
 
@@ -46,6 +47,7 @@ from mindroom.dispatch_handoff import (
     PreparedTextEvent,
     TextDispatchEvent,
     build_dispatch_handoff,
+    dispatch_prompt_for_event,
     payload_metadata_from_source,
 )
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
@@ -90,7 +92,9 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
+from mindroom.response_lifecycle import QueuedHumanMessage, current_queued_human_messages
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.text_ingress_dispatch import dispatch_text_message
@@ -136,6 +140,87 @@ if TYPE_CHECKING:
 type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
+
+
+@dataclass(frozen=True)
+class _ActiveFollowUpBacklog:
+    """Model-facing backlog for human messages queued behind one active response."""
+
+    source_event_ids: tuple[str, ...]
+    prompt: str
+    thread_history: tuple[ResolvedVisibleMessage, ...]
+    source_event_prompts: dict[str, str]
+
+
+def _matched_visible_event_id(message: ResolvedVisibleMessage, event_ids: set[str]) -> str | None:
+    candidates = (
+        (message.event_id,)
+        if message.latest_event_id == message.event_id
+        else (
+            message.event_id,
+            message.latest_event_id,
+        )
+    )
+    for candidate in candidates:
+        if candidate in event_ids:
+            return candidate
+    return None
+
+
+def _render_active_follow_up_message(message: QueuedHumanMessage) -> str:
+    safe_body = message.body.replace("]]>", "]]]]><![CDATA[>")
+    return (
+        f"<msg event_id={xml_quoteattr(message.source_event_id)} "
+        f"from={xml_quoteattr(message.sender_id)}><![CDATA[{safe_body}]]></msg>"
+    )
+
+
+def _render_active_follow_up_prompt(messages: Sequence[QueuedHumanMessage]) -> str:
+    rendered_messages = "\n".join(_render_active_follow_up_message(message) for message in messages)
+    return (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        f"<queued_messages>\n{rendered_messages}\n</queued_messages>"
+    )
+
+
+def _active_follow_up_backlog(
+    *,
+    queued_messages: Sequence[QueuedHumanMessage],
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> _ActiveFollowUpBacklog | None:
+    source_event_ids = tuple(message.source_event_id for message in queued_messages)
+    if len(source_event_ids) <= 1:
+        return None
+
+    backlog_source_id_set = set(source_event_ids)
+    filtered_history = tuple(
+        message for message in thread_history if _matched_visible_event_id(message, backlog_source_id_set) is None
+    )
+    return _ActiveFollowUpBacklog(
+        source_event_ids=source_event_ids,
+        prompt=_render_active_follow_up_prompt(queued_messages),
+        thread_history=filtered_history,
+        source_event_prompts={message.source_event_id: message.body for message in queued_messages},
+    )
+
+
+def _queued_human_message_for_event(
+    *,
+    event: DispatchEvent,
+    envelope: MessageEnvelope,
+    trust_internal_payload_metadata: bool | None,
+) -> QueuedHumanMessage:
+    attachment_ids = envelope.attachment_ids if trust_internal_payload_metadata else ()
+    media_event = event if is_matrix_media_dispatch_event(event) else None
+    return QueuedHumanMessage(
+        source_event_id=envelope.source_event_id,
+        sender_id=envelope.requester_id,
+        body=dispatch_prompt_for_event(event),
+        attachment_ids=attachment_ids,
+        trusted_attachment_ids=attachment_ids,
+        media_event=media_event,
+    )
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -630,9 +715,15 @@ class TurnController:
         preliminary_target: MessageTarget | None,
         target: MessageTarget,
         envelope: MessageEnvelope,
+        event: DispatchEvent,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> tuple[bool, QueuedHumanNoticeReservation | None]:
         """Return active-follow-up policy and the reservation for a voice target."""
+        queued_message = _queued_human_message_for_event(
+            event=event,
+            envelope=envelope,
+            trust_internal_payload_metadata=True,
+        )
         if queued_notice_reservation is not None and (
             preliminary_target is None
             or not self._same_response_lifecycle_target(
@@ -643,6 +734,7 @@ class TurnController:
             queued_notice_reservation.cancel()
             queued_notice_reservation = None
         if queued_notice_reservation is not None:
+            queued_notice_reservation.update_message(queued_message)
             return True, queued_notice_reservation
         active_follow_up = (
             envelope.origin.may_answer_interactive_prompt
@@ -653,6 +745,7 @@ class TurnController:
         return True, self.deps.response_runner.reserve_waiting_human_message(
             target=target,
             response_envelope=envelope,
+            queued_message=queued_message,
         )
 
     async def _enqueue_active_thread_follow_up(
@@ -673,6 +766,11 @@ class TurnController:
             queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                 target=target,
                 response_envelope=envelope,
+                queued_message=_queued_human_message_for_event(
+                    event=event,
+                    envelope=envelope,
+                    trust_internal_payload_metadata=trust_internal_payload_metadata,
+                ),
             )
         try:
             await self._enqueue_for_dispatch(
@@ -1775,6 +1873,8 @@ class TurnController:
 
                 async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
                     nonlocal dispatch
+                    nonlocal handled_turn
+                    nonlocal matrix_run_metadata
                     nonlocal payload_ready_monotonic
                     if dispatch_timing is not None:
                         dispatch_timing.mark("response_payload_start")
@@ -1799,6 +1899,31 @@ class TurnController:
                             thread_id=request.thread_id,
                             outcome=payload_builder_outcome,
                         )
+                    backlog: _ActiveFollowUpBacklog | None = None
+                    queued_messages = current_queued_human_messages()
+                    if (
+                        queued_messages
+                        and dispatch.envelope.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+                    ):
+                        backlog = _active_follow_up_backlog(
+                            queued_messages=queued_messages,
+                            thread_history=request.thread_history,
+                        )
+                        if backlog is not None:
+                            handled_turn = replace(
+                                handled_turn,
+                                source_event_ids=backlog.source_event_ids,
+                                source_event_prompts=backlog.source_event_prompts,
+                            )
+                            matrix_run_metadata = deep_merge_metadata(
+                                matrix_run_metadata,
+                                self.deps.turn_store.build_run_metadata(handled_turn),
+                            )
+                            payload = replace(payload, prompt=backlog.prompt, model_prompt=None)
+                            dispatch = replace(
+                                dispatch,
+                                envelope=replace(dispatch.envelope, body=backlog.prompt),
+                            )
                     prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
                         dispatch,
                         payload,
@@ -1829,7 +1954,7 @@ class TurnController:
                         thread_history=request.thread_history,
                     )
                     return ResponseRequest(
-                        thread_history=request.thread_history,
+                        thread_history=backlog.thread_history if backlog is not None else request.thread_history,
                         prompt=prepared_payload.payload.prompt,
                         model_prompt=prepared_payload.payload.model_prompt,
                         existing_event_id=request.existing_event_id,
@@ -2364,6 +2489,7 @@ class TurnController:
                 preliminary_target=voice_target,
                 target=normalized_target,
                 envelope=envelope,
+                event=normalized_event,
                 queued_notice_reservation=queued_notice_reservation,
             )
             reservation_released_or_handed_off = True
@@ -2472,6 +2598,7 @@ class TurnController:
                 preliminary_target=target,
                 target=target,
                 envelope=envelope,
+                event=fallback_event,
                 queued_notice_reservation=None,
             )
             dispatch_policy_source_kind = (

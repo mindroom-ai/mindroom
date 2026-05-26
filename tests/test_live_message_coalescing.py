@@ -44,6 +44,7 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
@@ -82,6 +83,7 @@ from tests.conftest import (
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 
@@ -1337,8 +1339,8 @@ async def test_already_queued_command_barrier_flushes_normal_without_debounce() 
 
 
 @pytest.mark.asyncio
-async def test_messages_during_active_response_wait_and_batch_after_completion(tmp_path: Path) -> None:
-    """Hold all threaded follow-ups while the first-turn response is in flight, then batch them."""
+async def test_messages_during_active_response_wait_and_dispatch_after_completion(tmp_path: Path) -> None:
+    """Hold threaded follow-ups while the first-turn dispatch is in flight, then drain them normally."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
@@ -1394,9 +1396,137 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         assert calls == [["$m1"]]
 
         release_first_dispatch.set()
-        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
+        await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$m3"]])
 
-    assert calls == [["$m1"], ["$m2", "$m3"]]
+    assert calls == [["$m1"], ["$m2"], ["$m3"]]
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Path) -> None:
+    """The first queued follow-up owner should carry later media before skipping its duplicate run."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    text_event = _text_event(
+        event_id="$text",
+        body="text follow-up",
+        sender="@alice:localhost",
+        server_timestamp=1000,
+        thread_id="$thread",
+    )
+    image_event = _image_event(
+        event_id="$img",
+        sender="@bob:localhost",
+        server_timestamp=1001,
+        thread_id="$thread",
+    )
+    target = MessageTarget.resolve(room.room_id, "$thread", "$text")
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    captured_requests = []
+    payload_requests = []
+    registered_media_event_ids = []
+
+    async def fake_prepare_dispatch(
+        _room: nio.MatrixRoom,
+        event: DispatchEvent,
+        requester_user_id: str,
+        **_kwargs: object,
+    ) -> object:
+        dispatch = _prepared_dispatch(
+            event_id=event.event_id,
+            requester_user_id=requester_user_id,
+            body=event.body,
+            thread_id="$thread",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        )
+        dispatch.context.am_i_mentioned = True
+        return prepared_dispatch_result(dispatch)
+
+    async def fake_register_batch_media_attachments(
+        request: BatchMediaAttachmentRequest,
+    ) -> _BatchMediaAttachmentResult:
+        registered_media_event_ids.append([media_event.event_id for media_event in request.media_events])
+        return _BatchMediaAttachmentResult(attachment_ids=["img-attachment"])
+
+    async def fake_build_payload(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
+        payload_requests.append(request)
+        return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
+
+    async def fake_generate_response_locked(_self: object, request: object, *, resolved_target: MessageTarget) -> str:
+        del resolved_target
+        prepared_request = await response_runner._prepare_request_after_lock(request)
+        captured_requests.append(prepared_request)
+        return "$response"
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+            patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
+            patch.object(
+                bot._inbound_turn_normalizer,
+                "register_batch_media_attachments",
+                new=fake_register_batch_media_attachments,
+            ),
+            patch.object(
+                bot._inbound_turn_normalizer,
+                "build_dispatch_payload_with_attachments",
+                new=fake_build_payload,
+            ),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_controller, "_log_dispatch_latency"),
+            patch(
+                "mindroom.response_runner.ResponseRunner.generate_response_locked",
+                new=fake_generate_response_locked,
+            ),
+        ):
+            for event, requester_user_id in (
+                (text_event, "@alice:localhost"),
+                (image_event, "@bob:localhost"),
+            ):
+                event_target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
+                envelope = bot._conversation_resolver.build_ingress_envelope(
+                    room_id=room.room_id,
+                    event=event,
+                    requester_user_id=requester_user_id,
+                    target=event_target,
+                    source_kind=IMAGE_SOURCE_KIND if event.event_id == "$img" else MESSAGE_SOURCE_KIND,
+                )
+                reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
+                try:
+                    await bot._turn_controller._enqueue_active_thread_follow_up(
+                        room=room,
+                        event=event,
+                        target=event_target,
+                        envelope=envelope,
+                        coalescing_thread_id="$thread",
+                        requester_user_id=requester_user_id,
+                        reservation_owner=reservation_owner,
+                    )
+                finally:
+                    await reservation_owner.release()
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await bot._coalescing_gate.drain_all()
+    finally:
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+    assert registered_media_event_ids == [["$img"]]
+    assert payload_requests[0].current_attachment_ids == ["img-attachment"]
+    assert captured_requests[0].attachment_ids == ("img-attachment",)
+    assert captured_requests[0].prompt == (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        "<queued_messages>\n"
+        '<msg event_id="$text" from="@alice:localhost"><![CDATA[text follow-up]]></msg>\n'
+        '<msg event_id="$img" from="@bob:localhost"><![CDATA[[Attached image]]]></msg>\n'
+        "</queued_messages>"
+    )
 
 
 @pytest.mark.asyncio
