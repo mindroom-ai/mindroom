@@ -212,12 +212,12 @@ def test_release_order_removes_unadmitted_reservation_from_owner_work() -> None:
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
 
-    assert gate._older_owner_reservations(key, before_order=reservation.received_order + 1) == [reservation]
+    assert gate._order_book.older_owner_reservations(key, before_order=reservation.received_order + 1) == [reservation]
 
     reservation.release()
     reservation.release()
 
-    assert gate._older_owner_reservations(key, before_order=reservation.received_order + 1) == []
+    assert gate._order_book.older_owner_reservations(key, before_order=reservation.received_order + 1) == []
     assert reservation.released
     assert reservation.settled.is_set()
 

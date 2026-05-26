@@ -4469,7 +4469,7 @@ class TestAgentBot:
 
         async def handle_selection(*_args: object, **_kwargs: object) -> None:
             selection_started.set()
-            assert [reservation for reservation in bot._coalescing_gate._order_reservations if not reservation.released]
+            assert bot._coalescing_gate._order_book.unsettled()
 
         with (
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
@@ -4478,7 +4478,7 @@ class TestAgentBot:
             await bot._on_reaction(room, event)
 
         await asyncio.wait_for(selection_started.wait(), timeout=0.5)
-        assert bot._coalescing_gate._order_reservations == []
+        assert bot._coalescing_gate._order_book.all_settled()
 
     @pytest.mark.asyncio
     async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(
@@ -4518,9 +4518,7 @@ class TestAgentBot:
             reaction_task = asyncio.create_task(bot._on_reaction(room, event))
             await asyncio.wait_for(approval_started.wait(), timeout=0.5)
             try:
-                reaction_reservations = [
-                    reservation for reservation in bot._coalescing_gate._order_reservations if not reservation.released
-                ]
+                reaction_reservations = bot._coalescing_gate._order_book.unsettled()
                 assert reaction_reservations
                 later_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
                 try:
@@ -4531,7 +4529,7 @@ class TestAgentBot:
                 release_approval.set()
                 await reaction_task
 
-        assert bot._coalescing_gate._order_reservations == []
+        assert bot._coalescing_gate._order_book.all_settled()
 
     @pytest.mark.asyncio
     async def test_checkmark_tool_approval_bypasses_conversation_reply_permission(
@@ -4561,7 +4559,7 @@ class TestAgentBot:
 
         approval_handler.assert_awaited_once()
         interactive_handler.assert_not_awaited()
-        assert bot._coalescing_gate._order_reservations == []
+        assert bot._coalescing_gate._order_book.all_settled()
 
     @pytest.mark.asyncio
     async def test_unknown_tool_approval_response_with_approval_id_and_denial_reason_resolves_live_waiter(
@@ -7458,7 +7456,7 @@ class TestAgentBot:
         with pytest.raises(asyncio.CancelledError):
             await bot._turn_controller._handle_media_message_inner(room, event)
 
-        assert bot._coalescing_gate._order_reservations == []
+        assert bot._coalescing_gate._order_book.all_settled()
 
     @pytest.mark.asyncio
     async def test_text_reserves_receive_order_before_thread_lookup(

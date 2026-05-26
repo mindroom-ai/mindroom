@@ -197,7 +197,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
 
     async def handle_edit(*_args: object) -> None:
         edit_started.set()
-        assert [reservation for reservation in bot._coalescing_gate._order_reservations if not reservation.released]
+        assert bot._coalescing_gate._order_book.unsettled()
         await release_edit.wait()
 
     with (
@@ -213,7 +213,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
         release_edit.set()
         await edit_task
 
-    assert bot._coalescing_gate._order_reservations == []
+    assert bot._coalescing_gate._order_book.all_settled()
 
 
 @pytest.mark.asyncio
