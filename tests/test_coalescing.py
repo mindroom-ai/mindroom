@@ -1046,7 +1046,7 @@ async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> No
 
 
 @pytest.mark.asyncio
-async def test_drain_all_waits_for_order_reservation_to_admit(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
     """Shutdown drains must treat receive-order reservations as pending ingress work."""
     batches: list[CoalescedBatch] = []
 
@@ -1055,7 +1055,7 @@ async def test_drain_all_waits_for_order_reservation_to_admit(monkeypatch: pytes
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 60.0,
+        debounce_seconds=lambda: 0.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: True,
     )
@@ -1063,21 +1063,13 @@ async def test_drain_all_waits_for_order_reservation_to_admit(monkeypatch: pytes
     reservation = gate.reserve_order(
         room_id=key.room_id,
         requester_user_id=key.requester_user_id,
-        receipt_time=1_000.0,
+        receipt_time=time.monotonic(),
     )
-    wait_entered = asyncio.Event()
-
-    original_settled_wait = reservation.settled.wait
-
-    async def wait_for_reservation_settled() -> bool:
-        wait_entered.set()
-        return await original_settled_wait()
-
-    monkeypatch.setattr(reservation.settled, "wait", wait_for_reservation_settled)
 
     drain_task = asyncio.create_task(gate.drain_all())
-    await asyncio.wait_for(wait_entered.wait(), timeout=5.0)
+    await _wait_for(lambda: gate._active_drain_context is not None and not drain_task.done())
     assert drain_task.done() is False
+    assert reservation.released is False
 
     await gate.admit(
         key,
