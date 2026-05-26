@@ -5057,6 +5057,7 @@ class TestAgentBot:
         event.reacts_to = "$approval"
         event.sender = "@user:localhost"
         event.event_id = "$reaction"
+        event.source = {"content": {}}
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
             new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
@@ -11715,7 +11716,7 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$relay", "@user:localhost")
+        assert key == CoalescingKey(room.room_id, None, "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
