@@ -1535,11 +1535,14 @@ class CoalescingGate:
                 ready_admissions,
                 room_scope_batching_allowed=room_scope_batching_allowed,
             )
-            candidate_events = [event for _segment_key, pending_events in segments for event in pending_events]
-            if allow_upload_grace and self._should_wait_for_upload_grace(candidate_events):
-                timing_scope = event_timing_scope(
-                    build_coalesced_batch(key, candidate_events).primary_event.event_id,
-                )
+            upload_grace_events = segments[0][1] if len(segments) == 1 else []
+            if (
+                allow_upload_grace
+                and upload_grace_events
+                and not _pending_events_require_solo_batch(upload_grace_events)
+                and self._should_wait_for_upload_grace(upload_grace_events)
+            ):
+                timing_scope = event_timing_scope(upload_grace_events[-1].event.event_id)
                 self._requeue_claimed_admissions(gate, admissions)
                 closed_or_transferred.update(
                     ready_admission.pending_event.event.event_id for ready_admission in ready_admissions

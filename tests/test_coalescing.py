@@ -616,6 +616,46 @@ async def test_upload_grace_does_not_flatten_late_solo_ready_segment() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upload_grace_does_not_flatten_claimed_solo_ready_segment() -> None:
+    """Solo metadata discovered before upload grace must remain in its own segment."""
+    batches: list[CoalescedBatch] = []
+    release_solo = asyncio.Event()
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.01,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    solo = _pending(_text_event("$solo:localhost", "solo", 1_000_000))
+    solo.dispatch_metadata = (
+        PendingDispatchMetadata(kind="solo", payload=object(), close=close, requires_solo_batch=True),
+    )
+
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(_ready_after(release_solo, solo)),
+        source_event_id="$solo:localhost",
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "normal", 1_000_001)))
+    release_solo.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$solo:localhost"], ["$text:localhost"]]
+    assert close_count == 0
+
+
+@pytest.mark.asyncio
 async def test_unresolved_solo_ready_event_dispatches_solo_without_metadata_close() -> None:
     """A ready task may reveal solo metadata after claim; split it before batch construction."""
     batches: list[CoalescedBatch] = []
