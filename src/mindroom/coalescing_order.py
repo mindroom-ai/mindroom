@@ -96,11 +96,11 @@ class CoalescingOrderBook:
 
     def unsettled(self) -> list[IngressOrderReservation]:
         """Return all currently unresolved reservations."""
-        return [reservation for reservation in self._reservations if not reservation.released]
+        return list(self._reservations)
 
     def all_settled(self) -> bool:
         """Return whether there are no unresolved reservations."""
-        return not self.unsettled()
+        return not self._reservations
 
     def older_owner_reservations(
         self,
@@ -112,17 +112,13 @@ class CoalescingOrderBook:
         return [
             reservation
             for reservation in self._reservations
-            if not reservation.released
-            and self.reservation_matches_key(reservation, key)
-            and reservation.received_order < before_order
+            if self.reservation_matches_key(reservation, key) and reservation.received_order < before_order
         ]
 
     def has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:
         """Return whether older unresolved same-owner reservation blocks this order."""
         return any(
-            not reservation.released
-            and self.reservation_matches_key(reservation, key)
-            and reservation.received_order < received_order
+            self.reservation_matches_key(reservation, key) and reservation.received_order < received_order
             for reservation in self._reservations
         )
 
@@ -139,8 +135,7 @@ class CoalescingOrderBook:
         return [
             reservation
             for reservation in self._reservations
-            if not reservation.released
-            and self.reservation_matches_key(reservation, key)
+            if self.reservation_matches_key(reservation, key)
             and reservation.received_order > after_order
             and (before_order is None or reservation.received_order < before_order)
             and (
@@ -162,16 +157,12 @@ class CoalescingOrderBook:
         return [
             reservation.received_order
             for reservation in self._reservations
-            if not reservation.released
-            and self.reservation_matches_key(reservation, key)
-            and reservation.received_order > after_order
+            if self.reservation_matches_key(reservation, key) and reservation.received_order > after_order
         ]
 
     def has_unsettled_owner_reservation_at_or_before(self, key: CoalescingKey, received_order: int) -> bool:
         """Return whether an unresolved same-owner reservation exists at or before an order."""
         return any(
-            not reservation.released
-            and self.reservation_matches_key(reservation, key)
-            and reservation.received_order <= received_order
+            self.reservation_matches_key(reservation, key) and reservation.received_order <= received_order
             for reservation in self._reservations
         )
