@@ -16,9 +16,7 @@ from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.coalescing import (
     CoalescingGate,
     IngressAdmissionClosedError,
-    IngressOrderReservation,
     ReadyPendingEvent,
-    close_ready_task_result_metadata,
 )
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, close_pending_event_metadata
 from mindroom.commands.handler import CommandHandlerContext, handle_command
@@ -97,6 +95,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.thread_utils import (
@@ -259,82 +258,6 @@ class _PrecheckedEvent[T]:
 
     event: T
     requester_user_id: str
-
-
-@dataclass
-class _PromptIngressReservationOwner:
-    """Own one prompt ingress reservation until it is admitted or released."""
-
-    gate: CoalescingGate
-    reservation: IngressOrderReservation
-    admitted: bool = False
-    ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
-
-    @staticmethod
-    def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:
-        try:
-            result = task.result()
-        except BaseException:
-            return
-        close_ready_task_result_metadata(result)
-
-    async def admit(
-        self,
-        key: CoalescingKey,
-        *,
-        source_event_id: str | None,
-        source_kind: str,
-        ready_result: ReadyPendingEvent | None = None,
-        ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
-    ) -> None:
-        """Transfer this reservation and any ready metadata to the coalescing gate."""
-        if ready_task is not None:
-            self.ready_task = ready_task
-        metadata_transferred = False
-        try:
-            await self.gate.admit(
-                key,
-                ready_result=ready_result,
-                ready_task=ready_task,
-                source_event_id=source_event_id,
-                source_kind=source_kind,
-                order_reservation=self.reservation,
-            )
-            metadata_transferred = True
-        except BaseException:
-            await self.cancel_ready_task()
-            if ready_result is not None and not metadata_transferred:
-                close_ready_task_result_metadata(ready_result)
-            raise
-        self.admitted = True
-        self.ready_task = None
-
-    async def cancel_ready_task(self) -> None:
-        """Cancel or collect the owned ready task once."""
-        if self.ready_task is None:
-            return
-        ready_task = self.ready_task
-        self.ready_task = None
-        if not ready_task.done():
-            ready_task.cancel()
-        try:
-            result = await asyncio.gather(ready_task, return_exceptions=True)
-        except asyncio.CancelledError:
-            if ready_task.done():
-                self._close_late_ready_task_result(ready_task)
-            else:
-                ready_task.add_done_callback(self._close_late_ready_task_result)
-            raise
-        close_ready_task_result_metadata(result[0])
-
-    async def release(self) -> None:
-        """Release this reservation if admission did not transfer ownership."""
-        if self.admitted:
-            return
-        try:
-            await self.cancel_ready_task()
-        finally:
-            self.gate.release_order_reservation(self.reservation)
 
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]

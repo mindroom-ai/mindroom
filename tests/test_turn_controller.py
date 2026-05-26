@@ -21,8 +21,8 @@ from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.streaming import send_streaming_response
-from mindroom.turn_controller import _PromptIngressReservationOwner
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -120,7 +120,7 @@ async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() 
         received_order=1,
         receipt_time=1.0,
     )
-    owner = _PromptIngressReservationOwner(gate=RejectingGate(), reservation=reservation)
+    owner = PromptIngressReservationOwner(gate=RejectingGate(), reservation=reservation)
     ready_task = asyncio.create_task(ready())
     await ready_task
 
@@ -171,7 +171,7 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
         is_shutting_down=lambda: False,
     )
     reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
-    owner = _PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    owner = PromptIngressReservationOwner(gate=gate, reservation=reservation)
     owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
 
@@ -198,7 +198,7 @@ async def test_owner_release_settles_reservation_when_cancelled_during_ready_tas
         is_shutting_down=lambda: False,
     )
     reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
-    owner = _PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    owner = PromptIngressReservationOwner(gate=gate, reservation=reservation)
     ready_task = asyncio.create_task(never_ready())
     owner.ready_task = ready_task
 
