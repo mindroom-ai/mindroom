@@ -512,6 +512,37 @@ class CoalescingGate:
             and reservation.received_order > after_order
         ]
 
+    def _set_buffered_in_flight_max_order(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        *,
+        after_order: int,
+    ) -> None:
+        buffered_orders = [queued.received_order for queued in gate.queue if queued.received_order > after_order]
+        buffered_orders.extend(
+            self._unsettled_owner_reservation_orders_after(key, after_order=after_order),
+        )
+        gate.buffered_in_flight_max_order = max(buffered_orders, default=None)
+        if gate.buffered_in_flight_max_order is None:
+            self._in_flight_buffered_max_order.pop(key, None)
+        else:
+            self._in_flight_buffered_max_order[key] = gate.buffered_in_flight_max_order
+
+    def _set_related_root_followup_buffered_orders(
+        self,
+        key: CoalescingKey,
+        pending_events: list[PendingEvent],
+        *,
+        after_order: int,
+    ) -> None:
+        if key.thread_id is not None:
+            return
+        source_event_ids = {pending_event.event.event_id for pending_event in pending_events}
+        for other_key, other_gate in self._gates.items():
+            if other_key != key and self._same_owner(other_key, key) and other_key.thread_id in source_event_ids:
+                self._set_buffered_in_flight_max_order(other_key, other_gate, after_order=after_order)
+
     @staticmethod
     def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
         pending = [*gate.claimed_admissions, *gate.queue]
@@ -1433,17 +1464,8 @@ class CoalescingGate:
                 outcome=outcome,
             )
             gate.phase = GatePhase.DEBOUNCE
-            buffered_orders = [
-                queued.received_order for queued in gate.queue if queued.received_order > in_flight_start_order
-            ]
-            buffered_orders.extend(
-                self._unsettled_owner_reservation_orders_after(key, after_order=in_flight_start_order),
-            )
-            gate.buffered_in_flight_max_order = max(buffered_orders, default=None)
-            if gate.buffered_in_flight_max_order is None:
-                self._in_flight_buffered_max_order.pop(key, None)
-            else:
-                self._in_flight_buffered_max_order[key] = gate.buffered_in_flight_max_order
+            self._set_buffered_in_flight_max_order(key, gate, after_order=in_flight_start_order)
+            self._set_related_root_followup_buffered_orders(key, pending_events, after_order=in_flight_start_order)
             gate.grace_deadline = None
             gate.deadline = None
             self._wake_owner_gates(key)
