@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from agno.media import Audio, File, Image, Video
@@ -15,6 +16,23 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 logger = get_logger(__name__)
+
+_MAX_INLINE_MEDIA_RECORDS = 512
+_INLINE_MEDIA_RECORDS_BY_ID: OrderedDict[str, AttachmentRecord] = OrderedDict()
+_INLINE_MEDIA_RECORDS_BY_PATH: OrderedDict[str, AttachmentRecord] = OrderedDict()
+
+
+def _remember_attachment_record(record: AttachmentRecord) -> None:
+    _INLINE_MEDIA_RECORDS_BY_ID[record.attachment_id] = record
+    _INLINE_MEDIA_RECORDS_BY_ID.move_to_end(record.attachment_id)
+    while len(_INLINE_MEDIA_RECORDS_BY_ID) > _MAX_INLINE_MEDIA_RECORDS:
+        _INLINE_MEDIA_RECORDS_BY_ID.popitem(last=False)
+
+    path_key = str(record.local_path.resolve())
+    _INLINE_MEDIA_RECORDS_BY_PATH[path_key] = record
+    _INLINE_MEDIA_RECORDS_BY_PATH.move_to_end(path_key)
+    while len(_INLINE_MEDIA_RECORDS_BY_PATH) > _MAX_INLINE_MEDIA_RECORDS:
+        _INLINE_MEDIA_RECORDS_BY_PATH.popitem(last=False)
 
 
 def _inline_media_content_key(record: AttachmentRecord) -> tuple[str, ...]:
@@ -130,6 +148,8 @@ def resolve_attachment_media(
                 thread_id=thread_id,
             )
     resolved_attachment_ids = [record.attachment_id for record in attachment_records]
+    for record in attachment_records:
+        _remember_attachment_record(record)
     media_records = (
         _partition_inline_media_by_content(attachment_records, current_attachment_ids=current_attachment_ids)
         if current_attachment_ids is not None

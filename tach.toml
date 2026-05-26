@@ -668,14 +668,27 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.attachment_media"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.logging_config",
+    "mindroom.timing",
+]
+
+[[modules]]
 path = "mindroom.history"
 depends_on = [
+    "mindroom.history.agno_team_patch",
     "mindroom.history.compaction",
     "mindroom.history.policy",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
 ]
+
+[[modules]]
+path = "mindroom.history.agno_team_patch"
+depends_on = ["mindroom.attachment_media"]
 
 [[modules]]
 path = "mindroom.history.compaction"
