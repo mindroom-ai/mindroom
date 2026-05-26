@@ -1730,12 +1730,24 @@ class AgentBot:
             self.runtime_paths,
         )
         if result:
-            await self._turn_controller.handle_interactive_selection(
-                room,
-                selection=result,
-                user_id=event.sender,
-                source_event_id=event.event_id,
+            requester_user_id = self._turn_controller._requester_user_id(
+                sender=event.sender,
+                source=event.source,
             )
+            reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+                room,
+                requester_user_id,
+                receipt_time=time.monotonic(),
+            )
+            try:
+                await self._turn_controller.handle_interactive_selection(
+                    room,
+                    selection=result,
+                    user_id=event.sender,
+                    source_event_id=event.event_id,
+                )
+            finally:
+                await reservation_owner.release()
             return
 
         await self._emit_reaction_received_hooks(

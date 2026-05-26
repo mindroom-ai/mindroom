@@ -2075,21 +2075,6 @@ class TurnController:
             room_id=room.room_id,
         )
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        if event_info.is_edit:
-            await self._append_live_event_with_timing(
-                room.room_id,
-                event,
-                event_info=event_info,
-                dispatch_timing=dispatch_timing,
-            )
-            await self.deps.edit_regenerator.handle_message_edit(
-                room,
-                prechecked_event.event,
-                event_info,
-                prechecked_event.requester_user_id,
-            )
-            return
-
         owns_reservation = reservation_owner is None
         if reservation_owner is None:
             reservation_owner = self._reserve_prompt_ingress_order(
@@ -2098,6 +2083,21 @@ class TurnController:
                 receipt_time=receipt_time,
             )
         try:
+            if event_info.is_edit:
+                await self._append_live_event_with_timing(
+                    room.room_id,
+                    event,
+                    event_info=event_info,
+                    dispatch_timing=dispatch_timing,
+                )
+                await self.deps.edit_regenerator.handle_message_edit(
+                    room,
+                    prechecked_event.event,
+                    event_info,
+                    prechecked_event.requester_user_id,
+                )
+                return
+
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
             if await self._should_skip_router_before_shared_ingress_work(
                 room,

@@ -570,6 +570,20 @@ class CoalescingGate:
             if other_key in related_keys:
                 self._set_buffered_in_flight_max_order(other_key, other_gate, after_order=after_order)
 
+    def _prune_in_flight_buffered_orders(self) -> None:
+        """Drop buffered markers whose reservations settled without creating that gate."""
+        for key, buffered_max_order in list(self._in_flight_buffered_max_order.items()):
+            if key in self._gates:
+                continue
+            has_unsettled_owner_reservation = any(
+                not reservation.released
+                and self._reservation_matches_key(reservation, key)
+                and reservation.received_order <= buffered_max_order
+                for reservation in self._order_reservations
+            )
+            if not has_unsettled_owner_reservation:
+                self._in_flight_buffered_max_order.pop(key, None)
+
     @staticmethod
     def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
         pending = [*gate.claimed_admissions, *gate.queue]
@@ -666,6 +680,7 @@ class CoalescingGate:
     def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
         """Release a receive-order reservation that will not become a queued admission."""
         self._release_order_reservation(reservation, wake=True)
+        self._prune_in_flight_buffered_orders()
 
     def _release_order_reservation(self, reservation: IngressOrderReservation, *, wake: bool) -> None:
         if reservation.released:
@@ -689,6 +704,7 @@ class CoalescingGate:
                 continue
             self._release_order_reservation(reservation, wake=True)
             drain_result.released_reservation_count += 1
+        self._prune_in_flight_buffered_orders()
 
     async def _wait_for_order_reservations_for_drain(self, drain_context: _DrainContext) -> None:
         while True:
@@ -1046,6 +1062,7 @@ class CoalescingGate:
             ready_result=ready_result,
         )
         self._insert_queued_event(gate, admission)
+        self._prune_in_flight_buffered_orders()
         self._schedule_drain(key, gate)
         self._wake_owner_gates(key)
         kind = self._queued_kind(admission)
@@ -1090,6 +1107,7 @@ class CoalescingGate:
                 self._active_drain_context = None
             if drain_completed:
                 self._gates.clear()
+                self._in_flight_buffered_max_order.clear()
 
     def _upload_grace_hard_cap_seconds(self) -> float:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
