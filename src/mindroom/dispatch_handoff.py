@@ -32,7 +32,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey
 
 
 class _PendingEventLike(Protocol):
@@ -76,6 +76,7 @@ class DispatchIngressMetadata:
     """Trusted ingress source and policy metadata for one dispatch handoff."""
 
     source_kind: str
+    coalescing_key: CoalescingKey | None = None
     dispatch_policy_source_kind: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
@@ -364,6 +365,7 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
         requester_user_id=batch.requester_user_id,
         ingress=DispatchIngressMetadata(
             source_kind=batch.source_kind,
+            coalescing_key=batch.coalescing_key,
             dispatch_policy_source_kind=batch.dispatch_policy_source_kind,
             hook_source=batch.hook_source,
             message_received_depth=batch.message_received_depth,

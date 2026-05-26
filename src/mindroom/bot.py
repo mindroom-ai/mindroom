@@ -1110,6 +1110,30 @@ class AgentBot:
             emit_timeline=restored_token_first_sync_response,
         )
 
+    async def _run_sync_response_side_effects(
+        self,
+        response: nio.SyncResponse,
+        *,
+        first_sync_response: bool,
+        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
+    ) -> None:
+        """Run sync-response side effects that must poison certification on failure."""
+        if room_member_join_hook_plan.emit_timeline:
+            await self._emit_room_member_joined_sync_timeline_hooks(response)
+        if room_member_join_hook_plan.emit_state:
+            await self._emit_room_member_joined_sync_state_hooks(response)
+
+        if first_sync_response:
+            self._register_room_member_callback_after_initial_sync()
+            await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            orchestrator = self.orchestrator
+            if orchestrator is not None:
+                await orchestrator.handle_bot_ready(self)
+            self._maybe_start_startup_thread_prewarm()
+
+        if first_sync_response or has_deferred_overdue_tasks():
+            self._maybe_start_deferred_overdue_task_drain()
+
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
@@ -1151,22 +1175,18 @@ class AgentBot:
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
-        if isinstance(_response, nio.SyncResponse):
-            if room_member_join_hook_plan.emit_timeline:
-                await self._emit_room_member_joined_sync_timeline_hooks(_response)
-            if room_member_join_hook_plan.emit_state:
-                await self._emit_room_member_joined_sync_state_hooks(_response)
-
-        if first_sync_response:
-            self._register_room_member_callback_after_initial_sync()
-            await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
-            orchestrator = self.orchestrator
-            if orchestrator is not None:
-                await orchestrator.handle_bot_ready(self)
-            self._maybe_start_startup_thread_prewarm()
-
-        if first_sync_response or has_deferred_overdue_tasks():
-            self._maybe_start_deferred_overdue_task_drain()
+        try:
+            await self._run_sync_response_side_effects(
+                _response,
+                first_sync_response=first_sync_response,
+                room_member_join_hook_plan=room_member_join_hook_plan,
+            )
+        except asyncio.CancelledError:
+            self._mark_callback_failed()
+            raise
+        except Exception:
+            self._mark_callback_failed()
+            raise
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors without marking cache state fresh."""

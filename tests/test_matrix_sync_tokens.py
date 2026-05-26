@@ -368,6 +368,29 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_sync_response_side_effect_failure_clears_certified_checkpoint(tmp_path: Path) -> None:
+    """A post-certification sync side effect failure must poison the saved token."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_side_effect_failure"
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_side_effect_failure"
+    response.rooms = MagicMock(join={})
+    bot._emit_agent_lifecycle_event = AsyncMock(side_effect=RuntimeError("bot ready failed"))  # type: ignore[method-assign]
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(RuntimeError, match="bot ready failed"),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot._runtime_view.callback_failure_count == 1
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Path) -> None:
     """Shutdown should flush the latest cache-certified sync token to disk."""
     bot = _agent_bot(tmp_path)

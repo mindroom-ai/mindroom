@@ -597,6 +597,42 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_room_root_text_and_image_coalesce_into_single_dispatch(tmp_path: Path) -> None:
+    """Root text and root media share the room coalescing scope before dispatch chooses a response root."""
+    bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=0)
+    room = _make_room()
+    text_event = _text_event(event_id="$text", body="describe this", server_timestamp=1000)
+    image_event = _image_event(event_id="$img", server_timestamp=1001)
+    calls: list[tuple[str, list[str], int]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
+
+    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_controller.handle_text_event(room, text_event)
+        await asyncio.sleep(0.005)
+        await bot._turn_controller.handle_media_event(room, image_event)
+        await _wait_for(lambda: len(calls) == 1)
+
+    assert calls == [
+        (
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\ndescribe this\n[Attached image]",
+            ["$text", "$img"],
+            1,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_text_first_image_during_debounce_dispatches_without_upload_grace_delay(tmp_path: Path) -> None:
     """Do not add upload-grace delay once media already joined during debounce."""
     bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=200)
@@ -3343,6 +3379,40 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
     assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
     assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+
+
+@pytest.mark.asyncio
+async def test_coalesced_room_plain_reply_target_uses_batch_key_not_reply_thread(tmp_path: Path) -> None:
+    """Coalesced handoff target must come from the batch key, not a preserved plain reply."""
+    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    room = _make_room()
+    typed_reply = _reply_event(
+        event_id="$typed",
+        reply_to_event_id="$old-reply",
+        body="room-level follow-up",
+        server_timestamp=1001,
+    )
+    bot._conversation_cache.get_thread_id_for_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: "$thread-root" if event_id == "$old-reply" else None,
+    )
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, None, "@user:localhost"),
+        [PendingEvent(event=typed_reply, room=room, source_kind=MESSAGE_SOURCE_KIND)],
+    )
+    dispatches: list[PreparedDispatch] = []
+
+    async def record_response(*args: object, **_kwargs: object) -> None:
+        dispatches.append(cast("PreparedDispatch", args[2]))
+
+    with (
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
+        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+    ):
+        await bot._turn_controller.handle_coalesced_batch(batch)
+
+    assert len(dispatches) == 1
+    assert dispatches[0].target.resolved_thread_id is None
+    assert dispatches[0].context.thread_id is None
 
 
 def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> None:

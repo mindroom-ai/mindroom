@@ -145,6 +145,27 @@ type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayl
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
 
+def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
+    """Return an event view that cannot pull dispatch context through Matrix relations."""
+    if not isinstance(event.source, dict):
+        return event
+    content = event.source.get("content")
+    if not isinstance(content, dict) or "m.relates_to" not in content:
+        return event
+    stripped_content = dict(content)
+    stripped_content.pop("m.relates_to", None)
+    stripped_source = {**event.source, "content": stripped_content}
+    if isinstance(event, PreparedTextEvent):
+        return replace(event, source=stripped_source)
+    return PreparedTextEvent(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=event.body,
+        source=stripped_source,
+        server_timestamp=event.server_timestamp,
+    )
+
+
 def _queued_notice_dispatch_metadata(
     reservation: QueuedHumanNoticeReservation | None,
     target: MessageTarget | None,
@@ -782,7 +803,6 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        canonical_thread_id = target.resolved_thread_id
         if self._should_apply_active_thread_follow_up_policy(
             envelope=envelope,
         ):
@@ -791,7 +811,7 @@ class TurnController:
                 event=dispatch_event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=canonical_thread_id,
+                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -808,7 +828,7 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, canonical_thread_id, requester_user_id),
+                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -841,7 +861,6 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        canonical_thread_id = target.resolved_thread_id
         envelope = self.deps.resolver.build_ingress_envelope(
             room_id=room.room_id,
             event=event,
@@ -857,7 +876,7 @@ class TurnController:
                 event=event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=canonical_thread_id,
+                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
             )
@@ -868,7 +887,7 @@ class TurnController:
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
-            coalescing_key=CoalescingKey(room.room_id, canonical_thread_id, requester_user_id),
+            coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
         )
         return _IngressAdmissionOutcome.ADMITTED
 
@@ -942,15 +961,9 @@ class TurnController:
     ) -> CoalescingKey:
         """Return the canonical sender/thread scope for one event."""
         coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
         return CoalescingKey(
             room.room_id,
-            target.resolved_thread_id,
+            coalescing_thread_id,
             requester_user_id,
         )
 
@@ -1052,7 +1065,7 @@ class TurnController:
             prepared_event=prepared_event,
             dispatch_event=dispatch_event,
             envelope=envelope,
-            coalescing_thread_id=canonical_thread_id,
+            coalescing_thread_id=coalescing_thread_id,
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
         )
@@ -1217,10 +1230,16 @@ class TurnController:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         use_trusted_router_relay_context = False
+        coalescing_key = ingress_metadata.coalescing_key if ingress_metadata is not None else None
+        context_event = (
+            _room_level_context_event(event)
+            if coalescing_key is not None and coalescing_key.thread_id is None
+            else event
+        )
         if use_command_context:
             dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
-                event,
+                context_event,
                 mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                 payload_metadata=payload_metadata,
                 caller_label="dispatch_command_context",
@@ -1237,7 +1256,7 @@ class TurnController:
         ):
             dispatch_context_result = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
-                event,
+                context_event,
                 payload_metadata=payload_metadata,
             )
             emit_elapsed_timing(
@@ -1248,7 +1267,7 @@ class TurnController:
         else:
             dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
-                event,
+                context_event,
                 payload_metadata=payload_metadata,
             )
             emit_elapsed_timing(
@@ -1259,16 +1278,34 @@ class TurnController:
         context = dispatch_context_result.context
         thread_context = dispatch_context_result.thread_context
         target_start = time.monotonic()
-        target = (
-            thread_context.stable_target
-            if thread_context is not None
-            else self.deps.resolver.build_message_target(
+        if coalescing_key is not None:
+            coalesced_thread_id = coalescing_key.thread_id
+            if context.thread_id != coalesced_thread_id:
+                context = replace(
+                    context,
+                    is_thread=coalesced_thread_id is not None,
+                    thread_id=coalesced_thread_id,
+                    thread_history=[],
+                    replay_guard_history=[],
+                    requires_model_history_refresh=False,
+                )
+            target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
-                thread_id=context.thread_id,
+                thread_id=coalesced_thread_id,
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
-        )
+        else:
+            target = (
+                thread_context.stable_target
+                if thread_context is not None
+                else self.deps.resolver.build_message_target(
+                    room_id=room.room_id,
+                    thread_id=context.thread_id,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                )
+            )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.build_message_target",
             target_start,
