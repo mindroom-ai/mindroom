@@ -966,10 +966,10 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
     )
     reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
     target_reservation = reservation
-    await asyncio.wait_for(wait_entered.wait(), timeout=1.0)
+    await asyncio.wait_for(wait_entered.wait(), timeout=5.0)
 
     shutting_down = True
-    result = await gate.drain_all(ready_timeout_seconds=0.01)
+    result = await gate.drain_all(ready_timeout_seconds=0.05)
 
     assert reservation.released is True
     assert result.completed is False

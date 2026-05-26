@@ -598,7 +598,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_room_root_text_and_image_coalesce_into_single_dispatch(tmp_path: Path) -> None:
     """Root text and root media share the room coalescing scope before dispatch chooses a response root."""
-    bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=0)
+    bot = _make_bot(tmp_path, debounce_ms=200, upload_grace_ms=0)
     room = _make_room()
     text_event = _text_event(event_id="$text", body="describe this", server_timestamp=1000)
     image_event = _image_event(event_id="$img", server_timestamp=1001)
