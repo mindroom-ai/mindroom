@@ -710,116 +710,6 @@ class CoalescingGate:
         self._ensure_drain_task(key, gate)
         self._wake(gate)
 
-    def _prepare_gate_for_drain(self, gate: _GateEntry, drain_context: _DrainContext) -> None:
-        gate.drain_context = drain_context
-        gate.drain_all_requested = True
-        gate.deadline = time.monotonic()
-        gate.grace_deadline = None
-
-    def _cancel_non_in_flight_drain_tasks(self, drain_context: _DrainContext) -> list[asyncio.Task[None]]:
-        if not self._is_bounded_drain(drain_context):
-            return []
-        cancelled_tasks: list[asyncio.Task[None]] = []
-        for gate in self._gates.values():
-            task = gate.drain_task
-            if task is None or task.done() or gate.phase is GatePhase.IN_FLIGHT:
-                continue
-            task.cancel()
-            cancelled_tasks.append(task)
-        return cancelled_tasks
-
-    def _active_drain_tasks(self) -> list[asyncio.Task[None]]:
-        return [
-            gate.drain_task
-            for gate in self._gates.values()
-            if gate.drain_task is not None and not gate.drain_task.done()
-        ]
-
-    async def _abandon_queued_admission_for_bounded_shutdown(
-        self,
-        queued: _QueuedEvent,
-        drain_context: _DrainContext,
-    ) -> int:
-        """Cancel or close one queued admission before bounded shutdown discards it."""
-        if queued.ready_result is not None:
-            close_pending_event_metadata_once([queued.ready_result.pending_event])
-            return 1
-        if queued.ready_task is None:
-            return 0
-        if queued.ready_task.done():
-            result = await asyncio.gather(queued.ready_task, return_exceptions=True)
-            return close_ready_task_result_metadata(result[0])
-        queued.ready_task.cancel()
-        done, pending = await asyncio.wait({queued.ready_task}, timeout=drain_context.ready_timeout_seconds)
-        if pending:
-            drain_context.result.cancelled_unready_count += 1
-            queued.ready_task.add_done_callback(self._close_late_ready_task_result)
-            return 0
-        drain_context.result.cancelled_unready_count += 1
-        result = await asyncio.gather(*done, return_exceptions=True)
-        return close_ready_task_result_metadata(result[0])
-
-    async def _abandon_gate_work_for_bounded_shutdown(self, drain_context: _DrainContext) -> None:
-        """Close/cancel all gate-owned work before bounded shutdown clears gates."""
-        if not self._is_bounded_drain(drain_context):
-            return
-        dropped_ready_count = 0
-        for gate in self._gates.values():
-            if gate.drain_task is not None and not gate.drain_task.done():
-                gate.drain_task.cancel()
-                drain_context.result.dispatch_cancelled_count += 1
-                gate.drain_task = None
-            admissions = [*gate.claimed_admissions, *gate.queue]
-            for queued in admissions:
-                dropped_ready_count += await self._abandon_queued_admission_for_bounded_shutdown(queued, drain_context)
-            gate.claimed_admissions = []
-            gate.queue.clear()
-            gate.drain_all_requested = False
-        if dropped_ready_count:
-            drain_context.result.dropped_ready_count += dropped_ready_count
-
-    async def _await_active_drain_tasks(self, drain_context: _DrainContext) -> tuple[bool, bool]:
-        """Await active drains; return (abandoned, still_pending)."""
-        tasks_to_await = self._active_drain_tasks()
-        if not tasks_to_await:
-            return False, False
-        if not self._is_bounded_drain(drain_context):
-            await asyncio.gather(*tasks_to_await, return_exceptions=True)
-            return False, False
-        done, pending = await asyncio.wait(tasks_to_await, timeout=drain_context.ready_timeout_seconds)
-        if done:
-            await asyncio.gather(*done, return_exceptions=True)
-        if not pending:
-            return False, False
-        if not any(gate.drain_task in pending and gate.phase is GatePhase.IN_FLIGHT for gate in self._gates.values()):
-            return False, True
-        await self._abandon_gate_work_for_bounded_shutdown(drain_context)
-        return True, False
-
-    async def _drain_all_once(self, drain_context: _DrainContext) -> bool:
-        await self._wait_for_order_reservations_for_drain(drain_context)
-        for gate in list(self._gates.values()):
-            self._prepare_gate_for_drain(gate, drain_context)
-
-        cancelled_tasks = (
-            [] if drain_context.cancelled_initial_drain_tasks else self._cancel_non_in_flight_drain_tasks(drain_context)
-        )
-        drain_context.cancelled_initial_drain_tasks = True
-        if cancelled_tasks:
-            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
-
-        for key, gate in list(self._gates.items()):
-            self._prepare_gate_for_drain(gate, drain_context)
-            self._ensure_drain_task(key, gate)
-            self._wake(gate)
-
-        abandoned, active_pending = await self._await_active_drain_tasks(drain_context)
-        if abandoned:
-            return True
-        if active_pending:
-            return False
-        return self._order_book.all_settled()
-
     @staticmethod
     def _wake(gate: _GateEntry) -> None:
         gate.wake_generation += 1
@@ -936,24 +826,7 @@ class CoalescingGate:
             ready_timeout_seconds=ready_timeout_seconds,
             result=_MutableDrainResult(),
         )
-        self._active_drain_context = drain_context
-        drain_completed = False
-        try:
-            while True:
-                if await self._drain_all_once(drain_context):
-                    break
-            await self._abandon_gate_work_for_bounded_shutdown(drain_context)
-            drain_completed = True
-            return drain_context.result.freeze()
-        finally:
-            for gate in self._gates.values():
-                if gate.drain_context is drain_context:
-                    gate.drain_context = None
-            if self._active_drain_context is drain_context:
-                self._active_drain_context = None
-            if drain_completed:
-                self._gates.clear()
-                self._in_flight_buffered_max_order.clear()
+        return await _CoalescingDrainCoordinator(self, drain_context).run()
 
     def _upload_grace_hard_cap_seconds(self) -> float:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
@@ -1506,7 +1379,123 @@ class CoalescingGate:
             self._clear_claimed_admissions(gate, admissions)
             self._wake_owner_gates(key)
 
-    async def _drain_gate(self, key: CoalescingKey, gate: _GateEntry) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def _dispatch_front_barrier(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        front_kind: QueueKind,
+    ) -> bool:
+        if front_kind not in {QueueKind.BYPASS, QueueKind.COMMAND}:
+            return False
+        claimed_admissions = self._claim_front_events(gate, 1)
+        await self._dispatch_claim(
+            key,
+            gate,
+            claimed_admissions,
+            bypass_grace=True,
+            allow_upload_grace=False,
+        )
+        return True
+
+    async def _dispatch_normal_after_debounce(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        debounce_result: _DebounceWaitResult,
+    ) -> None:
+        front = gate.queue[0]
+        same_window_reservations = self._order_book.unsettled_owner_reservations_in_window(
+            key,
+            after_order=front.received_order,
+            before_order=debounce_result.before_order,
+            before_or_at_receipt_time=debounce_result.quiet_deadline,
+            buffered_in_flight_max_order=gate.buffered_in_flight_max_order,
+        )
+        if same_window_reservations:
+            await self._wait_for_reservations(gate, same_window_reservations)
+            return
+
+        bypass_grace = self._is_shutting_down() or gate.drain_all_requested
+        candidate_count = self._claimable_front_normal_run_length(
+            key,
+            gate,
+            coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
+            max_received_order=self._order_book.next_received_order,
+            max_receipt_time=debounce_result.quiet_deadline,
+        )
+        if candidate_count == 0:
+            return
+
+        claimed_admissions = self._claim_front_events(gate, candidate_count)
+        await self._dispatch_claim(
+            key,
+            gate,
+            claimed_admissions,
+            bypass_grace=bypass_grace,
+            allow_upload_grace=not bypass_grace and self._upload_grace_seconds() > 0,
+        )
+        if not gate.queue:
+            gate.drain_all_requested = False
+
+    async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
+        front = gate.queue[0]
+        await self._wait_until_front_claimable(key, gate, front_order=front.received_order)
+        if not gate.queue:
+            return
+
+        front = gate.queue[0]
+        if await self._dispatch_front_barrier(key, gate, self._queued_kind(front)):
+            return
+
+        debounce_result = await self._wait_for_debounce(
+            gate,
+            coalesce_normal_events=lambda key=key, entry=gate: self._should_coalesce_normal_events(key, entry),
+        )
+        if not gate.queue:
+            return
+        await self._dispatch_normal_after_debounce(key, gate, debounce_result)
+
+    async def _drain_gate_loop(self, key: CoalescingKey, gate: _GateEntry) -> None:
+        while True:
+            if not gate.queue:
+                self._remove_gate(key)
+                return
+            await self._drain_gate_iteration(key, gate)
+
+    def _finish_gate_drain(
+        self,
+        key: CoalescingKey,
+        *,
+        outcome: str,
+        drain_start: float,
+    ) -> None:
+        current_gate = self._gates.get(key)
+        if current_gate is not None:
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
+            if current_gate.drain_task is current_task:
+                current_gate.drain_task = None
+            if self._gate_work_count(current_gate) == 0:
+                self._remove_gate(key)
+                if not self._order_book.unsettled_owner_reservation_orders_after(key, after_order=0):
+                    self._in_flight_buffered_max_order.pop(key, None)
+            elif outcome in {"failed", "cancelled"} and not self._is_shutting_down():
+                self._ensure_drain_task(key, current_gate)
+                self._wake(current_gate)
+        logger.debug(
+            "coalescing_drain_finish",
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=key.requester_user_id,
+            outcome=outcome,
+            pending_count=self._gate_work_count(current_gate) if current_gate is not None else 0,
+            oldest_pending_age_ms=self._oldest_pending_age_ms(current_gate) if current_gate is not None else None,
+            duration_ms=elapsed_ms_since(drain_start),
+        )
+
+    async def _drain_gate(self, key: CoalescingKey, gate: _GateEntry) -> None:
         """Own debounce, grace, and dispatch for one coalescing key."""
         drain_start = time.monotonic()
         outcome = "finished"
@@ -1519,68 +1508,7 @@ class CoalescingGate:
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
         )
         try:
-            while True:
-                if not gate.queue:
-                    self._remove_gate(key)
-                    return
-
-                front = gate.queue[0]
-                await self._wait_until_front_claimable(key, gate, front_order=front.received_order)
-                if not gate.queue:
-                    continue
-                front = gate.queue[0]
-                front_kind = self._queued_kind(front)
-                if front_kind in {QueueKind.BYPASS, QueueKind.COMMAND}:
-                    claimed_admissions = self._claim_front_events(gate, 1)
-                    await self._dispatch_claim(
-                        key,
-                        gate,
-                        claimed_admissions,
-                        bypass_grace=True,
-                        allow_upload_grace=False,
-                    )
-                    continue
-
-                debounce_result = await self._wait_for_debounce(
-                    gate,
-                    coalesce_normal_events=lambda key=key, entry=gate: self._should_coalesce_normal_events(key, entry),
-                )
-                if not gate.queue:
-                    continue
-                front = gate.queue[0]
-                same_window_reservations = self._order_book.unsettled_owner_reservations_in_window(
-                    key,
-                    after_order=front.received_order,
-                    before_order=debounce_result.before_order,
-                    before_or_at_receipt_time=debounce_result.quiet_deadline,
-                    buffered_in_flight_max_order=gate.buffered_in_flight_max_order,
-                )
-                if same_window_reservations:
-                    await self._wait_for_reservations(gate, same_window_reservations)
-                    continue
-                claim_max_received_order = self._order_book.next_received_order
-                bypass_grace = self._is_shutting_down() or gate.drain_all_requested
-                use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
-                coalesce_normal_events = self._should_coalesce_normal_events(key, gate)
-                candidate_count = self._claimable_front_normal_run_length(
-                    key,
-                    gate,
-                    coalesce_normal_events=coalesce_normal_events,
-                    max_received_order=claim_max_received_order,
-                    max_receipt_time=debounce_result.quiet_deadline,
-                )
-                if candidate_count == 0:
-                    continue
-                claimed_admissions = self._claim_front_events(gate, candidate_count)
-                await self._dispatch_claim(
-                    key,
-                    gate,
-                    claimed_admissions,
-                    bypass_grace=bypass_grace,
-                    allow_upload_grace=use_upload_grace,
-                )
-                if not gate.queue:
-                    gate.drain_all_requested = False
+            await self._drain_gate_loop(key, gate)
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
@@ -1590,28 +1518,139 @@ class CoalescingGate:
                 drain_context.result.dispatch_failure_count += 1
             self._log_dispatch_failure(key, gate, error)
         finally:
-            current_gate = self._gates.get(key)
-            if current_gate is not None:
-                try:
-                    current_task = asyncio.current_task()
-                except RuntimeError:
-                    current_task = None
-                if current_gate.drain_task is current_task:
-                    current_gate.drain_task = None
-                if self._gate_work_count(current_gate) == 0:
-                    self._remove_gate(key)
-                    if not self._order_book.unsettled_owner_reservation_orders_after(key, after_order=0):
-                        self._in_flight_buffered_max_order.pop(key, None)
-                elif outcome in {"failed", "cancelled"} and not self._is_shutting_down():
-                    self._ensure_drain_task(key, current_gate)
-                    self._wake(current_gate)
-            logger.debug(
-                "coalescing_drain_finish",
-                room_id=key.room_id,
-                thread_id=key.thread_id,
-                requester_user_id=key.requester_user_id,
-                outcome=outcome,
-                pending_count=self._gate_work_count(current_gate) if current_gate is not None else 0,
-                oldest_pending_age_ms=self._oldest_pending_age_ms(current_gate) if current_gate is not None else None,
-                duration_ms=elapsed_ms_since(drain_start),
-            )
+            self._finish_gate_drain(key, outcome=outcome, drain_start=drain_start)
+
+
+@dataclass
+class _CoalescingDrainCoordinator:
+    """Own one drain_all run across reservations and active gate drains."""
+
+    gate: CoalescingGate
+    context: _DrainContext
+
+    def _prepare_gate(self, gate: _GateEntry) -> None:
+        gate.drain_context = self.context
+        gate.drain_all_requested = True
+        gate.deadline = time.monotonic()
+        gate.grace_deadline = None
+
+    def _cancel_non_in_flight_drain_tasks(self) -> list[asyncio.Task[None]]:
+        if not self.gate._is_bounded_drain(self.context):
+            return []
+        cancelled_tasks: list[asyncio.Task[None]] = []
+        for gate in self.gate._gates.values():
+            task = gate.drain_task
+            if task is None or task.done() or gate.phase is GatePhase.IN_FLIGHT:
+                continue
+            task.cancel()
+            cancelled_tasks.append(task)
+        return cancelled_tasks
+
+    def _active_drain_tasks(self) -> list[asyncio.Task[None]]:
+        return [
+            gate.drain_task
+            for gate in self.gate._gates.values()
+            if gate.drain_task is not None and not gate.drain_task.done()
+        ]
+
+    async def _abandon_queued_admission_for_bounded_shutdown(self, queued: _QueuedEvent) -> int:
+        if queued.ready_result is not None:
+            close_pending_event_metadata_once([queued.ready_result.pending_event])
+            return 1
+        if queued.ready_task is None:
+            return 0
+        if queued.ready_task.done():
+            result = await asyncio.gather(queued.ready_task, return_exceptions=True)
+            return close_ready_task_result_metadata(result[0])
+        queued.ready_task.cancel()
+        done, pending = await asyncio.wait({queued.ready_task}, timeout=self.context.ready_timeout_seconds)
+        if pending:
+            self.context.result.cancelled_unready_count += 1
+            queued.ready_task.add_done_callback(self.gate._close_late_ready_task_result)
+            return 0
+        self.context.result.cancelled_unready_count += 1
+        result = await asyncio.gather(*done, return_exceptions=True)
+        return close_ready_task_result_metadata(result[0])
+
+    async def _abandon_gate_work_for_bounded_shutdown(self) -> None:
+        if not self.gate._is_bounded_drain(self.context):
+            return
+        dropped_ready_count = 0
+        for gate in self.gate._gates.values():
+            if gate.drain_task is not None and not gate.drain_task.done():
+                gate.drain_task.cancel()
+                self.context.result.dispatch_cancelled_count += 1
+                gate.drain_task = None
+            admissions = [*gate.claimed_admissions, *gate.queue]
+            for queued in admissions:
+                dropped_ready_count += await self._abandon_queued_admission_for_bounded_shutdown(queued)
+            gate.claimed_admissions = []
+            gate.queue.clear()
+            gate.drain_all_requested = False
+        if dropped_ready_count:
+            self.context.result.dropped_ready_count += dropped_ready_count
+
+    async def _await_active_drain_tasks(self) -> tuple[bool, bool]:
+        """Await active drains; return (abandoned, still_pending)."""
+        tasks_to_await = self._active_drain_tasks()
+        if not tasks_to_await:
+            return False, False
+        if not self.gate._is_bounded_drain(self.context):
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+            return False, False
+        done, pending = await asyncio.wait(tasks_to_await, timeout=self.context.ready_timeout_seconds)
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        if not pending:
+            return False, False
+        if not any(
+            gate.drain_task in pending and gate.phase is GatePhase.IN_FLIGHT for gate in self.gate._gates.values()
+        ):
+            return False, True
+        await self._abandon_gate_work_for_bounded_shutdown()
+        return True, False
+
+    async def _drain_once(self) -> bool:
+        await self.gate._wait_for_order_reservations_for_drain(self.context)
+        for gate in list(self.gate._gates.values()):
+            self._prepare_gate(gate)
+
+        cancelled_tasks = [] if self.context.cancelled_initial_drain_tasks else self._cancel_non_in_flight_drain_tasks()
+        self.context.cancelled_initial_drain_tasks = True
+        if cancelled_tasks:
+            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+
+        for key, gate in list(self.gate._gates.items()):
+            self._prepare_gate(gate)
+            self.gate._ensure_drain_task(key, gate)
+            self.gate._wake(gate)
+
+        abandoned, active_pending = await self._await_active_drain_tasks()
+        if abandoned:
+            return True
+        if active_pending:
+            return False
+        return self.gate._order_book.all_settled()
+
+    def _clear_context(self) -> None:
+        for gate in self.gate._gates.values():
+            if gate.drain_context is self.context:
+                gate.drain_context = None
+        if self.gate._active_drain_context is self.context:
+            self.gate._active_drain_context = None
+
+    async def run(self) -> CoalescingDrainResult:
+        self.gate._active_drain_context = self.context
+        drain_completed = False
+        try:
+            while True:
+                if await self._drain_once():
+                    break
+            await self._abandon_gate_work_for_bounded_shutdown()
+            drain_completed = True
+            return self.context.result.freeze()
+        finally:
+            self._clear_context()
+            if drain_completed:
+                self.gate._gates.clear()
+                self.gate._in_flight_buffered_max_order.clear()
