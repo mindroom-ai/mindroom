@@ -3376,8 +3376,8 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_coalesced_room_plain_reply_target_uses_batch_key_not_reply_thread(tmp_path: Path) -> None:
-    """Coalesced handoff target must come from the batch key, not a preserved plain reply."""
+async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_thread(tmp_path: Path) -> None:
+    """Room-level handoff targets the prompt event, not a stale preserved plain reply."""
     bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
     room = _make_room()
     typed_reply = _reply_event(
@@ -3405,7 +3405,7 @@ async def test_coalesced_room_plain_reply_target_uses_batch_key_not_reply_thread
         await bot._turn_controller.handle_coalesced_batch(batch)
 
     assert len(dispatches) == 1
-    assert dispatches[0].target.resolved_thread_id is None
+    assert dispatches[0].target.resolved_thread_id == "$typed"
     assert dispatches[0].context.thread_id is None
 
 

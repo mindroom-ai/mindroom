@@ -495,6 +495,7 @@ class CoalescingGate:
         after_order: int,
         before_order: int | None,
         before_or_at_receipt_time: float,
+        buffered_in_flight_max_order: int | None = None,
     ) -> list[IngressOrderReservation]:
         return [
             reservation
@@ -503,7 +504,13 @@ class CoalescingGate:
             and self._reservation_matches_key(reservation, key)
             and reservation.received_order > after_order
             and (before_order is None or reservation.received_order < before_order)
-            and reservation.receipt_time <= before_or_at_receipt_time
+            and (
+                reservation.receipt_time <= before_or_at_receipt_time
+                or (
+                    buffered_in_flight_max_order is not None
+                    and reservation.received_order <= buffered_in_flight_max_order
+                )
+            )
         ]
 
     def _unsettled_owner_reservation_orders_after(
@@ -1527,6 +1534,7 @@ class CoalescingGate:
             after_order=front.received_order,
             before_order=grace_result.before_order,
             before_or_at_receipt_time=grace_result.quiet_deadline,
+            buffered_in_flight_max_order=gate.buffered_in_flight_max_order,
         )
         if same_window_reservations:
             await self._wait_for_reservations(gate, same_window_reservations)
@@ -1676,6 +1684,7 @@ class CoalescingGate:
                     after_order=front.received_order,
                     before_order=debounce_result.before_order,
                     before_or_at_receipt_time=debounce_result.quiet_deadline,
+                    buffered_in_flight_max_order=gate.buffered_in_flight_max_order,
                 )
                 if same_window_reservations:
                     await self._wait_for_reservations(gate, same_window_reservations)

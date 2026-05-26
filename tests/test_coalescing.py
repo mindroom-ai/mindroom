@@ -1647,3 +1647,56 @@ async def test_root_in_flight_buffers_late_reservation_followups_for_child_key()
     await gate.drain_all()
 
     assert batches == [["$root:localhost"], ["$follow1:localhost", "$follow2:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_in_flight_buffered_reservations_ignore_debounce_gap_after_partial_admit() -> None:
+    """Buffered reservations should still batch when only the first one admits before debounce expires."""
+    first_dispatch_started = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    batches: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch.source_event_ids)
+        if batch.source_event_ids == ["$root:localhost"]:
+            first_dispatch_started.set()
+            await release_first_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    root_key = CoalescingKey("!room:localhost", None, "@user:localhost")
+    child_key = CoalescingKey("!room:localhost", "$root:localhost", "@user:localhost")
+
+    await _admit_ready(gate, root_key, _pending(_text_event("$root:localhost", "root", 1_000_000)))
+    await _wait_for(first_dispatch_started.is_set)
+    first_reservation = gate.reserve_order(room_id=root_key.room_id, requester_user_id=root_key.requester_user_id)
+    await asyncio.sleep(0.03)
+    second_reservation = gate.reserve_order(room_id=root_key.room_id, requester_user_id=root_key.requester_user_id)
+
+    release_first_dispatch.set()
+    await _wait_for(lambda: len(batches) == 1)
+    await gate.admit(
+        child_key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$follow1:localhost", "follow 1", 1_000_001)),
+        ),
+        order_reservation=first_reservation,
+    )
+    await asyncio.sleep(0.03)
+
+    assert batches == [["$root:localhost"]]
+
+    await gate.admit(
+        child_key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$follow2:localhost", "follow 2", 1_000_002)),
+        ),
+        order_reservation=second_reservation,
+    )
+    await gate.drain_all()
+
+    assert batches == [["$root:localhost"], ["$follow1:localhost", "$follow2:localhost"]]

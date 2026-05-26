@@ -1293,7 +1293,7 @@ class TurnController:
                 room_id=room.room_id,
                 thread_id=coalesced_thread_id,
                 reply_to_event_id=event.event_id,
-                event_source=event.source,
+                event_source=context_event.source,
             )
         else:
             target = (
