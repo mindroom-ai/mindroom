@@ -9,7 +9,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
@@ -327,6 +336,7 @@ class Config(BaseModel):
     """Complete configuration from YAML."""
 
     model_config = ConfigDict(extra="forbid")
+    _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -1230,9 +1240,16 @@ class Config(BaseModel):
             validate_authored_tool_entry_overrides,
         )
 
+        validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
+        if validation_info is not None and validation_info.unavailable_due_to_plugin_load_error:
+            logger.warning(
+                "Plugin tool unavailable because plugin failed to load",
+                config_path=config_path_prefix,
+                tool_name=entry.name,
+            )
 
         validate_authored_tool_entry_overrides(
             entry.name,
@@ -1256,6 +1273,11 @@ class Config(BaseModel):
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
+        self._unavailable_plugin_tool_names = {
+            tool_name
+            for tool_name, validation_info in tool_validation_snapshot.items()
+            if validation_info.unavailable_due_to_plugin_load_error
+        }
         self._validate_authored_tool_entries_with_snapshot(
             tool_validation_snapshot=tool_validation_snapshot,
         )
@@ -1289,7 +1311,9 @@ class Config(BaseModel):
                     )
                     raise ValueError(msg)
                 validation_info = tool_validation_snapshot.get(entry.name)
-                if validation_info is None or not validation_info.runtime_loadable:
+                if validation_info is None or (
+                    not validation_info.runtime_loadable and not validation_info.unavailable_due_to_plugin_load_error
+                ):
                     msg = (
                         f"{config_path_prefix}.{entry.name}: Toolkit tools must resolve through the normal "
                         f"tool registry; '{entry.name}' is not supported."
@@ -1313,6 +1337,7 @@ class Config(BaseModel):
                 tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
             )
             for tool_name in self.expand_tool_names(toolkit.tool_names)
+            if tool_name not in self._unavailable_plugin_tool_names
         ]
 
     def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
@@ -1338,6 +1363,7 @@ class Config(BaseModel):
                 tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
             )
             for tool_name in self.expand_tool_names(explicit_names)
+            if tool_name not in self._unavailable_plugin_tool_names
         ]
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
