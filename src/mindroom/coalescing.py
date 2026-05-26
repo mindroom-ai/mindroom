@@ -16,7 +16,12 @@ from .coalescing_batch import (
     CoalescingKey,
     PendingEvent,
     build_coalesced_batch,
-    close_pending_event_metadata,
+)
+from .coalescing_cleanup import (
+    ClaimedSegmentOwner,
+    ReadyPendingEvent,
+    close_pending_event_metadata_once,
+    close_ready_task_result_metadata,
 )
 from .commands.parsing import command_parser
 from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
@@ -128,13 +133,6 @@ class IngressOrderReservation:
 
 
 @dataclass(frozen=True)
-class ReadyPendingEvent:
-    """Resolved event returned by async ingress normalization."""
-
-    pending_event: PendingEvent
-
-
-@dataclass(frozen=True)
 class CoalescingDrainResult:
     """Outcome from flushing coalescing work during shutdown."""
 
@@ -185,21 +183,6 @@ class _DrainContext:
     cancelled_initial_drain_tasks: bool = False
 
 
-def _close_pending_event_metadata_once(pending_events: list[PendingEvent]) -> None:
-    """Close pending-event metadata and clear it so later cleanup is idempotent."""
-    close_pending_event_metadata(pending_events)
-    for pending_event in pending_events:
-        pending_event.dispatch_metadata = ()
-
-
-def close_ready_task_result_metadata(result: object) -> int:
-    """Close dispatch metadata for a ready-task result and report dropped ready work."""
-    if isinstance(result, ReadyPendingEvent):
-        _close_pending_event_metadata_once([result.pending_event])
-        return 1
-    return 0
-
-
 @dataclass(frozen=True)
 class _ReadyAdmission:
     """One receive-time admission resolved to a dispatchable pending event."""
@@ -214,23 +197,6 @@ class _ReadyAdmission:
     @property
     def pending_event(self) -> PendingEvent:
         return self.ready_event.pending_event
-
-
-@dataclass
-class _ClaimedSegmentOwner:
-    """Own metadata closure for one resolved dispatch segment."""
-
-    pending_events: list[PendingEvent]
-    metadata_closed: bool = False
-
-    def event_ids(self) -> set[str]:
-        return {pending_event.event.event_id for pending_event in self.pending_events}
-
-    def close_metadata_once(self) -> None:
-        if self.metadata_closed:
-            return
-        _close_pending_event_metadata_once(self.pending_events)
-        self.metadata_closed = True
 
 
 @dataclass
@@ -971,7 +937,7 @@ class CoalescingGate:
     ) -> int:
         """Cancel or close one queued admission before bounded shutdown discards it."""
         if queued.ready_result is not None:
-            _close_pending_event_metadata_once([queued.ready_result.pending_event])
+            close_pending_event_metadata_once([queued.ready_result.pending_event])
             return 1
         if queued.ready_task is None:
             return 0
@@ -1594,7 +1560,7 @@ class CoalescingGate:
         self,
         key: CoalescingKey,
         gate: _GateEntry,
-        segment_owner: _ClaimedSegmentOwner,
+        segment_owner: ClaimedSegmentOwner,
         *,
         bypass_grace: bool,
     ) -> None:
@@ -1664,7 +1630,7 @@ class CoalescingGate:
         """Resolve and dispatch one claimed admission set with one cleanup owner."""
         ready_admissions: list[_ReadyAdmission] = []
         closed_or_transferred: set[str] = set()
-        unresolved_segment_owners: list[_ClaimedSegmentOwner] = []
+        unresolved_segment_owners: list[ClaimedSegmentOwner] = []
         try:
             try:
                 ready_admissions = await self._resolve_claimed_admissions(gate, admissions)
@@ -1699,7 +1665,7 @@ class CoalescingGate:
                 await self._dispatch_after_upload_grace(key, gate, grace_result)
                 return
             for segment_key, pending_events in segments:
-                segment_owner = _ClaimedSegmentOwner(pending_events=list(pending_events))
+                segment_owner = ClaimedSegmentOwner(pending_events=list(pending_events))
                 unresolved_segment_owners.append(segment_owner)
                 await self._dispatch_claimed_events(
                     segment_key,
@@ -1722,7 +1688,7 @@ class CoalescingGate:
                 if ready_admission.pending_event.event.event_id not in closed_or_transferred
             ]
             closed_ready_count += len(unresolved_events)
-            _close_pending_event_metadata_once(unresolved_events)
+            close_pending_event_metadata_once(unresolved_events)
             if closed_ready_count and (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dropped_ready_count += closed_ready_count
             raise
