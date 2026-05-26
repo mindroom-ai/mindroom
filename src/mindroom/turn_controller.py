@@ -2263,6 +2263,11 @@ class TurnController:
                 if payload_metadata is not None and payload_metadata.attachment_ids is not None
                 else parse_attachment_ids_from_event_source(event.source)
             )
+            trusted_current_attachment_ids = (
+                list(payload_metadata.attachment_ids)
+                if payload_metadata is not None and payload_metadata.attachment_ids is not None
+                else []
+            )
             message_extra_content: dict[str, Any] = {}
             if message_attachment_ids:
                 message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
@@ -2395,6 +2400,7 @@ class TurnController:
                             message_attachment_ids,
                             media_attachment_ids,
                         ),
+                        trusted_current_attachment_ids=trusted_current_attachment_ids,
                         thread_id=context.thread_id,
                         media_thread_id=effective_thread_id,
                         thread_history=context.thread_history,

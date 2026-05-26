@@ -409,6 +409,20 @@ class CoalescingGate:
             and reservation.received_order < before_order
         ]
 
+    def _older_owner_claimed_gates(
+        self,
+        key: CoalescingKey,
+        *,
+        before_order: int,
+    ) -> list[_GateEntry]:
+        return [
+            gate
+            for gate_key, gate in self._gates.items()
+            if gate_key != key
+            and self._same_owner(gate_key, key)
+            and any(claimed.received_order < before_order for claimed in gate.claimed_admissions)
+        ]
+
     def _has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:
         return any(
             not reservation.released
@@ -424,10 +438,20 @@ class CoalescingGate:
         *,
         front_order: int,
     ) -> None:
-        await self._wait_for_reservations(
-            gate,
-            self._older_owner_reservations(key, before_order=front_order),
-        )
+        while True:
+            await self._wait_for_reservations(
+                gate,
+                self._older_owner_reservations(key, before_order=front_order),
+            )
+            older_gates = self._older_owner_claimed_gates(key, before_order=front_order)
+            if not older_gates:
+                return
+            wake_generation = gate.wake_generation
+            gate.wake_event.clear()
+            older_gates = self._older_owner_claimed_gates(key, before_order=front_order)
+            if not older_gates or gate.wake_generation != wake_generation:
+                continue
+            await gate.wake_event.wait()
 
     async def _wait_for_reservations(
         self,

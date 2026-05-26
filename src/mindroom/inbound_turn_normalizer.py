@@ -108,6 +108,7 @@ class DispatchPayloadWithAttachmentsRequest:
     media_thread_id: str | None
     thread_history: Sequence[ResolvedVisibleMessage]
     fallback_images: list[Image] | None = None
+    trusted_current_attachment_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -367,20 +368,40 @@ class InboundTurnNormalizer:
             thread_id=request.media_thread_id,
             thread_history=request.thread_history,
         )
+        trusted_current_attachment_ids = merge_attachment_ids(request.trusted_current_attachment_ids)
         attachment_ids = merge_attachment_ids(
             request.current_attachment_ids,
             thread_attachment_ids,
             history_attachment_ids,
             history_media_attachment_ids,
         )
+        scoped_attachment_ids = [
+            attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
+        ]
         resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
             resolve_attachment_media(
                 self.deps.storage_path,
-                attachment_ids,
+                scoped_attachment_ids,
                 room_id=request.room_id,
                 thread_id=request.media_thread_id,
             )
         )
+        if trusted_current_attachment_ids:
+            (
+                trusted_resolved_attachment_ids,
+                trusted_audio,
+                trusted_images,
+                trusted_files,
+                trusted_videos,
+            ) = resolve_attachment_media(
+                self.deps.storage_path,
+                trusted_current_attachment_ids,
+            )
+            resolved_attachment_ids = merge_attachment_ids(trusted_resolved_attachment_ids, resolved_attachment_ids)
+            attachment_audio = [*trusted_audio, *attachment_audio]
+            attachment_images = [*trusted_images, *attachment_images]
+            attachment_files = [*trusted_files, *attachment_files]
+            attachment_videos = [*trusted_videos, *attachment_videos]
         if request.fallback_images:
             attachment_images = (
                 [*attachment_images, *request.fallback_images] if attachment_images else list(request.fallback_images)

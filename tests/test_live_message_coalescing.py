@@ -12,11 +12,10 @@ import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom.attachments import _attachment_id_for_event, load_attachment
+from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
     CoalescingGate,
-    GatePhase,
     ReadyPendingEvent,
     is_coalescing_exempt_source_kind,
 )
@@ -2901,8 +2900,8 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_first_turn_thread_resolution_uses_canonical_in_flight_key(tmp_path: Path) -> None:
-    """A first-turn root should use the same canonical key as its threaded follow-ups."""
+async def test_thread_followups_wait_behind_first_turn_root_in_flight(tmp_path: Path) -> None:
+    """Threaded follow-ups should not overtake their room-root parent while it dispatches."""
     bot = _make_bot(tmp_path, debounce_ms=0)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first")
@@ -2941,10 +2940,6 @@ async def test_first_turn_thread_resolution_uses_canonical_in_flight_key(tmp_pat
         )
         await entered_dispatch.wait()
 
-        canonical_key = CoalescingKey("!room:localhost", "$m1", "@user:localhost")
-        assert set(bot._coalescing_gate._gates) == {canonical_key}
-        assert bot._coalescing_gate._gates[canonical_key].phase is GatePhase.IN_FLIGHT
-
         for followup in followups:
             await _enqueue_for_dispatch(
                 bot,
@@ -2954,9 +2949,8 @@ async def test_first_turn_thread_resolution_uses_canonical_in_flight_key(tmp_pat
                 requester_user_id="@user:localhost",
             )
 
-        gate = bot._coalescing_gate._gates[canonical_key]
-        assert gate.phase is GatePhase.IN_FLIGHT
-        assert [queued.pending_event.event.event_id for queued in gate.queue] == ["$m2", "$m3"]
+        await asyncio.sleep(0.01)
+        assert calls == [["$m1"]]
 
         release_first_dispatch.set()
         await first_task
@@ -3569,6 +3563,41 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
     assert record is not None
     assert record.source_event_id == "$img-history"
     assert record.thread_id == "$thread"
+
+
+@pytest.mark.asyncio
+async def test_trusted_current_attachment_ids_bypass_final_thread_filter(tmp_path: Path) -> None:
+    """Current-turn trusted attachments should survive when final dispatch root differs."""
+    bot = _make_bot(tmp_path)
+    media_path = tmp_path / "voice.ogg"
+    media_path.write_bytes(b"voice-bytes")
+    attachment = register_local_attachment(
+        tmp_path,
+        media_path,
+        kind="audio",
+        attachment_id="voice-attachment",
+        mime_type="audio/ogg",
+        room_id="!room:localhost",
+        thread_id="$voice-root",
+        source_event_id="$voice-root",
+        sender="@user:localhost",
+    )
+    assert attachment is not None
+
+    payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+        DispatchPayloadWithAttachmentsRequest(
+            room_id="!room:localhost",
+            prompt="voice plus later text",
+            current_attachment_ids=["voice-attachment"],
+            trusted_current_attachment_ids=["voice-attachment"],
+            thread_id="$typed-root",
+            media_thread_id="$typed-root",
+            thread_history=[],
+        ),
+    )
+
+    assert payload.attachment_ids == ["voice-attachment"]
+    assert len(payload.media.audio) == 1
 
 
 @pytest.mark.asyncio
@@ -6149,6 +6178,7 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
     assert envelopes[0].source_kind == "voice"
     assert envelopes[0].attachment_ids == ("voice-attachment",)
     assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
+    assert payload_requests[0].trusted_current_attachment_ids == ["voice-attachment"]
     assert captured_extra_content == [
         {
             ATTACHMENT_IDS_KEY: ["voice-attachment"],
@@ -6156,6 +6186,49 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
             VOICE_RAW_AUDIO_FALLBACK_KEY: True,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_coalesced_root_voice_attachment_is_trusted_when_later_text_is_primary(tmp_path: Path) -> None:
+    """Root voice audio should stay in the current payload when later root text becomes primary."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-root",
+        body="voice transcript",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "voice transcript",
+                ATTACHMENT_IDS_KEY: ["voice-attachment"],
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            },
+        },
+        server_timestamp=1000,
+        source_kind_override="voice",
+    )
+    text_event = _text_event(event_id="$typed-root", body="typed follow-up", server_timestamp=1001)
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (
+                voice_event,
+                "voice",
+                None,
+                {"coalescing_thread_id": None, "trust_internal_payload_metadata": True},
+            ),
+            (text_event, "message", None, {"coalescing_thread_id": None}),
+        ],
+    )
+
+    assert len(envelopes) == 1
+    assert envelopes[0].attachment_ids == ("voice-attachment",)
+    assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
+    assert payload_requests[0].trusted_current_attachment_ids == ["voice-attachment"]
 
 
 @pytest.mark.asyncio
