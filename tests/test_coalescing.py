@@ -1066,19 +1066,16 @@ async def test_drain_all_waits_for_order_reservation_to_admit(monkeypatch: pytes
         receipt_time=1_000.0,
     )
     wait_entered = asyncio.Event()
-    original_wait_for_order_reservations = gate._wait_for_order_reservations_for_drain
 
-    async def wait_for_order_reservations_for_drain(drain_context: object) -> None:
+    original_settled_wait = reservation.settled.wait
+
+    async def wait_for_reservation_settled() -> bool:
         wait_entered.set()
-        await original_wait_for_order_reservations(drain_context)
+        return await original_settled_wait()
 
-    monkeypatch.setattr(
-        gate,
-        "_wait_for_order_reservations_for_drain",
-        wait_for_order_reservations_for_drain,
-    )
+    monkeypatch.setattr(reservation.settled, "wait", wait_for_reservation_settled)
 
-    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=5.0))
+    drain_task = asyncio.create_task(gate.drain_all())
     await asyncio.wait_for(wait_entered.wait(), timeout=5.0)
     assert drain_task.done() is False
 
