@@ -2461,6 +2461,16 @@ class TurnController:
                 HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
             )
             return
+        if is_audio_message_event(prechecked_event.event) and not self.deps.runtime.config.voice.enabled:
+            self.deps.logger.debug(
+                "Ignoring audio event because voice processing is disabled",
+                event_id=prechecked_event.event.event_id,
+                sender=prechecked_event.event.sender,
+            )
+            self._mark_source_events_responded(
+                HandledTurnState.from_source_event_id(prechecked_event.event.event_id),
+            )
+            return
         reservation_owner = self._reserve_prompt_ingress_order(
             room,
             prechecked_event.requester_user_id,
@@ -2594,7 +2604,7 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        admission_key = CoalescingKey(room.room_id, voice_target.resolved_thread_id, requester_user_id)
+        admission_key = CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
         return voice_target, admission_key
 
     async def _ready_voice_event(
