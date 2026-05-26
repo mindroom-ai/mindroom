@@ -655,12 +655,12 @@ class TurnController:
         )
         return True
 
-    def _should_bypass_coalescing_for_active_thread_follow_up(
+    def _should_apply_active_thread_follow_up_policy(
         self,
         *,
         envelope: MessageEnvelope,
     ) -> bool:
-        """Return whether one human thread follow-up should skip in-flight coalescing."""
+        """Return whether one human thread follow-up should carry active-response policy."""
         if envelope.target.resolved_thread_id is None:
             return False
         if not envelope.origin.may_answer_interactive_prompt:
@@ -712,17 +712,11 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
-        if dispatch_timing is not None:
-            dispatch_timing.note(
-                coalescing_bypassed=True,
-                coalescing_bypass_reason="active_thread_follow_up",
-            )
         if queued_notice_reservation is None:
             queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                 target=target,
@@ -763,7 +757,6 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
@@ -776,7 +769,7 @@ class TurnController:
             event_source=prepared_event.source,
         )
         canonical_thread_id = target.resolved_thread_id
-        if self._should_bypass_coalescing_for_active_thread_follow_up(
+        if self._should_apply_active_thread_follow_up_policy(
             envelope=envelope,
         ):
             await self._enqueue_active_thread_follow_up(
@@ -786,7 +779,6 @@ class TurnController:
                 envelope=envelope,
                 coalescing_thread_id=canonical_thread_id,
                 requester_user_id=requester_user_id,
-                dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
                 queued_notice_reservation=queued_notice_reservation,
@@ -825,7 +817,6 @@ class TurnController:
         event: MediaDispatchEvent,
         coalescing_thread_id: str | None,
         requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
     ) -> _IngressAdmissionOutcome:
         """Queue one media event with the same active-follow-up policy as text."""
@@ -844,7 +835,7 @@ class TurnController:
             target=target,
             source_kind=source_kind,
         )
-        if self._should_bypass_coalescing_for_active_thread_follow_up(
+        if self._should_apply_active_thread_follow_up_policy(
             envelope=envelope,
         ):
             await self._enqueue_active_thread_follow_up(
@@ -854,7 +845,6 @@ class TurnController:
                 envelope=envelope,
                 coalescing_thread_id=canonical_thread_id,
                 requester_user_id=requester_user_id,
-                dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
             )
             return _IngressAdmissionOutcome.ADMITTED
@@ -989,7 +979,6 @@ class TurnController:
         prepared_event: PreparedTextEvent,
         dispatch_event: TextDispatchEvent,
         requester_user_id: str,
-        dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
         coalescing_thread_id: str | None,
     ) -> _IngressAdmissionOutcome:
@@ -1051,7 +1040,6 @@ class TurnController:
             envelope=envelope,
             coalescing_thread_id=canonical_thread_id,
             requester_user_id=requester_user_id,
-            dispatch_timing=dispatch_timing,
             reservation_owner=reservation_owner,
         )
 
@@ -2087,7 +2075,6 @@ class TurnController:
                 prepared_event=prepared_event,
                 dispatch_event=prechecked_event.event,
                 requester_user_id=prechecked_event.requester_user_id,
-                dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
                 coalescing_thread_id=ingress_thread_id,
             )
@@ -2455,7 +2442,6 @@ class TurnController:
                 event=prechecked_event.event,
                 coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=prechecked_event.requester_user_id,
-                dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
             )
         except IngressAdmissionClosedError:
@@ -2865,7 +2851,6 @@ class TurnController:
             prepared_event=prepared_text_event,
             dispatch_event=prepared_text_event,
             requester_user_id=prechecked_event.requester_user_id,
-            dispatch_timing=dispatch_timing,
             reservation_owner=reservation_owner,
             coalescing_thread_id=coalescing_thread_id,
         )

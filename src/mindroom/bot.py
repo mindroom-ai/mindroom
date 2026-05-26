@@ -1404,9 +1404,15 @@ class AgentBot:
             await self._cancel_deferred_overdue_task_drain()
         background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
-        if background_tasks_completed and drain_result.completed and self._sync_trust_state is SyncTrustState.CERTIFIED:
+        post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        if (
+            background_tasks_completed
+            and drain_result.completed
+            and post_drain_background_tasks_completed
+            and self._sync_trust_state is SyncTrustState.CERTIFIED
+        ):
             self._save_sync_checkpoint(self._sync_checkpoint)
-        elif not background_tasks_completed or not drain_result.completed:
+        elif not background_tasks_completed or not drain_result.completed or not post_drain_background_tasks_completed:
             self._sync_trust_state = SyncTrustState.UNCERTAIN
             self._sync_checkpoint = None
             self._clear_saved_sync_token()
@@ -1414,6 +1420,7 @@ class AgentBot:
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
                 agent_name=self.agent_name,
                 background_tasks_completed=background_tasks_completed,
+                post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,
                 failed_ready_count=drain_result.failed_ready_count,

@@ -2089,7 +2089,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
-                    dispatch_timing=None,
                     reservation_owner=reservation_owner,
                 )
         finally:
@@ -2208,7 +2207,7 @@ async def test_handed_off_reservation_is_cancelled_when_lock_wait_is_cancelled(t
 
 
 def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> None:
-    """A reserved active follow-up mixed into a multi-event batch should fail and clear."""
+    """Batch validation should not own cleanup for a reserved active follow-up."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2222,6 +2221,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
     lifecycle = coordinator._lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     queued_signal.begin_response_turn()
+    reservation = None
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
@@ -2243,7 +2243,10 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
                     ),
                 ],
             )
+        assert queued_signal.is_set()
     finally:
+        if reservation is not None:
+            reservation.cancel()
         queued_signal.finish_response_turn()
 
     assert not queued_signal.is_set()

@@ -1239,7 +1239,6 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
             prepared_event=echo_event,
             dispatch_event=echo_event,
             requester_user_id="@user:example.com",
-            dispatch_timing=None,
             reservation_owner=reservation_owner,
             coalescing_thread_id="$thread_root",
         )
@@ -1280,7 +1279,6 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
             prepared_event=forged_event,
             dispatch_event=forged_event,
             requester_user_id="@user:example.com",
-            dispatch_timing=None,
             reservation_owner=reservation_owner,
             coalescing_thread_id="$thread_root",
         )

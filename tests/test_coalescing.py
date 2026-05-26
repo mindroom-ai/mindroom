@@ -10,10 +10,16 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.coalescing import CoalescingGate, GatePhase, IngressAdmissionClosedError, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent
+from mindroom.coalescing import (
+    CoalescingGate,
+    GatePhase,
+    IngressAdmissionClosedError,
+    ReadyPendingEvent,
+    is_coalescing_exempt_source_kind,
+)
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent, build_coalesced_batch
 from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_source import IMAGE_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, IMAGE_SOURCE_KIND, VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -347,6 +353,34 @@ async def test_command_barrier_does_not_widen_receive_time_debounce_window() -> 
     await gate.drain_all()
 
 
+def test_active_follow_up_source_kind_is_not_coalescing_exempt() -> None:
+    """Active-follow-up is dispatch policy, not a source-kind bypass."""
+    event = _text_event("$active:localhost", "follow-up", 1_000_000)
+
+    assert not is_coalescing_exempt_source_kind(event, ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND)
+
+
+def test_batch_construction_does_not_close_mixed_solo_metadata() -> None:
+    """Batch construction must be pure; claimed segment owner owns cleanup."""
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    solo = _pending(_text_event("$solo:localhost", "solo", 1_000_000))
+    solo.dispatch_metadata = (
+        PendingDispatchMetadata(kind="solo", payload=object(), close=close, requires_solo_batch=True),
+    )
+    normal = _pending(_text_event("$normal:localhost", "normal", 1_000_001))
+
+    with pytest.raises(ValueError, match="requires solo batches"):
+        build_coalesced_batch(key, [solo, normal])
+
+    assert close_count == 0
+
+
 @pytest.mark.asyncio
 async def test_room_level_messages_do_not_coalesce() -> None:
     """Independent room-level messages must stay as separate model turns."""
@@ -461,6 +495,88 @@ async def test_upload_grace_waits_for_same_window_unresolved_media_reservation()
     await gate.drain_all()
 
     assert [batch.source_event_ids for batch in batches] == [["$text:localhost", "$image:localhost"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("barrier_kind", ["command", "bypass"])
+async def test_upload_grace_barrier_does_not_wait_for_later_unresolved_reservation(barrier_kind: str) -> None:
+    """A command/bypass after upload-grace text must not wait for later unresolved ingress."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.01,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
+    gate_entry = gate._gates[key]
+    await _wait_for(lambda: gate_entry.phase is GatePhase.GRACE)
+
+    if barrier_kind == "command":
+        barrier = _pending(_text_event("$barrier:localhost", "!help", 1_000_001))
+    else:
+        barrier = _pending(_text_event("$barrier:localhost", "solo", 1_000_001))
+        barrier.dispatch_metadata = (
+            PendingDispatchMetadata(kind="solo", payload=object(), close=lambda: None, requires_solo_batch=True),
+        )
+    await _admit_ready(gate, key, barrier)
+    later_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+
+    await _wait_for(
+        lambda: [batch.source_event_ids for batch in batches] == [["$text:localhost"], ["$barrier:localhost"]],
+    )
+
+    later_reservation.release()
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_unresolved_solo_ready_event_dispatches_solo_without_metadata_close() -> None:
+    """A ready task may reveal solo metadata after claim; split it before batch construction."""
+    batches: list[CoalescedBatch] = []
+    release_ready = asyncio.Event()
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    solo = _pending(_text_event("$solo:localhost", "solo", 1_000_000))
+    solo.dispatch_metadata = (
+        PendingDispatchMetadata(kind="solo", payload=object(), close=close, requires_solo_batch=True),
+    )
+
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(_ready_after(release_ready, solo)),
+        source_event_id="$solo:localhost",
+        source_kind="message",
+    )
+    await _admit_ready(gate, key, _pending(_text_event("$normal:localhost", "normal", 1_000_001)))
+    release_ready.set()
+
+    await _wait_for(
+        lambda: [batch.source_event_ids for batch in batches] == [["$solo:localhost"], ["$normal:localhost"]],
+    )
+
+    assert close_count == 0
+    assert batches[0].dispatch_metadata == solo.dispatch_metadata
 
 
 @pytest.mark.asyncio

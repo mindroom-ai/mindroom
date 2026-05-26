@@ -21,7 +21,6 @@ from .coalescing_batch import (
 from .commands.parsing import command_parser
 from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -56,7 +55,6 @@ _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
-        ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
@@ -265,6 +263,7 @@ class _UploadGraceWaitResult:
 
     candidate_count: int
     quiet_deadline: float
+    before_order: int | None = None
 
 
 def _effective_source_kind(
@@ -312,6 +311,14 @@ def _pending_has_room_scope_source(pending_events: list[PendingEvent]) -> bool:
         pending_event.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS or is_voice_event(pending_event.event)
         for pending_event in pending_events
     )
+
+
+def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
+    return any(item.requires_solo_batch for item in pending_event.dispatch_metadata)
+
+
+def _pending_events_require_solo_batch(pending_events: list[PendingEvent]) -> bool:
+    return any(_pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
 
 
 class CoalescingGate:
@@ -480,7 +487,7 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
-        if any(item.requires_solo_batch for item in pending_event.dispatch_metadata):
+        if _pending_event_requires_solo_batch(pending_event):
             return _QueueKind.BYPASS
         if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
             return _QueueKind.BYPASS
@@ -671,6 +678,12 @@ class CoalescingGate:
     @staticmethod
     def _has_item_after_candidate(gate: _GateEntry, candidate_count: int) -> bool:
         return candidate_count < len(gate.queue)
+
+    @staticmethod
+    def _first_item_after_candidate_order(gate: _GateEntry, candidate_count: int) -> int | None:
+        if candidate_count < len(gate.queue):
+            return gate.queue[candidate_count].received_order
+        return None
 
     def _enqueue_path(self, kind: _QueueKind) -> str:
         if kind is _QueueKind.BYPASS:
@@ -1023,7 +1036,11 @@ class CoalescingGate:
         gate.deadline = time.monotonic() + min(grace_seconds, self._upload_grace_hard_cap_seconds())
         candidate_count = self._extend_candidate_with_grace_media(gate, candidate_count)
         if self._has_item_after_candidate(gate, candidate_count):
-            return _UploadGraceWaitResult(candidate_count=candidate_count, quiet_deadline=gate.deadline)
+            return _UploadGraceWaitResult(
+                candidate_count=candidate_count,
+                quiet_deadline=gate.deadline,
+                before_order=self._first_item_after_candidate_order(gate, candidate_count),
+            )
         grace_start = time.monotonic()
         emit_elapsed_timing(
             "coalescing_gate.flush",
@@ -1043,10 +1060,18 @@ class CoalescingGate:
                 or self._has_item_after_candidate(gate, candidate_count)
                 or not woke
             ):
-                return _UploadGraceWaitResult(candidate_count=candidate_count, quiet_deadline=deadline)
+                return _UploadGraceWaitResult(
+                    candidate_count=candidate_count,
+                    quiet_deadline=deadline,
+                    before_order=self._first_item_after_candidate_order(gate, candidate_count),
+                )
             remaining_seconds = max((gate.grace_deadline or time.monotonic()) - time.monotonic(), 0.0)
             if remaining_seconds <= 0:
-                return _UploadGraceWaitResult(candidate_count=candidate_count, quiet_deadline=deadline)
+                return _UploadGraceWaitResult(
+                    candidate_count=candidate_count,
+                    quiet_deadline=deadline,
+                    before_order=self._first_item_after_candidate_order(gate, candidate_count),
+                )
             gate.deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
 
     def _close_late_ready_task_result(self, task: asyncio.Task[ReadyPendingEvent | None]) -> None:
@@ -1223,14 +1248,19 @@ class CoalescingGate:
         segments: list[tuple[CoalescingKey, list[PendingEvent]]] = []
         for index, ready_admission in enumerate(ready_admissions):
             key = self._key_for_ready_admission(ready_admissions, index)
-            if segments and self._can_merge_room_scope_segment(
+            pending_event = ready_admission.pending_event
+            if _pending_event_requires_solo_batch(pending_event) or (
+                segments and _pending_events_require_solo_batch(segments[-1][1])
+            ):
+                segments.append((key, [pending_event]))
+            elif segments and self._can_merge_room_scope_segment(
                 segments[-1][0],
                 key,
                 room_scope_batching_allowed=room_scope_batching_allowed,
             ):
-                segments[-1][1].append(ready_admission.pending_event)
+                segments[-1][1].append(pending_event)
             else:
-                segments.append((key, [ready_admission.pending_event]))
+                segments.append((key, [pending_event]))
         return segments
 
     @staticmethod
@@ -1352,7 +1382,7 @@ class CoalescingGate:
         same_window_reservations = self._unsettled_owner_reservations_in_window(
             key,
             after_order=front.received_order,
-            before_order=None,
+            before_order=grace_result.before_order,
             before_or_at_receipt_time=grace_result.quiet_deadline,
         )
         if same_window_reservations:

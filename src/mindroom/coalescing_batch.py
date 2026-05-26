@@ -154,8 +154,6 @@ def _batch_dispatch_metadata(
         return ()
     if len(ordered_pending_events) == 1 or not any(item.requires_solo_batch for item in metadata):
         return metadata
-    for item in metadata:
-        item.close()
     msg = "Pending dispatch metadata requires solo batches"
     raise ValueError(msg)
 
