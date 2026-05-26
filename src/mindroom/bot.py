@@ -1673,10 +1673,6 @@ class AgentBot:
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
-        if not self._turn_policy.can_reply_to_sender(event.sender):
-            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-            return
-
         requester_user_id = self._turn_controller._requester_user_id(
             sender=event.sender,
             source=event.source,
@@ -1698,6 +1694,10 @@ class AgentBot:
                 status="approved",
                 reason=None,
             ):
+                return
+
+            if not self._turn_policy.can_reply_to_sender(event.sender):
+                self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
                 return
 
             if event.key == "🛑":

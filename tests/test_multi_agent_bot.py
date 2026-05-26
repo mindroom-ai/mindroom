@@ -4534,6 +4534,36 @@ class TestAgentBot:
         assert bot._coalescing_gate._order_reservations == []
 
     @pytest.mark.asyncio
+    async def test_checkmark_tool_approval_bypasses_conversation_reply_permission(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Approval authorization owns approval reactions; reply policy owns chat reactions."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.client.user_id = "@mindroom_test:localhost"
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.key = "✅"
+        event.reacts_to = "$approval-card"
+
+        approval_handler = AsyncMock(return_value=True)
+        with (
+            patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply", return_value=False),
+            patch("mindroom.bot.handle_tool_approval_action", approval_handler),
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock()) as interactive_handler,
+        ):
+            await bot._on_reaction(room, event)
+
+        approval_handler.assert_awaited_once()
+        interactive_handler.assert_not_awaited()
+        assert bot._coalescing_gate._order_reservations == []
+
+    @pytest.mark.asyncio
     async def test_unknown_tool_approval_response_with_approval_id_and_denial_reason_resolves_live_waiter(
         self,
         mock_agent_user: AgentMatrixUser,
