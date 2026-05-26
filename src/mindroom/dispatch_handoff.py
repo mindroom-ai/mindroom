@@ -288,12 +288,14 @@ def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: C
     thread_id = batch.coalescing_key.thread_id
     content = event_content_dict(event)
     if content is None:
-        return thread_id is not None and batch.source_kind == VOICE_SOURCE_KIND
+        return thread_id is not None
     if thread_id is None:
         return "m.relates_to" in content
     if "m.relates_to" in content:
         return content["m.relates_to"] != {"rel_type": "m.thread", "event_id": thread_id}
-    return batch.source_kind == VOICE_SOURCE_KIND
+    if thread_id == event.event_id:
+        return False
+    return isinstance(event, PreparedTextEvent) or batch.source_kind == VOICE_SOURCE_KIND
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
@@ -326,6 +328,10 @@ def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) 
     return replace(event, source_kind_override=source_kind)
 
 
+def _prepared_source_kind_override(source_kind: str) -> str | None:
+    return None if source_kind == MESSAGE_SOURCE_KIND else source_kind
+
+
 def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the text dispatch event for one batch."""
     if (
@@ -342,7 +348,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         body=batch.prompt,
         source=_merge_batch_source(batch),
         server_timestamp=batch.primary_event.server_timestamp,
-        source_kind_override=batch.source_kind,
+        source_kind_override=_prepared_source_kind_override(batch.source_kind),
     )
 
 

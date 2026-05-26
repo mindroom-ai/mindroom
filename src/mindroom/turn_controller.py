@@ -249,6 +249,14 @@ class _PromptIngressReservationOwner:
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
 
+    @staticmethod
+    def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:
+        try:
+            result = task.result()
+        except BaseException:
+            return
+        close_ready_task_result_metadata(result)
+
     async def admit(
         self,
         key: CoalescingKey,
@@ -287,9 +295,15 @@ class _PromptIngressReservationOwner:
         ready_task = self.ready_task
         self.ready_task = None
         if not ready_task.done():
-            await asyncio.sleep(0)
             ready_task.cancel()
-        result = await asyncio.gather(ready_task, return_exceptions=True)
+        try:
+            result = await asyncio.gather(ready_task, return_exceptions=True)
+        except asyncio.CancelledError:
+            if ready_task.done():
+                self._close_late_ready_task_result(ready_task)
+            else:
+                ready_task.add_done_callback(self._close_late_ready_task_result)
+            raise
         close_ready_task_result_metadata(result[0])
 
     async def release(self) -> None:
@@ -1986,10 +2000,16 @@ class TurnController:
         event: nio.RoomMessageText,
         *,
         receipt_time: float | None = None,
+        reservation_owner: _PromptIngressReservationOwner | None = None,
     ) -> None:
         """Handle one inbound text event."""
         async with self.deps.resolver.turn_thread_cache_scope():
-            await self._handle_message_inner(room, event, receipt_time=receipt_time)
+            await self._handle_message_inner(
+                room,
+                event,
+                receipt_time=receipt_time,
+                reservation_owner=reservation_owner,
+            )
 
     async def _handle_message_inner(
         self,
@@ -1997,6 +2017,7 @@ class TurnController:
         event: nio.RoomMessageText,
         *,
         receipt_time: float | None = None,
+        reservation_owner: _PromptIngressReservationOwner | None = None,
     ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
@@ -2032,11 +2053,13 @@ class TurnController:
             )
             return
 
-        reservation_owner = self._reserve_prompt_ingress_order(
-            room,
-            prechecked_event.requester_user_id,
-            receipt_time=receipt_time,
-        )
+        owns_reservation = reservation_owner is None
+        if reservation_owner is None:
+            reservation_owner = self._reserve_prompt_ingress_order(
+                room,
+                prechecked_event.requester_user_id,
+                receipt_time=receipt_time,
+            )
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
             if await self._should_skip_router_before_shared_ingress_work(
@@ -2085,7 +2108,8 @@ class TurnController:
                 room_id=room.room_id,
             )
         finally:
-            await reservation_owner.release()
+            if owns_reservation:
+                await reservation_owner.release()
 
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,

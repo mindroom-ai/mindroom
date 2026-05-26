@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot, _create_task_wrapper
 from mindroom.coalescing import (
     CoalescingDrainResult,
     CoalescingGate,
@@ -412,6 +413,29 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_post_drain_backgrou
         await bot.prepare_for_sync_shutdown()
 
     assert wait_for_background_tasks.await_count == 2
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path: Path) -> None:
+    """A Matrix callback exception must make the certified sync token unsafe."""
+    bot = _agent_bot(tmp_path)
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_after_bad_callback")
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
+
+    async def failing_callback() -> None:
+        msg = "canonical key lookup failed"
+        raise RuntimeError(msg)
+
+    callback = _create_task_wrapper(failing_callback, owner=bot._runtime_view)
+    await callback()
+    await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
+
+    await bot.prepare_for_sync_shutdown()
+
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None

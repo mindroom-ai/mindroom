@@ -173,6 +173,7 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
     reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
     owner = _PromptIngressReservationOwner(gate=gate, reservation=reservation)
     owner.ready_task = asyncio.create_task(ready())
+    await asyncio.sleep(0)
 
     await owner.cancel_ready_task()
 
@@ -184,7 +185,7 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
 
 @pytest.mark.asyncio
 async def test_owner_release_settles_reservation_when_cancelled_during_ready_task_cleanup() -> None:
-    """Owner release must settle reservation even if callback cancellation interrupts task cleanup."""
+    """Owner release must not orphan its ready task when callback cancellation interrupts cleanup."""
 
     async def never_ready() -> ReadyPendingEvent | None:
         await asyncio.Event().wait()
@@ -198,19 +199,25 @@ async def test_owner_release_settles_reservation_when_cancelled_during_ready_tas
     )
     reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
     owner = _PromptIngressReservationOwner(gate=gate, reservation=reservation)
-    owner.ready_task = asyncio.create_task(never_ready())
+    ready_task = asyncio.create_task(never_ready())
+    owner.ready_task = ready_task
 
-    release_task = asyncio.create_task(owner.release())
-    await asyncio.sleep(0)
-    release_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await release_task
+    try:
+        release_task = asyncio.create_task(owner.release())
+        await asyncio.sleep(0)
+        release_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await release_task
 
-    assert reservation.released
-    assert reservation.settled.is_set()
-    if owner.ready_task is not None:
-        owner.ready_task.cancel()
-        await asyncio.gather(owner.ready_task, return_exceptions=True)
+        assert reservation.released
+        assert reservation.settled.is_set()
+        assert ready_task.done()
+        assert ready_task.cancelled()
+        assert owner.ready_task is None
+    finally:
+        if not ready_task.done():
+            ready_task.cancel()
+        await asyncio.gather(ready_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

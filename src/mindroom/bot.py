@@ -38,7 +38,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.event_info import origin_server_ts_from_event_source
+from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
@@ -62,6 +62,7 @@ from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -150,7 +151,7 @@ class _RoomMemberJoinSyncHookPlan:
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
-    owner: object | None = None,
+    owner: BotRuntimeState | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -168,6 +169,8 @@ def _create_task_wrapper(
                 # Task was cancelled, this is expected during shutdown
                 pass
             except Exception:
+                if owner is not None:
+                    owner.mark_callback_failed()
                 # Log the exception with full traceback
                 logger.exception("Error in event callback")
 
@@ -1405,20 +1408,28 @@ class AgentBot:
         background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
         drain_result = await self._coalescing_gate.drain_all(ready_timeout_seconds=5.0)
         post_drain_background_tasks_completed = await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)
+        callback_failure_count = self._runtime_view.callback_failure_count
         if (
             background_tasks_completed
             and drain_result.completed
             and post_drain_background_tasks_completed
+            and callback_failure_count == 0
             and self._sync_trust_state is SyncTrustState.CERTIFIED
         ):
             self._save_sync_checkpoint(self._sync_checkpoint)
-        elif not background_tasks_completed or not drain_result.completed or not post_drain_background_tasks_completed:
+        elif (
+            not background_tasks_completed
+            or not drain_result.completed
+            or not post_drain_background_tasks_completed
+            or callback_failure_count
+        ):
             self._sync_trust_state = SyncTrustState.UNCERTAIN
             self._sync_checkpoint = None
             self._clear_saved_sync_token()
             self.logger.warning(
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
                 agent_name=self.agent_name,
+                callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
@@ -1467,16 +1478,33 @@ class AgentBot:
         """Delegate one inbound text event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
-        if await maybe_handle_tool_approval_reply(
-            room=room,
-            event=event,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-        ):
-            return
-        await self._turn_controller.handle_text_event(room, event, receipt_time=receipt_time)
+        early_reservation_owner = None
+        approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
+        if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
+            early_reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+                room,
+                event.sender,
+                receipt_time=receipt_time,
+            )
+        try:
+            if await maybe_handle_tool_approval_reply(
+                room=room,
+                event=event,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                orchestrator=self.orchestrator,
+                logger=self.logger,
+            ):
+                return
+            await self._turn_controller.handle_text_event(
+                room,
+                event,
+                receipt_time=receipt_time,
+                reservation_owner=early_reservation_owner,
+            )
+        finally:
+            if early_reservation_owner is not None:
+                await early_reservation_owner.release()
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Keep cached thread history consistent when Matrix redactions arrive."""

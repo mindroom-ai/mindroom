@@ -54,6 +54,8 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -2924,6 +2926,55 @@ async def test_first_turn_thread_resolution_uses_canonical_in_flight_key(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_active_approval_fallthrough_reserves_before_async_approval_lookup(tmp_path: Path) -> None:
+    """An approval reply that falls through to normal text must keep receive order."""
+    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    room = _make_room()
+    approval_lookup_started = asyncio.Event()
+    release_approval_lookup = asyncio.Event()
+    batches: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch.source_event_ids)
+
+    async def maybe_approval(
+        *,
+        event: nio.RoomMessageText,
+        **_kwargs: object,
+    ) -> bool:
+        if event.event_id == "$first:localhost":
+            approval_lookup_started.set()
+            await release_approval_lookup.wait()
+        return False
+
+    bot._coalescing_gate._dispatch_batch = dispatch_batch
+    first = _reply_event(
+        event_id="$first:localhost",
+        body="not my approval",
+        reply_to_event_id="$approval-card:localhost",
+        server_timestamp=1_000_000,
+    )
+    later = _text_event(event_id="$later:localhost", body="later", server_timestamp=1_000_001)
+
+    with (
+        patch("mindroom.bot.is_process_active_approval_card", return_value=True),
+        patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=maybe_approval),
+    ):
+        first_task = asyncio.create_task(bot._on_message(room, first))
+        await _wait_for(approval_lookup_started.is_set)
+        await bot._on_message(room, later)
+        await asyncio.sleep(0.05)
+
+        assert batches == []
+
+        release_approval_lookup.set()
+        await first_task
+        await bot._coalescing_gate.drain_all()
+
+    assert batches == [["$first:localhost"], ["$later:localhost"]]
+
+
+@pytest.mark.asyncio
 async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing() -> None:
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()
@@ -5315,6 +5366,23 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
     assert content.get("format") == "org.matrix.custom.html"
 
 
+def _mentioned_matrix_ids_from_source(source: dict[str, object]) -> list[MatrixID]:
+    content = source.get("content", {})
+    if not isinstance(content, dict):
+        return []
+    mentioned_ids: list[MatrixID] = []
+    for candidate in (content, content.get("m.new_content")):
+        if mentioned_ids or not isinstance(candidate, dict):
+            continue
+        mentions = candidate.get("m.mentions")
+        if not isinstance(mentions, dict):
+            continue
+        mentioned_ids = [
+            MatrixID.parse(user_id) for user_id in mentions.get("user_ids", []) if isinstance(user_id, str)
+        ]
+    return mentioned_ids
+
+
 async def _capture_gate_dispatches(
     bot: AgentBot,
     room: nio.MatrixRoom,
@@ -5356,11 +5424,35 @@ async def _capture_gate_dispatches(
             return cast("str | None", coalescing_thread_id_overrides[event.event_id])
         return await original_coalescing_thread_id(room, event)
 
+    async def extract_dispatch_context(
+        _room: nio.MatrixRoom,
+        event: nio.Event | PreparedTextEvent,
+        **_kwargs: object,
+    ) -> object:
+        thread_id = EventInfo.from_event(event.source).thread_id
+        history: list[ResolvedVisibleMessage] = []
+        return dispatch_context_result(
+            MessageContext(
+                am_i_mentioned=True,
+                is_thread=thread_id is not None,
+                thread_id=thread_id,
+                thread_history=history,
+                mentioned_agents=_mentioned_matrix_ids_from_source(event.source),
+                has_non_agent_mentions=False,
+                replay_guard_history=history,
+            ),
+        )
+
     with (
         patch.object(
             bot._conversation_resolver,
             "coalescing_thread_id",
             new=AsyncMock(side_effect=coalescing_thread_id),
+        ),
+        patch.object(
+            bot._conversation_resolver,
+            "extract_dispatch_context",
+            new=AsyncMock(side_effect=extract_dispatch_context),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
@@ -5985,8 +6077,32 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
         await build_payload(dispatch.context)
 
+    async def extract_dispatch_context(
+        _room: nio.MatrixRoom,
+        event: nio.Event | PreparedTextEvent,
+        **_kwargs: object,
+    ) -> object:
+        thread_id = EventInfo.from_event(event.source).thread_id
+        history: list[ResolvedVisibleMessage] = []
+        return dispatch_context_result(
+            MessageContext(
+                am_i_mentioned=True,
+                is_thread=thread_id is not None,
+                thread_id=thread_id,
+                thread_history=history,
+                mentioned_agents=[MatrixID(username="mindroom_test_agent", domain="localhost")],
+                has_non_agent_mentions=False,
+                replay_guard_history=history,
+            ),
+        )
+
     with (
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        patch.object(
+            bot._conversation_resolver,
+            "extract_dispatch_context",
+            new=AsyncMock(side_effect=extract_dispatch_context),
+        ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
         patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(

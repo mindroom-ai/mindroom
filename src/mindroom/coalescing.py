@@ -1334,6 +1334,7 @@ class CoalescingGate:
     ) -> str:
         """Dispatch a claimed batch while buffering new ingress on the same gate."""
         flush_start = time.monotonic()
+        in_flight_start_order = self._next_received_order
         gate.phase = GatePhase.IN_FLIGHT
         gate.deadline = None
         gate.grace_deadline = None
@@ -1383,8 +1384,10 @@ class CoalescingGate:
                 outcome=outcome,
             )
             gate.phase = GatePhase.DEBOUNCE
-            if gate.queue:
-                gate.buffered_in_flight_max_order = max(queued.received_order for queued in gate.queue)
+            buffered_orders = [
+                queued.received_order for queued in gate.queue if queued.received_order > in_flight_start_order
+            ]
+            gate.buffered_in_flight_max_order = max(buffered_orders, default=None)
             gate.grace_deadline = None
             gate.deadline = None
             self._wake_owner_gates(key)

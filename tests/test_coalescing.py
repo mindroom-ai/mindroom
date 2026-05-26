@@ -18,8 +18,13 @@ from mindroom.coalescing import (
     is_coalescing_exempt_source_kind,
 )
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent, build_coalesced_batch
-from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, IMAGE_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    IMAGE_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -381,6 +386,38 @@ def test_batch_construction_does_not_close_mixed_solo_metadata() -> None:
     assert close_count == 0
 
 
+def test_single_prepared_event_handoff_synthesizes_canonical_thread_relation() -> None:
+    """A canonical batch key must control dispatch target for non-voice prepared events too."""
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    prepared = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$sidecar:localhost",
+        body="sidecar preview",
+        source={
+            "event_id": "$sidecar:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1_000_000,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "sidecar preview"},
+        },
+        server_timestamp=1_000_000,
+        source_kind_override=MESSAGE_SOURCE_KIND,
+    )
+    pending = PendingEvent(
+        event=prepared,
+        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+
+    handoff = build_dispatch_handoff(build_coalesced_batch(key, [pending]))
+
+    assert handoff.event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread:localhost",
+    }
+
+
 @pytest.mark.asyncio
 async def test_room_level_messages_do_not_coalesce() -> None:
     """Independent room-level messages must stay as separate model turns."""
@@ -537,6 +574,48 @@ async def test_upload_grace_barrier_does_not_wait_for_later_unresolved_reservati
 
 
 @pytest.mark.asyncio
+async def test_upload_grace_does_not_flatten_late_solo_ready_segment() -> None:
+    """Solo metadata discovered during upload grace must remain in its own segment."""
+    batches: list[CoalescedBatch] = []
+    release_solo = asyncio.Event()
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.01,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    solo = _pending(_text_event("$solo:localhost", "solo", 1_000_001))
+    solo.dispatch_metadata = (
+        PendingDispatchMetadata(kind="solo", payload=object(), close=close, requires_solo_batch=True),
+    )
+
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "describe this", 1_000_000)))
+    gate_entry = gate._gates[key]
+    await _wait_for(lambda: gate_entry.phase is GatePhase.GRACE)
+    await gate.admit(
+        key,
+        ready_task=asyncio.create_task(_ready_after(release_solo, solo)),
+        source_event_id="$solo:localhost",
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+    release_solo.set()
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [["$text:localhost"], ["$solo:localhost"]]
+    assert close_count == 0
+
+
+@pytest.mark.asyncio
 async def test_unresolved_solo_ready_event_dispatches_solo_without_metadata_close() -> None:
     """A ready task may reveal solo metadata after claim; split it before batch construction."""
     batches: list[CoalescedBatch] = []
@@ -661,6 +740,47 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
     await _wait_for(
         lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]],
     )
+
+
+@pytest.mark.asyncio
+async def test_unresolved_reservation_wait_does_not_mark_queued_events_as_in_flight_buffered() -> None:
+    """Events queued before dispatch starts must still obey debounce gaps after the blocker resolves."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.02,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    blocker = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+
+    await asyncio.sleep(0.05)
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_001)))
+    await asyncio.sleep(0.05)
+    await _admit_ready(gate, key, _pending(_text_event("$third:localhost", "third", 1_000_002)))
+    await asyncio.sleep(0.05)
+
+    assert batches == []
+
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$first:localhost", "first", 1_000_000)),
+        ),
+        order_reservation=blocker,
+    )
+    await _wait_for(lambda: len(batches) >= 3)
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$first:localhost"],
+        ["$second:localhost"],
+        ["$third:localhost"],
+    ]
 
 
 @pytest.mark.asyncio
