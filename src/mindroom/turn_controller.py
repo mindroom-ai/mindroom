@@ -20,7 +20,7 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     close_ready_task_result_metadata,
 )
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, close_pending_event_metadata
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -1980,7 +1980,11 @@ class TurnController:
         """Dispatch one flushed batch through the normal text pipeline."""
         reservation: QueuedHumanNoticeReservation | None = None
         try:
-            handoff = build_dispatch_handoff(batch)
+            try:
+                handoff = build_dispatch_handoff(batch)
+            except BaseException:
+                close_pending_event_metadata(list(batch.pending_events))
+                raise
             reservation = _queued_notice_reservation_from_metadata(
                 handoff.dispatch_metadata,
                 target_key=self._queued_notice_target_key_for_handoff(handoff),

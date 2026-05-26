@@ -634,7 +634,7 @@ async def test_room_root_text_and_image_coalesce_into_single_dispatch(tmp_path: 
 @pytest.mark.asyncio
 async def test_text_first_image_during_debounce_dispatches_without_upload_grace_delay(tmp_path: Path) -> None:
     """Do not add upload-grace delay once media already joined during debounce."""
-    bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=200)
+    bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=10_000)
     room = _make_room()
     text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000, thread_id="$thread")
     image_event = _image_event(event_id="$img1", server_timestamp=1001, thread_id="$thread")
@@ -667,7 +667,7 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
             source_kind="image",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: calls == [(["$m1", "$img1"], 1)], deadline_seconds=0.12)
+        await _wait_for(lambda: calls == [(["$m1", "$img1"], 1)], deadline_seconds=0.5)
 
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
