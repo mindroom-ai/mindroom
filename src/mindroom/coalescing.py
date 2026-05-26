@@ -9,8 +9,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import nio
-
 from .coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
@@ -23,18 +21,17 @@ from .coalescing_cleanup import (
     close_pending_event_metadata_once,
     close_ready_task_result_metadata,
 )
-from .commands.parsing import command_parser
-from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
-from .dispatch_source import (
-    HOOK_DISPATCH_SOURCE_KIND,
-    HOOK_SOURCE_KIND,
-    IMAGE_SOURCE_KIND,
-    MEDIA_SOURCE_KIND,
-    SCHEDULED_SOURCE_KIND,
-    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    VOICE_SOURCE_KIND,
-    is_voice_event,
+from .coalescing_policy import (
+    QueueKind,
+    is_coalescing_exempt_source_kind,
+    pending_event_requires_solo_batch,
+    pending_events_require_solo_batch,
+    pending_has_only_text,
+    pending_has_room_scope_source,
+    queue_kind,
+    source_or_event_allows_room_scope_batching,
 )
+from .dispatch_handoff import is_media_dispatch_event
 from .logging_config import get_logger
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
@@ -55,17 +52,6 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
-    {
-        HOOK_SOURCE_KIND,
-        HOOK_DISPATCH_SOURCE_KIND,
-        SCHEDULED_SOURCE_KIND,
-        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    },
-)
-_ROOM_SCOPE_BATCHING_SOURCE_KINDS: frozenset[str] = frozenset(
-    {VOICE_SOURCE_KIND, IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND},
-)
 logger = get_logger(__name__)
 
 
@@ -75,14 +61,6 @@ class GatePhase(enum.Enum):
     DEBOUNCE = "debounce"
     GRACE = "grace"
     IN_FLIGHT = "in_flight"
-
-
-class _QueueKind(enum.Enum):
-    """Dispatch behavior for one queued event."""
-
-    NORMAL = "normal"
-    COMMAND = "command"
-    BYPASS = "bypass"
 
 
 class IngressAdmissionClosedError(RuntimeError):
@@ -239,61 +217,6 @@ class _UploadGraceWaitResult:
     candidate_count: int
     quiet_deadline: float
     before_order: int | None = None
-
-
-def _effective_source_kind(
-    event: DispatchEvent,
-    fallback_source_kind: str | None = None,
-) -> str | None:
-    if fallback_source_kind is not None:
-        return fallback_source_kind
-    if isinstance(event, PreparedTextEvent) and event.source_kind_override is not None:
-        return event.source_kind_override
-    return None
-
-
-def is_coalescing_exempt_source_kind(
-    event: DispatchEvent,
-    fallback_source_kind: str | None = None,
-) -> bool:
-    """Return True when coalescing should be skipped for this event."""
-    return _effective_source_kind(event, fallback_source_kind) in _COALESCING_EXEMPT_SOURCE_KINDS
-
-
-def _is_command_event(
-    event: DispatchEvent,
-    *,
-    fallback_source_kind: str | None = None,
-) -> bool:
-    """Return whether a dispatch event should bypass coalescing as a command."""
-    if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
-        return False
-    if fallback_source_kind == VOICE_SOURCE_KIND or is_voice_event(event):
-        return False
-    if _effective_source_kind(event, fallback_source_kind) in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND}:
-        return False
-    return command_parser.parse(event.body) is not None
-
-
-def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
-    return bool(pending_events) and all(
-        isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent) for pending_event in pending_events
-    )
-
-
-def _pending_has_room_scope_source(pending_events: list[PendingEvent]) -> bool:
-    return any(
-        pending_event.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS or is_voice_event(pending_event.event)
-        for pending_event in pending_events
-    )
-
-
-def _pending_event_requires_solo_batch(pending_event: PendingEvent) -> bool:
-    return any(item.requires_solo_batch for item in pending_event.dispatch_metadata)
-
-
-def _pending_events_require_solo_batch(pending_events: list[PendingEvent]) -> bool:
-    return any(_pending_event_requires_solo_batch(pending_event) for pending_event in pending_events)
 
 
 class CoalescingGate:
@@ -576,19 +499,13 @@ class CoalescingGate:
         return [pending_event.event.event_id for pending_event in pending_events]
 
     @staticmethod
-    def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
-        if _pending_event_requires_solo_batch(pending_event):
-            return _QueueKind.BYPASS
-        if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
-            return _QueueKind.BYPASS
-        if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
-            return _QueueKind.COMMAND
-        return _QueueKind.NORMAL
+    def _queue_kind(pending_event: PendingEvent) -> QueueKind:
+        return queue_kind(pending_event)
 
     @staticmethod
-    def _queued_kind(queued: _QueuedEvent) -> _QueueKind:
+    def _queued_kind(queued: _QueuedEvent) -> QueueKind:
         if queued.ready_result is None:
-            return _QueueKind.NORMAL
+            return QueueKind.NORMAL
         return CoalescingGate._queue_kind(queued.ready_result.pending_event)
 
     @staticmethod
@@ -711,7 +628,7 @@ class CoalescingGate:
                 break
             if max_receipt_time is not None and queued.receipt_time > max_receipt_time:
                 break
-            if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
+            if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 break
             if count > 0 and not coalesce_normal_events:
                 break
@@ -746,7 +663,7 @@ class CoalescingGate:
         while count < len(gate.queue):
             queued = gate.queue[count]
             if (
-                CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL
+                CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL
                 or queued.ready_result is None
                 or not is_media_dispatch_event(queued.pending_event.event)
             ):
@@ -792,7 +709,7 @@ class CoalescingGate:
             return latest_receipt_time
         buffered_in_flight_max_order = gate.buffered_in_flight_max_order
         for queued in list(gate.queue)[1:]:
-            if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
+            if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 break
             if (
                 buffered_in_flight_max_order is None or queued.received_order > buffered_in_flight_max_order
@@ -801,10 +718,10 @@ class CoalescingGate:
             latest_receipt_time = queued.receipt_time
         return latest_receipt_time
 
-    def _enqueue_path(self, kind: _QueueKind) -> str:
-        if kind is _QueueKind.BYPASS:
+    def _enqueue_path(self, kind: QueueKind) -> str:
+        if kind is QueueKind.BYPASS:
             return "bypass"
-        if kind is _QueueKind.COMMAND:
+        if kind is QueueKind.COMMAND:
             return "command_interrupt"
         if self._debounce_seconds() <= 0:
             return "zero_debounce"
@@ -1393,11 +1310,14 @@ class CoalescingGate:
     def _front_admissions_allow_room_scope_coalescing(gate: _GateEntry) -> bool:
         """Return whether front normal admissions allow room-level batching policy."""
         for queued in gate.queue:
-            if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
+            if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 return False
-            if queued.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS:
+            if source_or_event_allows_room_scope_batching(queued.source_kind):
                 return True
-            if queued.ready_result is not None and is_media_dispatch_event(queued.ready_result.pending_event.event):
+            if queued.ready_result is not None and source_or_event_allows_room_scope_batching(
+                queued.ready_result.pending_event.source_kind,
+                queued.ready_result.pending_event.event,
+            ):
                 return True
         return False
 
@@ -1427,8 +1347,10 @@ class CoalescingGate:
     @staticmethod
     def _ready_admissions_allow_room_scope_coalescing(ready_admissions: list[_ReadyAdmission]) -> bool:
         return any(
-            ready_admission.pending_event.source_kind in _ROOM_SCOPE_BATCHING_SOURCE_KINDS
-            or is_media_dispatch_event(ready_admission.pending_event.event)
+            source_or_event_allows_room_scope_batching(
+                ready_admission.pending_event.source_kind,
+                ready_admission.pending_event.event,
+            )
             for ready_admission in ready_admissions
         )
 
@@ -1455,8 +1377,8 @@ class CoalescingGate:
         for index, ready_admission in enumerate(ready_admissions):
             key = self._key_for_ready_admission(ready_admissions, index)
             pending_event = ready_admission.pending_event
-            if _pending_event_requires_solo_batch(pending_event) or (
-                segments and _pending_events_require_solo_batch(segments[-1][1])
+            if pending_event_requires_solo_batch(pending_event) or (
+                segments and pending_events_require_solo_batch(segments[-1][1])
             ):
                 segments.append((key, [pending_event]))
             elif segments and self._can_merge_room_scope_segment(
@@ -1471,7 +1393,7 @@ class CoalescingGate:
 
     @staticmethod
     def _should_wait_for_upload_grace(candidate_events: list[PendingEvent]) -> bool:
-        return _pending_has_only_text(candidate_events) and not _pending_has_room_scope_source(candidate_events)
+        return pending_has_only_text(candidate_events) and not pending_has_room_scope_source(candidate_events)
 
     def _log_dispatch_failure(
         self,
@@ -1648,7 +1570,7 @@ class CoalescingGate:
             if (
                 allow_upload_grace
                 and upload_grace_events
-                and not _pending_events_require_solo_batch(upload_grace_events)
+                and not pending_events_require_solo_batch(upload_grace_events)
                 and self._should_wait_for_upload_grace(upload_grace_events)
             ):
                 timing_scope = event_timing_scope(upload_grace_events[-1].event.event_id)
@@ -1720,7 +1642,7 @@ class CoalescingGate:
                     continue
                 front = gate.queue[0]
                 front_kind = self._queued_kind(front)
-                if front_kind in {_QueueKind.BYPASS, _QueueKind.COMMAND}:
+                if front_kind in {QueueKind.BYPASS, QueueKind.COMMAND}:
                     claimed_admissions = self._claim_front_events(gate, 1)
                     await self._dispatch_claim(
                         key,
