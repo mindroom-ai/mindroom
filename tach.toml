@@ -2072,6 +2072,11 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.prompt_ingress_reservation"
+depends_on = ["mindroom.coalescing"]
+visibility = ["mindroom.turn_controller"]
+
+[[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.commands.handler",
@@ -2089,6 +2094,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
+    "mindroom.prompt_ingress_reservation",
     "mindroom.response_runner",
     "mindroom.routing",
     "mindroom.turn_store",
