@@ -344,6 +344,7 @@ class CoalescingGate:
         self._is_shutting_down = is_shutting_down
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._order_reservations: list[IngressOrderReservation] = []
+        self._in_flight_buffered_max_order: dict[CoalescingKey, int] = {}
         self._next_received_order = 0
         self._active_drain_context: _DrainContext | None = None
 
@@ -467,6 +468,20 @@ class CoalescingGate:
             and reservation.received_order > after_order
             and (before_order is None or reservation.received_order < before_order)
             and reservation.receipt_time <= before_or_at_receipt_time
+        ]
+
+    def _unsettled_owner_reservation_orders_after(
+        self,
+        key: CoalescingKey,
+        *,
+        after_order: int,
+    ) -> list[int]:
+        return [
+            reservation.received_order
+            for reservation in self._order_reservations
+            if not reservation.released
+            and self._reservation_matches_key(reservation, key)
+            and reservation.received_order > after_order
         ]
 
     @staticmethod
@@ -928,6 +943,12 @@ class CoalescingGate:
             resolved_received_at = received_at if received_at is not None else time.time()
             receipt_time = order_reservation.receipt_time
             self._release_order_reservation(order_reservation, wake=False)
+        buffered_max_order = self._in_flight_buffered_max_order.get(key)
+        if buffered_max_order is not None and received_order <= buffered_max_order:
+            gate.buffered_in_flight_max_order = max(
+                gate.buffered_in_flight_max_order or buffered_max_order,
+                buffered_max_order,
+            )
         admission = _QueuedEvent(
             admission_key=key,
             received_order=received_order,
@@ -1387,7 +1408,14 @@ class CoalescingGate:
             buffered_orders = [
                 queued.received_order for queued in gate.queue if queued.received_order > in_flight_start_order
             ]
+            buffered_orders.extend(
+                self._unsettled_owner_reservation_orders_after(key, after_order=in_flight_start_order),
+            )
             gate.buffered_in_flight_max_order = max(buffered_orders, default=None)
+            if gate.buffered_in_flight_max_order is None:
+                self._in_flight_buffered_max_order.pop(key, None)
+            else:
+                self._in_flight_buffered_max_order[key] = gate.buffered_in_flight_max_order
             gate.grace_deadline = None
             gate.deadline = None
             self._wake_owner_gates(key)
@@ -1621,6 +1649,8 @@ class CoalescingGate:
                     current_gate.drain_task = None
                 if self._gate_work_count(current_gate) == 0:
                     self._remove_gate(key)
+                    if not self._unsettled_owner_reservation_orders_after(key, after_order=0):
+                        self._in_flight_buffered_max_order.pop(key, None)
                 elif outcome in {"failed", "cancelled"} and not self._is_shutting_down():
                     self._ensure_drain_task(key, current_gate)
                     self._wake(current_gate)

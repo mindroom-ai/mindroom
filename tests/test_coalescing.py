@@ -784,6 +784,51 @@ async def test_unresolved_reservation_wait_does_not_mark_queued_events_as_in_fli
 
 
 @pytest.mark.asyncio
+async def test_in_flight_unresolved_reservations_stay_buffered_after_admission() -> None:
+    """Reservations created during dispatch should stay in the in-flight follow-up window."""
+    batches: list[CoalescedBatch] = []
+    release_dispatch = asyncio.Event()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+        if batch.source_event_ids == ["$first:localhost"]:
+            await release_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.02,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost"]])
+
+    second_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+    await asyncio.sleep(0.05)
+    third_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+    release_dispatch.set()
+    await asyncio.sleep(0.01)
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_001))),
+        order_reservation=second_reservation,
+    )
+    await gate.admit(
+        key,
+        ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$third:localhost", "third", 1_000_002))),
+        order_reservation=third_reservation,
+    )
+    await gate.drain_all()
+
+    assert [batch.source_event_ids for batch in batches] == [
+        ["$first:localhost"],
+        ["$second:localhost", "$third:localhost"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> None:
     """A slow STT result must not let later text join an expired voice debounce window."""
     batches: list[CoalescedBatch] = []

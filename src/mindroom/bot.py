@@ -1513,9 +1513,13 @@ class AgentBot:
         early_reservation_owner = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
+            requester_user_id = self._turn_controller._requester_user_id(
+                sender=event.sender,
+                source=event.source,
+            )
             early_reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
                 room,
-                event.sender,
+                requester_user_id,
                 receipt_time=receipt_time,
             )
         try:

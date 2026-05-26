@@ -43,7 +43,12 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+)
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
@@ -2975,6 +2980,63 @@ async def test_active_approval_fallthrough_reserves_before_async_approval_lookup
 
 
 @pytest.mark.asyncio
+async def test_trusted_relay_approval_fallthrough_reserves_effective_requester(tmp_path: Path) -> None:
+    """Approval fallthrough reservations must use original human requester for trusted relays."""
+    bot = _make_bot(tmp_path, debounce_ms=0, upload_grace_ms=0)
+    room = _make_room()
+    approval_lookup_started = asyncio.Event()
+    release_approval_lookup = asyncio.Event()
+    batches: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch.source_event_ids)
+
+    async def maybe_approval(
+        *,
+        event: nio.RoomMessageText,
+        **_kwargs: object,
+    ) -> bool:
+        if event.event_id == "$relay-first:localhost":
+            approval_lookup_started.set()
+            await release_approval_lookup.wait()
+        return False
+
+    bot._coalescing_gate._dispatch_batch = dispatch_batch
+    first = _reply_event(
+        event_id="$relay-first:localhost",
+        body="not my approval",
+        reply_to_event_id="$approval-card:localhost",
+        sender="@mindroom_test_agent:localhost",
+        server_timestamp=1_000_000,
+    )
+    first.source["content"][SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    first.source["content"][ORIGINAL_SENDER_KEY] = "@external:example.org"
+    later = _text_event(
+        event_id="$later:localhost",
+        body="later",
+        sender="@external:example.org",
+        server_timestamp=1_000_001,
+    )
+
+    with (
+        patch("mindroom.bot.is_process_active_approval_card", return_value=True),
+        patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=maybe_approval),
+    ):
+        first_task = asyncio.create_task(bot._on_message(room, first))
+        await _wait_for(approval_lookup_started.is_set)
+        await bot._on_message(room, later)
+        await asyncio.sleep(0.05)
+
+        assert batches == []
+
+        release_approval_lookup.set()
+        await first_task
+        await bot._coalescing_gate.drain_all()
+
+    assert batches == [["$relay-first:localhost"], ["$later:localhost"]]
+
+
+@pytest.mark.asyncio
 async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing() -> None:
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()
@@ -3215,8 +3277,8 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
     assert "m.relates_to" not in handoff.event.source["content"]
 
 
-def test_room_level_batch_removes_plain_reply_relation() -> None:
-    """A room-level batch should discard plain reply relations from its primary event."""
+def test_room_level_batch_preserves_plain_reply_relation_without_thread_target() -> None:
+    """Room-level batches should preserve plain reply shape without adding thread targeting."""
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3232,7 +3294,8 @@ def test_room_level_batch_removes_plain_reply_relation() -> None:
     handoff = build_dispatch_handoff(batch)
 
     assert isinstance(handoff.event, PreparedTextEvent)
-    assert "m.relates_to" not in handoff.event.source["content"]
+    assert handoff.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
+    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
 
 
 def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relation() -> None:
@@ -3258,8 +3321,8 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
 
 
-def test_room_level_mention_batch_removes_plain_reply_relation() -> None:
-    """Mention metadata must not preserve stale plain reply relations."""
+def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
+    """Mention metadata must preserve plain reply shape without reintroducing thread targeting."""
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3277,8 +3340,9 @@ def test_room_level_mention_batch_removes_plain_reply_relation() -> None:
 
     assert isinstance(handoff.event, PreparedTextEvent)
     content = handoff.event.source["content"]
-    assert "m.relates_to" not in content
+    assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
+    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
 
 
 def test_single_mentioned_followup_batch_uses_coalescing_thread_relation() -> None:

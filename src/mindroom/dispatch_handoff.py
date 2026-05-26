@@ -279,7 +279,11 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
 def _normalize_batch_thread_relation(content: dict[str, Any], batch: CoalescedBatch) -> None:
     thread_id = batch.coalescing_key.thread_id
     if thread_id is None:
-        content.pop("m.relates_to", None)
+        relates_to = content.get("m.relates_to")
+        if isinstance(relates_to, dict) and isinstance(relates_to.get("m.in_reply_to"), dict):
+            content["m.relates_to"] = {"m.in_reply_to": relates_to["m.in_reply_to"]}
+        else:
+            content.pop("m.relates_to", None)
         return
     content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
 
