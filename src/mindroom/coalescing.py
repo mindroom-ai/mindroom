@@ -409,7 +409,7 @@ class CoalescingGate:
             and reservation.received_order < before_order
         ]
 
-    def _older_owner_claimed_gates(
+    def _older_owner_root_gates(
         self,
         key: CoalescingKey,
         *,
@@ -423,8 +423,16 @@ class CoalescingGate:
             if gate_key != key
             and self._same_owner(gate_key, key)
             and gate_key.thread_id is None
-            and any(claimed.received_order < before_order for claimed in gate.claimed_admissions)
-            and any(claimed.source_event_id == key.thread_id for claimed in gate.claimed_admissions)
+            and (
+                any(
+                    queued.received_order < before_order and queued.source_event_id == key.thread_id
+                    for queued in gate.queue
+                )
+                or any(
+                    claimed.received_order < before_order and claimed.source_event_id == key.thread_id
+                    for claimed in gate.claimed_admissions
+                )
+            )
         ]
 
     def _has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:
@@ -447,12 +455,12 @@ class CoalescingGate:
                 gate,
                 self._older_owner_reservations(key, before_order=front_order),
             )
-            older_gates = self._older_owner_claimed_gates(key, before_order=front_order)
+            older_gates = self._older_owner_root_gates(key, before_order=front_order)
             if not older_gates:
                 return
             wake_generation = gate.wake_generation
             gate.wake_event.clear()
-            older_gates = self._older_owner_claimed_gates(key, before_order=front_order)
+            older_gates = self._older_owner_root_gates(key, before_order=front_order)
             if not older_gates or gate.wake_generation != wake_generation:
                 continue
             await gate.wake_event.wait()
@@ -539,8 +547,20 @@ class CoalescingGate:
         if key.thread_id is not None:
             return
         source_event_ids = {pending_event.event.event_id for pending_event in pending_events}
+        related_keys = {
+            CoalescingKey(key.room_id, source_event_id, key.requester_user_id) for source_event_id in source_event_ids
+        }
+        buffered_orders = self._unsettled_owner_reservation_orders_after(key, after_order=after_order)
+        if buffered_orders:
+            buffered_max_order = max(buffered_orders)
+            for related_key in related_keys:
+                existing_max_order = self._in_flight_buffered_max_order.get(related_key)
+                self._in_flight_buffered_max_order[related_key] = max(
+                    existing_max_order or buffered_max_order,
+                    buffered_max_order,
+                )
         for other_key, other_gate in self._gates.items():
-            if other_key != key and self._same_owner(other_key, key) and other_key.thread_id in source_event_ids:
+            if other_key in related_keys:
                 self._set_buffered_in_flight_max_order(other_key, other_gate, after_order=after_order)
 
     @staticmethod
