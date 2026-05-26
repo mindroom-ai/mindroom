@@ -358,7 +358,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
-            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Only this agent in the thread
@@ -418,7 +418,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
-            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Multiple agents in the thread
@@ -500,7 +500,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
-            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             thread_history = [

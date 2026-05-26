@@ -2077,6 +2077,22 @@ depends_on = ["mindroom.coalescing"]
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
+path = "mindroom.text_ingress_dispatch"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.commands.parsing",
+    "mindroom.constants",
+    "mindroom.dispatch_handoff",
+    "mindroom.dispatch_source",
+    "mindroom.handled_turns",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.media",
+    "mindroom.matrix.rooms",
+    "mindroom.timing",
+]
+visibility = ["mindroom.turn_controller"]
+
+[[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.commands.handler",
@@ -2097,6 +2113,7 @@ depends_on = [
     "mindroom.prompt_ingress_reservation",
     "mindroom.response_runner",
     "mindroom.routing",
+    "mindroom.text_ingress_dispatch",
     "mindroom.turn_store",
     "mindroom.turn_policy",
 ]
