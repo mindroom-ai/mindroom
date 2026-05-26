@@ -2051,6 +2051,69 @@ async def test_coalesced_batch_uses_queued_notice_for_batch_thread(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_room_scoped_root_voice_uses_final_target_for_queued_notice(tmp_path: Path) -> None:
+    """A room-scoped voice root should select the reservation for its final target root."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    voice_event = replace(
+        _prepared_text_event(event_id="$voice-root"),
+        body="🎤 voice follow-up",
+        source_kind_override=VOICE_SOURCE_KIND,
+    )
+    target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=voice_event.event_id,
+        event_source=voice_event.source,
+    )
+    assert target.resolved_thread_id == "$voice-root"
+    envelope = _envelope(
+        source_kind=VOICE_SOURCE_KIND,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        source_event_id=voice_event.event_id,
+        target=target,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    captured_reservations: list[object] = []
+
+    async def capture_dispatch(*_args: object, **kwargs: object) -> None:
+        assert queued_signal.pending_human_messages == 1
+        reservation = kwargs["queued_notice_reservation"]
+        captured_reservations.append(reservation)
+        assert reservation is voice_reservation
+        reservation.consume()
+
+    queued_signal.begin_response_turn()
+    try:
+        voice_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert voice_reservation is not None
+        batch = build_coalesced_batch(
+            CoalescingKey(room.room_id, None, "@user:localhost"),
+            [
+                PendingEvent(
+                    event=voice_event,
+                    room=room,
+                    source_kind=VOICE_SOURCE_KIND,
+                    dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                    dispatch_metadata=_targeted_queued_notice_metadata(voice_reservation, target),
+                ),
+            ],
+        )
+
+        with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)):
+            await bot._turn_controller.handle_coalesced_batch(batch)
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert captured_reservations == [voice_reservation]
+    assert queued_signal.pending_human_messages == 0
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
 async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(tmp_path: Path) -> None:
     """Cancellation during enqueue handoff should not leak the reserved notice."""
     bot = _bot(tmp_path)

@@ -1978,12 +1978,13 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        reservation = _queued_notice_reservation_from_metadata(
-            batch.dispatch_metadata,
-            target_key=(batch.room.room_id, batch.coalescing_key.thread_id),
-        )
+        reservation: QueuedHumanNoticeReservation | None = None
         try:
             handoff = build_dispatch_handoff(batch)
+            reservation = _queued_notice_reservation_from_metadata(
+                handoff.dispatch_metadata,
+                target_key=self._queued_notice_target_key_for_handoff(handoff),
+            )
             timing_scope = event_timing_scope(handoff.event.event_id)
             dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
             if dispatch_timing is not None:
@@ -2009,6 +2010,19 @@ class TurnController:
         finally:
             if reservation is not None:
                 reservation.cancel()
+
+    def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
+        coalescing_key = handoff.ingress.coalescing_key
+        if coalescing_key is None:
+            return (handoff.room.room_id, None)
+        context_event = _room_level_context_event(handoff.event) if coalescing_key.thread_id is None else handoff.event
+        target = self.deps.resolver.build_message_target(
+            room_id=handoff.room.room_id,
+            thread_id=coalescing_key.thread_id,
+            reply_to_event_id=handoff.event.event_id,
+            event_source=context_event.source,
+        )
+        return (target.room_id, target.resolved_thread_id)
 
     async def _dispatch_handoff(
         self,
