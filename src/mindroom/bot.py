@@ -1663,19 +1663,6 @@ class AgentBot:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        if event.key == "✅" and await handle_tool_approval_action(
-            room=room,
-            sender_id=event.sender,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-            approval_event_id=event.reacts_to,
-            status="approved",
-            reason=None,
-        ):
-            return
-
         if not is_authorized_sender(
             event.sender,
             self.config,
@@ -1690,65 +1677,78 @@ class AgentBot:
             self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
             return
 
-        if event.key == "🛑":
-            sender_agent_name = entity_identity_registry(
-                self.config,
-                self.runtime_paths,
-            ).current_entity_name_for_user_id(event.sender)
-            tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
-            if (
-                not sender_agent_name
-                and tracked_target is not None
-                and await self.stop_manager.handle_stop_reaction(event.reacts_to)
+        requester_user_id = self._turn_controller._requester_user_id(
+            sender=event.sender,
+            source=event.source,
+        )
+        reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+            room,
+            requester_user_id,
+            receipt_time=time.monotonic(),
+        )
+        try:
+            if event.key == "✅" and await handle_tool_approval_action(
+                room=room,
+                sender_id=event.sender,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                orchestrator=self.orchestrator,
+                logger=self.logger,
+                approval_event_id=event.reacts_to,
+                status="approved",
+                reason=None,
             ):
-                self.logger.info(
-                    "Stop requested for message",
-                    message_id=event.reacts_to,
-                    requested_by=event.sender,
-                )
-                await self.stop_manager.remove_stop_button(
-                    self.client,
-                    event.reacts_to,
-                    notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
-                )
-                await self._send_response(
-                    target=tracked_target,
-                    response_text=_STOPPING_RESPONSE_TEXT,
-                )
                 return
 
-        pending_change = config_confirmation.get_pending_change(event.reacts_to)
-        if pending_change and self.agent_name == ROUTER_AGENT_NAME:
-            await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
-            return
+            if event.key == "🛑":
+                sender_agent_name = entity_identity_registry(
+                    self.config,
+                    self.runtime_paths,
+                ).current_entity_name_for_user_id(event.sender)
+                tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
+                if (
+                    not sender_agent_name
+                    and tracked_target is not None
+                    and await self.stop_manager.handle_stop_reaction(event.reacts_to)
+                ):
+                    self.logger.info(
+                        "Stop requested for message",
+                        message_id=event.reacts_to,
+                        requested_by=event.sender,
+                    )
+                    await self.stop_manager.remove_stop_button(
+                        self.client,
+                        event.reacts_to,
+                        notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
+                    )
+                    await self._send_response(
+                        target=tracked_target,
+                        response_text=_STOPPING_RESPONSE_TEXT,
+                    )
+                    return
 
-        result = await interactive.handle_reaction(
-            self.client,
-            event,
-            self.agent_name,
-            self.config,
-            self.runtime_paths,
-        )
-        if result:
-            requester_user_id = self._turn_controller._requester_user_id(
-                sender=event.sender,
-                source=event.source,
+            pending_change = config_confirmation.get_pending_change(event.reacts_to)
+            if pending_change and self.agent_name == ROUTER_AGENT_NAME:
+                await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
+                return
+
+            result = await interactive.handle_reaction(
+                self.client,
+                event,
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
             )
-            reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
-                room,
-                requester_user_id,
-                receipt_time=time.monotonic(),
-            )
-            try:
+            if result:
                 await self._turn_controller.handle_interactive_selection(
                     room,
                     selection=result,
                     user_id=event.sender,
                     source_event_id=event.event_id,
                 )
-            finally:
-                await reservation_owner.release()
-            return
+                return
+        finally:
+            await reservation_owner.release()
 
         await self._emit_reaction_received_hooks(
             room_id=room.room_id,

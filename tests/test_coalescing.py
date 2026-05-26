@@ -976,6 +976,76 @@ async def test_bounded_shutdown_marks_internal_drain_failure_incomplete() -> Non
 
 
 @pytest.mark.asyncio
+async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
+    """Bounded shutdown must return unsafe instead of hanging on a stuck dispatch."""
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        dispatch_started.set()
+        await release_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1_000_000)))
+    await asyncio.wait_for(dispatch_started.wait(), timeout=0.5)
+
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.2)
+    except TimeoutError:  # pragma: no cover - documents the failure mode on regression
+        pytest.fail("bounded drain hung behind in-flight dispatch")
+    finally:
+        release_dispatch.set()
+        if not drain_task.done():
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.dispatch_cancelled_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> None:
+    """Gate-owned metadata must close before bounded shutdown discards failed queued work."""
+    close_count = 0
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    pending = _pending(_text_event("$text:localhost", "typed", 1_000_000))
+    pending.dispatch_metadata = (PendingDispatchMetadata(kind="test", payload=object(), close=close_metadata),)
+    await gate.admit(key, ready_result=ReadyPendingEvent(pending_event=pending))
+
+    async def fail_resolve(_gate: object, _admissions: object) -> list[object]:
+        msg = "internal drain failed"
+        raise RuntimeError(msg)
+
+    gate._resolve_claimed_admissions = fail_resolve
+
+    result = await gate.drain_all(ready_timeout_seconds=0.01)
+
+    assert result.completed is False
+    assert result.dispatch_failure_count == 1
+    assert result.dropped_ready_count == 1
+    assert close_count == 1
+    assert gate._gates == {}
+
+
+@pytest.mark.asyncio
 async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
     """Shutdown drains must treat receive-order reservations as pending ingress work."""
     batches: list[CoalescedBatch] = []

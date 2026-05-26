@@ -4481,6 +4481,59 @@ class TestAgentBot:
         assert bot._coalescing_gate._order_reservations == []
 
     @pytest.mark.asyncio
+    async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A checkmark selection should reserve before the approval fallthrough await."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.client.user_id = "@mindroom_test:localhost"
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.key = "✅"
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            selection_key="✅",
+            selected_value="Approved",
+            thread_id="$thread-root",
+        )
+        approval_started = asyncio.Event()
+        release_approval = asyncio.Event()
+
+        async def delayed_approval(*_args: object, **_kwargs: object) -> bool:
+            approval_started.set()
+            await release_approval.wait()
+            return False
+
+        with (
+            patch("mindroom.bot.handle_tool_approval_action", side_effect=delayed_approval),
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+            patch.object(bot._turn_controller, "handle_interactive_selection", new=AsyncMock()),
+        ):
+            reaction_task = asyncio.create_task(bot._on_reaction(room, event))
+            await asyncio.wait_for(approval_started.wait(), timeout=0.5)
+            try:
+                reaction_reservations = [
+                    reservation for reservation in bot._coalescing_gate._order_reservations if not reservation.released
+                ]
+                assert reaction_reservations
+                later_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+                try:
+                    assert reaction_reservations[0].received_order < later_owner.reservation.received_order
+                finally:
+                    await later_owner.release()
+            finally:
+                release_approval.set()
+                await reaction_task
+
+        assert bot._coalescing_gate._order_reservations == []
+
+    @pytest.mark.asyncio
     async def test_unknown_tool_approval_response_with_approval_id_and_denial_reason_resolves_live_waiter(
         self,
         mock_agent_user: AgentMatrixUser,

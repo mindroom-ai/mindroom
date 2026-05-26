@@ -182,12 +182,20 @@ class _MutableDrainResult:
 class _DrainContext:
     ready_timeout_seconds: float | None
     result: _MutableDrainResult
+    cancelled_initial_drain_tasks: bool = False
+
+
+def _close_pending_event_metadata_once(pending_events: list[PendingEvent]) -> None:
+    """Close pending-event metadata and clear it so later cleanup is idempotent."""
+    close_pending_event_metadata(pending_events)
+    for pending_event in pending_events:
+        pending_event.dispatch_metadata = ()
 
 
 def close_ready_task_result_metadata(result: object) -> int:
-    """Close dispatch metadata for a ready-task result and report closures."""
+    """Close dispatch metadata for a ready-task result and report dropped ready work."""
     if isinstance(result, ReadyPendingEvent):
-        close_pending_event_metadata([result.pending_event])
+        _close_pending_event_metadata_once([result.pending_event])
         return 1
     return 0
 
@@ -221,7 +229,7 @@ class _ClaimedSegmentOwner:
     def close_metadata_once(self) -> None:
         if self.metadata_closed:
             return
-        close_pending_event_metadata(self.pending_events)
+        _close_pending_event_metadata_once(self.pending_events)
         self.metadata_closed = True
 
 
@@ -956,12 +964,76 @@ class CoalescingGate:
             if gate.drain_task is not None and not gate.drain_task.done()
         ]
 
+    async def _abandon_queued_admission_for_bounded_shutdown(
+        self,
+        queued: _QueuedEvent,
+        drain_context: _DrainContext,
+    ) -> int:
+        """Cancel or close one queued admission before bounded shutdown discards it."""
+        if queued.ready_result is not None:
+            _close_pending_event_metadata_once([queued.ready_result.pending_event])
+            return 1
+        if queued.ready_task is None:
+            return 0
+        if queued.ready_task.done():
+            result = await asyncio.gather(queued.ready_task, return_exceptions=True)
+            return close_ready_task_result_metadata(result[0])
+        queued.ready_task.cancel()
+        done, pending = await asyncio.wait({queued.ready_task}, timeout=drain_context.ready_timeout_seconds)
+        if pending:
+            drain_context.result.cancelled_unready_count += 1
+            queued.ready_task.add_done_callback(self._close_late_ready_task_result)
+            return 0
+        drain_context.result.cancelled_unready_count += 1
+        result = await asyncio.gather(*done, return_exceptions=True)
+        return close_ready_task_result_metadata(result[0])
+
+    async def _abandon_gate_work_for_bounded_shutdown(self, drain_context: _DrainContext) -> None:
+        """Close/cancel all gate-owned work before bounded shutdown clears gates."""
+        if not self._is_bounded_drain(drain_context):
+            return
+        dropped_ready_count = 0
+        for gate in self._gates.values():
+            if gate.drain_task is not None and not gate.drain_task.done():
+                gate.drain_task.cancel()
+                drain_context.result.dispatch_cancelled_count += 1
+                gate.drain_task = None
+            admissions = [*gate.claimed_admissions, *gate.queue]
+            for queued in admissions:
+                dropped_ready_count += await self._abandon_queued_admission_for_bounded_shutdown(queued, drain_context)
+            gate.claimed_admissions = []
+            gate.queue.clear()
+            gate.drain_all_requested = False
+        if dropped_ready_count:
+            drain_context.result.dropped_ready_count += dropped_ready_count
+
+    async def _await_active_drain_tasks(self, drain_context: _DrainContext) -> tuple[bool, bool]:
+        """Await active drains; return (abandoned, still_pending)."""
+        tasks_to_await = self._active_drain_tasks()
+        if not tasks_to_await:
+            return False, False
+        if not self._is_bounded_drain(drain_context):
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+            return False, False
+        done, pending = await asyncio.wait(tasks_to_await, timeout=drain_context.ready_timeout_seconds)
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        if not pending:
+            return False, False
+        if not any(gate.drain_task in pending and gate.phase is GatePhase.IN_FLIGHT for gate in self._gates.values()):
+            return False, True
+        await self._abandon_gate_work_for_bounded_shutdown(drain_context)
+        return True, False
+
     async def _drain_all_once(self, drain_context: _DrainContext) -> bool:
         await self._wait_for_order_reservations_for_drain(drain_context)
         for gate in list(self._gates.values()):
             self._prepare_gate_for_drain(gate, drain_context)
 
-        cancelled_tasks = self._cancel_non_in_flight_drain_tasks(drain_context)
+        cancelled_tasks = (
+            [] if drain_context.cancelled_initial_drain_tasks else self._cancel_non_in_flight_drain_tasks(drain_context)
+        )
+        drain_context.cancelled_initial_drain_tasks = True
         if cancelled_tasks:
             await asyncio.gather(*cancelled_tasks, return_exceptions=True)
 
@@ -970,9 +1042,11 @@ class CoalescingGate:
             self._ensure_drain_task(key, gate)
             self._wake(gate)
 
-        tasks_to_await = self._active_drain_tasks()
-        if tasks_to_await:
-            await asyncio.gather(*tasks_to_await, return_exceptions=True)
+        abandoned, active_pending = await self._await_active_drain_tasks(drain_context)
+        if abandoned:
+            return True
+        if active_pending:
+            return False
         return not any(not reservation.released for reservation in self._order_reservations)
 
     @staticmethod
@@ -1097,6 +1171,7 @@ class CoalescingGate:
             while True:
                 if await self._drain_all_once(drain_context):
                     break
+            await self._abandon_gate_work_for_bounded_shutdown(drain_context)
             drain_completed = True
             return drain_context.result.freeze()
         finally:
@@ -1647,7 +1722,7 @@ class CoalescingGate:
                 if ready_admission.pending_event.event.event_id not in closed_or_transferred
             ]
             closed_ready_count += len(unresolved_events)
-            close_pending_event_metadata(unresolved_events)
+            _close_pending_event_metadata_once(unresolved_events)
             if closed_ready_count and (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dropped_ready_count += closed_ready_count
             raise
