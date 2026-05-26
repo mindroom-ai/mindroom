@@ -1066,7 +1066,7 @@ async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
         receipt_time=1_000.0,
     )
 
-    drain_task = asyncio.create_task(gate.drain_all())
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=5.0))
     await asyncio.sleep(0)
 
     assert drain_task.done() is False
@@ -1079,7 +1079,7 @@ async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
         source_kind=VOICE_SOURCE_KIND,
         order_reservation=reservation,
     )
-    await drain_task
+    await asyncio.wait_for(drain_task, timeout=5.0)
 
     assert [batch.source_event_ids for batch in batches] == [["$voice:localhost"]]
 

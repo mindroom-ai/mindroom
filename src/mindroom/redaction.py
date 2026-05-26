@@ -79,6 +79,7 @@ _SECRET_KEYS_SORTED = cast("tuple[str, ...]", tuple(sorted(_SECRET_KEYS, key=len
 _SECRET_KEY_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = tuple(
     (key, key.replace("_", ""), tuple(key.split("_"))) for key in _SECRET_KEYS_SORTED
 )
+_REDACTION_LOOKAHEAD_CHARS = 512
 
 type _RedactedValue = None | bool | int | float | str | list["_RedactedValue"] | dict[str, "_RedactedValue"]
 
@@ -221,9 +222,19 @@ def _truncate_text(value: str, max_length: int | None) -> str:
     return value[: max_length - len(_TRUNCATED)] + _TRUNCATED
 
 
+def _bounded_redaction_input(value: str, *, max_length: int | None) -> str:
+    if max_length is None:
+        return value
+    scan_length = max_length + _REDACTION_LOOKAHEAD_CHARS
+    if len(value) <= scan_length:
+        return value
+    return value[:scan_length]
+
+
 def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     """Redact common credential and bearer-token patterns from free-form text."""
-    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
+    bounded_value = _bounded_redaction_input(value, max_length=max_length)
+    redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), bounded_value)
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
