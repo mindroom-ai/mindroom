@@ -357,7 +357,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 what is the weather"),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -410,7 +410,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", return_value="🎤 show me the forecast"),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
@@ -468,7 +468,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
             new=AsyncMock(return_value="$thread_root"),
         ),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)

@@ -856,7 +856,7 @@ class TestCommandHandling:
                     new_callable=AsyncMock,
                     return_value=None,
                 ),
-                patch("mindroom.turn_controller.is_dm_room", return_value=False),
+                patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
             ):
                 await bot._on_message(room, event)
                 await drain_coalescing(bot)

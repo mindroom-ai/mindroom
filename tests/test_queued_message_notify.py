@@ -1709,7 +1709,7 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
@@ -1740,7 +1740,7 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(return_value=_DispatchPlan(kind="route", router_message="route this")),
@@ -1773,7 +1773,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
@@ -1815,7 +1815,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
-            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(

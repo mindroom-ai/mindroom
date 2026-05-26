@@ -4267,7 +4267,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
         bot._conversation_cache.get_thread_history = AsyncMock(
@@ -4383,7 +4383,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-        patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         # Setup mocks
         bot._conversation_cache.get_thread_history = AsyncMock(
