@@ -499,14 +499,10 @@ class CoalescingGate:
         return [pending_event.event.event_id for pending_event in pending_events]
 
     @staticmethod
-    def _queue_kind(pending_event: PendingEvent) -> QueueKind:
-        return queue_kind(pending_event)
-
-    @staticmethod
     def _queued_kind(queued: _QueuedEvent) -> QueueKind:
         if queued.ready_result is None:
             return QueueKind.NORMAL
-        return CoalescingGate._queue_kind(queued.ready_result.pending_event)
+        return queue_kind(queued.ready_result.pending_event)
 
     @staticmethod
     def _claim_front_events(gate: _GateEntry, count: int) -> list[_QueuedEvent]:
