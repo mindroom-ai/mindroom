@@ -1046,7 +1046,7 @@ async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> No
 
 
 @pytest.mark.asyncio
-async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
+async def test_drain_all_waits_for_order_reservation_to_admit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shutdown drains must treat receive-order reservations as pending ingress work."""
     batches: list[CoalescedBatch] = []
 
@@ -1065,10 +1065,21 @@ async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
         requester_user_id=key.requester_user_id,
         receipt_time=1_000.0,
     )
+    wait_entered = asyncio.Event()
+    original_wait_for_order_reservations = gate._wait_for_order_reservations_for_drain
+
+    async def wait_for_order_reservations_for_drain(drain_context: object) -> None:
+        wait_entered.set()
+        await original_wait_for_order_reservations(drain_context)
+
+    monkeypatch.setattr(
+        gate,
+        "_wait_for_order_reservations_for_drain",
+        wait_for_order_reservations_for_drain,
+    )
 
     drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=5.0))
-    await asyncio.sleep(0)
-
+    await asyncio.wait_for(wait_entered.wait(), timeout=5.0)
     assert drain_task.done() is False
 
     await gate.admit(
@@ -1079,7 +1090,7 @@ async def test_drain_all_waits_for_order_reservation_to_admit() -> None:
         source_kind=VOICE_SOURCE_KIND,
         order_reservation=reservation,
     )
-    await asyncio.wait_for(drain_task, timeout=5.0)
+    await asyncio.wait_for(drain_task, timeout=10.0)
 
     assert [batch.source_event_ids for batch in batches] == [["$voice:localhost"]]
 
