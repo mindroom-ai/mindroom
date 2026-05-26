@@ -32,6 +32,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     git_checkout_present,
@@ -281,6 +282,25 @@ def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
         load_published_index_state(metadata_path),
         metadata_exists=metadata_path.exists(),
     )
+
+
+def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: Path) -> None:
+    """Manager-authored file-mode metadata may omit the top-level index_kind field."""
+    metadata_path = tmp_path / "indexing_settings.json"
+    settings = replace(_test_indexing_settings(), mode="files")
+    write_index_metadata_payload(
+        metadata_path,
+        settings=settings.to_metadata(),
+        status="complete",
+        indexed_count=0,
+        source_signature="source-signature",
+    )
+
+    state = load_published_index_state(metadata_path)
+
+    assert state is not None
+    assert state.index_kind == "files"
+    assert state.collection is None
 
 
 def _identity(requester_id: str) -> ToolExecutionIdentity:

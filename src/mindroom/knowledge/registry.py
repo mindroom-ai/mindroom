@@ -280,7 +280,7 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
     indexing_settings = manager_module.IndexingSettings.from_metadata(settings)
     if indexing_settings is None:
         return None
-    raw_index_kind = payload.get("index_kind")
+    raw_index_kind = optional_metadata_str(payload.get("index_kind")) or optional_metadata_str(settings.get("mode"))
     index_kind: Literal["semantic", "files"] = "files" if raw_index_kind == "files" else "semantic"
 
     return PublishedIndexState(
