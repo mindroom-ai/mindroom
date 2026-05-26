@@ -152,6 +152,7 @@ def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
+    on_error: Callable[[], None] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -169,7 +170,9 @@ def _create_task_wrapper(
                 # Task was cancelled, this is expected during shutdown
                 pass
             except Exception:
-                if owner is not None:
+                if on_error is not None:
+                    on_error()
+                elif owner is not None:
                     owner.mark_callback_failed()
                 # Log the exception with full traceback
                 logger.exception("Error in event callback")
@@ -981,6 +984,13 @@ class AgentBot:
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
 
+    def _mark_callback_failed(self) -> None:
+        """Mark sync certification unsafe after a Matrix callback failure."""
+        self._runtime_view.mark_callback_failed()
+        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        self._sync_checkpoint = None
+        self._clear_saved_sync_token()
+
     def _apply_sync_certification_decision(
         self,
         decision: SyncCertificationDecision,
@@ -988,6 +998,19 @@ class AgentBot:
         cache_result: SyncCacheWriteResult | None = None,
     ) -> None:
         """Apply a certifier decision to runtime state and token storage."""
+        if self._runtime_view.callback_failure_count:
+            if decision.reset_client_token and self.client is not None:
+                client = cast("Any", self.client)
+                client.next_batch = None
+            self._sync_trust_state = SyncTrustState.UNCERTAIN
+            self._sync_checkpoint = None
+            self._clear_saved_sync_token()
+            self.logger.warning(
+                "matrix_sync_certification_uncertain",
+                reason="callback_failed",
+                callback_failure_count=self._runtime_view.callback_failure_count,
+            )
+            return
         self._sync_trust_state = decision.state
         self._sync_checkpoint = decision.checkpoint_to_save
         if decision.reset_client_token and self.client is not None:
@@ -1058,6 +1081,7 @@ class AgentBot:
                 except asyncio.CancelledError:
                     pass
                 except Exception:
+                    self._mark_callback_failed()
                     logger.exception("Error in event callback")
 
             create_background_task(error_handler(), owner=self._runtime_view)
@@ -1213,28 +1237,36 @@ class AgentBot:
             # Register event callbacks - wrap them to run as background tasks
             # This ensures the sync loop is never blocked, allowing stop reactions to work
             client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+                _create_task_wrapper(self._on_invite, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view),
+                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.RoomMessageText,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+                _create_task_wrapper(self._on_redaction, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.RedactionEvent,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
+                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.ReactionEvent,
             )
 
             # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
+            media_callback = _create_task_wrapper(
+                self._on_media_message,
+                owner=self._runtime_view,
+                on_error=self._mark_callback_failed,
+            )
             for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
             client.add_event_callback(
-                _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),
+                _create_task_wrapper(
+                    self._on_unknown_event,
+                    owner=self._runtime_view,
+                    on_error=self._mark_callback_failed,
+                ),
                 nio.UnknownEvent,
             )
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here

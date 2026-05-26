@@ -25,7 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCertificationDecision, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
@@ -98,6 +98,22 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
             "type": "m.room.message",
         },
     )
+
+
+def _room_member_event(event_id: str = "$member-join") -> nio.RoomMemberEvent:
+    event = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "state_key": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"membership": "join"},
+            "unsigned": {"prev_content": {"membership": "leave"}},
+        },
+    )
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event
 
 
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
@@ -436,6 +452,69 @@ async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path:
 
     await bot.prepare_for_sync_shutdown()
 
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_callback_failure_clears_saved_checkpoint_immediately(tmp_path: Path) -> None:
+    """A failed Matrix callback must clear already-persisted sync continuity."""
+    bot = _agent_bot(tmp_path)
+    save_sync_token(tmp_path, bot.agent_name, "s_before_failure")
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_before_failure")
+
+    async def failing_callback() -> None:
+        msg = "callback failed"
+        raise RuntimeError(msg)
+
+    callback = _create_task_wrapper(
+        failing_callback,
+        owner=bot._runtime_view,
+        on_error=bot._mark_callback_failed,
+    )
+    await callback()
+    await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
+
+    assert bot._runtime_view.callback_failure_count == 1
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+def test_callback_failure_blocks_later_certified_checkpoint(tmp_path: Path) -> None:
+    """No later sync response may restore certification after a callback failure."""
+    bot = _agent_bot(tmp_path)
+    bot._mark_callback_failed()
+
+    bot._apply_sync_certification_decision(
+        SyncCertificationDecision(
+            state=SyncTrustState.CERTIFIED,
+            checkpoint_to_save=SyncCheckpoint("s_after_failure"),
+        ),
+    )
+
+    assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
+    assert bot._sync_checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_room_member_callback_failure_prevents_certified_checkpoint(tmp_path: Path) -> None:
+    """Room-member callback exceptions must use the same sync-failure accounting."""
+    bot = _agent_bot(tmp_path)
+    save_sync_token(tmp_path, bot.agent_name, "s_before_member_failure")
+    bot._sync_trust_state = SyncTrustState.CERTIFIED
+    bot._sync_checkpoint = SyncCheckpoint("s_before_member_failure")
+    bot._on_room_member = AsyncMock(side_effect=RuntimeError("member callback failed"))  # type: ignore[method-assign]
+    wrapper = bot._create_room_member_task_wrapper()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await wrapper(room, _room_member_event())
+    await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
+
+    assert bot._runtime_view.callback_failure_count == 1
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
     assert bot._sync_checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
