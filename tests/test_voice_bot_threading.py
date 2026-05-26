@@ -440,10 +440,10 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
 
 
 @pytest.mark.asyncio
-async def test_voice_plain_reply_unproven_thread_candidate_coalesces_room_level(
+async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
     mock_home_bot: AgentBot,
 ) -> None:
-    """Unproven related-event candidates must not become canonical voice thread keys."""
+    """Unproven related-event candidates must not become guessed voice coalescing keys."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_voice_event(
@@ -462,16 +462,19 @@ async def test_voice_plain_reply_unproven_thread_candidate_coalesces_room_level(
         },
     )
 
-    with patch(
-        "mindroom.conversation_resolver.resolve_event_thread_membership",
-        new=AsyncMock(
-            return_value=ThreadResolution.indeterminate(
-                RuntimeError("proof unavailable"),
-                candidate_thread_root_id="$maybe-thread-root",
+    with (
+        patch(
+            "mindroom.conversation_resolver.resolve_event_thread_membership",
+            new=AsyncMock(
+                return_value=ThreadResolution.indeterminate(
+                    RuntimeError("proof unavailable"),
+                    candidate_thread_root_id="$maybe-thread-root",
+                ),
             ),
         ),
+        pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
     ):
-        assert await bot._conversation_resolver.coalescing_thread_id(room, voice_event) is None
+        await bot._conversation_resolver.coalescing_thread_id(room, voice_event)
 
 
 @pytest.mark.asyncio
@@ -1371,8 +1374,10 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
 
 
 @pytest.mark.asyncio
-async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
-    """Thread-resolution failures should terminate visibly instead of dropping live audio."""
+async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guessed_fallback(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Canonical target failures should not dispatch audio under a guessed thread."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$thread-resolution-fails")
@@ -1399,19 +1404,16 @@ async def test_raw_voice_thread_resolution_exception_dispatches_audio_fallback(m
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
     ):
-        await bot._on_media_message(room, voice_event)
+        with pytest.raises(RuntimeError, match="thread lookup failed"):
+            await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    _assert_voice_fallback_dispatch(
-        dispatches,
-        source_event_id="$thread-resolution-fails",
-        thread_id="$thread_root",
-    )
+    assert dispatches == []
 
 
 @pytest.mark.asyncio
-async def test_raw_voice_root_target_failures_dispatch_separate_audio_fallbacks(mock_home_bot: AgentBot) -> None:
-    """Fallback voice roots should dispatch under their built thread targets, not the room key."""
+async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(mock_home_bot: AgentBot) -> None:
+    """Target failures should not batch or mark guessed audio fallbacks handled."""
     bot = mock_home_bot
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.02)
@@ -1463,26 +1465,18 @@ async def test_raw_voice_root_target_failures_dispatch_separate_audio_fallbacks(
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
     ):
-        await asyncio.gather(
-            bot._on_media_message(room, first_voice),
-            bot._on_media_message(room, second_voice),
-        )
+        with pytest.raises(RuntimeError, match="thread lookup failed"):
+            await bot._on_media_message(room, first_voice)
+        with pytest.raises(RuntimeError, match="thread lookup failed"):
+            await bot._on_media_message(room, second_voice)
         await drain_coalescing(bot)
 
-    assert [handled_source_ids for _event, handled_source_ids in dispatches] == [
-        ["$target-fails-1"],
-        ["$target-fails-2"],
-    ]
-    assert [
-        cast("dict[str, str]", event.source["content"]["m.relates_to"])["event_id"]
-        for event, _handled_source_ids in dispatches
-        if isinstance(event, PreparedTextEvent)
-    ] == ["$target-fails-1", "$target-fails-2"]
+    assert dispatches == []
 
 
 @pytest.mark.asyncio
-async def test_raw_voice_cache_append_exception_dispatches_audio_fallback(mock_home_bot: AgentBot) -> None:
-    """Cache append failures after admission should terminate visibly."""
+async def test_raw_voice_cache_append_exception_does_not_dispatch_guessed_fallback(mock_home_bot: AgentBot) -> None:
+    """Cache append failures before canonical admission should not dispatch guessed audio."""
     bot = mock_home_bot
     room = _threaded_room()
     voice_event = _make_threaded_voice_event(event_id="$cache-append-fails")
@@ -1510,12 +1504,9 @@ async def test_raw_voice_cache_append_exception_dispatches_audio_fallback(mock_h
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
     ):
-        await bot._on_media_message(room, voice_event)
+        with pytest.raises(RuntimeError, match="cache append failed"):
+            await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    _assert_voice_fallback_dispatch(
-        dispatches,
-        source_event_id="$cache-append-fails",
-        thread_id="$thread_root",
-    )
+    assert dispatches == []
     prepare_voice_event.assert_not_awaited()

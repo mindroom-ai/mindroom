@@ -237,6 +237,7 @@ class _GateEntry:
     grace_deadline: float | None = None
     drain_all_requested: bool = False
     drain_context: _DrainContext | None = None
+    buffered_in_flight_max_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -504,6 +505,7 @@ class CoalescingGate:
     @staticmethod
     def _claim_front_events(gate: _GateEntry, count: int) -> list[_QueuedEvent]:
         gate.claimed_admissions = [gate.queue.popleft() for _ in range(count)]
+        gate.buffered_in_flight_max_order = None
         return gate.claimed_admissions
 
     @staticmethod
@@ -684,6 +686,29 @@ class CoalescingGate:
         if candidate_count < len(gate.queue):
             return gate.queue[candidate_count].received_order
         return None
+
+    @staticmethod
+    def _front_normal_run_latest_receipt_time(
+        gate: _GateEntry,
+        *,
+        coalesce_normal_events: bool,
+        debounce_seconds: float,
+    ) -> float:
+        if not gate.queue:
+            return time.monotonic()
+        latest_receipt_time = gate.queue[0].receipt_time
+        if not coalesce_normal_events:
+            return latest_receipt_time
+        buffered_in_flight_max_order = gate.buffered_in_flight_max_order
+        for queued in list(gate.queue)[1:]:
+            if CoalescingGate._queued_kind(queued) is not _QueueKind.NORMAL:
+                break
+            if (
+                buffered_in_flight_max_order is None or queued.received_order > buffered_in_flight_max_order
+            ) and queued.receipt_time > latest_receipt_time + debounce_seconds:
+                break
+            latest_receipt_time = queued.receipt_time
+        return latest_receipt_time
 
     def _enqueue_path(self, kind: _QueueKind) -> str:
         if kind is _QueueKind.BYPASS:
@@ -999,7 +1024,14 @@ class CoalescingGate:
         if debounce_seconds <= 0 or self._is_shutting_down() or gate.drain_all_requested:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
-        quiet_deadline = gate.queue[0].receipt_time + debounce_seconds
+        quiet_deadline = (
+            self._front_normal_run_latest_receipt_time(
+                gate,
+                coalesce_normal_events=coalesce_normal_events(),
+                debounce_seconds=debounce_seconds,
+            )
+            + debounce_seconds
+        )
         barrier_order = self._first_barrier_after_front_normal_run_order(
             gate,
             coalesce_normal_events=coalesce_normal_events(),
@@ -1018,6 +1050,14 @@ class CoalescingGate:
             )
             if self._is_shutting_down() or gate.drain_all_requested or barrier_order is not None:
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline, before_order=barrier_order)
+            quiet_deadline = (
+                self._front_normal_run_latest_receipt_time(
+                    gate,
+                    coalesce_normal_events=coalesce_normal_events(),
+                    debounce_seconds=debounce_seconds,
+                )
+                + debounce_seconds
+            )
             gate.deadline = quiet_deadline
 
     async def _wait_for_upload_grace(
@@ -1343,6 +1383,8 @@ class CoalescingGate:
                 outcome=outcome,
             )
             gate.phase = GatePhase.DEBOUNCE
+            if gate.queue:
+                gate.buffered_in_flight_max_order = max(queued.received_order for queued in gate.queue)
             gate.grace_deadline = None
             gate.deadline = None
             self._wake_owner_gates(key)

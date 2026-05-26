@@ -29,6 +29,8 @@ from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadMembershipLookupError,
+    ThreadResolutionState,
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
@@ -478,16 +480,16 @@ class ConversationResolver:
                 ),
             )
         except Exception as exc:
-            # Coalescing is only a batching optimization; any membership failure must fail open.
-            self.deps.logger.debug(
-                "Failed to resolve coalescing thread id; continuing room-level",
-                room_id=room.room_id,
-                event_id=event.event_id,
-                error=str(exc),
-            )
-            return None
-        else:
+            msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
+            raise ThreadMembershipLookupError(msg) from exc
+        if resolution.state is ThreadResolutionState.THREADED:
             return resolution.thread_id
+        if resolution.state is ThreadResolutionState.ROOM_LEVEL:
+            return None
+        msg = f"Could not resolve canonical coalescing thread for {event.event_id}"
+        if resolution.error is not None:
+            raise ThreadMembershipLookupError(msg) from resolution.error
+        raise ThreadMembershipLookupError(msg)
 
     async def _explicit_thread_id_for_event(
         self,

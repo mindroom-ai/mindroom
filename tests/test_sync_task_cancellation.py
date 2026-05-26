@@ -126,6 +126,30 @@ async def test_cancel_sync_task_missing_entity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync callbacks must be stopped before shutdown drain can certify a checkpoint."""
+    bot = _FakeBot()
+    call_order: list[str] = []
+
+    async def prepare_for_sync_shutdown() -> None:
+        call_order.append("prepare")
+
+    class FakeIteration:
+        async def wait(self) -> None:
+            bot.running = False
+
+        async def cancel(self) -> None:
+            call_order.append("cancel")
+
+    bot.prepare_for_sync_shutdown = prepare_for_sync_shutdown
+    monkeypatch.setattr(_SyncIteration, "start", lambda _bot: FakeIteration())
+
+    await sync_forever_with_restart(bot)
+
+    assert call_order == ["cancel", "prepare"]
+
+
+@pytest.mark.asyncio
 async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     """Watchdog should cancel and restart a sync loop that stops making progress."""
     bot = _FakeBot()
@@ -700,8 +724,8 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_stop_entities_prepares_bots_before_cancelling_sync_tasks() -> None:
-    """Restart teardown should cancel deferred work before the sync loop stops."""
+async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> None:
+    """Restart teardown should stop sync callbacks before checkpoint drain can certify."""
     call_order: list[tuple[str, str]] = []
     cancel_messages: list[tuple[str, str | None]] = []
 
@@ -746,7 +770,7 @@ async def test_stop_entities_prepares_bots_before_cancelling_sync_tasks() -> Non
 
     assert prepare_indexes
     assert cancel_indexes
-    assert max(prepare_indexes) < min(cancel_indexes)
+    assert max(cancel_indexes) < min(prepare_indexes)
     assert sorted(cancel_messages) == [
         ("agent1", SYNC_RESTART_CANCEL_MSG),
         ("agent2", SYNC_RESTART_CANCEL_MSG),

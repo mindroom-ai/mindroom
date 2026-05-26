@@ -2487,41 +2487,13 @@ class TurnController:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
-        try:
-            voice_target, admission_key = await self._resolve_ready_voice_target(
-                room,
-                event,
-                event_info=event_info,
-                requester_user_id=prechecked_event.requester_user_id,
-                dispatch_timing=dispatch_timing,
-            )
-        except Exception as exc:
-            fallback_target = self.deps.resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id=event_info.thread_id,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
-            )
-            fallback_thread_id = fallback_target.resolved_thread_id
-            fallback_key = CoalescingKey(room.room_id, fallback_thread_id, prechecked_event.requester_user_id)
-            fallback_ready_task = asyncio.create_task(
-                self._ready_voice_fallback_event(
-                    room=room,
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                    thread_id=fallback_thread_id,
-                    dispatch_timing=dispatch_timing,
-                    error=exc,
-                ),
-                name=f"voice_fallback_ready:{room.room_id}:{event.event_id}",
-            )
-            await reservation_owner.admit(
-                fallback_key,
-                ready_task=fallback_ready_task,
-                source_event_id=event.event_id,
-                source_kind=VOICE_SOURCE_KIND,
-            )
-            return
+        voice_target, admission_key = await self._resolve_ready_voice_target(
+            room,
+            event,
+            event_info=event_info,
+            requester_user_id=prechecked_event.requester_user_id,
+            dispatch_timing=dispatch_timing,
+        )
 
         ready_task = asyncio.create_task(
             self._ready_voice_event(

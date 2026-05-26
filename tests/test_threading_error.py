@@ -9363,7 +9363,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
-        """Ingress coalescing should attribute any thread proof refreshes it triggers."""
+        """Ingress coalescing should reject indeterminate thread proof refreshes it triggers."""
         room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
@@ -9397,10 +9397,10 @@ class TestThreadingBehavior:
                     ),
                 ),
             ) as mock_resolve,
+            pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
         ):
-            thread_id = await resolver.coalescing_thread_id(room, event)
+            await resolver.coalescing_thread_id(room, event)
 
-        assert thread_id is None
         mock_access.assert_called_once_with(
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="coalescing_thread_id",
@@ -9413,8 +9413,8 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
-    async def test_coalescing_thread_id_demotes_lookup_failure_candidate(self, bot: AgentBot) -> None:
-        """Lookup-failed plain replies should not use unproven candidate roots for coalescing."""
+    async def test_coalescing_thread_id_rejects_lookup_failure_candidate(self, bot: AgentBot) -> None:
+        """Lookup-failed plain replies should not be admitted under a guessed coalescing key."""
         room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
@@ -9435,10 +9435,9 @@ class TestThreadingBehavior:
         with (
             patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
             patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
         ):
-            thread_id = await resolver.coalescing_thread_id(room, event)
-
-        assert thread_id is None
+            await resolver.coalescing_thread_id(room, event)
 
     @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(

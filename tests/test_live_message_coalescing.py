@@ -1053,8 +1053,8 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
 
 
 @pytest.mark.asyncio
-async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_path: Path) -> None:
-    """Unproven roots demote to room-level coalescing and still dispatch separately."""
+async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(tmp_path: Path) -> None:
+    """Unproven roots should not be admitted as canonical room-level coalescing keys."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     reply_a = _reply_event(
@@ -1062,12 +1062,6 @@ async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_pat
         body="follow up a",
         reply_to_event_id="$root-a",
         server_timestamp=1000,
-    )
-    reply_b = _reply_event(
-        event_id="$reply-b",
-        body="follow up b",
-        reply_to_event_id="$root-b",
-        server_timestamp=1001,
     )
 
     def root_response(event_id: str) -> nio.RoomGetEventResponse:
@@ -1104,7 +1098,10 @@ async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_pat
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with (
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
+    ):
         await _enqueue_for_dispatch(
             bot,
             reply_a,
@@ -1112,16 +1109,8 @@ async def test_plain_replies_to_different_unproven_roots_do_not_coalesce(tmp_pat
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _enqueue_for_dispatch(
-            bot,
-            reply_b,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
-        await _wait_for(lambda: len(calls) == 2)
 
-    assert sorted(calls) == [["$reply-a"], ["$reply-b"]]
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -1307,8 +1296,8 @@ async def test_already_queued_command_barrier_flushes_normal_without_debounce() 
 
 @pytest.mark.asyncio
 async def test_messages_during_active_response_wait_and_batch_after_completion(tmp_path: Path) -> None:
-    """Hold threaded follow-ups while the first-turn response is in flight, then batch them."""
-    bot = _make_bot(tmp_path)
+    """Hold all threaded follow-ups while the first-turn response is in flight, then batch them."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$m1")
@@ -1350,6 +1339,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             source_kind="message",
             requester_user_id="@user:localhost",
         )
+        await asyncio.sleep(0.03)
         await _enqueue_for_dispatch(
             bot,
             third,

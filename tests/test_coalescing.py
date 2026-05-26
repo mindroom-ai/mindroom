@@ -636,6 +636,34 @@ async def test_thread_messages_inside_debounce_window_still_coalesce() -> None:
 
 
 @pytest.mark.asyncio
+async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
+    """A later threaded message inside the debounce window should extend the quiet deadline."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.05,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+
+    await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
+    await asyncio.sleep(0.04)
+    await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_040)))
+    await asyncio.sleep(0.02)
+
+    assert batches == []
+
+    await _wait_for(
+        lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]],
+    )
+
+
+@pytest.mark.asyncio
 async def test_voice_readiness_delay_does_not_extend_receive_time_debounce() -> None:
     """A slow STT result must not let later text join an expired voice debounce window."""
     batches: list[CoalescedBatch] = []
