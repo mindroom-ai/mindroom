@@ -12081,7 +12081,7 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
+        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
