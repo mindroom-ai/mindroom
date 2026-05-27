@@ -847,8 +847,8 @@ async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> No
 
 
 @pytest.mark.asyncio
-async def test_later_normal_gate_waits_behind_older_active_backlog() -> None:
-    """A resolved later normal key must not overtake an older same-room active backlog."""
+async def test_same_target_normal_gate_waits_behind_older_active_backlog() -> None:
+    """A resolved later normal key must not overtake an older active backlog for that target."""
     batches: list[list[str]] = []
     first_active_wait = asyncio.Event()
     release_first_active_wait = asyncio.Event()
@@ -856,7 +856,7 @@ async def test_later_normal_gate_waits_behind_older_active_backlog() -> None:
     release_second_active_wait = asyncio.Event()
     active_wait_count = 0
     active_key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
-    normal_key = CoalescingKey("!room:localhost", "$other-thread:localhost", "@bob:localhost")
+    normal_key = CoalescingKey("!room:localhost", "$thread:localhost", "@bob:localhost")
 
     async def dispatch_batch(batch: CoalescedBatch) -> None:
         batches.append(list(batch.source_event_ids))
@@ -913,6 +913,71 @@ async def test_later_normal_gate_waits_behind_older_active_backlog() -> None:
     await gate.drain_all()
 
     assert batches == [["$active:localhost"], ["$normal:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_different_thread_normal_gate_does_not_wait_behind_older_active_backlog() -> None:
+    """Resolved gates in other threads must not wait behind an active backlog for this target."""
+    batches: list[list[str]] = []
+    first_active_wait = asyncio.Event()
+    release_first_active_wait = asyncio.Event()
+    release_second_active_wait = asyncio.Event()
+    active_wait_count = 0
+    active_key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    normal_key = CoalescingKey("!room:localhost", "$other-thread:localhost", "@bob:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(list(batch.source_event_ids))
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        nonlocal active_wait_count
+        if wait_key != active_key:
+            return
+        active_wait_count += 1
+        if active_wait_count == 1:
+            first_active_wait.set()
+            await release_first_active_wait.wait()
+            return
+        await release_second_active_wait.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+
+    await _admit_ready(
+        gate,
+        active_key,
+        PendingEvent(
+            event=_text_event("$active:localhost", "queued while active", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@alice:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    await first_active_wait.wait()
+
+    later_reservation = gate.reserve_order(room_id=normal_key.room_id, requester_user_id=normal_key.requester_user_id)
+    release_first_active_wait.set()
+    await asyncio.sleep(0)
+
+    await gate.admit(
+        normal_key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$normal:localhost", "later normal", 1_000_001)),
+        ),
+        order_reservation=later_reservation,
+    )
+    await _wait_for(lambda: batches == [["$normal:localhost"]])
+
+    release_second_active_wait.set()
+    await gate.drain_all()
+
+    assert batches == [["$normal:localhost"], ["$active:localhost"]]
 
 
 @pytest.mark.asyncio

@@ -256,6 +256,10 @@ class CoalescingGate:
     def _same_owner(left: CoalescingKey, right: CoalescingKey) -> bool:
         return left.room_id == right.room_id and left.requester_user_id == right.requester_user_id
 
+    @staticmethod
+    def _same_target(left: CoalescingKey, right: CoalescingKey) -> bool:
+        return left.room_id == right.room_id and left.thread_id == right.thread_id
+
     def _wake_owner(self, room_id: str, requester_user_id: str) -> None:
         for gate_key, gate in self._gates.items():
             if gate_key.room_id == room_id and gate_key.requester_user_id == requester_user_id:
@@ -266,15 +270,15 @@ class CoalescingGate:
             if other_key != key and self._same_owner(other_key, key):
                 self._wake(other_gate)
 
-    def _wake_room_gates(self, key: CoalescingKey) -> None:
+    def _wake_target_gates(self, key: CoalescingKey) -> None:
         for other_key, other_gate in self._gates.items():
-            if other_key != key and other_key.room_id == key.room_id:
+            if other_key != key and self._same_target(other_key, key):
                 self._wake(other_gate)
 
     def _wake_related_gates(self, key: CoalescingKey) -> None:
         self._wake_owner_gates(key)
         if is_active_follow_up_coalescing_key(key):
-            self._wake_room_gates(key)
+            self._wake_target_gates(key)
 
     @staticmethod
     def _gate_has_work_before(
@@ -309,17 +313,18 @@ class CoalescingGate:
             and self._gate_has_work_before(gate, before_order=before_order, source_event_id=key.thread_id)
         ]
 
-    def _older_room_active_follow_up_gates(
+    def _older_target_active_follow_up_gates(
         self,
         key: CoalescingKey,
         *,
         before_order: int,
     ) -> list[_GateEntry]:
+        """Return active follow-up gates that can block a resolved target."""
         return [
             gate
             for gate_key, gate in self._gates.items()
             if gate_key != key
-            and gate_key.room_id == key.room_id
+            and self._same_target(gate_key, key)
             and is_active_follow_up_coalescing_key(gate_key)
             and self._gate_has_work_before(gate, before_order=before_order)
         ]
@@ -327,7 +332,7 @@ class CoalescingGate:
     def _older_gate_blockers(self, key: CoalescingKey, *, before_order: int) -> list[_GateEntry]:
         return [
             *self._older_owner_root_gates(key, before_order=before_order),
-            *self._older_room_active_follow_up_gates(key, before_order=before_order),
+            *self._older_target_active_follow_up_gates(key, before_order=before_order),
         ]
 
     async def _wait_until_front_claimable(
@@ -339,6 +344,8 @@ class CoalescingGate:
     ) -> None:
         while True:
             if is_active_follow_up_coalescing_key(key):
+                # The target of older same-room reservations is still unknown, so wait
+                # room-wide here. Once admitted, gate blockers below are target-scoped.
                 await self._wait_for_reservations(
                     gate,
                     self._order_book.older_room_reservations(key, before_order=front_order),
