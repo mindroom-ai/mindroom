@@ -17,7 +17,12 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     is_coalescing_exempt_source_kind,
 )
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescingKey,
+    PendingEvent,
+    active_follow_up_coalescing_key,
+    build_coalesced_batch,
+)
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -780,6 +785,65 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
     await _wait_for(
         lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost", "$second:localhost"]],
     )
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> None:
+    """Same-target follow-ups queued behind one active response flush as one ordered backlog."""
+    calls: list[tuple[list[str], str]] = []
+    idle = asyncio.Event()
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append((list(batch.source_event_ids), batch.prompt))
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        if wait_key == key:
+            await idle.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+
+    for event_id, body, requester_user_id in (
+        ("$a1:localhost", "first follow-up", "@alice:localhost"),
+        ("$b1:localhost", "extra context", "@bob:localhost"),
+        ("$a2:localhost", "reply to bob", "@alice:localhost"),
+    ):
+        await _admit_ready(
+            gate,
+            key,
+            PendingEvent(
+                event=_text_event(event_id, body, 1_000_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=requester_user_id,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+        await asyncio.sleep(0.03)
+
+    assert calls == []
+
+    idle.set()
+    await _wait_for(lambda: calls != [])
+
+    assert calls == [
+        (
+            ["$a1:localhost", "$b1:localhost", "$a2:localhost"],
+            "Messages arrived while the previous response was still running. "
+            "They are in chat timeline order. Respond once to the combined context:\n\n"
+            "<queued_messages>\n"
+            '<msg event_id="$a1:localhost" from="@alice:localhost"><![CDATA[first follow-up]]></msg>\n'
+            '<msg event_id="$b1:localhost" from="@bob:localhost"><![CDATA[extra context]]></msg>\n'
+            '<msg event_id="$a2:localhost" from="@alice:localhost"><![CDATA[reply to bob]]></msg>\n'
+            "</queued_messages>",
+        ),
+    ]
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from .coalescing_batch import (
     CoalescingKey,
     PendingEvent,
     build_coalesced_batch,
+    is_active_follow_up_coalescing_key,
 )
 from .coalescing_cleanup import (
     ClaimedSegmentOwner,
@@ -1380,6 +1381,44 @@ class CoalescingGate:
         if not gate.queue:
             gate.drain_all_requested = False
 
+    async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:
+        """Dispatch the post-idle active-response backlog as one receive-ordered batch."""
+        if not is_active_follow_up_coalescing_key(key):
+            return False
+        front = gate.queue[0]
+        if self._queued_kind(front) is not QueueKind.NORMAL:
+            return False
+
+        backlog_max_order = self._order_book.next_received_order
+        backlog_reservations = self._order_book.unsettled_owner_reservations_in_window(
+            key,
+            after_order=front.received_order,
+            before_order=backlog_max_order + 1,
+            before_or_at_receipt_time=float("inf"),
+        )
+        if backlog_reservations:
+            await self._wait_for_reservations(gate, backlog_reservations)
+            return True
+
+        candidate_count = self._claimable_front_normal_run_length(
+            key,
+            gate,
+            coalesce_normal_events=True,
+            max_received_order=backlog_max_order,
+        )
+        if candidate_count == 0:
+            return False
+
+        claimed_admissions = self._claim_front_events(gate, candidate_count)
+        await self._dispatch_claim(
+            key,
+            gate,
+            claimed_admissions,
+            bypass_grace=True,
+            allow_upload_grace=False,
+        )
+        return True
+
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
         front = gate.queue[0]
         await self._wait_until_front_claimable(key, gate, front_order=front.received_order)
@@ -1392,6 +1431,9 @@ class CoalescingGate:
 
         front = gate.queue[0]
         if await self._dispatch_front_barrier(key, gate, self._queued_kind(front)):
+            return
+
+        if await self._dispatch_active_follow_up_backlog(key, gate):
             return
 
         debounce_result = await self._wait_for_debounce(

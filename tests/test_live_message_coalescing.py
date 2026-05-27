@@ -19,7 +19,12 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     is_coalescing_exempt_source_kind,
 )
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescedBatch,
+    CoalescingKey,
+    PendingEvent,
+    build_coalesced_batch,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -1339,8 +1344,8 @@ async def test_already_queued_command_barrier_flushes_normal_without_debounce() 
 
 
 @pytest.mark.asyncio
-async def test_messages_during_active_response_wait_and_dispatch_after_completion(tmp_path: Path) -> None:
-    """Hold threaded follow-ups while the first-turn dispatch is in flight, then drain them normally."""
+async def test_messages_during_active_response_wait_and_batch_after_completion(tmp_path: Path) -> None:
+    """Hold all threaded follow-ups while the first-turn response is in flight, then batch them."""
     bot = _make_bot(tmp_path, debounce_ms=10)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
@@ -1349,6 +1354,34 @@ async def test_messages_during_active_response_wait_and_dispatch_after_completio
     entered_first_dispatch = asyncio.Event()
     release_first_dispatch = asyncio.Event()
     calls: list[list[str]] = []
+
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        assert room_id == room.room_id
+        assert thread_id == "$m1"
+        await release_first_dispatch.wait()
+
+    async def enqueue_active_follow_up(event: nio.RoomMessageText) -> None:
+        target = MessageTarget.resolve(room.room_id, "$m1", event.event_id)
+        envelope = bot._conversation_resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id="@user:localhost",
+            target=target,
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        try:
+            await bot._turn_controller._enqueue_active_thread_follow_up(
+                room=room,
+                event=event,
+                target=target,
+                envelope=envelope,
+                coalescing_thread_id="$m1",
+                requester_user_id="@user:localhost",
+                reservation_owner=reservation_owner,
+            )
+        finally:
+            await reservation_owner.release()
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
@@ -1365,7 +1398,14 @@ async def test_messages_during_active_response_wait_and_dispatch_after_completio
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with (
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(
+            bot._response_runner,
+            "wait_for_thread_response_idle",
+            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+        ),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -1376,29 +1416,17 @@ async def test_messages_during_active_response_wait_and_dispatch_after_completio
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
 
-        await _enqueue_for_dispatch(
-            bot,
-            second,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
+        await enqueue_active_follow_up(second)
         await asyncio.sleep(0.03)
-        await _enqueue_for_dispatch(
-            bot,
-            third,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
+        await enqueue_active_follow_up(third)
         await asyncio.sleep(0.03)
 
         assert calls == [["$m1"]]
 
         release_first_dispatch.set()
-        await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$m3"]])
+        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
-    assert calls == [["$m1"], ["$m2"], ["$m3"]]
+    assert calls == [["$m1"], ["$m2", "$m3"]]
 
 
 @pytest.mark.asyncio
