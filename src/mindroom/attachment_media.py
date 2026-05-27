@@ -28,7 +28,7 @@ def _remember_attachment_record(record: AttachmentRecord) -> None:
     while len(_INLINE_MEDIA_RECORDS_BY_ID) > _MAX_INLINE_MEDIA_RECORDS:
         _INLINE_MEDIA_RECORDS_BY_ID.popitem(last=False)
 
-    path_key = str(record.local_path.resolve())
+    path_key = str(record.local_path.absolute())
     _INLINE_MEDIA_RECORDS_BY_PATH[path_key] = record
     _INLINE_MEDIA_RECORDS_BY_PATH.move_to_end(path_key)
     while len(_INLINE_MEDIA_RECORDS_BY_PATH) > _MAX_INLINE_MEDIA_RECORDS:

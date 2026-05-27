@@ -9,6 +9,7 @@ Team has the same upstream behavior.
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from agno.media import Audio, File, Image, Video
 
 _PATCHED = False
+_PATCH_LOCK = threading.Lock()
 type _RolefulInput = list[Message]
 type _RunMessagesBuilder = Callable[..., RunMessages]
 type _AsyncRunMessagesBuilder = Callable[..., Awaitable[RunMessages]]
@@ -67,8 +69,8 @@ def _media_content_key(kind: str, media: Image | Audio | Video | File) -> tuple[
         record = attachment_media._INLINE_MEDIA_RECORDS_BY_ID.get(media.id)
         if record is not None and record.kind == kind:
             key = attachment_media._inline_media_content_key(record)
-    if key is None and media.filepath is not None:
-        path = str(Path(media.filepath).resolve())
+    if key is None and media.filepath:
+        path = str(Path(media.filepath).absolute())
         record = attachment_media._INLINE_MEDIA_RECORDS_BY_PATH.get(path)
         if record is not None and record.kind == kind:
             key = attachment_media._inline_media_content_key(record)
@@ -145,6 +147,13 @@ def _messages_in_inline_media_dedupe_order(run_messages: RunMessages) -> list[Me
 
 
 def _dedupe_run_messages_inline_media(run_messages: RunMessages) -> RunMessages:
+    """Remove duplicate inline media from one provider-bound run in place.
+
+    Agno builds fresh per-run Message objects for persisted history before this
+    function runs, so clearing older duplicate media here affects the current
+    request payload rather than persisted session history. The first content key
+    in current, non-history, then history order wins.
+    """
     seen_images: set[tuple[str, ...]] = set()
     seen_audio: set[tuple[str, ...]] = set()
     seen_files: set[tuple[str, ...]] = set()
@@ -166,40 +175,43 @@ def apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
+    with _PATCH_LOCK:
+        if _PATCHED:
+            return
 
-    original_team_get_run_messages = cast("_RunMessagesBuilder", team_messages._get_run_messages)
-    original_team_aget_run_messages = cast("_AsyncRunMessagesBuilder", team_messages._aget_run_messages)
-    original_agent_get_run_messages = cast("_RunMessagesBuilder", agent_messages.get_run_messages)
-    original_agent_aget_run_messages = cast("_AsyncRunMessagesBuilder", agent_messages.aget_run_messages)
+        original_team_get_run_messages = cast("_RunMessagesBuilder", team_messages._get_run_messages)
+        original_team_aget_run_messages = cast("_AsyncRunMessagesBuilder", team_messages._aget_run_messages)
+        original_agent_get_run_messages = cast("_RunMessagesBuilder", agent_messages.get_run_messages)
+        original_agent_aget_run_messages = cast("_AsyncRunMessagesBuilder", agent_messages.aget_run_messages)
 
-    def _get_run_messages(*args: object, **kwargs: object) -> RunMessages:
-        input_message = kwargs.get("input_message")
-        if not _is_roleful_message_list(input_message):
-            return _dedupe_run_messages_inline_media(original_team_get_run_messages(*args, **kwargs))
+        def _get_run_messages(*args: object, **kwargs: object) -> RunMessages:
+            input_message = kwargs.get("input_message")
+            if not _is_roleful_message_list(input_message):
+                return _dedupe_run_messages_inline_media(original_team_get_run_messages(*args, **kwargs))
 
-        passthrough_kwargs = {**kwargs, "input_message": None}
-        run_messages = original_team_get_run_messages(*args, **passthrough_kwargs)
-        _append_input_messages(run_messages, cast("_RolefulInput", input_message))
-        return _dedupe_run_messages_inline_media(run_messages)
+            passthrough_kwargs = {**kwargs, "input_message": None}
+            run_messages = original_team_get_run_messages(*args, **passthrough_kwargs)
+            _append_input_messages(run_messages, cast("_RolefulInput", input_message))
+            return _dedupe_run_messages_inline_media(run_messages)
 
-    async def _aget_run_messages(*args: object, **kwargs: object) -> RunMessages:
-        input_message = kwargs.get("input_message")
-        if not _is_roleful_message_list(input_message):
-            return _dedupe_run_messages_inline_media(await original_team_aget_run_messages(*args, **kwargs))
+        async def _aget_run_messages(*args: object, **kwargs: object) -> RunMessages:
+            input_message = kwargs.get("input_message")
+            if not _is_roleful_message_list(input_message):
+                return _dedupe_run_messages_inline_media(await original_team_aget_run_messages(*args, **kwargs))
 
-        passthrough_kwargs = {**kwargs, "input_message": None}
-        run_messages = await original_team_aget_run_messages(*args, **passthrough_kwargs)
-        _append_input_messages(run_messages, cast("_RolefulInput", input_message))
-        return _dedupe_run_messages_inline_media(run_messages)
+            passthrough_kwargs = {**kwargs, "input_message": None}
+            run_messages = await original_team_aget_run_messages(*args, **passthrough_kwargs)
+            _append_input_messages(run_messages, cast("_RolefulInput", input_message))
+            return _dedupe_run_messages_inline_media(run_messages)
 
-    def _agent_get_run_messages(*args: object, **kwargs: object) -> RunMessages:
-        return _dedupe_run_messages_inline_media(original_agent_get_run_messages(*args, **kwargs))
+        def _agent_get_run_messages(*args: object, **kwargs: object) -> RunMessages:
+            return _dedupe_run_messages_inline_media(original_agent_get_run_messages(*args, **kwargs))
 
-    async def _agent_aget_run_messages(*args: object, **kwargs: object) -> RunMessages:
-        return _dedupe_run_messages_inline_media(await original_agent_aget_run_messages(*args, **kwargs))
+        async def _agent_aget_run_messages(*args: object, **kwargs: object) -> RunMessages:
+            return _dedupe_run_messages_inline_media(await original_agent_aget_run_messages(*args, **kwargs))
 
-    team_messages._get_run_messages = cast("Any", _get_run_messages)
-    team_messages._aget_run_messages = cast("Any", _aget_run_messages)
-    agent_messages.get_run_messages = cast("Any", _agent_get_run_messages)
-    agent_messages.aget_run_messages = cast("Any", _agent_aget_run_messages)
-    _PATCHED = True
+        team_messages._get_run_messages = cast("Any", _get_run_messages)
+        team_messages._aget_run_messages = cast("Any", _aget_run_messages)
+        agent_messages.get_run_messages = cast("Any", _agent_get_run_messages)
+        agent_messages.aget_run_messages = cast("Any", _agent_aget_run_messages)
+        _PATCHED = True

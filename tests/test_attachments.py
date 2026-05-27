@@ -112,6 +112,7 @@ def test_register_resolve_and_convert_attachment(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.attachment_id == "att_payload"
     assert loaded.local_path == file_path.resolve()
+    assert loaded.size_bytes == len(b"PK\x03\x04")
     assert loaded.content_sha256 == hashlib.sha256(file_path.read_bytes()).hexdigest()
 
     resolved = resolve_attachments(tmp_path, ["att_payload", "att_missing"])

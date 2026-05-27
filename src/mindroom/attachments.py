@@ -416,11 +416,12 @@ def register_local_attachment(
         return None
 
     hasher = hashlib.sha256()
+    size_bytes = 0
     try:
         with local_path.open("rb") as fh:
             for chunk in iter(lambda: fh.read(65536), b""):
                 hasher.update(chunk)
-        size_bytes = local_path.stat().st_size
+                size_bytes += len(chunk)
     except OSError:
         logger.exception("Failed to hash attachment file", path=str(local_path))
         return None

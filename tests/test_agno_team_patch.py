@@ -399,6 +399,10 @@ def test_apply_patch_is_idempotent() -> None:
     assert agent_messages.aget_run_messages is patched_agent_async
 
 
+def test_media_content_key_ignores_empty_filepath() -> None:
+    assert agno_team_patch._media_content_key("image", Image(filepath="")) is None
+
+
 @pytest.mark.parametrize(
     ("input_message", "expected_content"),
     [
