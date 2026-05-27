@@ -1452,7 +1452,11 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
 
     async def fake_build_payload(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
         payload_requests.append(request)
-        return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
+        return DispatchPayload(
+            prompt=request.prompt,
+            model_prompt="attachment guidance",
+            attachment_ids=list(request.current_attachment_ids),
+        )
 
     async def fake_generate_response_locked(_self: object, request: object, *, resolved_target: MessageTarget) -> str:
         del resolved_target
@@ -1519,6 +1523,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     assert registered_media_event_ids == [["$img"]]
     assert payload_requests[0].current_attachment_ids == ["img-attachment"]
     assert captured_requests[0].attachment_ids == ("img-attachment",)
+    assert captured_requests[0].model_prompt == "attachment guidance"
     assert captured_requests[0].prompt == (
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
@@ -4207,7 +4212,7 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
     """Mark every source event ID from a coalesced batch as responded."""
-    bot = _make_bot(tmp_path)
+    bot = _make_bot(tmp_path, debounce_ms=250)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")

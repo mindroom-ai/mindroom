@@ -209,7 +209,7 @@ def _queued_human_message_for_event(
     *,
     event: DispatchEvent,
     envelope: MessageEnvelope,
-    trust_internal_payload_metadata: bool | None,
+    trust_internal_payload_metadata: bool,
 ) -> QueuedHumanMessage:
     attachment_ids = envelope.attachment_ids if trust_internal_payload_metadata else ()
     media_event = event if is_matrix_media_dispatch_event(event) else None
@@ -277,7 +277,11 @@ def _queued_notice_reservation_from_metadata(
     )
     for item in reservation_items:
         if item is not selected_item:
-            cast("QueuedHumanNoticeReservation", item.payload).consume()
+            reservation = cast("QueuedHumanNoticeReservation", item.payload)
+            if item.target_key == target_key:
+                reservation.hand_off()
+            else:
+                reservation.consume()
     if selected_item is None:
         return None
     return cast("QueuedHumanNoticeReservation", selected_item.payload)
@@ -762,6 +766,11 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
+        resolved_trust_internal_payload_metadata = (
+            self._should_trust_internal_payload_metadata(event)
+            if trust_internal_payload_metadata is None
+            else trust_internal_payload_metadata
+        )
         if queued_notice_reservation is None:
             queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                 target=target,
@@ -769,7 +778,7 @@ class TurnController:
                 queued_message=_queued_human_message_for_event(
                     event=event,
                     envelope=envelope,
-                    trust_internal_payload_metadata=trust_internal_payload_metadata,
+                    trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
                 ),
             )
         try:
@@ -785,7 +794,7 @@ class TurnController:
                 coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             )
         except asyncio.CancelledError:
             if queued_notice_reservation is not None:
@@ -823,7 +832,7 @@ class TurnController:
         ):
             await self._enqueue_active_thread_follow_up(
                 room=room,
-                event=dispatch_event,
+                event=prepared_event,
                 target=target,
                 envelope=envelope,
                 coalescing_thread_id=coalescing_thread_id,
@@ -1919,7 +1928,7 @@ class TurnController:
                                 matrix_run_metadata,
                                 self.deps.turn_store.build_run_metadata(handled_turn),
                             )
-                            payload = replace(payload, prompt=backlog.prompt, model_prompt=None)
+                            payload = replace(payload, prompt=backlog.prompt)
                             dispatch = replace(
                                 dispatch,
                                 envelope=replace(dispatch.envelope, body=backlog.prompt),

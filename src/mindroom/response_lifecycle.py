@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
     from mindroom.delivery_gateway import ResponseHookService
+    from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history import HistoryScope
     from mindroom.hooks import MessageEnvelope
@@ -43,7 +44,7 @@ class QueuedHumanMessage:
     body: str
     attachment_ids: tuple[str, ...] = ()
     trusted_attachment_ids: tuple[str, ...] = ()
-    media_event: object | None = None
+    media_event: MediaDispatchEvent | None = None
 
 
 _current_queued_human_messages_context: ContextVar[tuple[QueuedHumanMessage, ...]] = ContextVar(
@@ -130,16 +131,43 @@ class _QueuedMessageState:
         if self.pending_human_messages == 0:
             self._event.clear()
 
-    def consume_pending_human_messages(self) -> tuple[QueuedHumanMessage, ...]:
-        """Drain all pending human messages in receive order for one follow-up response."""
+    def claim_pending_human_messages(self) -> tuple[QueuedHumanMessage, ...]:
+        """Remove and return pending human messages for one follow-up response."""
         messages = tuple(self._pending_human_messages)
         if not messages:
             return ()
-        event_ids = tuple(message.source_event_id for message in messages)
         self._pending_human_messages.clear()
-        self._consumed_human_message_event_ids.update(event_ids)
         self._event.clear()
         return messages
+
+    def restore_pending_human_messages(self, messages: tuple[QueuedHumanMessage, ...]) -> None:
+        """Restore a failed backlog claim ahead of newer pending messages."""
+        if not messages:
+            return
+        existing_event_ids = set(self.pending_human_message_event_ids)
+        restored_messages = [
+            message
+            for message in messages
+            if message.source_event_id not in self._consumed_human_message_event_ids
+            and message.source_event_id not in existing_event_ids
+        ]
+        if not restored_messages:
+            return
+        self._pending_human_messages = [*restored_messages, *self._pending_human_messages]
+        self._event.set()
+
+    def commit_pending_human_messages(self, messages: tuple[QueuedHumanMessage, ...]) -> None:
+        """Mark one successfully answered backlog claim as consumed."""
+        if not messages:
+            return
+        event_ids = tuple(message.source_event_id for message in messages)
+        consumed_event_ids = set(event_ids)
+        self._pending_human_messages = [
+            message for message in self._pending_human_messages if message.source_event_id not in consumed_event_ids
+        ]
+        self._consumed_human_message_event_ids.update(event_ids)
+        if self.pending_human_messages == 0:
+            self._event.clear()
 
     def has_consumed_human_message(self, source_event_id: str) -> bool:
         return source_event_id in self._consumed_human_message_event_ids
@@ -174,6 +202,10 @@ class QueuedHumanNoticeReservation:
     def consume(self) -> None:
         """Mark the reservation as owned by the response lifecycle."""
         self._release_waiting_human_message()
+
+    def hand_off(self) -> None:
+        """Mark the reservation as owned while keeping its message in the backlog."""
+        self._active = False
 
     def update_message(self, message: QueuedHumanMessage) -> None:
         """Refresh the queued message snapshot while the reservation is active."""
@@ -299,6 +331,41 @@ class ResponseLifecycleCoordinator:
             return
         queued_signal.consume_waiting_human_message(notice)
 
+    @staticmethod
+    def _claim_reserved_queued_messages(
+        *,
+        queued_signal: _QueuedMessageState,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    ) -> tuple[QueuedHumanMessage, ...]:
+        if queued_notice_reservation is None:
+            return ()
+        queued_messages = queued_signal.claim_pending_human_messages()
+        queued_notice_reservation.hand_off()
+        return queued_messages
+
+    async def _run_with_queued_context(
+        self,
+        *,
+        target: MessageTarget,
+        queued_signal: _QueuedMessageState,
+        queued_messages: tuple[QueuedHumanMessage, ...],
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
+    ) -> _LockedResponseResult:
+        try:
+            with (
+                queued_message_signal_context(queued_signal),
+                _queued_human_messages_context(queued_messages),
+            ):
+                result = await locked_operation(target)
+        except BaseException:
+            if queued_notice_reservation is not None:
+                queued_signal.restore_pending_human_messages(queued_messages)
+            raise
+        if queued_notice_reservation is not None:
+            queued_signal.commit_pending_human_messages(queued_messages)
+        return result
+
     async def run_locked_response(
         self,
         *,
@@ -319,7 +386,6 @@ class ResponseLifecycleCoordinator:
             queued_notice_reservation=queued_notice_reservation,
         )
         lock_acquired = False
-        reservation_consumed = False
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
@@ -331,30 +397,31 @@ class ResponseLifecycleCoordinator:
                 if queued_signal.has_consumed_human_message(response_envelope.source_event_id):
                     if queued_notice_reservation is not None:
                         queued_notice_reservation.consume()
-                        reservation_consumed = True
                     notice = self._consume_queued_human_notice(
                         notice=notice,
                         queued_signal=queued_signal,
                     )
                     return None
-                queued_human_messages = queued_signal.consume_pending_human_messages()
-                if queued_notice_reservation is not None:
-                    queued_notice_reservation.consume()
-                    reservation_consumed = True
+                queued_human_messages = self._claim_reserved_queued_messages(
+                    queued_signal=queued_signal,
+                    queued_notice_reservation=queued_notice_reservation,
+                )
                 notice = self._consume_queued_human_notice(
                     notice=notice,
                     queued_signal=queued_signal,
                 )
-                with (
-                    queued_message_signal_context(queued_signal),
-                    _queued_human_messages_context(queued_human_messages),
-                ):
-                    return await locked_operation(target)
+                return await self._run_with_queued_context(
+                    target=target,
+                    queued_signal=queued_signal,
+                    queued_messages=queued_human_messages,
+                    queued_notice_reservation=queued_notice_reservation,
+                    locked_operation=locked_operation,
+                )
             finally:
                 if lock_acquired:
                     lifecycle_lock.release()
         finally:
-            if queued_notice_reservation is not None and not reservation_consumed:
+            if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
             self._consume_queued_human_notice(
                 notice=notice,

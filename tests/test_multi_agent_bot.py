@@ -11827,7 +11827,7 @@ class TestAgentBot:
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
+        assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1

@@ -469,6 +469,50 @@ def test_active_follow_up_backlog_uses_queued_receive_order() -> None:
     )
 
 
+def test_same_target_batch_reservation_keeps_all_pending_messages(tmp_path: Path) -> None:
+    """Selecting one coalesced reservation must not drop earlier messages on the same target."""
+    bot = _bot(tmp_path)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$a1")
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        first_reservation = lifecycle.reserve_waiting_human_message(
+            target=target,
+            response_envelope=_envelope(source_event_id="$a1", target=target),
+        )
+        second_reservation = lifecycle.reserve_waiting_human_message(
+            target=target,
+            response_envelope=_envelope(source_event_id="$b1", target=target),
+        )
+        assert first_reservation is not None
+        assert second_reservation is not None
+
+        selected = turn_controller._queued_notice_reservation_from_metadata(
+            (
+                PendingDispatchMetadata(
+                    kind="queued_notice_reservation",
+                    payload=first_reservation,
+                    close=first_reservation.cancel,
+                    target_key=(target.room_id, target.resolved_thread_id),
+                ),
+                PendingDispatchMetadata(
+                    kind="queued_notice_reservation",
+                    payload=second_reservation,
+                    close=second_reservation.cancel,
+                    target_key=(target.room_id, target.resolved_thread_id),
+                ),
+            ),
+            target_key=(target.room_id, target.resolved_thread_id),
+        )
+
+        assert selected is second_reservation
+        assert queued_signal.pending_human_message_event_ids == ("$a1", "$b1")
+    finally:
+        queued_signal.finish_response_turn()
+
+
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
     yield SimpleNamespace(storage=storage, session=storage.session)
@@ -920,9 +964,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         second_result = await second_task
         first_result = await first_task
 
-    assert second_result is None
+    assert second_result == "second"
     assert first_result == "first"
-    assert observed_backlog == {"first": ("$second",)}
+    assert observed_backlog == {"first": (), "second": ()}
 
 
 @pytest.mark.asyncio
@@ -1421,8 +1465,8 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_generate_response_drains_later_queued_human_message(tmp_path: Path) -> None:
-    """The first queued owner should drain later human messages that were already queued."""
+async def test_generate_response_without_reservation_does_not_drain_human_backlog(tmp_path: Path) -> None:
+    """Unreserved direct responses should serialize normally instead of owning active follow-up backlog."""
     bot = _bot(tmp_path)
     response_envelope_b = _envelope(source_event_id="$event-b")
     response_envelope_c = _envelope(source_event_id="$event-c")
@@ -1472,23 +1516,24 @@ async def test_generate_response_drains_later_queued_human_message(tmp_path: Pat
 
             lifecycle_lock.release()
             await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
-            assert observed_pending == [False]
-            assert observed_backlogs == [("$event-b", "$event-c")]
+            assert observed_pending == [True]
+            assert observed_backlogs == [()]
 
             allow_turns_to_finish.set()
             assert await task_b == "$response-1"
-            assert await task_c is None
+            assert await task_c == "$response-2"
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert observed_pending == [False]
+    assert observed_pending == [True, False]
+    assert observed_backlogs == [(), ()]
     assert not queued_signal.is_set()
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_drains_later_queued_human_message(tmp_path: Path) -> None:
-    """Team queue notices should also drain already queued human messages once."""
+async def test_generate_team_response_without_reservation_does_not_drain_human_backlog(tmp_path: Path) -> None:
+    """Unreserved direct team responses should serialize without owning active follow-up backlog."""
     bot = _bot(tmp_path)
     response_envelope_b = _envelope(source_event_id="$team-event-b")
     response_envelope_c = _envelope(source_event_id="$team-event-c")
@@ -1542,17 +1587,18 @@ async def test_generate_team_response_drains_later_queued_human_message(tmp_path
 
             lifecycle_lock.release()
             await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
-            assert observed_pending == [False]
-            assert observed_backlogs == [("$team-event-b", "$team-event-c")]
+            assert observed_pending == [True]
+            assert observed_backlogs == [()]
 
             allow_turns_to_finish.set()
             assert await task_b == "$team-response-1"
-            assert await task_c is None
+            assert await task_c == "$team-response-2"
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
-    assert observed_pending == [False]
+    assert observed_pending == [True, False]
+    assert observed_backlogs == [(), ()]
     assert not queued_signal.is_set()
 
 
@@ -1692,6 +1738,168 @@ async def test_response_lifecycle_consumes_active_backlog_once(tmp_path: Path) -
     assert await active_task == "$active-response"
     assert await asyncio.gather(*follow_up_tasks) == ["$response-$a1", None, None]
     assert follow_up_calls == ["$a1"]
+
+
+@pytest.mark.asyncio
+async def test_non_human_lock_owner_does_not_drain_pending_human_backlog(tmp_path: Path) -> None:
+    """Scheduled or hook turns sharing the target lock must not consume human follow-up backlog."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    active_envelope = _envelope(source_event_id="$active", target=target)
+    human_envelope = _envelope(
+        source_event_id="$human",
+        target=target,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    )
+    scheduled_envelope = _envelope(
+        source_event_id="$scheduled",
+        target=target,
+        source_kind=SCHEDULED_SOURCE_KIND,
+    )
+    active_started = asyncio.Event()
+    release_active = asyncio.Event()
+    observed_scheduled_backlog: list[tuple[str, ...]] = []
+    observed_human_backlog: list[tuple[str, ...]] = []
+
+    async def active_operation(_target: MessageTarget) -> str:
+        active_started.set()
+        await release_active.wait()
+        return "$active-response"
+
+    async def scheduled_operation(_target: MessageTarget) -> str:
+        observed_scheduled_backlog.append(_current_queued_human_event_ids())
+        return "$scheduled-response"
+
+    async def human_operation(_target: MessageTarget) -> str:
+        observed_human_backlog.append(_current_queued_human_event_ids())
+        return "$human-response"
+
+    active_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=active_envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=active_operation,
+        ),
+    )
+    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+
+    human_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=human_envelope)
+    assert human_reservation is not None
+    scheduled_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=scheduled_envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=scheduled_operation,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    release_active.set()
+    assert await active_task == "$active-response"
+    assert await scheduled_task == "$scheduled-response"
+    assert observed_scheduled_backlog == [()]
+    assert lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids == ("$human",)
+
+    assert (
+        await lifecycle.run_locked_response(
+            target=target,
+            response_envelope=human_envelope,
+            queued_notice_reservation=human_reservation,
+            pipeline_timing=None,
+            locked_operation=human_operation,
+        )
+        == "$human-response"
+    )
+    assert observed_human_backlog == [("$human",)]
+
+
+@pytest.mark.asyncio
+async def test_failed_active_follow_up_owner_leaves_backlog_for_next_owner(tmp_path: Path) -> None:
+    """Backlog consumption should commit only after the owning response finishes successfully."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    active_envelope = _envelope(source_event_id="$active", target=target)
+    first_envelope = _envelope(
+        source_event_id="$a1",
+        target=target,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    )
+    second_envelope = _envelope(
+        source_event_id="$b1",
+        target=target,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    )
+    active_started = asyncio.Event()
+    release_active = asyncio.Event()
+    observed_failed_owner_backlog: list[tuple[str, ...]] = []
+    observed_next_owner_backlog: list[tuple[str, ...]] = []
+
+    async def active_operation(_target: MessageTarget) -> str:
+        active_started.set()
+        await release_active.wait()
+        return "$active-response"
+
+    async def failing_owner_operation(_target: MessageTarget) -> str:
+        observed_failed_owner_backlog.append(_current_queued_human_event_ids())
+        msg = "payload failed"
+        raise RuntimeError(msg)
+
+    async def next_owner_operation(_target: MessageTarget) -> str:
+        observed_next_owner_backlog.append(_current_queued_human_event_ids())
+        return "$next-response"
+
+    active_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=active_envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=active_operation,
+        ),
+    )
+    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+
+    first_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=first_envelope)
+    second_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=second_envelope)
+    assert first_reservation is not None
+    assert second_reservation is not None
+
+    first_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=first_envelope,
+            queued_notice_reservation=first_reservation,
+            pipeline_timing=None,
+            locked_operation=failing_owner_operation,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    release_active.set()
+    assert await active_task == "$active-response"
+    with pytest.raises(RuntimeError, match="payload failed"):
+        await first_task
+
+    assert observed_failed_owner_backlog == [("$a1", "$b1")]
+    assert (
+        await lifecycle.run_locked_response(
+            target=target,
+            response_envelope=second_envelope,
+            queued_notice_reservation=second_reservation,
+            pipeline_timing=None,
+            locked_operation=next_owner_operation,
+        )
+        == "$next-response"
+    )
+    assert observed_next_owner_backlog == [("$a1", "$b1")]
 
 
 @pytest.mark.asyncio

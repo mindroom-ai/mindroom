@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from mindroom.commands.parsing import command_parser
@@ -106,11 +106,7 @@ def _active_follow_up_payload_extras(
     queued_messages: Sequence[QueuedHumanMessage],
 ) -> _ActiveFollowUpPayloadExtras:
     media_events = _dedupe_media_events(
-        tuple(
-            cast("MediaDispatchEvent", message.media_event)
-            for message in queued_messages
-            if message.media_event is not None
-        ),
+        tuple(message.media_event for message in queued_messages if message.media_event is not None),
     )
     return _ActiveFollowUpPayloadExtras(
         attachment_ids=tuple(merge_attachment_ids(*(list(message.attachment_ids) for message in queued_messages))),
