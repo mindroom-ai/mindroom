@@ -1079,6 +1079,57 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -> None:
+    """A bounded drain must not wait indefinitely for an active-follow-up idle gate."""
+    calls: list[list[str]] = []
+    dispatch_wait_started = asyncio.Event()
+    release_dispatch_wait = asyncio.Event()
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        if wait_key == key:
+            dispatch_wait_started.set()
+            await release_dispatch_wait.wait()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+    await _admit_ready(
+        gate,
+        key,
+        PendingEvent(
+            event=_text_event("$text:localhost", "typed", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@user:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    await dispatch_wait_started.wait()
+
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.2)
+    except TimeoutError:  # pragma: no cover - documents the failure mode on regression
+        pytest.fail("bounded drain hung behind external dispatch gate")
+    finally:
+        release_dispatch_wait.set()
+        if not drain_task.done():
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert result.completed is True
+    assert calls == [["$text:localhost"]]
+
+
+@pytest.mark.asyncio
 async def test_bounded_shutdown_closes_metadata_for_abandoned_ready_work() -> None:
     """Gate-owned metadata must close before bounded shutdown discards failed queued work."""
     close_count = 0

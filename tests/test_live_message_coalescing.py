@@ -1535,8 +1535,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             attachment_ids=list(request.current_attachment_ids),
         )
 
-    async def fake_generate_response_locked(_self: object, request: object, *, resolved_target: MessageTarget) -> str:
-        del resolved_target
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
         prepared_request = await response_runner._prepare_request_after_lock(request)
         captured_requests.append(prepared_request)
         return "$response"
@@ -1594,6 +1593,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             lifecycle_lock.release()
             await bot._coalescing_gate.drain_all()
     finally:
+        queued_signal.finish_response_turn()
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
@@ -4327,7 +4327,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: bot._turn_store.is_handled("$m1"))
+        await _wait_for(lambda: bot._turn_store.is_handled("$m1"), deadline_seconds=1.0)
 
     assert bot._turn_store.is_handled("$m1")
     assert bot._turn_store.is_handled("$m2")

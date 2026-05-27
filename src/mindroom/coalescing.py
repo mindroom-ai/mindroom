@@ -1425,7 +1425,9 @@ class CoalescingGate:
         if not gate.queue:
             return
 
-        await self._wait_until_dispatch_allowed(key)
+        drain_context = self._current_drain_context(gate)
+        if not (self._is_shutting_down() or self._is_bounded_drain(drain_context)):
+            await self._wait_until_dispatch_allowed(key)
         if not gate.queue:
             return
 
