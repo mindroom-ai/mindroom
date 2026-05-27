@@ -365,6 +365,7 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 receipt_time=receipt_time,
             ),
+            active_response_thread_ids_at_receipt=self.deps.response_runner.active_thread_ids_for_room(room.room_id),
         )
 
     def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
@@ -611,12 +612,13 @@ class TurnController:
         self,
         *,
         envelope: MessageEnvelope,
+        active_response_thread_ids_at_receipt: frozenset[str | None] | None = None,
     ) -> bool:
-        """Return whether one human thread follow-up should carry active-response policy."""
-        if envelope.target.resolved_thread_id is None:
-            return False
+        """Return whether one human follow-up should carry active-response policy."""
         if not envelope.origin.may_answer_interactive_prompt:
             return False
+        if active_response_thread_ids_at_receipt is not None:
+            return envelope.target.resolved_thread_id in active_response_thread_ids_at_receipt
         return self.deps.response_runner.has_active_response_for_target(envelope.target)
 
     @staticmethod
@@ -631,6 +633,7 @@ class TurnController:
         target: MessageTarget,
         envelope: MessageEnvelope,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        active_response_thread_ids_at_receipt: frozenset[str | None] | None,
     ) -> tuple[bool, QueuedHumanNoticeReservation | None]:
         """Return active-follow-up policy and the reservation for a voice target."""
         if queued_notice_reservation is not None and (
@@ -642,12 +645,15 @@ class TurnController:
         ):
             queued_notice_reservation.cancel()
             queued_notice_reservation = None
-        if queued_notice_reservation is not None:
-            return True, queued_notice_reservation
-        active_follow_up = (
-            envelope.origin.may_answer_interactive_prompt
-            and self.deps.response_runner.has_active_response_for_target(target)
+        active_follow_up = self._should_apply_active_thread_follow_up_policy(
+            envelope=envelope,
+            active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
         )
+        if queued_notice_reservation is not None:
+            if active_follow_up:
+                return True, queued_notice_reservation
+            queued_notice_reservation.cancel()
+            return False, None
         if not active_follow_up:
             return False, None
         return True, self.deps.response_runner.reserve_waiting_human_message(
@@ -729,6 +735,7 @@ class TurnController:
         )
         if self._should_apply_active_thread_follow_up_policy(
             envelope=envelope,
+            active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
         ):
             await self._enqueue_active_thread_follow_up(
                 room=room,
@@ -794,6 +801,7 @@ class TurnController:
         )
         if self._should_apply_active_thread_follow_up_policy(
             envelope=envelope,
+            active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
         ):
             await self._enqueue_active_thread_follow_up(
                 room=room,
@@ -2251,6 +2259,7 @@ class TurnController:
             event_info=event_info,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
+            active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
         )
 
         ready_task = asyncio.create_task(
@@ -2259,6 +2268,7 @@ class TurnController:
                 prechecked_event=prechecked_event,
                 voice_target=voice_target,
                 dispatch_timing=dispatch_timing,
+                active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
@@ -2278,6 +2288,7 @@ class TurnController:
         event_info: EventInfo,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> tuple[MessageTarget, CoalescingKey]:
         await self._append_live_event_with_timing(
             room.room_id,
@@ -2292,7 +2303,17 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        if self.deps.response_runner.has_active_response_for_target(voice_target):
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=cast("DispatchEvent", event),
+            requester_user_id=requester_user_id,
+            target=voice_target,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+        if self._should_apply_active_thread_follow_up_policy(
+            envelope=envelope,
+            active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
+        ):
             admission_key = active_follow_up_coalescing_key(room.room_id, coalescing_thread_id)
         else:
             admission_key = CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
@@ -2305,6 +2326,7 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         voice_target: MessageTarget,
         dispatch_timing: DispatchPipelineTiming | None,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> ReadyPendingEvent | None:
         """Normalize a raw voice event after its conversation key is fixed."""
         event = prechecked_event.event
@@ -2318,10 +2340,14 @@ class TurnController:
                 target=voice_target,
                 source_kind=VOICE_SOURCE_KIND,
             )
-            queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                target=voice_target,
-                response_envelope=envelope,
-            )
+            if self._should_apply_active_thread_follow_up_policy(
+                envelope=envelope,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
+            ):
+                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                    target=voice_target,
+                    response_envelope=envelope,
+                )
             normalized_event, effective_thread_id = await self._normalize_voice_event_or_fallback(
                 room=room,
                 event=event,
@@ -2367,6 +2393,7 @@ class TurnController:
                 target=normalized_target,
                 envelope=envelope,
                 queued_notice_reservation=queued_notice_reservation,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
             )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
@@ -2399,6 +2426,7 @@ class TurnController:
                 thread_id=voice_target.resolved_thread_id,
                 dispatch_timing=dispatch_timing,
                 error=exc,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
             )
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
@@ -2441,6 +2469,7 @@ class TurnController:
         thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
         error: Exception,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> ReadyPendingEvent:
         """Return a raw-audio fallback when voice readiness fails before STT."""
         self.deps.logger.warning(
@@ -2476,6 +2505,7 @@ class TurnController:
                 target=target,
                 envelope=envelope,
                 queued_notice_reservation=None,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
             )
             dispatch_policy_source_kind = (
                 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND if active_follow_up else envelope.dispatch_policy_source_kind

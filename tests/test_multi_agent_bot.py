@@ -11795,9 +11795,9 @@ class TestAgentBot:
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ) as mock_has_active_response,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
+            ) as mock_active_thread_ids,
             patch.object(
                 bot._response_runner,
                 "reserve_waiting_human_message",
@@ -11812,9 +11812,7 @@ class TestAgentBot:
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
-        mock_has_active_response.assert_called_once()
-        active_target = mock_has_active_response.call_args.args[0]
-        assert active_target.resolved_thread_id == target.resolved_thread_id
+        mock_active_thread_ids.assert_called_once_with(room.room_id)
         mock_reserve_waiting_human_message.assert_called_once()
         signal_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert signal_target.resolved_thread_id == target.resolved_thread_id
@@ -11942,8 +11940,8 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
                 bot._response_runner,
@@ -12163,8 +12161,8 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
                 bot._response_runner,

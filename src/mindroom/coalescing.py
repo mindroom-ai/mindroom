@@ -300,6 +300,11 @@ class CoalescingGate:
         front_order: int,
     ) -> None:
         while True:
+            if is_active_follow_up_coalescing_key(key):
+                await self._wait_for_reservations(
+                    gate,
+                    self._order_book.older_room_reservations(key, before_order=front_order),
+                )
             await self._wait_for_reservations(
                 gate,
                 self._order_book.older_owner_reservations(key, before_order=front_order),

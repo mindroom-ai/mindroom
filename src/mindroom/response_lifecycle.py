@@ -136,6 +136,15 @@ class ResponseLifecycleCoordinator:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(self._thread_key(target))
 
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
+        """Return canonical thread IDs with active response lifecycles in one room."""
+        known_thread_keys = set(self._thread_queued_signals) | set(self._response_lifecycle_locks)
+        return frozenset(
+            thread_id
+            for known_room_id, thread_id in known_thread_keys
+            if known_room_id == room_id and self._has_active_response_for_thread_key((known_room_id, thread_id))
+        )
+
     def has_active_response_for_thread(self, room_id: str, thread_id: str | None) -> bool:
         """Return whether one canonical room/thread key has an active turn."""
         return self._has_active_response_for_thread_key((room_id, thread_id))

@@ -776,7 +776,7 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
     await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
-    await asyncio.sleep(0.04)
+    await asyncio.sleep(0.01)
     await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_040)))
     await asyncio.sleep(0.02)
 

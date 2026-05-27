@@ -23,6 +23,7 @@ class PromptIngressReservationOwner:
 
     gate: CoalescingGate
     reservation: IngressOrderReservation
+    active_response_thread_ids_at_receipt: frozenset[str | None] = frozenset()
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
 

@@ -519,6 +519,10 @@ class ResponseRunner:
         """Return whether one canonical conversation target already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_target(target)
 
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
+        """Return canonical thread IDs with active response lifecycles in one room."""
+        return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
+
     def has_active_response_for_thread(self, room_id: str, thread_id: str | None) -> bool:
         """Return whether one canonical room/thread already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_thread(room_id, thread_id)

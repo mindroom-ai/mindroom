@@ -1479,6 +1479,94 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(tmp_path: Path) -> None:
+    """A slow older lookup received during an active turn must stay in the same active backlog."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    second = _text_event(
+        event_id="$m2",
+        body="second",
+        sender="@alice:localhost",
+        server_timestamp=1001,
+        thread_id="$thread",
+    )
+    third = _text_event(
+        event_id="$m3",
+        body="third",
+        sender="@bob:localhost",
+        server_timestamp=1002,
+        thread_id="$thread",
+    )
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    second_lookup_started = asyncio.Event()
+    release_second_lookup = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+        if event.event_id == "$m2":
+            second_lookup_started.set()
+            await release_second_lookup.wait()
+        return "$thread"
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        _ = media_events
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    second_task: asyncio.Task[None] | None = None
+    third_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        ):
+            second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
+            await second_lookup_started.wait()
+
+            third_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, third))
+            await asyncio.wait_for(third_task, timeout=0.5)
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await asyncio.sleep(0.05)
+            assert calls == []
+
+            release_second_lookup.set()
+            await asyncio.wait_for(second_task, timeout=0.5)
+            await _wait_for(lambda: calls == [["$m2", "$m3"]])
+    finally:
+        release_second_lookup.set()
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+        pending_tasks = [task for task in (second_task, third_task) if task is not None and not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert calls == [["$m2", "$m3"]]
+
+
+@pytest.mark.asyncio
 async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Path) -> None:
     """The first queued follow-up owner should carry later media before skipping its duplicate run."""
     bot = _make_bot(tmp_path, debounce_ms=0)
