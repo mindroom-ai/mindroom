@@ -130,6 +130,22 @@ class CoalescingOrderBook:
             if reservation.room_id == key.room_id and reservation.received_order < before_order
         ]
 
+    def unsettled_room_reservations_in_window(
+        self,
+        key: CoalescingKey,
+        *,
+        after_order: int,
+        before_order: int | None,
+    ) -> list[IngressOrderReservation]:
+        """Return unresolved same-room reservations inside one receive-order window."""
+        return [
+            reservation
+            for reservation in self._reservations
+            if reservation.room_id == key.room_id
+            and reservation.received_order > after_order
+            and (before_order is None or reservation.received_order < before_order)
+        ]
+
     def has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:
         """Return whether older unresolved same-owner reservation blocks this order."""
         return any(

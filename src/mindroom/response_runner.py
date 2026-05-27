@@ -523,10 +523,6 @@ class ResponseRunner:
         """Return canonical thread IDs with active response lifecycles in one room."""
         return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
-    def has_active_response_for_thread(self, room_id: str, thread_id: str | None) -> bool:
-        """Return whether one canonical room/thread already has an active turn."""
-        return self._lifecycle_coordinator.has_active_response_for_thread(room_id, thread_id)
-
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)

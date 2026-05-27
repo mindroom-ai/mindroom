@@ -7509,6 +7509,7 @@ class TestAgentBot:
                     event_source=voice_event.source,
                 ),
                 CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                False,
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(

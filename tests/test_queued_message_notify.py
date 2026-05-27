@@ -2418,9 +2418,9 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                     event=event,
                     target=target,
                     envelope=envelope,
-                    coalescing_thread_id="$thread",
                     requester_user_id="@user:localhost",
                     reservation_owner=reservation_owner,
+                    coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
                 )
         finally:
             await reservation_owner.release()

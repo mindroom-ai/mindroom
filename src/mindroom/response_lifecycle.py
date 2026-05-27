@@ -145,10 +145,6 @@ class ResponseLifecycleCoordinator:
             if known_room_id == room_id and self._has_active_response_for_thread_key((known_room_id, thread_id))
         )
 
-    def has_active_response_for_thread(self, room_id: str, thread_id: str | None) -> bool:
-        """Return whether one canonical room/thread key has an active turn."""
-        return self._has_active_response_for_thread_key((room_id, thread_id))
-
     async def wait_for_thread_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until a response lifecycle lock is idle for one room/thread key."""
         thread_key = (room_id, thread_id)

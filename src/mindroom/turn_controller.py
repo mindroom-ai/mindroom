@@ -610,16 +610,26 @@ class TurnController:
 
     def _should_apply_active_thread_follow_up_policy(
         self,
-        *,
         envelope: MessageEnvelope,
-        active_response_thread_ids_at_receipt: frozenset[str | None] | None = None,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> bool:
         """Return whether one human follow-up should carry active-response policy."""
         if not envelope.origin.may_answer_interactive_prompt:
             return False
-        if active_response_thread_ids_at_receipt is not None:
-            return envelope.target.resolved_thread_id in active_response_thread_ids_at_receipt
-        return self.deps.response_runner.has_active_response_for_target(envelope.target)
+        return envelope.target.resolved_thread_id in active_response_thread_ids_at_receipt
+
+    def _coalescing_key_for_ingress(
+        self,
+        room_id: str,
+        coalescing_thread_id: str | None,
+        requester_user_id: str,
+        envelope: MessageEnvelope,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
+    ) -> tuple[bool, CoalescingKey]:
+        """Return whether ingress is an active follow-up and its physical queue key."""
+        if self._should_apply_active_thread_follow_up_policy(envelope, active_response_thread_ids_at_receipt):
+            return True, active_follow_up_coalescing_key(room_id, coalescing_thread_id)
+        return False, CoalescingKey(room_id, coalescing_thread_id, requester_user_id)
 
     @staticmethod
     def _same_response_lifecycle_target(left: MessageTarget, right: MessageTarget) -> bool:
@@ -633,7 +643,7 @@ class TurnController:
         target: MessageTarget,
         envelope: MessageEnvelope,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
-        active_response_thread_ids_at_receipt: frozenset[str | None] | None,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> tuple[bool, QueuedHumanNoticeReservation | None]:
         """Return active-follow-up policy and the reservation for a voice target."""
         if queued_notice_reservation is not None and (
@@ -646,8 +656,8 @@ class TurnController:
             queued_notice_reservation.cancel()
             queued_notice_reservation = None
         active_follow_up = self._should_apply_active_thread_follow_up_policy(
-            envelope=envelope,
-            active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
+            envelope,
+            active_response_thread_ids_at_receipt,
         )
         if queued_notice_reservation is not None:
             if active_follow_up:
@@ -668,9 +678,9 @@ class TurnController:
         event: DispatchEvent,
         target: MessageTarget,
         envelope: MessageEnvelope,
-        coalescing_thread_id: str | None,
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
+        coalescing_key: CoalescingKey,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
@@ -685,7 +695,6 @@ class TurnController:
                 target=target,
                 response_envelope=envelope,
             )
-        coalescing_key = active_follow_up_coalescing_key(room.room_id, coalescing_thread_id)
         reservation_owner.retarget(coalescing_key.requester_user_id)
         try:
             await self._enqueue_for_dispatch(
@@ -733,18 +742,22 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        if self._should_apply_active_thread_follow_up_policy(
-            envelope=envelope,
-            active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
-        ):
+        active_follow_up, coalescing_key = self._coalescing_key_for_ingress(
+            room.room_id,
+            coalescing_thread_id,
+            requester_user_id,
+            envelope,
+            reservation_owner.active_response_thread_ids_at_receipt,
+        )
+        if active_follow_up:
             await self._enqueue_active_thread_follow_up(
                 room=room,
                 event=prepared_event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
+                coalescing_key=coalescing_key,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
                 queued_notice_reservation=queued_notice_reservation,
             )
@@ -759,7 +772,7 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=coalescing_key,
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -799,18 +812,22 @@ class TurnController:
             target=target,
             source_kind=source_kind,
         )
-        if self._should_apply_active_thread_follow_up_policy(
-            envelope=envelope,
-            active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
-        ):
+        active_follow_up, coalescing_key = self._coalescing_key_for_ingress(
+            room.room_id,
+            coalescing_thread_id,
+            requester_user_id,
+            envelope,
+            reservation_owner.active_response_thread_ids_at_receipt,
+        )
+        if active_follow_up:
             await self._enqueue_active_thread_follow_up(
                 room=room,
                 event=event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
+                coalescing_key=coalescing_key,
             )
             return _IngressAdmissionOutcome.ADMITTED
         await self._enqueue_for_dispatch(
@@ -819,7 +836,7 @@ class TurnController:
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
-            coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+            coalescing_key=coalescing_key,
         )
         return _IngressAdmissionOutcome.ADMITTED
 
@@ -2253,7 +2270,7 @@ class TurnController:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
-        voice_target, admission_key = await self._resolve_ready_voice_target(
+        voice_target, admission_key, preliminary_active_follow_up = await self._resolve_ready_voice_target(
             room,
             event,
             event_info=event_info,
@@ -2268,6 +2285,7 @@ class TurnController:
                 prechecked_event=prechecked_event,
                 voice_target=voice_target,
                 dispatch_timing=dispatch_timing,
+                preliminary_active_follow_up=preliminary_active_follow_up,
                 active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
@@ -2289,7 +2307,7 @@ class TurnController:
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
         active_response_thread_ids_at_receipt: frozenset[str | None],
-    ) -> tuple[MessageTarget, CoalescingKey]:
+    ) -> tuple[MessageTarget, CoalescingKey, bool]:
         await self._append_live_event_with_timing(
             room.room_id,
             event,
@@ -2310,14 +2328,14 @@ class TurnController:
             target=voice_target,
             source_kind=VOICE_SOURCE_KIND,
         )
-        if self._should_apply_active_thread_follow_up_policy(
-            envelope=envelope,
-            active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
-        ):
-            admission_key = active_follow_up_coalescing_key(room.room_id, coalescing_thread_id)
-        else:
-            admission_key = CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
-        return voice_target, admission_key
+        active_follow_up, admission_key = self._coalescing_key_for_ingress(
+            room.room_id,
+            coalescing_thread_id,
+            requester_user_id,
+            envelope,
+            active_response_thread_ids_at_receipt,
+        )
+        return voice_target, admission_key, active_follow_up
 
     async def _ready_voice_event(
         self,
@@ -2326,6 +2344,7 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         voice_target: MessageTarget,
         dispatch_timing: DispatchPipelineTiming | None,
+        preliminary_active_follow_up: bool,
         active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> ReadyPendingEvent | None:
         """Normalize a raw voice event after its conversation key is fixed."""
@@ -2340,10 +2359,7 @@ class TurnController:
                 target=voice_target,
                 source_kind=VOICE_SOURCE_KIND,
             )
-            if self._should_apply_active_thread_follow_up_policy(
-                envelope=envelope,
-                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
-            ):
+            if preliminary_active_follow_up:
                 queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                     target=voice_target,
                     response_envelope=envelope,

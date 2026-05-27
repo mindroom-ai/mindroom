@@ -229,7 +229,7 @@ class CoalescingGate:
 
     def _remove_gate(self, key: CoalescingKey) -> None:
         self._gates.pop(key, None)
-        self._wake_owner_gates(key)
+        self._wake_related_gates(key)
 
     def _get_or_create_gate(self, key: CoalescingKey) -> _GateEntry:
         gate = self._gates.get(key)
@@ -266,6 +266,32 @@ class CoalescingGate:
             if other_key != key and self._same_owner(other_key, key):
                 self._wake(other_gate)
 
+    def _wake_room_gates(self, key: CoalescingKey) -> None:
+        for other_key, other_gate in self._gates.items():
+            if other_key != key and other_key.room_id == key.room_id:
+                self._wake(other_gate)
+
+    def _wake_related_gates(self, key: CoalescingKey) -> None:
+        self._wake_owner_gates(key)
+        if is_active_follow_up_coalescing_key(key):
+            self._wake_room_gates(key)
+
+    @staticmethod
+    def _gate_has_work_before(
+        gate: _GateEntry,
+        *,
+        before_order: int,
+        source_event_id: str | None = None,
+    ) -> bool:
+        def matches(queued: _QueuedEvent) -> bool:
+            return queued.received_order < before_order and (
+                source_event_id is None or queued.source_event_id == source_event_id
+            )
+
+        return any(matches(queued) for queued in gate.queue) or any(
+            matches(claimed) for claimed in gate.claimed_admissions
+        )
+
     def _older_owner_root_gates(
         self,
         key: CoalescingKey,
@@ -280,16 +306,28 @@ class CoalescingGate:
             if gate_key != key
             and self._same_owner(gate_key, key)
             and gate_key.thread_id is None
-            and (
-                any(
-                    queued.received_order < before_order and queued.source_event_id == key.thread_id
-                    for queued in gate.queue
-                )
-                or any(
-                    claimed.received_order < before_order and claimed.source_event_id == key.thread_id
-                    for claimed in gate.claimed_admissions
-                )
-            )
+            and self._gate_has_work_before(gate, before_order=before_order, source_event_id=key.thread_id)
+        ]
+
+    def _older_room_active_follow_up_gates(
+        self,
+        key: CoalescingKey,
+        *,
+        before_order: int,
+    ) -> list[_GateEntry]:
+        return [
+            gate
+            for gate_key, gate in self._gates.items()
+            if gate_key != key
+            and gate_key.room_id == key.room_id
+            and is_active_follow_up_coalescing_key(gate_key)
+            and self._gate_has_work_before(gate, before_order=before_order)
+        ]
+
+    def _older_gate_blockers(self, key: CoalescingKey, *, before_order: int) -> list[_GateEntry]:
+        return [
+            *self._older_owner_root_gates(key, before_order=before_order),
+            *self._older_room_active_follow_up_gates(key, before_order=before_order),
         ]
 
     async def _wait_until_front_claimable(
@@ -309,13 +347,13 @@ class CoalescingGate:
                 gate,
                 self._order_book.older_owner_reservations(key, before_order=front_order),
             )
-            older_gates = self._older_owner_root_gates(key, before_order=front_order)
-            if not older_gates:
+            blockers = self._older_gate_blockers(key, before_order=front_order)
+            if not blockers:
                 return
             wake_generation = gate.wake_generation
             gate.wake_event.clear()
-            older_gates = self._older_owner_root_gates(key, before_order=front_order)
-            if not older_gates or gate.wake_generation != wake_generation:
+            blockers = self._older_gate_blockers(key, before_order=front_order)
+            if not blockers or gate.wake_generation != wake_generation:
                 continue
             await gate.wake_event.wait()
 
@@ -753,7 +791,7 @@ class CoalescingGate:
         )
         self._insert_queued_event(gate, admission)
         self._schedule_drain(key, gate)
-        self._wake_owner_gates(key)
+        self._wake_related_gates(key)
         kind = self._queued_kind(admission)
         path = self._enqueue_path(kind)
         if ready_result is not None:
@@ -1188,7 +1226,7 @@ class CoalescingGate:
             gate.phase = GatePhase.DEBOUNCE
             gate.grace_deadline = None
             gate.deadline = None
-            self._wake_owner_gates(key)
+            self._wake_related_gates(key)
 
     async def _dispatch_claimed_events(
         self,
@@ -1327,7 +1365,7 @@ class CoalescingGate:
             raise
         finally:
             self._clear_claimed_admissions(gate, admissions)
-            self._wake_owner_gates(key)
+            self._wake_related_gates(key)
 
     async def _dispatch_front_barrier(
         self,
@@ -1395,11 +1433,10 @@ class CoalescingGate:
             return False
 
         backlog_max_order = self._order_book.next_received_order
-        backlog_reservations = self._order_book.unsettled_owner_reservations_in_window(
+        backlog_reservations = self._order_book.unsettled_room_reservations_in_window(
             key,
             after_order=front.received_order,
             before_order=backlog_max_order + 1,
-            before_or_at_receipt_time=float("inf"),
         )
         if backlog_reservations:
             await self._wait_for_reservations(gate, backlog_reservations)
