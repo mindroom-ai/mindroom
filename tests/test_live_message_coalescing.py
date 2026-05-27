@@ -1402,6 +1402,55 @@ async def test_messages_during_active_response_wait_and_dispatch_after_completio
 
 
 @pytest.mark.asyncio
+async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: Path) -> None:
+    """Active-response follow-ups should queue by target while preserving the actual requester."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    first = _text_event(event_id="$a", body="first", sender="@alice:localhost", thread_id="$thread")
+    second = _text_event(event_id="$b", body="second", sender="@bob:localhost", thread_id="$thread")
+    admitted: list[tuple[CoalescingKey, PendingEvent]] = []
+
+    async def record_admit(key: CoalescingKey, **kwargs: object) -> None:
+        ready_result = cast("ReadyPendingEvent", kwargs["ready_result"])
+        admitted.append((key, ready_result.pending_event))
+        bot._coalescing_gate.release_order_reservation(kwargs["order_reservation"])
+
+    with (
+        patch.object(bot._coalescing_gate, "admit", new=AsyncMock(side_effect=record_admit)),
+        patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
+        patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
+    ):
+        for event, requester_user_id in ((first, "@alice:localhost"), (second, "@bob:localhost")):
+            target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
+            envelope = bot._conversation_resolver.build_ingress_envelope(
+                room_id=room.room_id,
+                event=event,
+                requester_user_id=requester_user_id,
+                target=target,
+                source_kind=MESSAGE_SOURCE_KIND,
+            )
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
+            try:
+                await bot._turn_controller._enqueue_active_thread_follow_up(
+                    room=room,
+                    event=event,
+                    target=target,
+                    envelope=envelope,
+                    coalescing_thread_id="$thread",
+                    requester_user_id=requester_user_id,
+                    reservation_owner=reservation_owner,
+                )
+            finally:
+                await reservation_owner.release()
+
+    assert len({key for key, _pending_event in admitted}) == 1
+    assert [pending_event.requester_user_id for _key, pending_event in admitted] == [
+        "@alice:localhost",
+        "@bob:localhost",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Path) -> None:
     """The first queued follow-up owner should carry later media before skipping its duplicate run."""
     bot = _make_bot(tmp_path, debounce_ms=0)

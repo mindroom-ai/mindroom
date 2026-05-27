@@ -94,6 +94,13 @@ class CoalescingOrderBook:
         reservation.settled.set()
         return True
 
+    def retarget(self, reservation: IngressOrderReservation, *, requester_user_id: str) -> bool:
+        """Move an unsettled reservation to a different owner key."""
+        if reservation.released or reservation.requester_user_id == requester_user_id:
+            return False
+        reservation.requester_user_id = requester_user_id
+        return True
+
     def unsettled(self) -> list[IngressOrderReservation]:
         """Return all currently unresolved reservations."""
         return list(self._reservations)

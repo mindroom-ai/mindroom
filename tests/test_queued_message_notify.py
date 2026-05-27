@@ -29,7 +29,12 @@ from mindroom.ai_runtime import (
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescingKey,
+    PendingEvent,
+    active_follow_up_coalescing_key,
+    build_coalesced_batch,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -60,7 +65,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_lifecycle import QueuedHumanMessage, _QueuedMessageState, current_queued_human_messages
+from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -86,10 +91,6 @@ if TYPE_CHECKING:
 
     from mindroom.delivery_gateway import FinalDeliveryRequest
     from mindroom.turn_origin import TurnOrigin
-
-
-def _current_queued_human_event_ids() -> tuple[str, ...]:
-    return tuple(message.source_event_id for message in current_queued_human_messages())
 
 
 class _ReservationLike(Protocol):
@@ -388,10 +389,9 @@ class _StaticQueuedState:
 def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     """Queued-message state should track distinct source events, not anonymous increments."""
     state = _QueuedMessageState()
-    message = QueuedHumanMessage(source_event_id="$event", sender_id="@user:localhost", body="hello")
 
-    assert state.add_waiting_human_message(message)
-    assert not state.add_waiting_human_message(message)
+    assert state.add_waiting_human_message("$event")
+    assert not state.add_waiting_human_message("$event")
 
     assert state.has_pending_human_messages()
     assert state.pending_human_messages == 1
@@ -408,57 +408,65 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     assert not state.is_set()
 
 
-def test_active_follow_up_backlog_uses_queued_receive_order() -> None:
-    """An active-stream backlog should render queued human messages once, even across senders."""
-    thread_history = [
-        ResolvedVisibleMessage.synthetic(
-            sender="@alice:localhost",
-            body="A first",
-            event_id="$a1",
-            timestamp=1,
-            thread_id="$thread",
+def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
+    """Target-scoped active follow-up batches should preserve timeline order and senders."""
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    pending_events = [
+        PendingEvent(
+            event=PreparedTextEvent(
+                sender="@alice:localhost",
+                event_id="$a1",
+                body="A first",
+                source={"content": {"body": "A first"}},
+                server_timestamp=1,
+            ),
+            room=room,
+            requester_user_id="@alice:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        ResolvedVisibleMessage.synthetic(
-            sender="@bob:localhost",
-            body="B <context> & more",
-            event_id="$b1",
-            timestamp=2,
-            thread_id="$thread",
+        PendingEvent(
+            event=PreparedTextEvent(
+                sender="@bob:localhost",
+                event_id="$b1",
+                body="B <context> & more",
+                source={"content": {"body": "B <context> & more"}},
+                server_timestamp=2,
+            ),
+            room=room,
+            requester_user_id="@bob:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
-        ResolvedVisibleMessage.synthetic(
-            sender="@alice:localhost",
-            body="A follow-up",
-            event_id="$a2",
-            timestamp=3,
-            thread_id="$thread",
-        ),
-        ResolvedVisibleMessage.synthetic(
-            sender="@mindroom_general:localhost",
-            body="Previous partial",
-            event_id="$agent",
-            timestamp=4,
-            thread_id="$thread",
+        PendingEvent(
+            event=PreparedTextEvent(
+                sender="@alice:localhost",
+                event_id="$a2",
+                body="A follow-up",
+                source={"content": {"body": "A follow-up"}},
+                server_timestamp=3,
+            ),
+            room=room,
+            requester_user_id="@alice:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         ),
     ]
 
-    backlog = turn_controller._active_follow_up_backlog(
-        queued_messages=(
-            QueuedHumanMessage(source_event_id="$a1", sender_id="@alice:localhost", body="A first"),
-            QueuedHumanMessage(source_event_id="$b1", sender_id="@bob:localhost", body="B <context> & more"),
-            QueuedHumanMessage(source_event_id="$a2", sender_id="@alice:localhost", body="A follow-up"),
-        ),
-        thread_history=thread_history,
+    batch = build_coalesced_batch(
+        active_follow_up_coalescing_key(room.room_id, "$thread"),
+        pending_events,
     )
 
-    assert backlog is not None
-    assert backlog.source_event_ids == ("$a1", "$b1", "$a2")
-    assert [message.event_id for message in backlog.thread_history] == ["$agent"]
-    assert backlog.source_event_prompts == {
+    assert batch.source_event_ids == ["$a1", "$b1", "$a2"]
+    assert batch.requester_user_id == "@alice:localhost"
+    assert batch.source_event_prompts == {
         "$a1": "A first",
         "$b1": "B <context> & more",
         "$a2": "A follow-up",
     }
-    assert backlog.prompt == (
+    assert batch.prompt == (
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
@@ -469,8 +477,8 @@ def test_active_follow_up_backlog_uses_queued_receive_order() -> None:
     )
 
 
-def test_same_target_batch_reservation_keeps_all_pending_messages(tmp_path: Path) -> None:
-    """Selecting one coalesced reservation must not drop earlier messages on the same target."""
+def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: Path) -> None:
+    """A coalesced target batch should consume every matching queued-human notice."""
     bot = _bot(tmp_path)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$a1")
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -489,7 +497,7 @@ def test_same_target_batch_reservation_keeps_all_pending_messages(tmp_path: Path
         assert first_reservation is not None
         assert second_reservation is not None
 
-        selected = turn_controller._queued_notice_reservation_from_metadata(
+        turn_controller._consume_queued_notice_reservations_from_metadata(
             (
                 PendingDispatchMetadata(
                     kind="queued_notice_reservation",
@@ -507,8 +515,7 @@ def test_same_target_batch_reservation_keeps_all_pending_messages(tmp_path: Path
             target_key=(target.room_id, target.resolved_thread_id),
         )
 
-        assert selected is second_reservation
-        assert queued_signal.pending_human_message_event_ids == ("$a1", "$b1")
+        assert queued_signal.pending_human_message_event_ids == set()
     finally:
         queued_signal.finish_response_turn()
 
@@ -924,7 +931,6 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     lock = _PrelockBarrierLock()
     first_envelope = _envelope(source_event_id="$first")
     second_envelope = _envelope(source_event_id="$second")
-    observed_backlog: dict[str, tuple[str, ...]] = {}
 
     async def fake_generate_response_locked(
         _self: ResponseRunner,
@@ -933,9 +939,7 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         resolved_target: MessageTarget,
     ) -> str:
         del resolved_target
-        user_id = str(request.user_id)
-        observed_backlog[user_id] = _current_queued_human_event_ids()
-        return user_id
+        return str(request.user_id)
 
     with (
         patch.object(coordinator._lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
@@ -966,7 +970,6 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
 
     assert second_result == "second"
     assert first_result == "first"
-    assert observed_backlog == {"first": (), "second": ()}
 
 
 @pytest.mark.asyncio
@@ -1476,13 +1479,11 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
-    observed_backlogs: list[tuple[str, ...]] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
     async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
-        observed_backlogs.append(_current_queued_human_event_ids())
         if len(observed_pending) == 1:
             second_turn_started.set()
         await allow_turns_to_finish.wait()
@@ -1517,7 +1518,6 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             lifecycle_lock.release()
             await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
             assert observed_pending == [True]
-            assert observed_backlogs == [()]
 
             allow_turns_to_finish.set()
             assert await task_b == "$response-1"
@@ -1527,7 +1527,6 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
-    assert observed_backlogs == [(), ()]
     assert not queued_signal.is_set()
 
 
@@ -1543,13 +1542,11 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
-    observed_backlogs: list[tuple[str, ...]] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
     async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
         observed_pending.append(queued_signal.has_pending_human_messages())
-        observed_backlogs.append(_current_queued_human_event_ids())
         if len(observed_pending) == 1:
             second_turn_started.set()
         await allow_turns_to_finish.wait()
@@ -1588,7 +1585,6 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             lifecycle_lock.release()
             await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
             assert observed_pending == [True]
-            assert observed_backlogs == [()]
 
             allow_turns_to_finish.set()
             assert await task_b == "$team-response-1"
@@ -1598,7 +1594,6 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
-    assert observed_backlogs == [(), ()]
     assert not queued_signal.is_set()
 
 
@@ -1669,8 +1664,8 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
 
 
 @pytest.mark.asyncio
-async def test_response_lifecycle_consumes_active_backlog_once(tmp_path: Path) -> None:
-    """Only one queued turn should answer the human messages that arrived during an active reply."""
+async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path: Path) -> None:
+    """Lifecycle reservations only own queued-message notices, not coalesced follow-up batching."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator._lifecycle_coordinator
@@ -1736,13 +1731,17 @@ async def test_response_lifecycle_consumes_active_backlog_once(tmp_path: Path) -
 
     release_active.set()
     assert await active_task == "$active-response"
-    assert await asyncio.gather(*follow_up_tasks) == ["$response-$a1", None, None]
-    assert follow_up_calls == ["$a1"]
+    assert await asyncio.gather(*follow_up_tasks) == [
+        "$response-$a1",
+        "$response-$b1",
+        "$response-$a2",
+    ]
+    assert follow_up_calls == ["$a1", "$b1", "$a2"]
 
 
 @pytest.mark.asyncio
-async def test_non_human_lock_owner_does_not_drain_pending_human_backlog(tmp_path: Path) -> None:
-    """Scheduled or hook turns sharing the target lock must not consume human follow-up backlog."""
+async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path: Path) -> None:
+    """Scheduled or hook turns sharing the target lock must not clear human follow-up notices."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator._lifecycle_coordinator
@@ -1760,8 +1759,8 @@ async def test_non_human_lock_owner_does_not_drain_pending_human_backlog(tmp_pat
     )
     active_started = asyncio.Event()
     release_active = asyncio.Event()
-    observed_scheduled_backlog: list[tuple[str, ...]] = []
-    observed_human_backlog: list[tuple[str, ...]] = []
+    observed_scheduled_pending: list[set[str]] = []
+    observed_human_pending: list[set[str]] = []
 
     async def active_operation(_target: MessageTarget) -> str:
         active_started.set()
@@ -1769,11 +1768,15 @@ async def test_non_human_lock_owner_does_not_drain_pending_human_backlog(tmp_pat
         return "$active-response"
 
     async def scheduled_operation(_target: MessageTarget) -> str:
-        observed_scheduled_backlog.append(_current_queued_human_event_ids())
+        observed_scheduled_pending.append(
+            set(lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids),
+        )
         return "$scheduled-response"
 
     async def human_operation(_target: MessageTarget) -> str:
-        observed_human_backlog.append(_current_queued_human_event_ids())
+        observed_human_pending.append(
+            set(lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids),
+        )
         return "$human-response"
 
     active_task = asyncio.create_task(
@@ -1803,8 +1806,8 @@ async def test_non_human_lock_owner_does_not_drain_pending_human_backlog(tmp_pat
     release_active.set()
     assert await active_task == "$active-response"
     assert await scheduled_task == "$scheduled-response"
-    assert observed_scheduled_backlog == [()]
-    assert lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids == ("$human",)
+    assert observed_scheduled_pending == [{"$human"}]
+    assert lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids == {"$human"}
 
     assert (
         await lifecycle.run_locked_response(
@@ -1816,90 +1819,7 @@ async def test_non_human_lock_owner_does_not_drain_pending_human_backlog(tmp_pat
         )
         == "$human-response"
     )
-    assert observed_human_backlog == [("$human",)]
-
-
-@pytest.mark.asyncio
-async def test_failed_active_follow_up_owner_leaves_backlog_for_next_owner(tmp_path: Path) -> None:
-    """Backlog consumption should commit only after the owning response finishes successfully."""
-    bot = _bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
-    active_envelope = _envelope(source_event_id="$active", target=target)
-    first_envelope = _envelope(
-        source_event_id="$a1",
-        target=target,
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    )
-    second_envelope = _envelope(
-        source_event_id="$b1",
-        target=target,
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    )
-    active_started = asyncio.Event()
-    release_active = asyncio.Event()
-    observed_failed_owner_backlog: list[tuple[str, ...]] = []
-    observed_next_owner_backlog: list[tuple[str, ...]] = []
-
-    async def active_operation(_target: MessageTarget) -> str:
-        active_started.set()
-        await release_active.wait()
-        return "$active-response"
-
-    async def failing_owner_operation(_target: MessageTarget) -> str:
-        observed_failed_owner_backlog.append(_current_queued_human_event_ids())
-        msg = "payload failed"
-        raise RuntimeError(msg)
-
-    async def next_owner_operation(_target: MessageTarget) -> str:
-        observed_next_owner_backlog.append(_current_queued_human_event_ids())
-        return "$next-response"
-
-    active_task = asyncio.create_task(
-        lifecycle.run_locked_response(
-            target=target,
-            response_envelope=active_envelope,
-            queued_notice_reservation=None,
-            pipeline_timing=None,
-            locked_operation=active_operation,
-        ),
-    )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
-
-    first_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=first_envelope)
-    second_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=second_envelope)
-    assert first_reservation is not None
-    assert second_reservation is not None
-
-    first_task = asyncio.create_task(
-        lifecycle.run_locked_response(
-            target=target,
-            response_envelope=first_envelope,
-            queued_notice_reservation=first_reservation,
-            pipeline_timing=None,
-            locked_operation=failing_owner_operation,
-        ),
-    )
-    await asyncio.sleep(0)
-
-    release_active.set()
-    assert await active_task == "$active-response"
-    with pytest.raises(RuntimeError, match="payload failed"):
-        await first_task
-
-    assert observed_failed_owner_backlog == [("$a1", "$b1")]
-    assert (
-        await lifecycle.run_locked_response(
-            target=target,
-            response_envelope=second_envelope,
-            queued_notice_reservation=second_reservation,
-            pipeline_timing=None,
-            locked_operation=next_owner_operation,
-        )
-        == "$next-response"
-    )
-    assert observed_next_owner_backlog == [("$a1", "$b1")]
+    assert observed_human_pending == [set()]
 
 
 @pytest.mark.asyncio
@@ -2324,8 +2244,8 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
 
 
 @pytest.mark.asyncio
-async def test_coalesced_batch_uses_queued_notice_for_batch_thread(tmp_path: Path) -> None:
-    """A mixed batch should keep the reservation for its single coalescing target."""
+async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path: Path) -> None:
+    """A mixed batch should consume the notices for its single coalescing target before dispatch."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2352,15 +2272,13 @@ async def test_coalesced_batch_uses_queued_notice_for_batch_thread(tmp_path: Pat
         body="🎤 voice transcript",
         source_kind_override=VOICE_SOURCE_KIND,
     )
-    captured_reservations: list[object] = []
+    captured_dispatches: list[str] = []
 
     async def capture_dispatch(*_args: object, **kwargs: object) -> None:
+        del kwargs
         assert pre_signal.pending_human_messages == 0
-        assert post_signal.pending_human_messages == 1
-        reservation = kwargs["queued_notice_reservation"]
-        captured_reservations.append(reservation)
-        assert reservation is post_reservation
-        reservation.consume()
+        assert post_signal.pending_human_messages == 0
+        captured_dispatches.append("dispatched")
 
     pre_signal.begin_response_turn()
     post_signal.begin_response_turn()
@@ -2395,7 +2313,7 @@ async def test_coalesced_batch_uses_queued_notice_for_batch_thread(tmp_path: Pat
         pre_signal.finish_response_turn()
         post_signal.finish_response_turn()
 
-    assert captured_reservations == [post_reservation]
+    assert captured_dispatches == ["dispatched"]
     assert pre_signal.pending_human_messages == 0
     assert post_signal.pending_human_messages == 0
     assert not pre_signal.is_set()
@@ -2403,8 +2321,8 @@ async def test_coalesced_batch_uses_queued_notice_for_batch_thread(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_room_scoped_root_voice_uses_final_target_for_queued_notice(tmp_path: Path) -> None:
-    """A room-scoped voice root should select the reservation for its final target root."""
+async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_path: Path) -> None:
+    """A room-scoped voice root should consume the notice for its final target root before dispatch."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2429,14 +2347,12 @@ async def test_room_scoped_root_voice_uses_final_target_for_queued_notice(tmp_pa
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator._lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
-    captured_reservations: list[object] = []
+    captured_dispatches: list[str] = []
 
     async def capture_dispatch(*_args: object, **kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 1
-        reservation = kwargs["queued_notice_reservation"]
-        captured_reservations.append(reservation)
-        assert reservation is voice_reservation
-        reservation.consume()
+        del kwargs
+        assert queued_signal.pending_human_messages == 0
+        captured_dispatches.append("dispatched")
 
     queued_signal.begin_response_turn()
     try:
@@ -2460,7 +2376,7 @@ async def test_room_scoped_root_voice_uses_final_target_for_queued_notice(tmp_pa
     finally:
         queued_signal.finish_response_turn()
 
-    assert captured_reservations == [voice_reservation]
+    assert captured_dispatches == ["dispatched"]
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
 

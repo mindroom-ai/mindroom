@@ -56,6 +56,10 @@ _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 logger = get_logger(__name__)
 
 
+async def _allow_dispatch(_key: CoalescingKey) -> None:
+    return
+
+
 class GatePhase(enum.Enum):
     """Lifecycle phases for one coalescing gate."""
 
@@ -211,11 +215,13 @@ class CoalescingGate:
         debounce_seconds: Callable[[], float],
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
+        wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
+        self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._order_book = CoalescingOrderBook()
         self._active_drain_context: _DrainContext | None = None
@@ -407,6 +413,14 @@ class CoalescingGate:
         )
         self._wake_owner(room_id, requester_user_id)
         return reservation
+
+    def retarget_order_reservation(self, reservation: IngressOrderReservation, *, requester_user_id: str) -> None:
+        """Move an unsettled receive-order reservation to another owner key."""
+        previous_requester_user_id = reservation.requester_user_id
+        if not self._order_book.retarget(reservation, requester_user_id=requester_user_id):
+            return
+        self._wake_owner(reservation.room_id, previous_requester_user_id)
+        self._wake_owner(reservation.room_id, requester_user_id)
 
     def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
         """Release a receive-order reservation that will not become a queued admission."""
@@ -1369,6 +1383,10 @@ class CoalescingGate:
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
         front = gate.queue[0]
         await self._wait_until_front_claimable(key, gate, front_order=front.received_order)
+        if not gate.queue:
+            return
+
+        await self._wait_until_dispatch_allowed(key)
         if not gate.queue:
             return
 

@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 import nio
 
@@ -19,7 +18,13 @@ from mindroom.coalescing import (
     IngressAdmissionClosedError,
     ReadyPendingEvent,
 )
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, close_pending_event_metadata
+from mindroom.coalescing_batch import (
+    CoalescedBatch,
+    CoalescingKey,
+    PendingEvent,
+    active_follow_up_coalescing_key,
+    close_pending_event_metadata,
+)
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -47,7 +52,6 @@ from mindroom.dispatch_handoff import (
     PreparedTextEvent,
     TextDispatchEvent,
     build_dispatch_handoff,
-    dispatch_prompt_for_event,
     payload_metadata_from_source,
 )
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
@@ -92,9 +96,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
-from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
-from mindroom.response_lifecycle import QueuedHumanMessage, current_queued_human_messages
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.text_ingress_dispatch import dispatch_text_message
@@ -142,87 +144,6 @@ type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayl
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
 
-@dataclass(frozen=True)
-class _ActiveFollowUpBacklog:
-    """Model-facing backlog for human messages queued behind one active response."""
-
-    source_event_ids: tuple[str, ...]
-    prompt: str
-    thread_history: tuple[ResolvedVisibleMessage, ...]
-    source_event_prompts: dict[str, str]
-
-
-def _matched_visible_event_id(message: ResolvedVisibleMessage, event_ids: set[str]) -> str | None:
-    candidates = (
-        (message.event_id,)
-        if message.latest_event_id == message.event_id
-        else (
-            message.event_id,
-            message.latest_event_id,
-        )
-    )
-    for candidate in candidates:
-        if candidate in event_ids:
-            return candidate
-    return None
-
-
-def _render_active_follow_up_message(message: QueuedHumanMessage) -> str:
-    safe_body = message.body.replace("]]>", "]]]]><![CDATA[>")
-    return (
-        f"<msg event_id={xml_quoteattr(message.source_event_id)} "
-        f"from={xml_quoteattr(message.sender_id)}><![CDATA[{safe_body}]]></msg>"
-    )
-
-
-def _render_active_follow_up_prompt(messages: Sequence[QueuedHumanMessage]) -> str:
-    rendered_messages = "\n".join(_render_active_follow_up_message(message) for message in messages)
-    return (
-        "Messages arrived while the previous response was still running. "
-        "They are in chat timeline order. Respond once to the combined context:\n\n"
-        f"<queued_messages>\n{rendered_messages}\n</queued_messages>"
-    )
-
-
-def _active_follow_up_backlog(
-    *,
-    queued_messages: Sequence[QueuedHumanMessage],
-    thread_history: Sequence[ResolvedVisibleMessage],
-) -> _ActiveFollowUpBacklog | None:
-    source_event_ids = tuple(message.source_event_id for message in queued_messages)
-    if len(source_event_ids) <= 1:
-        return None
-
-    backlog_source_id_set = set(source_event_ids)
-    filtered_history = tuple(
-        message for message in thread_history if _matched_visible_event_id(message, backlog_source_id_set) is None
-    )
-    return _ActiveFollowUpBacklog(
-        source_event_ids=source_event_ids,
-        prompt=_render_active_follow_up_prompt(queued_messages),
-        thread_history=filtered_history,
-        source_event_prompts={message.source_event_id: message.body for message in queued_messages},
-    )
-
-
-def _queued_human_message_for_event(
-    *,
-    event: DispatchEvent,
-    envelope: MessageEnvelope,
-    trust_internal_payload_metadata: bool,
-) -> QueuedHumanMessage:
-    attachment_ids = envelope.attachment_ids if trust_internal_payload_metadata else ()
-    media_event = event if is_matrix_media_dispatch_event(event) else None
-    return QueuedHumanMessage(
-        source_event_id=envelope.source_event_id,
-        sender_id=envelope.requester_id,
-        body=dispatch_prompt_for_event(event),
-        attachment_ids=attachment_ids,
-        trusted_attachment_ids=attachment_ids,
-        media_event=media_event,
-    )
-
-
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
     """Return an event view that cannot pull dispatch context through Matrix relations."""
     if not isinstance(event.source, dict):
@@ -263,28 +184,18 @@ def _queued_notice_dispatch_metadata(
     )
 
 
-def _queued_notice_reservation_from_metadata(
+def _consume_queued_notice_reservations_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
     *,
     target_key: tuple[str, str | None],
-) -> QueuedHumanNoticeReservation | None:
+) -> None:
     reservation_items = [item for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
-    if not reservation_items:
-        return None
-    selected_item = next(
-        (item for item in reversed(reservation_items) if item.target_key == target_key),
-        None,
-    )
     for item in reservation_items:
-        if item is not selected_item:
-            reservation = cast("QueuedHumanNoticeReservation", item.payload)
-            if item.target_key == target_key:
-                reservation.hand_off()
-            else:
-                reservation.consume()
-    if selected_item is None:
-        return None
-    return cast("QueuedHumanNoticeReservation", selected_item.payload)
+        reservation = cast("QueuedHumanNoticeReservation", item.payload)
+        if item.target_key == target_key:
+            reservation.consume()
+        else:
+            reservation.cancel()
 
 
 def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedTextEvent:
@@ -719,15 +630,9 @@ class TurnController:
         preliminary_target: MessageTarget | None,
         target: MessageTarget,
         envelope: MessageEnvelope,
-        event: DispatchEvent,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> tuple[bool, QueuedHumanNoticeReservation | None]:
         """Return active-follow-up policy and the reservation for a voice target."""
-        queued_message = _queued_human_message_for_event(
-            event=event,
-            envelope=envelope,
-            trust_internal_payload_metadata=True,
-        )
         if queued_notice_reservation is not None and (
             preliminary_target is None
             or not self._same_response_lifecycle_target(
@@ -738,7 +643,6 @@ class TurnController:
             queued_notice_reservation.cancel()
             queued_notice_reservation = None
         if queued_notice_reservation is not None:
-            queued_notice_reservation.update_message(queued_message)
             return True, queued_notice_reservation
         active_follow_up = (
             envelope.origin.may_answer_interactive_prompt
@@ -749,7 +653,6 @@ class TurnController:
         return True, self.deps.response_runner.reserve_waiting_human_message(
             target=target,
             response_envelope=envelope,
-            queued_message=queued_message,
         )
 
     async def _enqueue_active_thread_follow_up(
@@ -775,12 +678,9 @@ class TurnController:
             queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                 target=target,
                 response_envelope=envelope,
-                queued_message=_queued_human_message_for_event(
-                    event=event,
-                    envelope=envelope,
-                    trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-                ),
             )
+        coalescing_key = active_follow_up_coalescing_key(room.room_id, coalescing_thread_id)
+        reservation_owner.retarget(coalescing_key.requester_user_id)
         try:
             await self._enqueue_for_dispatch(
                 event,
@@ -791,7 +691,7 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=coalescing_key,
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
@@ -1142,6 +1042,7 @@ class TurnController:
         pending_event = PendingEvent(
             event=event,
             room=room,
+            requester_user_id=requester_user_id,
             source_kind=source_kind,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
             hook_source=hook_source,
@@ -1882,8 +1783,6 @@ class TurnController:
 
                 async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
                     nonlocal dispatch
-                    nonlocal handled_turn
-                    nonlocal matrix_run_metadata
                     nonlocal payload_ready_monotonic
                     if dispatch_timing is not None:
                         dispatch_timing.mark("response_payload_start")
@@ -1908,31 +1807,6 @@ class TurnController:
                             thread_id=request.thread_id,
                             outcome=payload_builder_outcome,
                         )
-                    backlog: _ActiveFollowUpBacklog | None = None
-                    queued_messages = current_queued_human_messages()
-                    if (
-                        queued_messages
-                        and dispatch.envelope.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-                    ):
-                        backlog = _active_follow_up_backlog(
-                            queued_messages=queued_messages,
-                            thread_history=request.thread_history,
-                        )
-                        if backlog is not None:
-                            handled_turn = replace(
-                                handled_turn,
-                                source_event_ids=backlog.source_event_ids,
-                                source_event_prompts=backlog.source_event_prompts,
-                            )
-                            matrix_run_metadata = deep_merge_metadata(
-                                matrix_run_metadata,
-                                self.deps.turn_store.build_run_metadata(handled_turn),
-                            )
-                            payload = replace(payload, prompt=backlog.prompt)
-                            dispatch = replace(
-                                dispatch,
-                                envelope=replace(dispatch.envelope, body=backlog.prompt),
-                            )
                     prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
                         dispatch,
                         payload,
@@ -1963,7 +1837,7 @@ class TurnController:
                         thread_history=request.thread_history,
                     )
                     return ResponseRequest(
-                        thread_history=backlog.thread_history if backlog is not None else request.thread_history,
+                        thread_history=request.thread_history,
                         prompt=prepared_payload.payload.prompt,
                         model_prompt=prepared_payload.payload.model_prompt,
                         existing_event_id=request.existing_event_id,
@@ -2029,42 +1903,35 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        reservation: QueuedHumanNoticeReservation | None = None
         try:
-            try:
-                handoff = build_dispatch_handoff(batch)
-            except BaseException:
-                close_pending_event_metadata(list(batch.pending_events))
-                raise
-            reservation = _queued_notice_reservation_from_metadata(
-                handoff.dispatch_metadata,
-                target_key=self._queued_notice_target_key_for_handoff(handoff),
+            handoff = build_dispatch_handoff(batch)
+        except BaseException:
+            close_pending_event_metadata(list(batch.pending_events))
+            raise
+        _consume_queued_notice_reservations_from_metadata(
+            handoff.dispatch_metadata,
+            target_key=self._queued_notice_target_key_for_handoff(handoff),
+        )
+        timing_scope = event_timing_scope(handoff.event.event_id)
+        dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_exit")
+        async with self.deps.resolver.turn_thread_cache_scope():
+            dispatch_start = time.monotonic()
+            handled_turn = HandledTurnState.create(
+                handoff.source_event_ids,
+                source_event_prompts=dict(handoff.source_event_prompts),
             )
-            timing_scope = event_timing_scope(handoff.event.event_id)
-            dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
-            if dispatch_timing is not None:
-                dispatch_timing.mark("gate_exit")
-            async with self.deps.resolver.turn_thread_cache_scope():
-                dispatch_start = time.monotonic()
-                handled_turn = HandledTurnState.create(
-                    handoff.source_event_ids,
-                    source_event_prompts=dict(handoff.source_event_prompts),
-                )
-                await self._dispatch_handoff(
-                    handoff,
-                    handled_turn=handled_turn,
-                    queued_notice_reservation=reservation,
-                )
-                reservation = None
-                emit_elapsed_timing(
-                    "coalescing.handle_batch.dispatch_text_message",
-                    dispatch_start,
-                    source_event_count=len(batch.source_event_ids),
-                    timing_scope=timing_scope,
-                )
-        finally:
-            if reservation is not None:
-                reservation.cancel()
+            await self._dispatch_handoff(
+                handoff,
+                handled_turn=handled_turn,
+            )
+            emit_elapsed_timing(
+                "coalescing.handle_batch.dispatch_text_message",
+                dispatch_start,
+                source_event_count=len(batch.source_event_ids),
+                timing_scope=timing_scope,
+            )
 
     def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
         coalescing_key = handoff.ingress.coalescing_key
@@ -2084,17 +1951,14 @@ class TurnController:
         handoff: DispatchHandoff,
         *,
         handled_turn: HandledTurnState,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> None:
         """Dispatch one coalesced handoff and own opaque metadata cleanup."""
-        reservation = queued_notice_reservation
         await self._dispatch_text_message(
             handoff.room,
             handoff.event,
             handoff.requester_user_id,
             media_events=list(handoff.media_events) or None,
             handled_turn=handled_turn,
-            queued_notice_reservation=reservation,
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
@@ -2398,6 +2262,7 @@ class TurnController:
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
+        reservation_owner.retarget(admission_key.requester_user_id)
         await reservation_owner.admit(
             admission_key,
             ready_task=ready_task,
@@ -2427,7 +2292,10 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        admission_key = CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
+        if self.deps.response_runner.has_active_response_for_target(voice_target):
+            admission_key = active_follow_up_coalescing_key(room.room_id, coalescing_thread_id)
+        else:
+            admission_key = CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
         return voice_target, admission_key
 
     async def _ready_voice_event(
@@ -2498,7 +2366,6 @@ class TurnController:
                 preliminary_target=voice_target,
                 target=normalized_target,
                 envelope=envelope,
-                event=normalized_event,
                 queued_notice_reservation=queued_notice_reservation,
             )
             reservation_released_or_handed_off = True
@@ -2507,6 +2374,7 @@ class TurnController:
                     event=normalized_event,
                     room=room,
                     source_kind=envelope.source_kind,
+                    requester_user_id=prechecked_event.requester_user_id,
                     dispatch_policy_source_kind=(
                         ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
                         if active_follow_up
@@ -2607,7 +2475,6 @@ class TurnController:
                 preliminary_target=target,
                 target=target,
                 envelope=envelope,
-                event=fallback_event,
                 queued_notice_reservation=None,
             )
             dispatch_policy_source_kind = (
@@ -2628,6 +2495,7 @@ class TurnController:
                 event=fallback_event,
                 room=room,
                 source_kind=VOICE_SOURCE_KIND,
+                requester_user_id=requester_user_id,
                 dispatch_policy_source_kind=dispatch_policy_source_kind,
                 hook_source=hook_source,
                 message_received_depth=message_received_depth,

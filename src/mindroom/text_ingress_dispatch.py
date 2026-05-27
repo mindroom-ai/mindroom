@@ -23,7 +23,7 @@ from mindroom.dispatch_handoff import (
     merge_payload_metadata,
     payload_metadata_from_source,
 )
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND, is_voice_event
+from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
 from mindroom.handled_turns import HandledTurnState
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -33,7 +33,6 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_lifecycle import QueuedHumanMessage, current_queued_human_messages
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -80,41 +79,6 @@ class _PreparedTextDispatch:
     dispatch: PreparedDispatch
     replay_guard: _ReplayGuard
     dispatch_started_at: float
-
-
-@dataclass(frozen=True)
-class _ActiveFollowUpPayloadExtras:
-    """Attachments/media from queued follow-ups owned by one combined response."""
-
-    attachment_ids: tuple[str, ...] = ()
-    trusted_attachment_ids: tuple[str, ...] = ()
-    media_events: tuple[MediaDispatchEvent, ...] = ()
-
-
-def _dedupe_media_events(media_events: Sequence[MediaDispatchEvent]) -> tuple[MediaDispatchEvent, ...]:
-    seen: set[str] = set()
-    ordered: list[MediaDispatchEvent] = []
-    for media_event in media_events:
-        if media_event.event_id in seen:
-            continue
-        seen.add(media_event.event_id)
-        ordered.append(media_event)
-    return tuple(ordered)
-
-
-def _active_follow_up_payload_extras(
-    queued_messages: Sequence[QueuedHumanMessage],
-) -> _ActiveFollowUpPayloadExtras:
-    media_events = _dedupe_media_events(
-        tuple(message.media_event for message in queued_messages if message.media_event is not None),
-    )
-    return _ActiveFollowUpPayloadExtras(
-        attachment_ids=tuple(merge_attachment_ids(*(list(message.attachment_ids) for message in queued_messages))),
-        trusted_attachment_ids=tuple(
-            merge_attachment_ids(*(list(message.trusted_attachment_ids) for message in queued_messages)),
-        ),
-        media_events=media_events,
-    )
 
 
 async def dispatch_text_message(
@@ -409,23 +373,12 @@ async def _apply_turn_plan(
         effective_thread_id = prepared.dispatch.target.resolved_thread_id
         media_attachment_ids: list[str] = []
         fallback_images = None
-        queued_payload_extras = (
-            _active_follow_up_payload_extras(current_queued_human_messages())
-            if prepared.dispatch.envelope.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-            else _ActiveFollowUpPayloadExtras()
-        )
-        payload_media_events = _dedupe_media_events(
-            (
-                *(media_events or ()),
-                *queued_payload_extras.media_events,
-            ),
-        )
-        if payload_media_events:
+        if media_events:
             media_result = await controller.deps.normalizer.register_batch_media_attachments(
                 BatchMediaAttachmentRequest(
                     room_id=room.room_id,
                     thread_id=effective_thread_id,
-                    media_events=list(payload_media_events),
+                    media_events=media_events,
                 ),
             )
             media_attachment_ids = media_result.attachment_ids
@@ -437,12 +390,8 @@ async def _apply_turn_plan(
                 current_attachment_ids=merge_attachment_ids(
                     message_attachment_ids,
                     media_attachment_ids,
-                    list(queued_payload_extras.attachment_ids),
                 ),
-                trusted_current_attachment_ids=merge_attachment_ids(
-                    trusted_attachment_ids,
-                    list(queued_payload_extras.trusted_attachment_ids),
-                ),
+                trusted_current_attachment_ids=trusted_attachment_ids,
                 thread_id=context.thread_id,
                 media_thread_id=effective_thread_id,
                 thread_history=context.thread_history,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
+from xml.sax.saxutils import quoteattr as xml_quoteattr
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
@@ -16,7 +17,12 @@ from .dispatch_handoff import (
     event_content_dict,
     is_media_dispatch_event,
 )
-from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
+from .dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    IMAGE_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+)
 
 if TYPE_CHECKING:
     import nio
@@ -30,6 +36,23 @@ class CoalescingKey(NamedTuple):
     requester_user_id: str
 
 
+_ACTIVE_FOLLOW_UP_OWNER_PREFIX = "__mindroom_active_follow_up__"
+
+
+def active_follow_up_coalescing_key(room_id: str, thread_id: str | None) -> CoalescingKey:
+    """Return the target-scoped key for follow-ups queued behind an active response."""
+    return CoalescingKey(
+        room_id,
+        thread_id,
+        f"{_ACTIVE_FOLLOW_UP_OWNER_PREFIX}:{thread_id or 'room'}",
+    )
+
+
+def is_active_follow_up_coalescing_key(key: CoalescingKey) -> bool:
+    """Return whether a coalescing key is target-scoped for an active response."""
+    return key.requester_user_id.startswith(f"{_ACTIVE_FOLLOW_UP_OWNER_PREFIX}:")
+
+
 @dataclass
 class PendingEvent:
     """One queued inbound event waiting to be coalesced."""
@@ -41,6 +64,7 @@ class PendingEvent:
     hook_source: str | None = None
     message_received_depth: int = 0
     trust_internal_payload_metadata: bool = False
+    requester_user_id: str | None = None
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -81,6 +105,35 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
         "The user sent the following messages in quick succession. "
         "Treat them as one turn and respond once:\n\n"
         f"{combined_body}"
+    )
+
+
+def _active_follow_up_message(pending_event: PendingEvent) -> str:
+    safe_body = dispatch_prompt_for_event(pending_event.event).replace("]]>", "]]]]><![CDATA[>")
+    sender = pending_event.requester_user_id or pending_event.event.sender
+    return (
+        f"<msg event_id={xml_quoteattr(pending_event.event.event_id)} "
+        f"from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
+    )
+
+
+def _active_follow_up_prompt(pending_events: list[PendingEvent]) -> str:
+    rendered_messages = "\n".join(_active_follow_up_message(pending_event) for pending_event in pending_events)
+    return (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        f"<queued_messages>\n{rendered_messages}\n</queued_messages>"
+    )
+
+
+def _coalesced_prompt_for_events(ordered_pending_events: list[PendingEvent]) -> str:
+    if (
+        len(ordered_pending_events) > 1
+        and _batch_dispatch_policy_source_kind(ordered_pending_events) == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+    ):
+        return _active_follow_up_prompt(ordered_pending_events)
+    return coalesced_prompt(
+        [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
     )
 
 
@@ -184,11 +237,9 @@ def build_coalesced_batch(
         coalescing_key=key,
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
-        requester_user_id=key.requester_user_id,
+        requester_user_id=primary_pending_event.requester_user_id or key.requester_user_id,
         pending_events=tuple(ordered_pending_events),
-        prompt=coalesced_prompt(
-            [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
-        ),
+        prompt=_coalesced_prompt_for_events(ordered_pending_events),
         source_kind=_batch_source_kind(ordered_pending_events),
         dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
         hook_source=_batch_hook_source(ordered_pending_events),
