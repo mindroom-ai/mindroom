@@ -236,7 +236,7 @@ async def _fetch_json(
     await _validate_discovery_url(url, runtime_paths)
     try:
         response = await client.get(url, headers={"Accept": _JSON_CONTENT_TYPE})
-        if optional and getattr(response, "status_code", None) in {404, 410}:
+        if optional and response.status_code in {404, 410}:
             return None
         response.raise_for_status()
     except Exception as exc:
