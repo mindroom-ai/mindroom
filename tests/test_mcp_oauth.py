@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -14,7 +15,13 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.mcp.config import MCPServerConfig
-from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
+from mindroom.mcp.oauth import (
+    _DISCOVERY_CACHE,
+    _DYNAMIC_CLIENT_REGISTRATION_LOCKS,
+    _resolve_mcp_oauth_metadata,
+    mcp_oauth_provider,
+    mcp_oauth_provider_id,
+)
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -28,6 +35,12 @@ if TYPE_CHECKING:
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+
+
+@pytest.fixture(autouse=True)
+def _clear_discovery_cache() -> None:
+    _DISCOVERY_CACHE.clear()
+    _DYNAMIC_CLIENT_REGISTRATION_LOCKS.clear()
 
 
 def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
@@ -149,6 +162,15 @@ class _FakeDiscoveryClient:
         )
 
 
+class _InvalidJsonDiscoveryResponse(_FakeDiscoveryResponse):
+    def __init__(self) -> None:
+        super().__init__({})
+
+    def json(self) -> dict[str, Any]:
+        msg = "invalid json"
+        raise ValueError(msg)
+
+
 def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
     """Generated MCP OAuth providers use deterministic services and public-client defaults."""
     provider = mcp_oauth_provider("demo", _oauth_mcp_server_config())
@@ -258,6 +280,136 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
         "_source": "oauth_dynamic_client_registration",
         "_oauth_provider": "mcp_demo",
     }
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bad optional metadata candidates should not abort discovery before later valid candidates."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    class _InvalidFirstDiscoveryClient(_FakeDiscoveryClient):
+        async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
+            if url == "https://mcp.example.test/.well-known/oauth-protected-resource":
+                _FakeDiscoveryClient.gets.append(url)
+                return _InvalidJsonDiscoveryResponse()
+            return await super().get(url, headers=headers)
+
+    _FakeDiscoveryClient.gets = []
+    _FakeDiscoveryClient.posts = []
+    monkeypatch.setattr("mindroom.mcp.oauth.httpx.AsyncClient", _InvalidFirstDiscoveryClient)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    code_verifier = provider.issue_pkce_code_verifier()
+    assert code_verifier is not None
+
+    auth_url = await provider.authorization_uri_async(
+        runtime_paths,
+        state="state-token",
+        code_verifier=code_verifier,
+    )
+
+    assert urlparse(auth_url).netloc == "auth.example.test"
+    assert _FakeDiscoveryClient.gets[:2] == [
+        "https://mcp.example.test/.well-known/oauth-protected-resource",
+        "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(tmp_path: Path) -> None:
+    """Metadata cached under permissive discovery settings must not bypass stricter runtime checks."""
+    permissive_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY": "true"},
+    )
+    strict_paths = _runtime_paths(tmp_path)
+    server_config = MCPServerConfig(
+        transport="streamable-http",
+        url="https://mcp.example.test/mcp",
+        auth={
+            "type": "oauth",
+            "discovery": "manual",
+            "authorization_url": "http://auth.example.test/authorize",
+            "token_url": "http://auth.example.test/token",
+        },
+    )
+
+    metadata = await _resolve_mcp_oauth_metadata("demo", server_config, permissive_paths)
+    assert metadata.authorization_url == "http://auth.example.test/authorize"
+
+    with pytest.raises(OAuthProviderError, match="requires HTTPS URL"):
+        await _resolve_mcp_oauth_metadata("demo", server_config, strict_paths)
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_dynamic_client_registration_is_serialized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent authorization starts should not double-register the same OAuth client."""
+    runtime_paths = _runtime_paths(tmp_path)
+    first_post_started = asyncio.Event()
+    release_first_post = asyncio.Event()
+
+    class _SlowRegistrationDiscoveryClient(_FakeDiscoveryClient):
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, Any],
+            headers: Mapping[str, str] | None = None,
+        ) -> _FakeDiscoveryResponse:
+            del headers
+            _FakeDiscoveryClient.posts.append((url, json))
+            if len(_FakeDiscoveryClient.posts) == 1:
+                first_post_started.set()
+                await release_first_post.wait()
+            assert url == "https://auth.example.test/register"
+            return _FakeDiscoveryResponse(
+                {
+                    "client_id": "registered-client-id",
+                    "client_id_issued_at": 123,
+                    "token_endpoint_auth_method": "none",
+                },
+                status_code=201,
+            )
+
+    _FakeDiscoveryClient.gets = []
+    _FakeDiscoveryClient.posts = []
+    monkeypatch.setattr("mindroom.mcp.oauth.httpx.AsyncClient", _SlowRegistrationDiscoveryClient)
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    first_verifier = provider.issue_pkce_code_verifier()
+    second_verifier = provider.issue_pkce_code_verifier()
+    assert first_verifier is not None
+    assert second_verifier is not None
+
+    first_call = asyncio.create_task(
+        provider.authorization_uri_async(
+            runtime_paths,
+            state="first-state",
+            code_verifier=first_verifier,
+        ),
+    )
+    await first_post_started.wait()
+    second_call = asyncio.create_task(
+        provider.authorization_uri_async(
+            runtime_paths,
+            state="second-state",
+            code_verifier=second_verifier,
+        ),
+    )
+    await asyncio.sleep(0)
+    assert len(_FakeDiscoveryClient.posts) == 1
+
+    release_first_post.set()
+    first_url, second_url = await asyncio.gather(first_call, second_call)
+
+    assert parse_qs(urlparse(first_url).query)["client_id"] == ["registered-client-id"]
+    assert parse_qs(urlparse(second_url).query)["client_id"] == ["registered-client-id"]
+    assert len(_FakeDiscoveryClient.posts) == 1
 
 
 @pytest.mark.asyncio

@@ -173,7 +173,13 @@ class MCPServerManager:
                 credentials_manager=credentials_manager,
                 worker_target=worker_target,
             )
-            if request_state.catalog is None or request_state.session is None or not request_state.connected:
+            if (
+                request_state.catalog is None
+                or request_state.session is None
+                or request_state.stale
+                or request_state.last_error is not None
+                or not request_state.connected
+            ):
                 await self._refresh_server_catalog(request_state, notify=False, auth_headers=auth_headers)
             self._require_catalog_tool(request_state, remote_tool_name)
             return await self._call_tool_once_or_reconnect(
@@ -333,19 +339,19 @@ class MCPServerManager:
             raise MCPConnectionError(server_id, msg)
         if base_state.last_error is not None:
             raise base_state.last_error
-        access_token = await self._oauth_access_token(
-            base_state,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-        )
         key = self._request_session_key(base_state, worker_target)
         state = self._scoped_states.get(key)
         if state is None:
             state = MCPServerState(server_id=server_id, config=base_state.config)
             self._scoped_states[key] = state
 
-        token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
         async with state.lock:
+            access_token = await self._oauth_access_token(
+                base_state,
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+            )
+            token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
             if state.oauth_access_token_hash != token_hash:
                 async with state.call_lock.write():
                     await self._disconnect_state(state)

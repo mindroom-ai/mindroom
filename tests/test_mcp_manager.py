@@ -287,6 +287,110 @@ async def test_mcp_manager_uses_requester_oauth_bearer_token(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_serializes_requester_oauth_token_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent calls for one requester should share one locked OAuth state."""
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    first_token_started = asyncio.Event()
+    allow_first_token = asyncio.Event()
+    active_token_resolutions = 0
+    max_active_token_resolutions = 0
+
+    async def fake_oauth_access_token(
+        _state: MCPServerState,
+        *,
+        credentials_manager: object,
+        worker_target: object,
+    ) -> str:
+        del credentials_manager, worker_target
+        nonlocal active_token_resolutions, max_active_token_resolutions
+        active_token_resolutions += 1
+        max_active_token_resolutions = max(max_active_token_resolutions, active_token_resolutions)
+        if active_token_resolutions == 1:
+            first_token_started.set()
+            await allow_first_token.wait()
+        await asyncio.sleep(0)
+        active_token_resolutions -= 1
+        return "alice-token"
+
+    monkeypatch.setattr(manager, "_oauth_access_token", fake_oauth_access_token)
+
+    first_call = asyncio.create_task(
+        manager._request_state_and_headers(
+            "demo",
+            credentials_manager=None,
+            worker_target=worker_target,
+        ),
+    )
+    await first_token_started.wait()
+    second_call = asyncio.create_task(
+        manager._request_state_and_headers(
+            "demo",
+            credentials_manager=None,
+            worker_target=worker_target,
+        ),
+    )
+    await asyncio.sleep(0)
+    assert len(manager._scoped_states) == 1
+    assert max_active_token_resolutions == 1
+
+    allow_first_token.set()
+    first_result, second_result = await asyncio.gather(first_call, second_call)
+
+    assert first_result[0] is second_result[0]
+    assert first_result[1] == {"Authorization": "Bearer alice-token"}
+    assert second_result[1] == {"Authorization": "Bearer alice-token"}
+    assert max_active_token_resolutions == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_refreshes_stale_requester_oauth_session_before_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth tool calls should refresh requester catalogs marked stale by server notifications."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    request_state = next(iter(manager._scoped_states.values()))
+    request_state.stale = True
+
+    result = await manager.call_tool(
+        "demo",
+        "echo",
+        {},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert result.content == "pong"
+    assert request_state.stale is False
+    assert len(_FakeClientSession.sessions) == 2
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer alice-token"},
+        {"Authorization": "Bearer alice-token"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_separates_oauth_sessions_by_requester(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -51,6 +51,7 @@ class _CachedDiscovery:
 
 
 _DISCOVERY_CACHE: dict[tuple[object, ...], _CachedDiscovery] = {}
+_DYNAMIC_CLIENT_REGISTRATION_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def mcp_oauth_provider_id(server_id: str, auth_config: MCPOAuthConfig | None) -> str:
@@ -199,17 +200,27 @@ async def _validate_discovery_url(url: str, runtime_paths: RuntimePaths) -> None
         raise OAuthProviderError(msg)
 
 
-def _metadata_cache_key(server_id: str, server_config: MCPServerConfig) -> tuple[object, ...]:
+def _metadata_cache_key(
+    server_id: str,
+    server_config: MCPServerConfig,
+    runtime_paths: RuntimePaths,
+) -> tuple[object, ...]:
     auth_config = server_config.auth
     return (
         server_id,
         server_config.url,
         json.dumps(auth_config.model_dump(mode="json"), sort_keys=True) if auth_config is not None else None,
+        runtime_paths.env_flag("MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY"),
+        runtime_paths.env_flag("MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY"),
     )
 
 
-def _metadata_from_cache(server_id: str, server_config: MCPServerConfig) -> _DiscoveredMCPOAuthMetadata | None:
-    cached = _DISCOVERY_CACHE.get(_metadata_cache_key(server_id, server_config))
+def _metadata_from_cache(
+    server_id: str,
+    server_config: MCPServerConfig,
+    runtime_paths: RuntimePaths,
+) -> _DiscoveredMCPOAuthMetadata | None:
+    cached = _DISCOVERY_CACHE.get(_metadata_cache_key(server_id, server_config, runtime_paths))
     if cached is None or cached.expires_at <= time.time():
         return None
     return cached.metadata
@@ -218,12 +229,23 @@ def _metadata_from_cache(server_id: str, server_config: MCPServerConfig) -> _Dis
 def _store_metadata_cache(
     server_id: str,
     server_config: MCPServerConfig,
+    runtime_paths: RuntimePaths,
     metadata: _DiscoveredMCPOAuthMetadata,
 ) -> None:
-    _DISCOVERY_CACHE[_metadata_cache_key(server_id, server_config)] = _CachedDiscovery(
+    _DISCOVERY_CACHE[_metadata_cache_key(server_id, server_config, runtime_paths)] = _CachedDiscovery(
         metadata=metadata,
         expires_at=time.time() + _DISCOVERY_CACHE_TTL_SECONDS,
     )
+
+
+async def _validate_metadata_endpoints(
+    metadata: _DiscoveredMCPOAuthMetadata,
+    runtime_paths: RuntimePaths,
+) -> None:
+    await _validate_discovery_url(metadata.authorization_url, runtime_paths)
+    await _validate_discovery_url(metadata.token_url, runtime_paths)
+    if metadata.registration_url is not None:
+        await _validate_discovery_url(metadata.registration_url, runtime_paths)
 
 
 async def _fetch_json(
@@ -239,12 +261,12 @@ async def _fetch_json(
         if optional and response.status_code in {404, 410}:
             return None
         response.raise_for_status()
+        payload = response.json()
     except Exception as exc:
         if optional:
             return None
         msg = f"MCP OAuth metadata request failed for {url}"
         raise OAuthProviderError(msg) from exc
-    payload = response.json()
     if not isinstance(payload, dict):
         msg = f"MCP OAuth metadata at {url} is not a JSON object"
         raise OAuthProviderError(msg)
@@ -322,7 +344,7 @@ async def _resolve_mcp_oauth_metadata(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
 ) -> _DiscoveredMCPOAuthMetadata:
-    cached = _metadata_from_cache(server_id, server_config)
+    cached = _metadata_from_cache(server_id, server_config, runtime_paths)
     if cached is not None:
         return cached
 
@@ -342,7 +364,8 @@ async def _resolve_mcp_oauth_metadata(
             registration_url=_configured_endpoint(auth_config.registration_url) or None,
             token_endpoint_auth_method=auth_config.token_endpoint_auth_method,
         )
-        _store_metadata_cache(server_id, server_config, metadata)
+        await _validate_metadata_endpoints(metadata, runtime_paths)
+        _store_metadata_cache(server_id, server_config, runtime_paths, metadata)
         return metadata
 
     async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
@@ -377,7 +400,8 @@ async def _resolve_mcp_oauth_metadata(
         registration_url=registration_url,
         token_endpoint_auth_method=auth_config.token_endpoint_auth_method,
     )
-    _store_metadata_cache(server_id, server_config, metadata)
+    await _validate_metadata_endpoints(metadata, runtime_paths)
+    _store_metadata_cache(server_id, server_config, runtime_paths, metadata)
     return metadata
 
 
@@ -409,45 +433,49 @@ async def _register_dynamic_client(
     runtime_paths: RuntimePaths,
 ) -> None:
     auth_config = server_config.auth
-    if auth_config is None or _stored_client_config_exists(provider, runtime_paths):
+    if auth_config is None:
         return
     if not auth_config.dynamic_client_registration:
         return
     if metadata.registration_url is None:
         return
 
-    await _validate_discovery_url(metadata.registration_url, runtime_paths)
-    payload = _client_registration_payload(provider, auth_config, runtime_paths)
-    try:
-        async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            response = await client.post(
-                metadata.registration_url,
-                json=payload,
-                headers={"Accept": _JSON_CONTENT_TYPE, "Content-Type": _JSON_CONTENT_TYPE},
-            )
-            response.raise_for_status()
-            registration = response.json()
-    except Exception as exc:
-        msg = "MCP OAuth dynamic client registration failed"
-        raise OAuthProviderError(msg) from exc
-    if not isinstance(registration, dict):
-        msg = "MCP OAuth dynamic client registration response is not a JSON object"
-        raise OAuthProviderError(msg)
-    client_id = registration.get("client_id")
-    if not isinstance(client_id, str) or not client_id.strip():
-        msg = "MCP OAuth dynamic client registration did not return client_id"
-        raise OAuthProviderError(msg)
-    client_secret = registration.get("client_secret")
-    stored_registration = _stored_client_registration(
-        provider,
-        runtime_paths,
-        auth_config=auth_config,
-        client_id=client_id,
-        client_secret=client_secret,
-        registration=registration,
-    )
-    service = provider.client_config_services[0]
-    get_runtime_credentials_manager(runtime_paths).save_credentials(service, stored_registration)
+    lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, asyncio.Lock())
+    async with lock:
+        if _stored_client_config_exists(provider, runtime_paths):
+            return
+        await _validate_discovery_url(metadata.registration_url, runtime_paths)
+        payload = _client_registration_payload(provider, auth_config, runtime_paths)
+        try:
+            async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
+                response = await client.post(
+                    metadata.registration_url,
+                    json=payload,
+                    headers={"Accept": _JSON_CONTENT_TYPE, "Content-Type": _JSON_CONTENT_TYPE},
+                )
+                response.raise_for_status()
+                registration = response.json()
+        except Exception as exc:
+            msg = "MCP OAuth dynamic client registration failed"
+            raise OAuthProviderError(msg) from exc
+        if not isinstance(registration, dict):
+            msg = "MCP OAuth dynamic client registration response is not a JSON object"
+            raise OAuthProviderError(msg)
+        client_id = registration.get("client_id")
+        if not isinstance(client_id, str) or not client_id.strip():
+            msg = "MCP OAuth dynamic client registration did not return client_id"
+            raise OAuthProviderError(msg)
+        client_secret = registration.get("client_secret")
+        stored_registration = _stored_client_registration(
+            provider,
+            runtime_paths,
+            auth_config=auth_config,
+            client_id=client_id,
+            client_secret=client_secret,
+            registration=registration,
+        )
+        service = provider.client_config_services[0]
+        get_runtime_credentials_manager(runtime_paths).save_credentials(service, stored_registration)
 
 
 def _stored_client_registration(
