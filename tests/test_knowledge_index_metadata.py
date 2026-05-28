@@ -72,12 +72,11 @@ def test_strict_index_metadata_parsing_requires_collection_except_complete_file_
     ) == ({"base": "storage", "mode": "files"}, "complete", None, None, None, 0, "source-signature")
 
 
-def test_strict_index_metadata_parsing_accepts_published_file_mode_index_kind() -> None:
-    """Published file-mode metadata stores file mode in the top-level index_kind field."""
+def test_strict_index_metadata_parsing_accepts_complete_file_mode_from_settings() -> None:
+    """Published file-mode metadata stores file mode in indexing settings."""
     payload = {
-        "settings": {"base": "storage"},
+        "settings": {"base": "storage", "mode": "files"},
         "status": "complete",
-        "index_kind": "files",
         "indexed_count": 0,
         "source_signature": "source-signature",
     }
@@ -86,7 +85,7 @@ def test_strict_index_metadata_parsing_accepts_published_file_mode_index_kind() 
         payload,
         allowed_statuses={"indexing", "complete"},
         require_complete_fields_for_all_statuses=True,
-    ) == ({"base": "storage"}, "complete", None, None, None, 0, "source-signature")
+    ) == ({"base": "storage", "mode": "files"}, "complete", None, None, None, 0, "source-signature")
 
 
 def test_write_index_metadata_payload_preserves_field_names_and_omits_none_values(tmp_path: Path) -> None:

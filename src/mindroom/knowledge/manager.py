@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
     from agno.knowledge.reader.base import Reader
 
-    from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.config.knowledge import KnowledgeBaseMode, KnowledgeGitConfig
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -76,6 +76,7 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
 }
+_INDEXING_MODES: set[str] = {"semantic", "files"}
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
     ".markdown",
@@ -140,7 +141,7 @@ class IndexingSettings:
     base_id: str
     storage_root: str
     knowledge_path: str
-    mode: str
+    mode: KnowledgeBaseMode
     embedder_provider: str
     embedder_model: str
     embedder_host: str
@@ -180,11 +181,14 @@ class IndexingSettings:
             "exclude_extensions",
         }:
             return None
+        mode = settings["mode"]
+        if mode not in _INDEXING_MODES:
+            return None
         return cls(
             base_id=settings["base_id"],
             storage_root=settings["storage_root"],
             knowledge_path=settings["knowledge_path"],
-            mode=settings["mode"],
+            mode=cast("KnowledgeBaseMode", mode),
             embedder_provider=settings["embedder_provider"],
             embedder_model=settings["embedder_model"],
             embedder_host=settings["embedder_host"],

@@ -29,6 +29,7 @@ from mindroom.knowledge.registry import (
     published_index_metadata_path,
     resolve_published_index_key,
 )
+from mindroom.knowledge.status import get_knowledge_index_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,6 +107,23 @@ def _write_index_metadata(
         knowledge_registry.mark_published_index_refresh_succeeded(key)
     else:
         knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error=last_error)
+
+
+def _assert_file_mode_metadata_blocks_old_semantic_index(
+    *,
+    file_config: Config,
+    semantic_config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    file_key = resolve_published_index_key("research", config=file_config, runtime_paths=runtime_paths)
+    file_state = load_published_index_state(published_index_metadata_path(file_key))
+    assert file_state is not None
+    assert file_state.settings.mode == "files"
+    assert file_state.collection is None
+
+    semantic_status = get_knowledge_index_status("research", config=semantic_config, runtime_paths=runtime_paths)
+    assert semantic_status.indexed_count == 0
+    assert semantic_status.availability is KnowledgeAvailability.CONFIG_MISMATCH
 
 
 def _init_git_checkout(path: Path, *tracked_paths: str) -> None:
@@ -711,6 +729,38 @@ def test_file_mode_upload_accepts_non_semantic_extension(tmp_path: Path) -> None
     refresh.assert_not_awaited()
 
 
+def test_file_mode_upload_replaces_prior_semantic_metadata(tmp_path: Path) -> None:
+    """Local file-only uploads must not leave old semantic metadata query-compatible."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    semantic_config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, semantic_config)
+    _write_index_metadata(semantic_config, runtime_paths, collection="old_collection", indexed_count=5)
+
+    file_config = _knowledge_config(docs, mode="files")
+    _publish_committed_runtime_config(client.app, file_config)
+    scheduler = _RecordingRefreshScheduler()
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.post(
+            "/api/knowledge/bases/research/upload",
+            files=[("files", ("diagram.png", b"\x89PNG\r\n\x1a\n", "image/png"))],
+        )
+
+    assert response.status_code == 200
+    assert (docs / "diagram.png").read_bytes() == b"\x89PNG\r\n\x1a\n"
+    assert scheduler.scheduled == []
+    refresh.assert_not_awaited()
+    _assert_file_mode_metadata_blocks_old_semantic_index(
+        file_config=file_config,
+        semantic_config=semantic_config,
+        runtime_paths=runtime_paths,
+    )
+
+
 @pytest.mark.parametrize(
     ("base_config", "filename"),
     [
@@ -1293,6 +1343,36 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
         ("research", config),
     ]
     refresh.assert_not_awaited()
+
+
+def test_file_mode_delete_replaces_prior_semantic_metadata(tmp_path: Path) -> None:
+    """Local file-only deletes must not leave old semantic metadata query-compatible."""
+    client = _test_client(tmp_path)
+    runtime_paths = main._app_context(client.app).runtime_paths
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("hello", encoding="utf-8")
+    semantic_config = _knowledge_config(docs)
+    _publish_committed_runtime_config(client.app, semantic_config)
+    _write_index_metadata(semantic_config, runtime_paths, collection="old_collection", indexed_count=5)
+
+    file_config = _knowledge_config(docs, mode="files")
+    _publish_committed_runtime_config(client.app, file_config)
+    scheduler = _RecordingRefreshScheduler()
+    config_lifecycle.app_state(client.app).knowledge_refresh_scheduler = scheduler
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding", new=AsyncMock()) as refresh:
+        response = client.delete("/api/knowledge/bases/research/files/guide.md")
+
+    assert response.status_code == 200
+    assert not (docs / "guide.md").exists()
+    assert scheduler.scheduled == []
+    refresh.assert_not_awaited()
+    _assert_file_mode_metadata_blocks_old_semantic_index(
+        file_config=file_config,
+        semantic_config=semantic_config,
+        runtime_paths=runtime_paths,
+    )
 
 
 @pytest.mark.parametrize(

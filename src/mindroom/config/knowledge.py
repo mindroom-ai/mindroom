@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-_KnowledgeBaseMode = Literal["semantic", "files"]
+KnowledgeBaseMode = Literal["semantic", "files"]
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -51,7 +51,7 @@ class KnowledgeGitConfig(BaseModel):
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
-    mode: _KnowledgeBaseMode = Field(
+    mode: KnowledgeBaseMode = Field(
         default="semantic",
         description=(
             "Knowledge access mode. 'semantic' builds an embedding-backed search index; "

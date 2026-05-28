@@ -75,7 +75,6 @@ class PublishedIndexState:
 
     settings: manager_module.IndexingSettings
     status: Literal["resetting", "indexing", "complete", "failed"]
-    index_kind: Literal["semantic", "files"] = "semantic"
     collection: str | None = None
     last_published_at: str | None = None
     published_revision: str | None = None
@@ -280,13 +279,10 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
     indexing_settings = manager_module.IndexingSettings.from_metadata(settings)
     if indexing_settings is None:
         return None
-    raw_index_kind = optional_metadata_str(payload.get("index_kind")) or optional_metadata_str(settings.get("mode"))
-    index_kind: Literal["semantic", "files"] = "files" if raw_index_kind == "files" else "semantic"
 
     return PublishedIndexState(
         settings=indexing_settings,
         status=cast('Literal["resetting", "indexing", "complete", "failed"]', status),
-        index_kind=index_kind,
         collection=collection,
         last_published_at=last_published_at,
         published_revision=published_revision,
@@ -306,7 +302,6 @@ def save_published_index_state(metadata_path: Path, state: PublishedIndexState) 
         metadata_path,
         settings=state.settings.to_metadata(),
         status=state.status,
-        index_kind=state.index_kind,
         collection=state.collection,
         last_published_at=state.last_published_at,
         published_revision=state.published_revision,
@@ -588,7 +583,6 @@ def _cached_index_matches_persisted_state(
     return (
         index.state.settings == state.settings
         and index.state.status == state.status
-        and index.state.index_kind == state.index_kind
         and index.state.collection == state.collection
         and index.state.last_published_at == state.last_published_at
         and index.state.published_revision == state.published_revision

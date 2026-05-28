@@ -21,6 +21,7 @@ from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
+    publish_file_mode_source_metadata_for_base,
     refresh_knowledge_binding,
 )
 from mindroom.knowledge.status import (
@@ -208,6 +209,28 @@ async def _mark_source_changed_after_committed_mutation(
         return await asyncio.shield(source_changed_task), False
     except asyncio.CancelledError:
         return await source_changed_task, True
+
+
+async def _publish_file_mode_metadata_after_committed_mutation(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> bool:
+    base_config = config.get_knowledge_base_config(base_id)
+    if base_config.mode != "files" or base_config.git is not None:
+        return False
+
+    publish_task = asyncio.create_task(
+        publish_file_mode_source_metadata_for_base(base_id, config=config, runtime_paths=runtime_paths),
+    )
+    try:
+        await asyncio.shield(publish_task)
+    except asyncio.CancelledError:
+        await publish_task
+        return True
+    else:
+        return False
 
 
 async def _mark_committed_mutation_and_schedule_refresh(
@@ -626,7 +649,12 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
-        if cancelled_after_source_changed:
+        cancelled_after_file_mode_publish = await _publish_file_mode_metadata_after_committed_mutation(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if cancelled_after_source_changed or cancelled_after_file_mode_publish:
             raise asyncio.CancelledError
 
     return {
@@ -659,7 +687,12 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
             request=request,
             reason="dashboard_delete",
         )
-        if cancelled_after_source_changed:
+        cancelled_after_file_mode_publish = await _publish_file_mode_metadata_after_committed_mutation(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if cancelled_after_source_changed or cancelled_after_file_mode_publish:
             raise asyncio.CancelledError
 
     return {

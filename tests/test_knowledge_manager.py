@@ -285,7 +285,7 @@ def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
 
 
 def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: Path) -> None:
-    """Manager-authored file-mode metadata may omit the top-level index_kind field."""
+    """Published file-mode metadata derives mode from indexing settings."""
     metadata_path = tmp_path / "indexing_settings.json"
     settings = replace(_test_indexing_settings(), mode="files")
     write_index_metadata_payload(
@@ -299,7 +299,7 @@ def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: 
     state = load_published_index_state(metadata_path)
 
     assert state is not None
-    assert state.index_kind == "files"
+    assert state.settings.mode == "files"
     assert state.collection is None
 
 
@@ -576,7 +576,7 @@ async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
     assert knowledge_registry.published_index_refresh_state(semantic_state) == "stale"
     assert file_state is not None
     assert file_state.status == "complete"
-    assert file_state.index_kind == "files"
+    assert file_state.settings.mode == "files"
     assert knowledge_registry.published_index_refresh_state(file_state) == "none"
 
 
@@ -606,7 +606,7 @@ async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete
 
     assert state is not None
     assert state.status == "complete"
-    assert state.index_kind == "files"
+    assert state.settings.mode == "files"
     assert state.collection is None
     assert published_index_refresh_state(state) == "none"
     assert state.reason is None
