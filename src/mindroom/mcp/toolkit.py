@@ -97,19 +97,22 @@ class MindRoomMCPToolkit(Toolkit):
     def _is_oauth_backed(self) -> bool:
         return self.server_config is not None and self.server_config.auth is not None
 
-    def _filtered_tools(self) -> list[MCPDiscoveredTool]:
-        if self.catalog is None:
-            return []
+    def _filtered_catalog_tools(self, catalog: MCPServerCatalog) -> list[MCPDiscoveredTool]:
         filtered: list[MCPDiscoveredTool] = []
         include_tools = set(self.include_tools or [])
         exclude_tools = set(self.exclude_tools or [])
-        for tool in self.catalog.tools:
+        for tool in catalog.tools:
             if exclude_tools and tool.remote_name in exclude_tools:
                 continue
             if include_tools and tool.remote_name not in include_tools:
                 continue
             filtered.append(tool)
         return filtered
+
+    def _filtered_tools(self) -> list[MCPDiscoveredTool]:
+        if self.catalog is None:
+            return []
+        return self._filtered_catalog_tools(self.catalog)
 
     def _register_catalog_tools(self, tools: list[MCPDiscoveredTool]) -> None:
         seen: set[str] = set(self.async_functions)
@@ -181,12 +184,11 @@ class MindRoomMCPToolkit(Toolkit):
             {
                 "connected": True,
                 "server_id": self.server_id,
-                "tool_count": len(catalog.tools),
+                "tool_count": len(self._filtered_catalog_tools(catalog)),
             },
         )
 
-    @staticmethod
-    def _catalog_payload(catalog: MCPServerCatalog) -> dict[str, object]:
+    def _catalog_payload(self, catalog: MCPServerCatalog) -> dict[str, object]:
         return {
             "server_id": catalog.server_id,
             "instructions": catalog.instructions,
@@ -198,7 +200,7 @@ class MindRoomMCPToolkit(Toolkit):
                     "output_schema": tool.output_schema,
                     "title": tool.title,
                 }
-                for tool in catalog.tools
+                for tool in self._filtered_catalog_tools(catalog)
             ],
         }
 
@@ -215,7 +217,7 @@ class MindRoomMCPToolkit(Toolkit):
         except OAuthConnectionRequired as exc:
             return self._oauth_payload(exc)
 
-        tools_by_name = {tool.remote_name: tool for tool in catalog.tools}
+        tools_by_name = {tool.remote_name: tool for tool in self._filtered_catalog_tools(catalog)}
         if tool_name not in tools_by_name:
             return json.dumps(
                 {

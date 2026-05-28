@@ -289,6 +289,60 @@ async def test_oauth_mcp_toolkit_registers_typed_tools_from_cached_requester_cat
     assert manager.calls == [("demo", "echo", {"text": "hello"}, credentials_manager, worker_target, 30.0)]
 
 
+@pytest.mark.asyncio
+async def test_oauth_mcp_toolkit_bridge_respects_tool_filters(tmp_path: Path) -> None:
+    """Bridge list and call operations must enforce the MCP tool allowlist."""
+    catalog = _catalog(
+        MCPDiscoveredTool(
+            remote_name="echo",
+            function_name="demo_echo",
+            description="Echo",
+            input_schema={"type": "object", "properties": {}},
+            output_schema=None,
+        ),
+        MCPDiscoveredTool(
+            remote_name="ping",
+            function_name="demo_ping",
+            description="Ping",
+            input_schema={"type": "object", "properties": {}},
+            output_schema=None,
+        ),
+    )
+    manager = _RequesterAwareManager(catalog)
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    worker_target = _worker_target()
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=_oauth_server_config(),
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+        include_tools=["ping"],
+    )
+
+    tools_payload = json.loads(await toolkit.async_functions["demo_list_tools"].entrypoint())
+    rejected_payload = json.loads(
+        await toolkit.async_functions["demo_call_tool"].entrypoint(
+            tool_name="echo",
+            arguments={},
+        ),
+    )
+    result = await toolkit.async_functions["demo_call_tool"].entrypoint(
+        tool_name="ping",
+        arguments={},
+    )
+
+    assert [tool["name"] for tool in tools_payload["tools"]] == ["ping"]
+    assert rejected_payload == {
+        "error": "MCP tool 'echo' is not available for server 'demo'",
+        "available_tools": ["ping"],
+    }
+    assert result.content == "ok"
+    assert manager.calls == [("demo", "ping", {}, credentials_manager, worker_target, None)]
+
+
 def test_mcp_toolkit_filters_remote_tools() -> None:
     """Apply include filters to the cached remote catalog."""
     manager = _DummyManager()
