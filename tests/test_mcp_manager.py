@@ -314,6 +314,56 @@ async def test_mcp_manager_separates_oauth_sessions_by_requester(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_allows_same_oauth_typed_tools_for_multiple_requesters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Equivalent requester-scoped catalogs should not collide within one OAuth server."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_target = _worker_target("@alice:example.test")
+    bob_target = _worker_target("@bob:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, alice_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    await manager.sync_servers(config)
+
+    alice_catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=alice_target,
+    )
+    bob_catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=bob_target,
+    )
+
+    assert [tool.function_name for tool in alice_catalog.tools] == ["demo_echo"]
+    assert [tool.function_name for tool in bob_catalog.tools] == ["demo_echo"]
+    assert manager.failed_server_ids() == set()
+    assert len(manager._scoped_states) == 2
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_disconnects_requester_oauth_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -728,21 +728,27 @@ class MCPServerManager:
                 server_ids.add(key.server_id)
         return server_ids
 
-    def _server_visible_function_names(self, server_id: str) -> list[str]:
-        """Return bridge and catalog function names currently visible for one MCP server."""
+    def _server_visible_function_surface(self, server_id: str) -> tuple[set[str], set[str]]:
+        """Return visible function names and real same-server collisions for one MCP server."""
         state = self._states.get(server_id)
         if state is None or state.last_error is not None:
-            return []
-        function_names: list[str] = []
+            return set(), set()
+        base_function_names: set[str] = set()
+        duplicate_function_names: set[str] = set()
         if state.config.auth is not None:
-            function_names.extend(mcp_oauth_bridge_function_names(server_id, state.config))
+            base_function_names.update(mcp_oauth_bridge_function_names(server_id, state.config))
         if state.catalog is not None:
-            function_names.extend(tool.function_name for tool in state.catalog.tools)
+            catalog_function_names = {tool.function_name for tool in state.catalog.tools}
+            duplicate_function_names.update(base_function_names & catalog_function_names)
+            base_function_names.update(catalog_function_names)
+        scoped_function_names: set[str] = set()
         for key, scoped_state in self._scoped_states.items():
             if key.server_id != server_id or scoped_state.catalog is None or scoped_state.last_error is not None:
                 continue
-            function_names.extend(tool.function_name for tool in scoped_state.catalog.tools)
-        return function_names
+            catalog_function_names = {tool.function_name for tool in scoped_state.catalog.tools}
+            duplicate_function_names.update(base_function_names & catalog_function_names)
+            scoped_function_names.update(catalog_function_names)
+        return base_function_names | scoped_function_names, duplicate_function_names
 
     def _agent_collision_messages(
         self,
@@ -758,13 +764,8 @@ class MCPServerManager:
         server_ids_by_function_name: dict[str, set[str]] = {}
         errors_by_server: dict[str, list[str]] = {}
         for server_id in visible_server_ids:
-            seen_function_names: set[str] = set()
-            duplicate_function_names: set[str] = set()
-            for function_name in sorted(self._server_visible_function_names(server_id)):
-                if function_name in seen_function_names:
-                    duplicate_function_names.add(function_name)
-                    continue
-                seen_function_names.add(function_name)
+            visible_function_names, duplicate_function_names = self._server_visible_function_surface(server_id)
+            for function_name in sorted(visible_function_names):
                 server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
             for function_name in duplicate_function_names:
                 errors_by_server.setdefault(server_id, []).append(
