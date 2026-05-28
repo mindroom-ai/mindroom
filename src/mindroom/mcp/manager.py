@@ -15,7 +15,12 @@ from mcp import ClientSession
 
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
-from mindroom.mcp.config import MCPServerConfig, resolved_mcp_tool_prefix, validate_mcp_function_name
+from mindroom.mcp.config import (
+    MCPServerConfig,
+    mcp_oauth_bridge_function_names,
+    resolved_mcp_tool_prefix,
+    validate_mcp_function_name,
+)
 from mindroom.mcp.errors import MCPConnectionError, MCPError, MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
@@ -76,8 +81,7 @@ class MCPServerManager:
         return {
             server_id
             for server_id, state in self._states.items()
-            if state.config.auth is None
-            if state.catalog is None or state.last_error is not None
+            if state.last_error is not None or (state.config.auth is None and state.catalog is None)
         }
 
     def get_catalog(self, server_id: str) -> MCPServerCatalog:
@@ -327,6 +331,8 @@ class MCPServerManager:
         if base_state.config.auth is None:
             msg = f"MCP server '{server_id}' is not OAuth-backed"
             raise MCPConnectionError(server_id, msg)
+        if base_state.last_error is not None:
+            raise base_state.last_error
         access_token = await self._oauth_access_token(
             base_state,
             credentials_manager=credentials_manager,
@@ -709,36 +715,69 @@ class MCPServerManager:
                 errors_by_server.setdefault(server_id, []).append(message)
         return errors_by_server
 
-    def _connected_catalog_server_ids(self) -> set[str]:
-        """Return MCP servers that currently expose a usable catalog."""
-        return {
-            state.server_id for state in self._states.values() if state.catalog is not None and state.last_error is None
-        }
+    def _visible_function_server_ids(self) -> set[str]:
+        """Return MCP servers that currently expose provider-visible function names."""
+        server_ids: set[str] = set()
+        for state in self._states.values():
+            if state.last_error is not None:
+                continue
+            if state.config.auth is not None or state.catalog is not None:
+                server_ids.add(state.server_id)
+        for key, state in self._scoped_states.items():
+            if state.catalog is not None and state.last_error is None:
+                server_ids.add(key.server_id)
+        return server_ids
+
+    def _server_visible_function_names(self, server_id: str) -> list[str]:
+        """Return bridge and catalog function names currently visible for one MCP server."""
+        state = self._states.get(server_id)
+        if state is None or state.last_error is not None:
+            return []
+        function_names: list[str] = []
+        if state.config.auth is not None:
+            function_names.extend(mcp_oauth_bridge_function_names(server_id, state.config))
+        if state.catalog is not None:
+            function_names.extend(tool.function_name for tool in state.catalog.tools)
+        for key, scoped_state in self._scoped_states.items():
+            if key.server_id != server_id or scoped_state.catalog is None or scoped_state.last_error is not None:
+                continue
+            function_names.extend(tool.function_name for tool in scoped_state.catalog.tools)
+        return function_names
 
     def _agent_collision_messages(
         self,
         agent_name: str,
-        connected_server_ids: set[str],
+        visible_function_server_ids: set[str],
     ) -> dict[str, list[str]]:
         """Return one agent's MCP function-name collisions against its visible surface."""
         configured_local_function_names, configured_mcp_server_ids = self._configured_function_surface(agent_name)
-        visible_server_ids = configured_mcp_server_ids & connected_server_ids
+        visible_server_ids = configured_mcp_server_ids & visible_function_server_ids
         if not visible_server_ids:
             return {}
 
         server_ids_by_function_name: dict[str, set[str]] = {}
+        errors_by_server: dict[str, list[str]] = {}
         for server_id in visible_server_ids:
-            state = self._states.get(server_id)
-            if state is None or state.catalog is None or state.last_error is not None:
-                continue
-            for tool in state.catalog.tools:
-                server_ids_by_function_name.setdefault(tool.function_name, set()).add(state.server_id)
+            seen_function_names: set[str] = set()
+            duplicate_function_names: set[str] = set()
+            for function_name in sorted(self._server_visible_function_names(server_id)):
+                if function_name in seen_function_names:
+                    duplicate_function_names.add(function_name)
+                    continue
+                seen_function_names.add(function_name)
+                server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
+            for function_name in duplicate_function_names:
+                errors_by_server.setdefault(server_id, []).append(
+                    f"MCP function name '{function_name}' collides within server '{server_id}'",
+                )
         if not server_ids_by_function_name:
-            return {}
-        return self._function_name_collision_messages(
+            return errors_by_server
+        for server_id, messages in self._function_name_collision_messages(
             server_ids_by_function_name,
             configured_local_function_names,
-        )
+        ).items():
+            errors_by_server.setdefault(server_id, []).extend(messages)
+        return errors_by_server
 
     async def _apply_function_name_collision_errors(self, errors_by_server: dict[str, set[str]]) -> None:
         """Disconnect and mark servers that failed provider-visible name validation."""
@@ -747,19 +786,34 @@ class MCPServerManager:
             error_message = "\n".join(sorted(messages))
             async with state.lock:
                 await self._disconnect_state_when_idle(state)
+                await self._mark_scoped_states_failed(server_id, error_message)
+                state.catalog = None
+                state.last_error = MCPProtocolError(server_id, error_message)
+                state.stale = False
+
+    async def _mark_scoped_states_failed(self, server_id: str, error_message: str) -> None:
+        """Disconnect requester-scoped states after server-level function-name validation fails."""
+        for key, state in list(self._scoped_states.items()):
+            if key.server_id != server_id:
+                continue
+            async with state.lock:
+                await self._disconnect_state_when_idle(state)
                 state.catalog = None
                 state.last_error = MCPProtocolError(server_id, error_message)
                 state.stale = False
 
     async def _validate_global_function_names(self) -> set[str]:
         async with self._catalog_validation_lock:
-            connected_server_ids = self._connected_catalog_server_ids()
-            if not connected_server_ids:
+            visible_function_server_ids = self._visible_function_server_ids()
+            if not visible_function_server_ids:
                 return set()
 
             errors_by_server: dict[str, set[str]] = {}
             for agent_name in sorted(self._config.agents) if self._config is not None else ():
-                for server_id, messages in self._agent_collision_messages(agent_name, connected_server_ids).items():
+                for server_id, messages in self._agent_collision_messages(
+                    agent_name,
+                    visible_function_server_ids,
+                ).items():
                     errors_by_server.setdefault(server_id, set()).update(messages)
             if not errors_by_server:
                 return set()

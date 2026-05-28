@@ -714,6 +714,87 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_marks_oauth_bridge_function_name_collisions_as_failed(
+    tmp_path: Path,
+) -> None:
+    """OAuth bridge functions should collide like discovered MCP catalog functions."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    oauth_server = _oauth_mcp_config().model_copy(update={"tool_prefix": "shared"})
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": oauth_server.model_dump(exclude_none=True),
+                "other": oauth_server.model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo", "mcp_other"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == set()
+    assert manager.failed_server_ids() == {"demo", "other"}
+    demo_error = manager._states["demo"].last_error
+    other_error = manager._states["other"].last_error
+    assert isinstance(demo_error, MCPProtocolError)
+    assert isinstance(other_error, MCPProtocolError)
+    assert "shared_list_tools" in str(demo_error)
+    assert "demo, other" in str(demo_error)
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth bridge functions should not collide with local tool functions on the same agent."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+
+    class _FakeToolkit:
+        def __init__(self) -> None:
+            self.functions = {"demo_list_tools": object()}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == set()
+    assert manager.failed_server_ids() == {"demo"}
+    error = manager._states["demo"].last_error
+    assert isinstance(error, MCPProtocolError)
+    assert "demo_list_tools" in str(error)
+    assert "existing MindRoom tool function" in str(error)
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_rejects_overlong_function_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -769,6 +850,100 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
     assert isinstance(error, MCPProtocolError)
     assert "run_shell_command" in str(error)
     assert "existing MindRoom tool function" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Requester-scoped OAuth catalogs should also participate in function-name validation."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+
+    class _FakeToolkit:
+        def __init__(self) -> None:
+            self.functions = {"demo_echo": object()}
+            self.async_functions = {}
+            self.tools = ()
+
+    monkeypatch.setattr("mindroom.mcp.manager.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["shell", "mcp_demo"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    await manager.sync_servers(config)
+
+    with pytest.raises(MCPProtocolError, match="demo_echo"):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert manager.failed_server_ids() == {"demo"}
+    assert manager._states["demo"].last_error is not None
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_marks_oauth_typed_bridge_function_name_collisions_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Requester-scoped typed tools should not overwrite OAuth bridge functions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("list_tools")]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": _oauth_mcp_config().model_dump(exclude_none=True),
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Use MCP",
+                    "tools": ["mcp_demo"],
+                    "worker_scope": "user",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    await manager.sync_servers(config)
+
+    with pytest.raises(MCPProtocolError, match="demo_list_tools"):
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+
+    assert manager.failed_server_ids() == {"demo"}
+    error = manager._states["demo"].last_error
+    assert isinstance(error, MCPProtocolError)
+    assert "collides within server 'demo'" in str(error)
 
 
 @pytest.mark.asyncio

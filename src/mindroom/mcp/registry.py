@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from mindroom.mcp.config import resolved_mcp_tool_prefix, validate_mcp_tool_filter_overlap
+from mindroom.mcp.config import mcp_oauth_bridge_function_names, validate_mcp_tool_filter_overlap
 from mindroom.mcp.errors import MCPError
 from mindroom.mcp.oauth import mcp_oauth_provider_id
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
@@ -136,13 +136,8 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
     auth_provider = None
     function_names: tuple[str, ...]
     if is_oauth:
-        tool_prefix = resolved_mcp_tool_prefix(server_id, server_config)
         auth_provider = mcp_oauth_provider_id(server_id, server_config.auth)
-        function_names = (
-            f"{tool_prefix}_connection_status",
-            f"{tool_prefix}_list_tools",
-            f"{tool_prefix}_call_tool",
-        )
+        function_names = mcp_oauth_bridge_function_names(server_id, server_config)
     else:
         function_names = tuple(tool.function_name for tool in catalog.tools) if catalog is not None else ()
     return ToolMetadata(

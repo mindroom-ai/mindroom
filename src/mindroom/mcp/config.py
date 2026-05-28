@@ -204,3 +204,14 @@ def resolved_mcp_tool_prefix(server_id: str, server_config: MCPServerConfig) -> 
     """Return the effective tool prefix for one server."""
     prefix = server_config.tool_prefix if server_config.tool_prefix is not None else normalize_mcp_server_id(server_id)
     return _validate_mcp_identifier(prefix, subject="MCP tool_prefix")
+
+
+def mcp_oauth_bridge_function_names(server_id: str, server_config: MCPServerConfig) -> tuple[str, str, str]:
+    """Return provider-visible bridge function names for one OAuth-backed MCP server."""
+    tool_prefix = resolved_mcp_tool_prefix(server_id, server_config)
+    subject = f"MCP OAuth bridge function name for server '{server_id}'"
+    return (
+        validate_mcp_function_name(f"{tool_prefix}_connection_status", subject=subject),
+        validate_mcp_function_name(f"{tool_prefix}_list_tools", subject=subject),
+        validate_mcp_function_name(f"{tool_prefix}_call_tool", subject=subject),
+    )
