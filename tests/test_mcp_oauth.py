@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
@@ -26,6 +28,20 @@ if TYPE_CHECKING:
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+
+
+def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
+    """Importing the MCP registry first should not trigger OAuth registry cycles."""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from mindroom.mcp.registry import resolved_mcp_tool_state; print(resolved_mcp_tool_state is not None)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _oauth_mcp_server_config() -> MCPServerConfig:

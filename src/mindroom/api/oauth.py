@@ -27,8 +27,8 @@ from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthProvider,
     OAuthProviderError,
-    load_oauth_providers_for_snapshot,
 )
+from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
