@@ -371,18 +371,31 @@ def _requires_shared_only_integration_scope(
     name: str,
     *,
     configured_mcp_server_ids: Collection[str] | None = None,
+    oauth_mcp_server_ids: Collection[str] | None = None,
 ) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope."""
     if name in _SHARED_ONLY_INTEGRATION_NAMES:
         return True
 
-    from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name  # noqa: PLC0415
+    from mindroom.mcp.registry import (  # noqa: PLC0415
+        mcp_server_id_from_tool_name,
+        mcp_tool_name,
+        mcp_tool_name_is_oauth_backed,
+    )
 
-    if mcp_server_id_from_tool_name(name) is not None:
-        return True
+    server_id = mcp_server_id_from_tool_name(name)
+    if server_id is not None:
+        return not (
+            mcp_tool_name_is_oauth_backed(name)
+            or (oauth_mcp_server_ids is not None and server_id in oauth_mcp_server_ids)
+        )
     if configured_mcp_server_ids is None:
         return False
-    return any(name == mcp_tool_name(server_id) for server_id in configured_mcp_server_ids)
+    for server_id in configured_mcp_server_ids:
+        if name != mcp_tool_name(server_id):
+            continue
+        return oauth_mcp_server_ids is None or server_id not in oauth_mcp_server_ids
+    return False
 
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
@@ -397,6 +410,7 @@ def unsupported_shared_only_integration_names(
     worker_scope: WorkerScope | None,
     *,
     configured_mcp_server_ids: Collection[str] | None = None,
+    oauth_mcp_server_ids: Collection[str] | None = None,
 ) -> list[str]:
     """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
@@ -407,6 +421,7 @@ def unsupported_shared_only_integration_names(
         if _requires_shared_only_integration_scope(
             name,
             configured_mcp_server_ids=configured_mcp_server_ids,
+            oauth_mcp_server_ids=oauth_mcp_server_ids,
         )
     ]
 

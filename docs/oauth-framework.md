@@ -46,7 +46,8 @@ Client config services are local-only deployment configuration and cannot be mir
 Generic credential responses redact `client_secret` for client config services.
 Generic credential saves preserve the existing `client_secret` only when the saved `client_id` is unchanged.
 Changing `client_id` requires submitting the matching new `client_secret`.
-First-time client config saves require both fields to be non-empty.
+First-time confidential client config saves require both fields to be non-empty.
+Public OAuth clients that use `token_endpoint_auth_method: none` require `client_id` and may omit `client_secret`.
 Client config services cannot be copied through the generic copy route.
 Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
 
@@ -62,3 +63,13 @@ Built-in Google providers use the generic framework for Drive, Calendar, Sheets,
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
 The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.
+
+OAuth-backed remote MCP servers also use the generic framework.
+MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth` config entry and exposes it through the same `/api/oauth/{provider}/*` routes.
+Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
+Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
+These token services stay in the primary runtime credential store.
+The matching MCP toolkit loads the token for the current requester before opening the remote MCP transport, so the transport sends a requester-scoped bearer token instead of a process-global static header.
+Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
+Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
+If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.

@@ -615,6 +615,7 @@ class Config(BaseModel):
     def validate_shared_only_integration_assignments(self) -> Config:
         """Reject shared-only integrations on isolating scopes for static and dynamic tool assignments."""
         invalid_assignments: list[str] = []
+        oauth_mcp_server_ids = self.oauth_mcp_server_ids()
         for agent_name in sorted(self.agents):
             scope_label = self.get_agent_scope_label(agent_name)
             execution_scope = self.get_agent_execution_scope(agent_name)
@@ -622,6 +623,7 @@ class Config(BaseModel):
                 self.get_agent_tools(agent_name),
                 execution_scope,
                 configured_mcp_server_ids=self.mcp_servers,
+                oauth_mcp_server_ids=oauth_mcp_server_ids,
             )
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
@@ -1103,6 +1105,13 @@ class Config(BaseModel):
             [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
             execution_scope,
             configured_mcp_server_ids=self.mcp_servers,
+            oauth_mcp_server_ids=self.oauth_mcp_server_ids(),
+        )
+
+    def oauth_mcp_server_ids(self) -> frozenset[str]:
+        """Return configured MCP server ids backed by requester-scoped OAuth."""
+        return frozenset(
+            server_id for server_id, server_config in self.mcp_servers.items() if server_config.auth is not None
         )
 
     def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:

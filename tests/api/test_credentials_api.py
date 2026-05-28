@@ -14,6 +14,8 @@ from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.mcp.config import MCPServerConfig
+from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
@@ -655,6 +657,44 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "client_secret is required" in response.json()["detail"]
         assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_public_mcp_oauth_client_config_save_allows_missing_first_time_secret(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Generated public MCP OAuth client config should allow client_id-only saves."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        provider = mcp_oauth_provider(
+            "demo",
+            MCPServerConfig(
+                transport="streamable-http",
+                url="https://mcp.example.test/mcp",
+                auth={
+                    "type": "oauth",
+                    "discovery": "manual",
+                    "authorization_url": "https://auth.example.test/authorize",
+                    "token_url": "https://auth.example.test/token",
+                },
+            ),
+        )
+
+        with patch.object(credentials_api, "load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+            response = client.post(
+                "/api/credentials/mcp_demo_oauth_client",
+                json={
+                    "credentials": {
+                        "client_id": "stored-client-id",
+                        "client_secret": "",
+                    },
+                },
+            )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("mcp_demo_oauth_client") == {
+            "client_id": "stored-client-id",
+            "_source": "ui",
+        }
 
     def test_oauth_client_config_save_rejects_missing_first_time_client_id(
         self,

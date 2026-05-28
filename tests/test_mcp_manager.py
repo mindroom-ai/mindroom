@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, ClassVar, Self
 
@@ -13,10 +13,12 @@ from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, Too
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.transports import _MCPTransportHandle
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -24,6 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.types import MCPServerState
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 _MessageHandler = Callable[[object], Awaitable[None]]
@@ -57,6 +60,7 @@ class _FakeClientSession:
     call_tool_invocation_count: ClassVar[int] = 0
     call_started_event: ClassVar[asyncio.Event | None] = None
     call_continue_event: ClassVar[asyncio.Event | None] = None
+    transport_extra_headers: ClassVar[list[dict[str, str]]] = []
 
     def __init__(
         self,
@@ -146,6 +150,7 @@ def _reset_fake_session_state() -> None:
     _FakeClientSession.call_tool_invocation_count = 0
     _FakeClientSession.call_started_event = None
     _FakeClientSession.call_continue_event = None
+    _FakeClientSession.transport_extra_headers = []
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -166,7 +171,10 @@ def _patch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
         _server_id: str,
         server_config: MCPServerConfig,
         _runtime_paths: RuntimePaths,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> _MCPTransportHandle:
+        _FakeClientSession.transport_extra_headers.append(dict(extra_headers or {}))
         return _MCPTransportHandle(
             transport=server_config.transport,
             opener=lambda: _fake_transport(),
@@ -176,6 +184,51 @@ def _patch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "mindroom.mcp.manager.build_transport_handle",
         _build_fake_handle,
+    )
+
+
+def _oauth_mcp_config() -> MCPServerConfig:
+    return MCPServerConfig(
+        transport="streamable-http",
+        url="https://mcp.example.test/mcp",
+        auth={
+            "type": "oauth",
+            "discovery": "manual",
+            "authorization_url": "https://auth.example.test/authorize",
+            "token_url": "https://auth.example.test/token",
+        },
+    )
+
+
+def _worker_target(requester_id: str) -> ResolvedWorkerTarget:
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=requester_id,
+        room_id="!room:example.test",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=None,
+        tenant_id="tenant",
+        account_id=None,
+    )
+    return resolve_worker_target("user", "code", identity)
+
+
+def _save_mcp_oauth_credentials(runtime_paths: RuntimePaths, worker_target: ResolvedWorkerTarget, token: str) -> None:
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
+    save_scoped_credentials(
+        "mcp_demo_oauth",
+        {
+            "token": token,
+            "client_id": "public-client",
+            "scopes": [],
+            "_source": "oauth",
+            "_oauth_provider": "mcp_demo",
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
     )
 
 
@@ -193,6 +246,99 @@ async def test_mcp_manager_syncs_catalog_and_calls_tool(monkeypatch: pytest.Monk
     assert changed == {"demo"}
     result = await manager.call_tool("demo", "echo", {"value": "ping"})
     assert result.content == "pong"
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_uses_requester_oauth_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth-backed MCP sessions send the current requester's bearer token."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    config = _ConfigStub({"demo": _oauth_mcp_config()})
+
+    changed = await manager.sync_servers(config)
+    catalog = await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    result = await manager.call_tool(
+        "demo",
+        "echo",
+        {"value": "ping"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+
+    assert changed == set()
+    assert [tool.remote_name for tool in catalog.tools] == ["echo"]
+    assert result.content == "pong"
+    assert _FakeClientSession.transport_extra_headers == [{"Authorization": "Bearer alice-token"}]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_separates_oauth_sessions_by_requester(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two requesters should get separate OAuth MCP sessions and bearer tokens."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_target = _worker_target("@alice:example.test")
+    bob_target = _worker_target("@bob:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, alice_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+
+    await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=alice_target)
+    await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=bob_target)
+
+    assert _FakeClientSession.transport_extra_headers == [
+        {"Authorization": "Bearer alice-token"},
+        {"Authorization": "Bearer bob-token"},
+    ]
+    assert len(manager._scoped_states) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_disconnects_requester_oauth_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Disconnect should close only the current requester's OAuth-backed MCP session."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    runtime_paths = _runtime_paths(tmp_path)
+    alice_target = _worker_target("@alice:example.test")
+    bob_target = _worker_target("@bob:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, alice_target, "alice-token")
+    _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=alice_target)
+    await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=bob_target)
+    alice_session = _FakeClientSession.sessions[0]
+    bob_session = _FakeClientSession.sessions[1]
+
+    await manager.disconnect_request_session("demo", worker_target=alice_target)
+
+    assert alice_session.closed is True
+    assert bob_session.closed is False
+    assert len(manager._scoped_states) == 1
 
 
 @pytest.mark.asyncio

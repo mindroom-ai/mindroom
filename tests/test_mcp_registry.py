@@ -19,7 +19,7 @@ from mindroom.mcp.registry import (
     validate_mcp_agent_overrides,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, SetupType, ToolStatus, get_tool_by_name
 from mindroom.tool_system.worker_routing import supports_tool_name_for_worker_scope
 
 if TYPE_CHECKING:
@@ -72,6 +72,34 @@ def _config(tmp_path: Path) -> Config:
                 "code": {
                     "display_name": "Code",
                     "role": "Write code",
+                    "tools": ["mcp_demo"],
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+
+
+def _oauth_config(tmp_path: Path) -> Config:
+    return Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "streamable-http",
+                    "url": "https://mcp.example.test/mcp",
+                    "auth": {
+                        "type": "oauth",
+                        "discovery": "manual",
+                        "authorization_url": "https://auth.example.test/authorize",
+                        "token_url": "https://auth.example.test/token",
+                    },
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "worker_scope": "user",
                     "tools": ["mcp_demo"],
                 },
             },
@@ -138,6 +166,21 @@ def test_sync_mcp_tool_registry_removes_deleted_servers(tmp_path: Path) -> None:
     )
     assert "mcp_demo" not in TOOL_METADATA
     assert "mcp_demo" not in TOOL_REGISTRY
+
+
+def test_sync_mcp_tool_registry_marks_oauth_mcp_tools(tmp_path: Path) -> None:
+    """Expose OAuth-backed MCP servers as OAuth-configured bridge tools."""
+    sync_mcp_tool_registry(_oauth_config(tmp_path))
+
+    metadata = TOOL_METADATA["mcp_demo"]
+    assert metadata.setup_type is SetupType.OAUTH
+    assert metadata.status is ToolStatus.REQUIRES_CONFIG
+    assert metadata.auth_provider == "mcp_demo"
+    assert metadata.function_names == (
+        "demo_connection_status",
+        "demo_list_tools",
+        "demo_call_tool",
+    )
 
 
 def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path) -> None:
@@ -301,6 +344,14 @@ def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:
 
     assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
     assert supports_tool_name_for_worker_scope("mcp_demo", "user") is False
+
+
+def test_oauth_mcp_tool_names_are_supported_on_isolating_scope(tmp_path: Path) -> None:
+    """OAuth-backed MCP registry tools can use requester-scoped credentials."""
+    sync_mcp_tool_registry(_oauth_config(tmp_path))
+
+    assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
+    assert supports_tool_name_for_worker_scope("mcp_demo", "user") is True
 
 
 def test_validate_mcp_agent_overrides_rejects_overlapping_filters_with_exact_message() -> None:

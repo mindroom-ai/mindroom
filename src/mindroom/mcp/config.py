@@ -8,6 +8,8 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MCPTransport = Literal["stdio", "sse", "streamable-http"]
+_MCPOAuthDiscoveryMode = Literal["auto", "manual"]
+_MCPOAuthTokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 _MCP_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _MCP_FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_MCP_FUNCTION_NAME_LENGTH = 64
@@ -51,6 +53,57 @@ def normalize_mcp_server_id(server_id: str) -> str:
     return _validate_mcp_identifier(server_id, subject="MCP server id")
 
 
+class MCPOAuthConfig(BaseModel):
+    """OAuth settings for requester-scoped remote MCP servers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["oauth"]
+    provider_id: str | None = Field(default=None, description="OAuth provider id; defaults to mcp_<server_id>")
+    display_name: str | None = Field(default=None, description="Human-readable OAuth provider name")
+    resource: str | None = Field(default=None, description="OAuth protected resource identifier")
+    discovery: _MCPOAuthDiscoveryMode = Field(default="auto", description="OAuth metadata discovery mode")
+    authorization_server: str | None = Field(default=None, description="Authorization server issuer/base URL")
+    authorization_url: str | None = Field(default=None, description="Manual OAuth authorization endpoint")
+    token_url: str | None = Field(default=None, description="Manual OAuth token endpoint")
+    registration_url: str | None = Field(default=None, description="Dynamic client registration endpoint")
+    dynamic_client_registration: bool = Field(default=True, description="Whether dynamic registration may be used")
+    token_endpoint_auth_method: _MCPOAuthTokenEndpointAuthMethod = Field(
+        default="none",
+        description="OAuth token endpoint client authentication method",
+    )
+    pkce_code_challenge_method: Literal["S256"] | None = Field(default="S256", description="PKCE challenge method")
+    scopes: list[str] = Field(default_factory=list, description="OAuth scopes")
+    extra_auth_params: dict[str, str] = Field(default_factory=dict, description="Extra authorization request params")
+    extra_token_params: dict[str, str] = Field(default_factory=dict, description="Extra token request params")
+    client_config_services: list[str] = Field(default_factory=list, description="Provider-specific client config")
+    shared_client_config_services: list[str] = Field(default_factory=list, description="Shared client config services")
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, value: str | None) -> str | None:
+        """Validate explicit generated OAuth provider ids."""
+        if value is None:
+            return None
+        return _validate_mcp_identifier(value, subject="MCP OAuth provider_id")
+
+    @field_validator("scopes", mode="before")
+    @classmethod
+    def normalize_scopes(cls, value: object) -> object:
+        """Strip blank scope entries while preserving empty scope lists."""
+        if value is None or not isinstance(value, list):
+            return value
+        normalized: list[str] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                msg = "MCP OAuth scopes must be strings"
+                raise TypeError(msg)
+            stripped = entry.strip()
+            if stripped:
+                normalized.append(stripped)
+        return normalized
+
+
 class MCPServerConfig(BaseModel):
     """Config for one MCP server connection."""
 
@@ -65,6 +118,7 @@ class MCPServerConfig(BaseModel):
     url: str | None = Field(default=None, description="Remote URL for SSE or streamable HTTP")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers for remote transports")
     tool_prefix: str | None = Field(default=None, description="Prefix for model-visible function names")
+    auth: MCPOAuthConfig | None = Field(default=None, description="Optional requester-scoped MCP auth")
     include_tools: list[str] = Field(default_factory=list, description="Optional remote tool allowlist")
     exclude_tools: list[str] = Field(default_factory=list, description="Optional remote tool denylist")
     startup_timeout_seconds: float = Field(default=20.0, gt=0, description="Startup timeout")
@@ -98,6 +152,9 @@ class MCPServerConfig(BaseModel):
         if self.headers:
             msg = "stdio MCP servers do not allow headers"
             raise ValueError(msg)
+        if self.auth is not None:
+            msg = "OAuth-backed MCP servers require remote HTTP transport"
+            raise ValueError(msg)
 
     def _validate_remote_transport(self) -> None:
         if not self.url or not self.url.strip():
@@ -129,6 +186,14 @@ class MCPServerConfig(BaseModel):
             self._validate_stdio_transport()
         else:
             self._validate_remote_transport()
+
+        if self.auth is not None and self.auth.discovery == "manual":
+            if not self.auth.authorization_url or not self.auth.authorization_url.strip():
+                msg = "manual MCP OAuth discovery requires authorization_url"
+                raise ValueError(msg)
+            if not self.auth.token_url or not self.auth.token_url.strip():
+                msg = "manual MCP OAuth discovery requires token_url"
+                raise ValueError(msg)
 
         if self.tool_prefix is not None:
             _validate_mcp_identifier(self.tool_prefix, subject="MCP tool_prefix")

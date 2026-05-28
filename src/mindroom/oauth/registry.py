@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
+from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
@@ -198,7 +199,8 @@ def _load_oauth_provider_registry(
         runtime_paths,
         skip_broken_plugins=skip_broken_plugins,
     )
-    providers = (*_builtin_oauth_providers(), *plugin_providers)
+    mcp_providers = tuple(mcp_oauth_providers_for_config(config.mcp_servers))
+    providers = (*_builtin_oauth_providers(), *mcp_providers, *plugin_providers)
     registry = _provider_registry(providers)
     with _provider_cache_lock:
         _provider_cache = _ProviderCacheEntry(cache_key, registry)

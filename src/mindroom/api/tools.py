@@ -159,10 +159,16 @@ def _annotate_execution_scope_support(
     tools: list[dict[str, Any]],
     *,
     execution_scope: WorkerScope | None,
+    config: Config,
 ) -> None:
     """Expose whether each tool is supported for the requested execution scope."""
     unsupported_tools = set(
-        unsupported_shared_only_integration_names([tool["name"] for tool in tools], execution_scope),
+        unsupported_shared_only_integration_names(
+            [tool["name"] for tool in tools],
+            execution_scope,
+            configured_mcp_server_ids=config.mcp_servers,
+            oauth_mcp_server_ids=config.oauth_mcp_server_ids(),
+        ),
     )
     for tool in tools:
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
@@ -340,6 +346,7 @@ async def get_registered_tools(
     _annotate_execution_scope_support(
         tools,
         execution_scope=context.execution_scope,
+        config=config,
     )
     _annotate_dashboard_configuration_support(
         tools,
