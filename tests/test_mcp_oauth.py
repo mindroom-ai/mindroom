@@ -244,6 +244,29 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     }
 
 
+@pytest.mark.asyncio
+async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery must not allow DNS names that resolve to private-network targets."""
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr(
+        "mindroom.mcp.oauth.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.0.0.5", 0))],
+    )
+    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    code_verifier = provider.issue_pkce_code_verifier()
+    assert code_verifier is not None
+
+    with pytest.raises(OAuthProviderError, match="refused unsafe URL host"):
+        await provider.authorization_uri_async(
+            runtime_paths,
+            state="state-token",
+            code_verifier=code_verifier,
+        )
+
+
 def test_oauth_provider_allows_public_clients_without_secret_and_empty_scopes(tmp_path: Path) -> None:
     """Public OAuth clients can be configured with a client ID and no client secret."""
     runtime_paths = _runtime_paths(tmp_path)

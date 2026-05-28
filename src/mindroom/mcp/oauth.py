@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import socket
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,6 +13,7 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 import httpx
 
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
 
 if TYPE_CHECKING:
@@ -95,7 +97,6 @@ async def disconnect_mcp_oauth_request_session(
     server_id = _mcp_oauth_server_id_for_provider_id(mcp_servers, provider_id)
     if server_id is None:
         return
-    from mindroom.mcp.toolkit import require_mcp_server_manager  # noqa: PLC0415
 
     manager = require_mcp_server_manager()
     if manager is not None:
@@ -147,6 +148,31 @@ def _authorization_server_metadata_urls(authorization_server: str) -> tuple[str,
     return tuple(dict.fromkeys(urls))
 
 
+def _address_is_unsafe(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def _resolved_host_addresses(hostname: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    try:
+        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return ()
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        try:
+            addresses.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return tuple(addresses)
+
+
 def _host_is_unsafe(hostname: str | None) -> bool:
     if not hostname:
         return True
@@ -155,8 +181,8 @@ def _host_is_unsafe(hostname: str | None) -> bool:
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return False
-    return address.is_private or address.is_loopback or address.is_link_local or address.is_reserved
+        return any(_address_is_unsafe(address) for address in _resolved_host_addresses(hostname))
+    return _address_is_unsafe(address)
 
 
 def _validate_discovery_url(url: str, runtime_paths: RuntimePaths) -> None:

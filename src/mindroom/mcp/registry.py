@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix, validate_mcp_tool_filter_overlap
 from mindroom.mcp.errors import MCPError
+from mindroom.mcp.oauth import mcp_oauth_provider_id
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -13,6 +14,7 @@ from mindroom.tool_system.catalog import (
     SetupType,
     ToolAuthoredOverrideValidator,
     ToolCategory,
+    ToolManagedInitArg,
     ToolMetadata,
     ToolStatus,
 )
@@ -27,16 +29,16 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
-    from mindroom.tool_system.metadata import ToolManagedInitArg
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _MCP_TOOL_PREFIX = "mcp_"
 _MCP_TOOL_NAMES: set[str] = set()
 _MCP_OAUTH_TOOL_NAMES: set[str] = set()
 _MCP_TOOL_FACTORY_MARKER = "__mindroom_mcp_tool_factory__"
-_MCP_OAUTH_MANAGED_INIT_ARGS = cast(
-    "tuple[ToolManagedInitArg, ...]",
-    ("runtime_paths", "credentials_manager", "worker_target"),
+_MCP_OAUTH_MANAGED_INIT_ARGS = (
+    ToolManagedInitArg.RUNTIME_PATHS,
+    ToolManagedInitArg.CREDENTIALS_MANAGER,
+    ToolManagedInitArg.WORKER_TARGET,
 )
 
 
@@ -134,8 +136,6 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
     auth_provider = None
     function_names: tuple[str, ...]
     if is_oauth:
-        from mindroom.mcp.oauth import mcp_oauth_provider_id  # noqa: PLC0415
-
         tool_prefix = resolved_mcp_tool_prefix(server_id, server_config)
         auth_provider = mcp_oauth_provider_id(server_id, server_config.auth)
         function_names = (

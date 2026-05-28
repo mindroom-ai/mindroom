@@ -354,6 +354,20 @@ def test_oauth_mcp_tool_names_are_supported_on_isolating_scope(tmp_path: Path) -
     assert supports_tool_name_for_worker_scope("mcp_demo", "user") is True
 
 
+def test_oauth_mcp_toolkit_instantiates_with_managed_runtime_args(tmp_path: Path) -> None:
+    """OAuth-backed dynamic MCP tools declare managed init args as runtime enum values."""
+    sync_mcp_tool_registry(_oauth_config(tmp_path))
+
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+
+    assert toolkit.name == "mcp_demo"
+    assert set(toolkit.async_functions) == {
+        "demo_connection_status",
+        "demo_list_tools",
+        "demo_call_tool",
+    }
+
+
 def test_validate_mcp_agent_overrides_rejects_overlapping_filters_with_exact_message() -> None:
     """Preserve the public per-agent MCP filter-overlap error."""
     with pytest.raises(ValueError, match="include_tools and exclude_tools overlap") as exc_info:
