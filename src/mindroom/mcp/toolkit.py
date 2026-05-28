@@ -243,20 +243,13 @@ class MindRoomMCPToolkit(Toolkit):
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
         async def _call_tool(**kwargs: object) -> ToolResult:
             assert self.manager is not None
-            if self._is_oauth_backed():
-                return await self.manager.call_tool(
-                    self.server_id,
-                    tool.remote_name,
-                    dict(kwargs),
-                    timeout_seconds=self.call_timeout_seconds,
-                    credentials_manager=self.credentials_manager,
-                    worker_target=self.worker_target,
-                )
             return await self.manager.call_tool(
                 self.server_id,
                 tool.remote_name,
                 dict(kwargs),
                 timeout_seconds=self.call_timeout_seconds,
+                credentials_manager=self.credentials_manager,
+                worker_target=self.worker_target,
             )
 
         return Function(

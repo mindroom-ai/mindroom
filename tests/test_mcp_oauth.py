@@ -20,7 +20,7 @@ from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_provi
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -271,6 +271,18 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
         "mindroom.mcp.oauth.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.0.0.5", 0))],
     )
+    to_thread_calls = 0
+
+    async def fake_to_thread(
+        func: Callable[..., tuple[object, ...]],
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[object, ...]:
+        nonlocal to_thread_calls
+        to_thread_calls += 1
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.mcp.oauth.asyncio.to_thread", fake_to_thread)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
@@ -281,6 +293,7 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
             state="state-token",
             code_verifier=code_verifier,
         )
+    assert to_thread_calls == 1
 
 
 def test_oauth_provider_allows_public_clients_without_secret_and_empty_scopes(tmp_path: Path) -> None:

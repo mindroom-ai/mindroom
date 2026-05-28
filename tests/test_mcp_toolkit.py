@@ -25,7 +25,16 @@ if TYPE_CHECKING:
 
 class _DummyManager:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict[str, object], float | None]] = []
+        self.calls: list[
+            tuple[
+                str,
+                str,
+                dict[str, object],
+                CredentialsManager | None,
+                ResolvedWorkerTarget | None,
+                float | None,
+            ]
+        ] = []
 
     async def call_tool(
         self,
@@ -34,9 +43,11 @@ class _DummyManager:
         arguments: dict[str, object],
         *,
         timeout_seconds: float | None = None,
+        credentials_manager: CredentialsManager | None = None,
+        worker_target: ResolvedWorkerTarget | None = None,
     ) -> ToolResult:
         """Record the call and return a fixed tool result."""
-        self.calls.append((server_id, remote_tool_name, arguments, timeout_seconds))
+        self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
         return ToolResult(content="ok")
 
 
@@ -183,7 +194,7 @@ async def test_mcp_toolkit_registers_async_functions_and_calls_manager() -> None
     )
     result = await toolkit.async_functions["demo_echo"].entrypoint(text="hello")
     assert result.content == "ok"
-    assert manager.calls == [("demo", "echo", {"text": "hello"}, 15.0)]
+    assert manager.calls == [("demo", "echo", {"text": "hello"}, None, None, 15.0)]
 
 
 @pytest.mark.asyncio

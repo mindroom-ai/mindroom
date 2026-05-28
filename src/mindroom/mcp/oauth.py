@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -173,7 +174,7 @@ def _resolved_host_addresses(hostname: str) -> tuple[ipaddress.IPv4Address | ipa
     return tuple(addresses)
 
 
-def _host_is_unsafe(hostname: str | None) -> bool:
+async def _host_is_unsafe(hostname: str | None) -> bool:
     if not hostname:
         return True
     if hostname.lower() == "localhost":
@@ -181,18 +182,19 @@ def _host_is_unsafe(hostname: str | None) -> bool:
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return any(_address_is_unsafe(address) for address in _resolved_host_addresses(hostname))
+        addresses = await asyncio.to_thread(_resolved_host_addresses, hostname)
+        return any(_address_is_unsafe(address) for address in addresses)
     return _address_is_unsafe(address)
 
 
-def _validate_discovery_url(url: str, runtime_paths: RuntimePaths) -> None:
+async def _validate_discovery_url(url: str, runtime_paths: RuntimePaths) -> None:
     parsed = urlparse(url)
     allow_insecure = runtime_paths.env_flag("MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY")
     allow_private = runtime_paths.env_flag("MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY")
     if parsed.scheme != "https" and not allow_insecure:
         msg = f"MCP OAuth discovery requires HTTPS URL: {url}"
         raise OAuthProviderError(msg)
-    if _host_is_unsafe(parsed.hostname) and not allow_private:
+    if await _host_is_unsafe(parsed.hostname) and not allow_private:
         msg = f"MCP OAuth discovery refused unsafe URL host: {parsed.hostname or ''}"
         raise OAuthProviderError(msg)
 
@@ -231,7 +233,7 @@ async def _fetch_json(
     *,
     optional: bool = False,
 ) -> dict[str, Any] | None:
-    _validate_discovery_url(url, runtime_paths)
+    await _validate_discovery_url(url, runtime_paths)
     try:
         response = await client.get(url, headers={"Accept": _JSON_CONTENT_TYPE})
         if optional and getattr(response, "status_code", None) in {404, 410}:
@@ -414,7 +416,7 @@ async def _register_dynamic_client(
     if metadata.registration_url is None:
         return
 
-    _validate_discovery_url(metadata.registration_url, runtime_paths)
+    await _validate_discovery_url(metadata.registration_url, runtime_paths)
     payload = _client_registration_payload(provider, auth_config, runtime_paths)
     try:
         async with httpx.AsyncClient(timeout=_DISCOVERY_TIMEOUT_SECONDS, follow_redirects=False) as client:
