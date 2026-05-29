@@ -22,12 +22,13 @@ from mindroom.api.credentials import (
 )
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
+from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthProvider,
     OAuthProviderError,
-    load_oauth_providers_for_snapshot,
 )
+from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
@@ -100,7 +101,7 @@ async def _require_oauth_browser_user(request: Request) -> RedirectResponse | No
     return None
 
 
-def _issue_authorization_url(
+async def _issue_authorization_url(
     request: Request,
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -131,7 +132,7 @@ def _issue_authorization_url(
             code_verifier=code_verifier,
         )
         try:
-            auth_url = provider.authorization_uri(
+            auth_url = await provider.authorization_uri_async(
                 target.runtime_paths,
                 state=state,
                 code_verifier=code_verifier,
@@ -163,7 +164,7 @@ def _issue_authorization_url(
             payload=_target_binding_payload(provider, target),
             code_verifier=code_verifier,
         )
-        auth_url = provider.authorization_uri(
+        auth_url = await provider.authorization_uri_async(
             target.runtime_paths,
             state=state,
             code_verifier=code_verifier,
@@ -289,7 +290,7 @@ async def connect(provider_id: str, request: Request, agent_name: str | None = N
     """Start a provider OAuth flow and return the external authorization URL."""
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
-    return _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
+    return await _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
 
 
 @router.get("/{provider_id}/authorize")
@@ -304,7 +305,7 @@ async def authorize(
     if login_redirect is not None:
         return login_redirect
     provider, runtime_paths = _load_provider(request, provider_id)
-    response = _issue_authorization_url(
+    response = await _issue_authorization_url(
         request,
         provider,
         runtime_paths,
@@ -435,7 +436,27 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     client_config_resolution = provider.client_config_resolution(runtime_paths)
     has_client_config = client_config_resolution is not None
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
-    connected = has_service_account_config or oauth_credentials_usable(provider, runtime_paths, credentials)
+    credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    if credentials_usable and has_client_config and not has_service_account_config:
+        try:
+            refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
+        except OAuthProviderError as exc:
+            logger.warning(
+                "oauth_token_refresh_failed",
+                provider_id=provider.id,
+                error_type=type(exc).__name__,
+            )
+        else:
+            if refreshed_credentials is not None:
+                save_scoped_credentials(
+                    provider.credential_service,
+                    refreshed_credentials,
+                    credentials_manager=target.base_manager,
+                    worker_target=worker_target,
+                )
+                credentials = refreshed_credentials
+                credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    connected = has_service_account_config or credentials_usable
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service
     elif provider.all_client_config_services:
@@ -478,4 +499,12 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         credentials_manager=target.base_manager,
         worker_target=worker_target,
     )
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    config = snapshot.runtime_config
+    if config is not None:
+        await disconnect_mcp_oauth_request_session(
+            config.mcp_servers,
+            provider.id,
+            worker_target=worker_target,
+        )
     return {"status": "disconnected", "provider": provider.id}

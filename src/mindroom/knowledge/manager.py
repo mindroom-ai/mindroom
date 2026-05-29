@@ -48,6 +48,7 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -327,7 +328,7 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
         )
 
     if provider == "ollama":
-        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or "http://localhost:11434"
+        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT
         return OllamaEmbedder(id=embedder_config.model, host=host)
 
     if provider == "sentence_transformers":

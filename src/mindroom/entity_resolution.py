@@ -7,11 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import (
-    MatrixID,
-    managed_account_key,
-    managed_account_user_id,
-)
+from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_key_from_alias_localpart,
@@ -59,6 +55,18 @@ def configured_bot_user_ids_for_room(
         configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
 
     return configured_bots
+
+
+def is_configured_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
+) -> bool:
+    """Return whether one Matrix room is present in the configured room set."""
+    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    return _room_refs_match(list(config.get_all_configured_rooms()), room_identifiers, runtime_paths)
 
 
 def configured_routable_entity_names_for_room(

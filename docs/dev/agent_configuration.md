@@ -29,8 +29,9 @@ The configuration file has these top-level sections:
 14. **mindroom_user** - Internal MindRoom user account settings
 15. **timezone** - Timezone for scheduled tasks (default: `UTC`)
 16. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-17. **room_models** - Per-room model overrides
-18. **plugins** - Plugin paths for tool/skill extensions
+17. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
+18. **room_models** - Per-room model overrides
+19. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 
@@ -69,6 +70,7 @@ Each model entry supports these fields:
 ### Supported Providers
 
 - **anthropic** - Claude models (requires `ANTHROPIC_API_KEY`)
+- **azure** - Azure OpenAI deployments (requires `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT`)
 - **openai** - OpenAI and OpenAI-compatible models (requires `OPENAI_API_KEY`)
 - **ollama** - Local models via Ollama (requires `OLLAMA_HOST`, defaults to `http://localhost:11434`)
 - **openrouter** - Access multiple models through OpenRouter (requires `OPENROUTER_API_KEY`)
@@ -341,6 +343,12 @@ matrix_space:
   enabled: true  # Create and maintain a root Space (default: true)
   name: "MindRoom"  # Display name for the root Space
 ```
+
+Concrete Matrix users in `authorization.global_users` receive root Space admin power.
+The configured `mindroom_user` also receives root Space admin power when the internal account exists.
+Room-specific `authorization.room_permissions` users do not become root Space admins unless they are also global users.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 
 ## Matrix Delivery Configuration
 

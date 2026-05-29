@@ -1,213 +1,534 @@
 'use client'
 
 import Link from 'next/link'
-import { Hero } from '@/components/landing/Hero'
-import { HowItWorks } from '@/components/landing/HowItWorks'
-import { Features } from '@/components/landing/Features'
-import { Pricing } from '@/components/landing/Pricing'
-import { Testimonials } from '@/components/landing/Testimonials'
-import { Stats } from '@/components/landing/Stats'
-import { CTA } from '@/components/landing/CTA'
-import { WhyItMatters } from '@/components/landing/WhyItMatters'
-import { Collaboration } from '@/components/landing/Collaboration'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
+import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
-import { useState, useEffect } from 'react'
-import { navLinks, footerLinks } from '@/lib/constants'
 import {
-  FileText, DollarSign, Layers,
-  Info, BookOpen, Briefcase,
-  Mail, HelpCircle, Activity
+  ArrowRight,
+  Bot,
+  Check,
+  Code2,
+  GitBranch,
+  KeyRound,
+  Lock,
+  MessageSquare,
+  Network,
+  Shield,
+  Sparkles,
+  TerminalSquare,
+  Workflow,
+  type LucideIcon,
 } from 'lucide-react'
 
-export default function LandingPage() {
-  const [scrolled, setScrolled] = useState(false)
+type IconItem = {
+  title: string
+  body: string
+  icon: LucideIcon
+}
 
-  useEffect(() => {
-    const handleScroll = () => {
-      setScrolled(window.scrollY > 20)
-    }
-    window.addEventListener('scroll', handleScroll)
-    return () => window.removeEventListener('scroll', handleScroll)
-  }, [])
+type PricePlan = {
+  name: string
+  price: string
+  description: string
+  features: string[]
+  cta: string
+  href: string
+  highlighted?: boolean
+}
 
-  // Icon mapping for footer links
-  const footerIcons: Record<string, any> = {
-    'Features': Layers,
-    'Pricing': DollarSign,
-    'Documentation': FileText,
-    'About': Info,
-    'Blog': BookOpen,
-    'Careers': Briefcase,
-    'Contact': Mail,
-    'Help Center': HelpCircle,
-    'Status': Activity,
-  }
+const navLinks = [
+  { href: '#workflow', label: 'Workflow' },
+  { href: '#platform', label: 'Platform' },
+  { href: '#security', label: 'Security' },
+  { href: '#pricing', label: 'Pricing' },
+]
+
+const docsUrl = 'https://docs.mindroom.chat/'
+
+const heroFacts = ['Matrix-first rooms', 'Tool-aware agents', 'Hosted or OSS']
+
+const workflow: IconItem[] = [
+  {
+    title: 'Create rooms for real work',
+    body: 'Give each room a purpose, invite people, and bring in the agents that should participate.',
+    icon: MessageSquare,
+  },
+  {
+    title: 'Route work to specialists',
+    body: 'Agents can answer directly, coordinate as a team, or stay quiet until they are mentioned.',
+    icon: Bot,
+  },
+  {
+    title: 'Keep the audit trail',
+    body: 'Threads, tool traces, schedules, and decisions remain in the room where the work happened.',
+    icon: Workflow,
+  },
+]
+
+const platform: IconItem[] = [
+  {
+    title: 'Matrix-native runtime',
+    body: 'MindRoom runs on Matrix so rooms, bridges, identity, and federation are part of the product model.',
+    icon: Network,
+  },
+  {
+    title: 'Code and tool execution',
+    body: 'Agents can use shell, file, browser, calendar, GitHub, and custom tools with policy controls.',
+    icon: TerminalSquare,
+  },
+  {
+    title: 'Hosted or self-managed',
+    body: 'Use the hosted SaaS control plane, deploy instances on Kubernetes, or run the open-source stack yourself.',
+    icon: GitBranch,
+  },
+  {
+    title: 'Model-provider flexible',
+    body: 'Configure OpenAI, Anthropic, Google, OpenRouter, local OpenAI-compatible servers, and per-agent defaults.',
+    icon: Sparkles,
+  },
+]
+
+const security: IconItem[] = [
+  {
+    title: 'Private-by-default rooms',
+    body: 'Hosted instances can start with owner-scoped authorization and invite-only room behavior.',
+    icon: Lock,
+  },
+  {
+    title: 'Credential isolation',
+    body: 'Provider keys and tool credentials are stored separately from public configuration and runtime code.',
+    icon: KeyRound,
+  },
+  {
+    title: 'Operational boundaries',
+    body: 'Kubernetes workers, network policies, rate limits, and audit logs keep hosted deployments inspectable.',
+    icon: Shield,
+  },
+]
+
+const plans: PricePlan[] = [
+  {
+    name: 'Free',
+    price: '$0',
+    description: 'Try one agent in a hosted room.',
+    features: ['1 agent', '100 messages per day', 'Community support'],
+    cta: 'Start free',
+    href: '/auth/signup',
+  },
+  {
+    name: 'BYOK',
+    price: '$10',
+    description: 'Hosted MindRoom for customers who bring their own model keys.',
+    features: ['Hosted instance', 'Bring your own keys', 'All integrations'],
+    cta: 'Create account',
+    href: '/auth/signup?plan=byok',
+  },
+  {
+    name: 'Hobby',
+    price: '$20',
+    description: 'Hosted MindRoom with included monthly AI usage.',
+    features: ['Hosted instance', '$15 included monthly AI usage', 'All integrations'],
+    cta: 'Create account',
+    href: '/auth/signup?plan=hobby',
+    highlighted: true,
+  },
+  {
+    name: 'Pro',
+    price: '$200',
+    description: 'Larger hosted workspace with a higher included AI budget.',
+    features: ['Larger resource profile', '$150 included monthly AI usage', 'Priority support'],
+    cta: 'Create account',
+    href: '/auth/signup?plan=pro',
+  },
+]
+
+const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16'
+const secondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white/70 px-5 py-3 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10'
+const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/18 bg-white/10 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/16'
+const darkSecondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/14 bg-transparent px-5 py-3 text-sm font-semibold text-white/82 transition-colors hover:bg-white/8 hover:text-white'
+
+function SectionHeading({
+  eyebrow,
+  title,
+  body,
+}: {
+  eyebrow: string
+  title: string
+  body: string
+}) {
+  return (
+    <div className="max-w-2xl">
+      <p className="text-sm font-semibold uppercase tracking-normal text-orange-600 dark:text-orange-400">
+        {eyebrow}
+      </p>
+      <h2 className="mt-3 text-3xl font-semibold text-gray-950 dark:text-white sm:text-4xl">
+        {title}
+      </h2>
+      <p className="mt-4 text-base leading-7 text-gray-600 dark:text-gray-300">
+        {body}
+      </p>
+    </div>
+  )
+}
+
+function ProductPreview() {
+  const messages = [
+    {
+      actor: 'bas',
+      body: 'Launch app.mindroom.chat and check Google sign-in before we announce it.',
+    },
+    {
+      actor: 'router',
+      body: 'Routing this to infra and security. I will keep the result in this thread.',
+    },
+    {
+      actor: 'infra',
+      body: 'DNS, service health, and the OAuth callback are green on production.',
+    },
+  ]
+
+  const agents = [
+    ['infra', 'deploying'],
+    ['security', 'checking auth'],
+    ['docs', 'drafting notes'],
+  ]
 
   return (
-    <main className="min-h-screen overflow-x-hidden">
-      {/* Modern Navigation with Glass Effect */}
-      <nav className={`fixed top-0 w-full z-50 transition-all duration-300 ${
-        scrolled
-          ? 'glass-effect shadow-lg'
-          : 'bg-transparent'
-      }`}>
-        <div className="container mx-auto px-4 sm:px-6 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2 sm:gap-3 group">
-              <MindRoomLogo className="text-orange-500 group-hover:scale-110 active:scale-100 transition-transform duration-300" size={32} />
-              <span className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-orange-500 to-orange-600 bg-clip-text text-transparent">
-                MindRoom
-              </span>
+    <div className="relative overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl shadow-gray-200/70 dark:border-gray-800 dark:bg-gray-950 dark:shadow-black/25">
+      <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-800 dark:bg-gray-900">
+        <div className="flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full bg-red-400" />
+          <span className="h-3 w-3 rounded-full bg-yellow-400" />
+          <span className="h-3 w-3 rounded-full bg-green-400" />
+        </div>
+        <div className="flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400">
+          <span>#ops-deploy</span>
+          <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+            live
+          </span>
+        </div>
+      </div>
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_240px]">
+        <section className="p-4 sm:p-5">
+          <div className="mb-4 rounded-md border border-gray-200 bg-gray-50 p-3 text-sm leading-6 text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+            <span className="font-semibold text-gray-950 dark:text-white">Task:</span> deploy a new hosted workspace, verify auth, and leave the trace in-room.
+          </div>
+          <div className="space-y-3">
+            {messages.map((message) => (
+              <div key={message.actor} className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
+                <div className="mb-2 flex items-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-md bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
+                    <Bot className="h-4 w-4" />
+                  </div>
+                  <div className="text-sm font-semibold text-gray-950 dark:text-white">@{message.actor}</div>
+                </div>
+                <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">{message.body}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+        <aside className="border-t border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900 lg:border-l lg:border-t-0">
+          <div className="text-xs font-semibold uppercase tracking-normal text-gray-500 dark:text-gray-500">
+            Active agents
+          </div>
+          <div className="mt-3 space-y-2">
+            {agents.map(([agent, state]) => (
+              <div key={agent} className="flex items-center justify-between rounded-md bg-white px-3 py-2 text-sm shadow-sm dark:bg-gray-950">
+                <span className="font-medium text-gray-950 dark:text-white">@{agent}</span>
+                <span className="text-xs text-gray-500 dark:text-gray-400">{state}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-5 text-xs font-semibold uppercase tracking-normal text-gray-500 dark:text-gray-500">
+            Run trace
+          </div>
+          {['DNS checked', 'OAuth callback tested', 'Secrets scan clean'].map((item) => (
+            <div key={item} className="mt-4 flex items-start gap-2 text-sm text-gray-600 dark:text-gray-300">
+              <Check className="mt-0.5 h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              <span>{item}</span>
             </div>
+          ))}
+        </aside>
+      </div>
+    </div>
+  )
+}
 
-            <div className="hidden xl:flex items-center gap-8">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  className="nav-link"
-                >
-                  {link.label}
-                </Link>
-              ))}
+function FeatureRows({ items }: { items: IconItem[] }) {
+  return (
+    <div className="grid border-y border-gray-200 dark:border-gray-800 lg:grid-cols-2">
+      {items.map((item) => {
+        const Icon = item.icon
+        return (
+          <article
+            key={item.title}
+            className="flex gap-4 border-b border-gray-200 py-6 last:border-b-0 dark:border-gray-800 lg:odd:pr-8 lg:even:border-l lg:even:pl-8 lg:[&:nth-last-child(2)]:border-b-0"
+          >
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-gray-100 text-gray-900 dark:bg-white/8 dark:text-white">
+              <Icon className="h-5 w-5" />
             </div>
+            <div>
+              <h3 className="text-base font-semibold text-gray-950 dark:text-white">{item.title}</h3>
+              <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
+            </div>
+          </article>
+        )
+      })}
+    </div>
+  )
+}
 
-            <div className="flex items-center gap-2 sm:gap-4">
-              <DarkModeToggle />
-              <Link
-                href="/auth/login"
-                className="hidden sm:flex items-center px-5 py-2 text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 font-medium transition-colors whitespace-nowrap"
-              >
-                Sign In
+export default function LandingPage() {
+  return (
+    <main className="min-h-screen bg-white text-gray-950 dark:bg-gray-950 dark:text-white">
+      <nav className="sticky top-0 z-50 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-800 dark:bg-gray-950/95">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+          <Link href="/" className="group flex items-center gap-3" aria-label="MindRoom home">
+            <MindRoomLogo className="transition-transform duration-200 group-hover:scale-105" size={32} />
+            <span className="text-lg font-semibold">MindRoom</span>
+          </Link>
+          <div className="hidden items-center gap-7 lg:flex">
+            {navLinks.map((link) => (
+              <Link key={link.href} href={link.href} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
+                {link.label}
               </Link>
-              <Link
-                href="/auth/signup"
-                className="btn-primary shimmer text-sm sm:text-base px-4 sm:px-6 py-2 sm:py-2.5 whitespace-nowrap"
-              >
-                <span className="hidden sm:inline">Get Started Free</span>
-                <span className="sm:hidden">Get Started</span>
-              </Link>
-            </div>
+            ))}
+            <a href={docsUrl} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
+              Docs
+            </a>
+          </div>
+          <div className="flex items-center gap-2 sm:gap-3">
+            <DarkModeToggle />
+            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white sm:inline-flex">
+              Sign in
+            </Link>
+            <Link href="/auth/signup" className="inline-flex items-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16 sm:px-4">
+              Start free
+              <ArrowRight className="h-4 w-4" />
+            </Link>
           </div>
         </div>
       </nav>
 
-      {/* Hero Section */}
-      <Hero />
-
-      {/* Option 2: Getting Started Banner */}
-      <section className="py-8 bg-gradient-to-r from-blue-50 via-purple-50 to-blue-50 dark:from-blue-500/10 dark:via-purple-500/10 dark:to-blue-500/10">
-        <div className="container mx-auto px-6 text-center">
-          <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm rounded-full shadow-lg border border-gray-200 dark:border-gray-700 mb-4">
-            <span className="text-2xl">🎉</span>
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-              Fresh out of the oven!
-            </span>
+      <section className="relative overflow-hidden border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950">
+        <HeroParticleBackground />
+        <div className="relative z-10 mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 sm:py-12 lg:grid-cols-[0.85fr_1.15fr] lg:items-center lg:px-8 lg:py-16">
+          <div>
+            <p className="inline-flex rounded-md border border-orange-200 bg-orange-50 px-3 py-1 text-sm font-medium text-orange-700 dark:border-orange-500/25 dark:bg-orange-500/10 dark:text-orange-300">
+              Matrix-native AI workrooms
+            </p>
+            <div className="mt-5 flex flex-wrap items-center gap-4">
+              <MindRoomLogo className="h-14 w-14 sm:h-16 sm:w-16" size={64} />
+              <h1 className="text-5xl font-semibold text-gray-950 dark:text-white sm:text-6xl">
+                MindRoom
+              </h1>
+            </div>
+            <p className="mt-4 text-xl font-medium leading-8 text-gray-900 dark:text-gray-100">
+              AI agents that live in rooms, not another inbox.
+            </p>
+            <p className="mt-4 max-w-xl text-base leading-7 text-gray-600 dark:text-gray-300">
+              Give each agent a role, memory, tools, and a shared Matrix room where people can see the work, the trace, and the decisions.
+            </p>
+            <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+              <Link href="/auth/signup" className={primaryCtaClass}>
+                Create hosted workspace
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+              <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className={secondaryCtaClass}>
+                <GitBranch className="h-4 w-4" />
+                View source
+              </a>
+            </div>
+            <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium text-gray-500 dark:text-gray-400">
+              {heroFacts.map((fact, index) => (
+                <div key={fact} className="flex items-center gap-4">
+                  {index > 0 && <span className="hidden h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-700 sm:block" />}
+                  <span>{fact}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <h3 className="text-2xl font-bold mb-3 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Built in Public by an Open Source Veteran
-          </h3>
-          <p className="text-gray-600 dark:text-gray-400 max-w-2xl mx-auto mb-4">
-            MindRoom just launched! Everything you see here is already implemented and working.
-            We're actively adding more bridges and integrations. Join us on this journey!
-          </p>
-          <div className="flex items-center justify-center gap-4">
-            <a
-              href="https://github.com/mindroom-ai/mindroom"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-lg hover:bg-gray-800 dark:hover:bg-gray-100 transition-colors"
-            >
-              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-              </svg>
-              Star on GitHub
-            </a>
-            <a
-              href="https://twitter.com/basnijholt"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-gray-700 dark:text-gray-300"
-            >
-              Follow the journey
+          <div className="relative">
+            <ProductPreview />
+          </div>
+        </div>
+      </section>
+
+      <section id="workflow" className="border-b border-gray-200 py-16 dark:border-gray-800">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <SectionHeading
+            eyebrow="Workflow"
+            title="Rooms become durable workspaces."
+            body="MindRoom is not another isolated chat window. It keeps agents, people, decisions, and tool output in the same conversational surface."
+          />
+          <div className="mt-12 border-y border-gray-200 dark:border-gray-800">
+            {workflow.map((item, index) => {
+              const Icon = item.icon
+              return (
+                <article
+                  key={item.title}
+                  className="grid gap-4 border-b border-gray-200 py-7 last:border-b-0 dark:border-gray-800 md:grid-cols-[72px_minmax(0,0.8fr)_minmax(0,1.2fr)] md:items-start"
+                >
+                  <div className="text-sm font-semibold text-gray-400">0{index + 1}</div>
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
+                      <Icon className="h-5 w-5" />
+                    </span>
+                    <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{item.title}</h3>
+                  </div>
+                  <p className="text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
+                </article>
+              )
+            })}
+          </div>
+        </div>
+      </section>
+
+      <section id="platform" className="border-b border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <SectionHeading
+            eyebrow="Platform"
+            title="Built for agents that need context and tools."
+            body="Run a simple assistant, a specialist code agent, or a team of agents that coordinate across Matrix rooms and bridged networks."
+          />
+          <div className="mt-10">
+            <FeatureRows items={platform} />
+          </div>
+        </div>
+      </section>
+
+      <section id="security" className="border-b border-gray-200 py-16 dark:border-gray-800">
+        <div className="mx-auto grid max-w-7xl gap-10 px-4 sm:px-6 lg:grid-cols-[0.9fr_1.1fr] lg:px-8">
+          <SectionHeading
+            eyebrow="Security"
+            title="Less magic, more operational control."
+            body="Hosted MindRoom instances are designed around explicit room access, visible tool traces, isolated credentials, and deployable infrastructure you can inspect."
+          />
+          <div className="border-y border-gray-200 dark:border-gray-800">
+            {security.map((item) => {
+              const Icon = item.icon
+              return (
+                <article key={item.title} className="border-b border-gray-200 py-6 last:border-b-0 dark:border-gray-800">
+                  <div className="flex gap-4">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+                      <Icon className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-gray-950 dark:text-white">{item.title}</h3>
+                      <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
+                    </div>
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+        </div>
+      </section>
+
+      <section className="border-b border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div className="grid gap-8 md:grid-cols-3">
+            {[
+              ['Open source core', 'Run it locally, inspect it, and adapt it to your stack.'],
+              ['Hosted control plane', 'Create and manage SaaS instances without hand-editing Helm values.'],
+              ['Matrix federation', 'Use protocol-level rooms and bridges instead of trapping work in one app.'],
+            ].map(([title, body]) => (
+              <div key={title}>
+                <h3 className="text-xl font-semibold">{title}</h3>
+                <p className="mt-3 text-sm leading-6 text-gray-300">{body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section id="pricing" className="py-16">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col justify-between gap-8 lg:flex-row lg:items-end">
+            <SectionHeading
+              eyebrow="Pricing"
+              title="Start small, then add rooms and agents."
+              body="Use the hosted platform for quick setup or run the open-source stack yourself when you need full control."
+            />
+            <Link href="/dashboard" className="inline-flex items-center gap-2 self-start rounded-md border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8 lg:self-end">
+              Open dashboard
+              <ArrowRight className="h-4 w-4" />
+            </Link>
+          </div>
+          <div className="mt-10 overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
+            {plans.map((plan) => (
+              <article
+                key={plan.name}
+                className={`grid gap-5 border-b border-gray-200 p-5 last:border-b-0 dark:border-gray-800 lg:grid-cols-[0.7fr_0.9fr_1.2fr_auto] lg:items-center ${
+                  plan.highlighted ? 'bg-orange-50/70 dark:bg-orange-500/10' : ''
+                }`}
+              >
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
+                  <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{plan.description}</p>
+                </div>
+                <div className="flex items-baseline gap-2 lg:justify-center">
+                  <span className="text-3xl font-semibold text-gray-950 dark:text-white">{plan.price}</span>
+                  {plan.price !== '$0' && <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>}
+                </div>
+                <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
+                  {plan.features.map((feature) => (
+                    <li key={feature} className="flex gap-2 text-sm text-gray-700 dark:text-gray-300">
+                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                      {feature}
+                    </li>
+                  ))}
+                </ul>
+                <Link
+                  href={plan.href}
+                  className={`inline-flex items-center justify-center rounded-md px-4 py-2.5 text-sm font-semibold transition-colors ${
+                    plan.highlighted
+                      ? 'border border-gray-950/10 bg-gray-950 text-white hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16'
+                      : 'border border-gray-300 text-gray-800 hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8'
+                  }`}
+                >
+                  {plan.cta}
+                </Link>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="border-y border-gray-200 bg-gray-950 py-16 text-white dark:border-gray-800">
+        <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+          <div>
+            <h2 className="text-3xl font-semibold text-white">Bring agents into the room.</h2>
+            <p className="mt-3 max-w-2xl text-base leading-7 text-gray-300">
+              Create a hosted workspace, or inspect the repo and run MindRoom on your own infrastructure.
+            </p>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Link href="/auth/signup" className={darkPrimaryCtaClass}>
+              Start free
+              <ArrowRight className="h-4 w-4" />
+            </Link>
+            <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className={darkSecondaryCtaClass}>
+              <Code2 className="h-4 w-4" />
+              Read the code
             </a>
           </div>
         </div>
       </section>
 
-      {/* How It Works - Immediately explain what MindRoom is */}
-      <HowItWorks />
-
-      {/* Collaboration - Show the KEY differentiator: federation across organizations */}
-      <Collaboration />
-
-      {/* Stats Section - Build credibility with Matrix adoption */}
-      <Stats />
-
-      {/* Features - Comprehensive capability list */}
-      <Features />
-
-      {/* Why It Matters - Strategic importance of federated AI */}
-      <WhyItMatters />
-
-      {/* Testimonials - Social proof */}
-      <Testimonials />
-
-      {/* Pricing - Commercial details */}
-      <Pricing />
-
-      {/* CTA Section */}
-      <CTA />
-
-      {/* Modern Footer */}
-      <footer className="relative bg-gradient-to-br from-gray-900 to-gray-800 text-white py-16 overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-t from-orange-500/5 to-transparent"></div>
-        <div className="container mx-auto px-6 relative z-10">
-          <div className="grid md:grid-cols-4 gap-8 mb-8">
-            <div>
-              <div className="flex items-center gap-2 mb-4">
-                <MindRoomLogo className="text-white" size={32} />
-                <span className="text-xl font-bold">MindRoom</span>
-              </div>
-              <p className="text-gray-400">
-                Your AI agents, deployed everywhere you work.
-              </p>
-            </div>
-
-            {Object.entries(footerLinks).map(([category, links]) => (
-              <div key={category}>
-                <h4 className="font-semibold mb-4 capitalize">{category}</h4>
-                <ul className="space-y-2">
-                  {links.map((link) => {
-                    const Icon = footerIcons[link.label]
-                    return (
-                      <li key={link.href}>
-                        <Link href={link.href} className="footer-link flex items-center gap-2 group">
-                          {Icon && <Icon className="w-4 h-4 text-gray-500 group-hover:text-orange-400 transition-colors" />}
-                          <span>{link.label}</span>
-                        </Link>
-                      </li>
-                    )
-                  })}
-                </ul>
-              </div>
-            ))}
+      <footer className="py-10">
+        <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 text-sm text-gray-500 dark:text-gray-400 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
+          <div className="flex items-center gap-3">
+            <MindRoomLogo className="opacity-75" size={24} />
+            <span>MindRoom</span>
           </div>
-
-          <div className="border-t border-gray-700 pt-8 text-center">
-            <p className="text-gray-400">© 2025 MindRoom. All rights reserved.</p>
-            <p className="text-gray-400 mt-2">
-              Made with ❤️ by{' '}
-              <a
-                href="https://github.com/basnijholt"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-orange-400 hover:text-orange-300 transition-colors"
-              >
-                an open source veteran
-              </a>
-            </p>
+          <div className="flex flex-wrap gap-4">
+            <Link href="/privacy" className="hover:text-gray-950 dark:hover:text-white">Privacy</Link>
+            <Link href="/terms" className="hover:text-gray-950 dark:hover:text-white">Terms</Link>
+            <a href={docsUrl} className="hover:text-gray-950 dark:hover:text-white">Docs</a>
+            <a href="https://github.com/mindroom-ai/mindroom" target="_blank" rel="noopener noreferrer" className="hover:text-gray-950 dark:hover:text-white">GitHub</a>
+            <Link href="/auth/login" className="hover:text-gray-950 dark:hover:text-white">Sign in</Link>
           </div>
         </div>
       </footer>

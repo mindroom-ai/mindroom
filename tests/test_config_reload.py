@@ -17,7 +17,7 @@ import yaml
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
@@ -25,6 +25,7 @@ from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
 from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
@@ -1425,9 +1426,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 
     response_task = asyncio.create_task(
         bot._response_runner.run_cancellable_response(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             response_function=response_function,
             thinking_message="Thinking...",
         ),
@@ -1805,6 +1804,37 @@ def test_config_update_plan_does_not_restart_for_request_time_prompt_change() ->
 
     assert plan.entities_to_restart == set()
     assert plan.only_support_service_changes is True
+
+
+def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -> None:
+    """Room display-name edits should reconcile Matrix room state without bot restarts."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            rooms={"lobby": RoomConfig(display_name="Lobby")},
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
+            rooms={"lobby": RoomConfig(display_name="Project Lobby")},
+            router=RouterConfig(model="default"),
+        ),
+    )
+
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.room_metadata_changed is True
+    assert plan.only_support_service_changes is False
 
 
 def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:
@@ -2609,9 +2639,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
     task = asyncio.create_task(
         bot._response_runner.run_cancellable_response(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             response_function=response_function,
             thinking_message="Thinking...",
         ),
@@ -2661,9 +2689,7 @@ async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
         assert message_id is None
 
     await bot._response_runner.run_cancellable_response(
-        room_id="!room:localhost",
-        reply_to_event_id="$reply",
-        thread_id=None,
+        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         response_function=response_function,
     )
 
@@ -2692,27 +2718,18 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
     captured_send: dict[str, object] = {}
 
     async def fake_send_response(
-        room_id: str,
-        reply_to_event_id: str | None,
+        *,
+        target: object,
         response_text: str,
-        thread_id: str | None,
-        reply_to_event: object | None = None,
         skip_mentions: bool = False,
         tool_trace: list[object] | None = None,
         extra_content: dict[str, object] | None = None,
-        thread_mode_override: str | None = None,
-        target: object | None = None,
     ) -> str:
-        captured_send["room_id"] = room_id
-        captured_send["reply_to_event_id"] = reply_to_event_id
         captured_send["response_text"] = response_text
-        captured_send["thread_id"] = thread_id
-        captured_send["reply_to_event"] = reply_to_event
+        captured_send["target"] = target
         captured_send["skip_mentions"] = skip_mentions
         captured_send["tool_trace"] = tool_trace
         captured_send["extra_content"] = extra_content
-        captured_send["thread_mode_override"] = thread_mode_override
-        captured_send["target"] = target
         return "$thinking"
 
     bot._send_response = AsyncMock(side_effect=fake_send_response)
@@ -2722,9 +2739,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
         assert message_id == "$thinking"
 
     await bot._response_runner.run_cancellable_response(
-        room_id="!room:localhost",
-        reply_to_event_id="$reply",
-        thread_id=None,
+        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         response_function=response_function,
         thinking_message="Thinking...",
     )

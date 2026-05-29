@@ -85,6 +85,8 @@ In worker-routed shell and python tools, that workspace is also exposed as `~`, 
 
 `attachment_ids` accepts only context attachment IDs (`att_*`).
 `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
+Relative paths resolve from the agent workspace when one is available.
+Relative paths must stay inside the workspace.
 Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
 
 ### Why use this tool?

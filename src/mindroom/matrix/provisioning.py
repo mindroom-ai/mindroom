@@ -7,7 +7,7 @@ from typing import Literal
 
 import httpx
 
-from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
 
@@ -22,6 +22,22 @@ def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
     token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
     return token or None
+
+
+def registration_shared_secret_from_env(runtime_paths: RuntimePaths) -> str | None:
+    """Get Synapse shared-secret registration credentials from env or file."""
+    secret = (runtime_paths.env_value("MATRIX_REGISTRATION_SHARED_SECRET") or "").strip()
+    if secret:
+        return secret
+
+    file_path = runtime_env_path(runtime_paths, "MATRIX_REGISTRATION_SHARED_SECRET_FILE")
+    if file_path is None:
+        return None
+    try:
+        return file_path.read_text(encoding="utf-8").strip() or None
+    except OSError as exc:
+        msg = f"MATRIX_REGISTRATION_SHARED_SECRET_FILE is not readable: {file_path}"
+        raise matrix_startup_error(msg, permanent=True) from exc
 
 
 def _local_provisioning_client_credentials_from_env(

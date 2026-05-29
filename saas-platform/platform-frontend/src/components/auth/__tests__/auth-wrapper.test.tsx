@@ -1,8 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { AuthWrapper } from '../auth-wrapper'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import { useDarkMode } from '@/hooks/useDarkMode'
+import { act } from 'react'
+import { hydrateRoot } from 'react-dom/client'
+import { renderToString } from 'react-dom/server'
 
 // Mock dependencies
 jest.mock('@/lib/supabase/client', () => ({
@@ -33,9 +36,11 @@ describe('AuthWrapper', () => {
   let mockSupabaseClient: any
   let mockRouter: any
   let mockAuthSubscription: any
+  let originalRuntimeConfig: any
 
   beforeEach(() => {
     jest.clearAllMocks()
+    originalRuntimeConfig = window.__MINDROOM_CONFIG__
 
     // Setup mock router
     mockRouter = {
@@ -65,6 +70,10 @@ describe('AuthWrapper', () => {
     ;(createClient as jest.Mock).mockReturnValue(mockSupabaseClient)
   })
 
+  afterEach(() => {
+    window.__MINDROOM_CONFIG__ = originalRuntimeConfig
+  })
+
   describe('Basic Rendering', () => {
     it('should render Auth component with default props', () => {
       render(<AuthWrapper />)
@@ -80,6 +89,65 @@ describe('AuthWrapper', () => {
       render(<AuthWrapper view="sign_up" />)
 
       expect(screen.getByText('View: sign_up')).toBeInTheDocument()
+    })
+
+    it('should render an unavailable state when Supabase is not configured', () => {
+      window.__MINDROOM_CONFIG__ = {
+        apiUrl: 'https://api.mindroom.chat',
+        supabaseUrl: '',
+        supabaseAnonKey: '',
+        platformDomain: 'mindroom.chat',
+      }
+
+      render(<AuthWrapper view="sign_up" />)
+
+      expect(screen.getByText('Account signup is not available yet.')).toBeInTheDocument()
+      expect(screen.queryByTestId('auth-ui')).not.toBeInTheDocument()
+      expect(createClient).not.toHaveBeenCalled()
+    })
+
+    it('should render an unavailable state when runtime config is missing', async () => {
+      window.__MINDROOM_CONFIG__ = undefined
+
+      render(<AuthWrapper />)
+
+      await waitFor(() => {
+        expect(screen.getByText('Sign in is not available yet.')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('auth-ui')).not.toBeInTheDocument()
+      expect(createClient).not.toHaveBeenCalled()
+    })
+
+    it('should hydrate without changing the initial auth markup', async () => {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const recoverableErrors: unknown[] = []
+
+      window.__MINDROOM_CONFIG__ = undefined
+      container.innerHTML = renderToString(<AuthWrapper view="sign_up" />)
+      window.__MINDROOM_CONFIG__ = {
+        apiUrl: 'https://api.mindroom.chat',
+        supabaseUrl: '',
+        supabaseAnonKey: '',
+        platformDomain: 'mindroom.chat',
+      }
+
+      let root: ReturnType<typeof hydrateRoot> | undefined
+      await act(async () => {
+        root = hydrateRoot(container, <AuthWrapper view="sign_up" />, {
+          onRecoverableError: (error) => recoverableErrors.push(error),
+        })
+      })
+
+      await waitFor(() => {
+        expect(within(container).getByText('Account signup is not available yet.')).toBeInTheDocument()
+      })
+      expect(recoverableErrors).toHaveLength(0)
+
+      await act(async () => {
+        root?.unmount()
+      })
+      container.remove()
     })
 
     it('should set correct redirect URL with origin', async () => {
@@ -110,30 +178,29 @@ describe('AuthWrapper', () => {
     })
   })
 
-  describe('Dark Mode Integration', () => {
-    it('should apply dark mode styles when enabled', () => {
+  describe('Glass Auth Styling', () => {
+    it('should use glass-friendly input colors when dark mode is enabled', () => {
       ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
 
       const { Auth } = require('@supabase/auth-ui-react')
       render(<AuthWrapper />)
 
-      // Check that Auth component receives dark mode colors
       const authCall = Auth.mock.calls[0][0]
-      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('#1f2937')
-      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('#374151')
-      expect(authCall.appearance.variables.default.colors.inputText).toBe('#f3f4f6')
+      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('rgba(8, 10, 22, 0.46)')
+      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('rgba(255, 255, 255, 0.18)')
+      expect(authCall.appearance.variables.default.colors.inputText).toBe('#f8f5ff')
     })
 
-    it('should apply light mode styles when disabled', () => {
+    it('should keep the same glass input colors when dark mode is disabled', () => {
       ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
 
       const { Auth } = require('@supabase/auth-ui-react')
       render(<AuthWrapper />)
 
       const authCall = Auth.mock.calls[0][0]
-      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('white')
-      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('#e5e7eb')
-      expect(authCall.appearance.variables.default.colors.inputText).toBe('#1f2937')
+      expect(authCall.appearance.variables.default.colors.inputBackground).toBe('rgba(8, 10, 22, 0.46)')
+      expect(authCall.appearance.variables.default.colors.inputBorder).toBe('rgba(255, 255, 255, 0.18)')
+      expect(authCall.appearance.variables.default.colors.inputText).toBe('#f8f5ff')
     })
   })
 
@@ -232,8 +299,10 @@ describe('AuthWrapper', () => {
 
       const authCall = Auth.mock.calls[0][0]
       expect(authCall.appearance.className.button).toContain('font-semibold')
-      expect(authCall.appearance.className.input).toContain('focus:ring-orange-500')
-      expect(authCall.appearance.className.anchor).toContain('text-orange-600')
+      expect(authCall.appearance.className.button).toContain('bg-white/12')
+      expect(authCall.appearance.className.button).not.toContain('scale')
+      expect(authCall.appearance.className.input).toContain('bg-black/25')
+      expect(authCall.appearance.className.anchor).toContain('text-[#f4b47e]')
     })
 
     it('should set brand colors', () => {
@@ -241,8 +310,8 @@ describe('AuthWrapper', () => {
       render(<AuthWrapper />)
 
       const authCall = Auth.mock.calls[0][0]
-      expect(authCall.appearance.variables.default.colors.brand).toBe('#f97316')
-      expect(authCall.appearance.variables.default.colors.brandAccent).toBe('#ea580c')
+      expect(authCall.appearance.variables.default.colors.brand).toBe('#f4b47e')
+      expect(authCall.appearance.variables.default.colors.brandAccent).toBe('#ffd6b0')
     })
   })
 

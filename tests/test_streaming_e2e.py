@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
@@ -26,6 +27,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
@@ -155,9 +157,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
     ):
         await send_streaming_response(
             client=client,
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=runtime_config,
             runtime_paths=runtime_paths_for(runtime_config),
             response_stream=stream(),
@@ -601,6 +601,10 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
                         display_name="CalculatorAgent",
                         rooms=["!test:localhost"],
                     ),
+                    "helper": AgentConfig(
+                        display_name="HelperAgent",
+                        rooms=["!test:localhost"],
+                    ),
                 },
                 router=RouterConfig(model="default"),
             ),
@@ -639,6 +643,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         # Process - bot should not respond (not mentioned)
         await bot._on_message(test_room, initial_event)
+        await drain_coalescing(bot)
         assert len(events_sent) == 0
 
         # User edits to add mention

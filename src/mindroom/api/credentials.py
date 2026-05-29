@@ -14,6 +14,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
+from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.config.main import Config
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
@@ -58,6 +59,7 @@ _OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed throug
 _OAUTH_CLIENT_CONFIG_FIELDS = frozenset({"client_id", "client_secret", "redirect_uri"})
 _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS = _OAUTH_CLIENT_CONFIG_FIELDS - {"client_secret"}
 _PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
+_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
 
 
 @dataclass(frozen=True)
@@ -160,13 +162,6 @@ class _OAuthCredentialServices:
         """Reject direct dashboard access to non-editable OAuth credential services."""
         for service in services:
             _reject_oauth_token_service(self.match(service))
-
-    def allows_private_scope_for(self, service: str) -> bool:
-        """Return whether this OAuth config service can target a private scope."""
-        if is_oauth_client_config_service(service):
-            return True
-        match = self.match(service)
-        return match is not None and match.tool_config_service and _dashboard_may_edit_oauth_match(match)
 
     def dashboard_may_show_service(self, service: str) -> bool:
         """Return whether a service may appear in dashboard credential listings."""
@@ -411,6 +406,29 @@ def resolve_dashboard_agent_execution_scope_request(
     )
 
 
+def require_agent_credential_management_authorized(
+    request: Request,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> ToolExecutionIdentity:
+    """Require the dashboard requester to be allowed to manage one agent's credentials."""
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        agent_name,
+        runtime_paths=runtime_paths,
+    )
+    requester_id = execution_identity.requester_id
+    if requester_id is None or not is_sender_allowed_for_agent_credential_management(
+        requester_id,
+        agent_name=agent_name,
+        config=config,
+    ):
+        raise HTTPException(status_code=403, detail=f"Not authorized to manage credentials for agent '{agent_name}'")
+    return execution_identity
+
+
 def _reject_raw_worker_targeting(request: Request) -> None:
     for param_name in ("worker_key", "source_worker_key"):
         if request.query_params.get(param_name):
@@ -474,6 +492,12 @@ def resolve_request_credentials_target(
             execution_identity=None,
             allowed_shared_services=None,
         )
+    execution_identity = require_agent_credential_management_authorized(
+        request,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=scope_request.agent_name,
+    )
     execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
         return RequestCredentialsTarget(
@@ -514,11 +538,6 @@ def resolve_request_credentials_target(
             ),
         )
 
-    execution_identity = build_dashboard_execution_identity(
-        request,
-        scope_request.agent_name,
-        runtime_paths=runtime_paths,
-    )
     _reject_unbound_private_dashboard_requester(execution_scope, execution_identity)
     worker_key = require_worker_key_for_scope(
         execution_scope,
@@ -812,6 +831,34 @@ def _require_or_preserve_oauth_client_config_secret(
     _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_secret")
 
 
+def _preserve_optional_oauth_client_config_secret(
+    credentials: dict[str, Any],
+    existing_credentials: dict[str, Any],
+) -> None:
+    submitted_secret = credentials.get("client_secret")
+    if isinstance(submitted_secret, str) and submitted_secret.strip():
+        credentials["client_secret"] = submitted_secret.strip()
+        return
+    credentials.pop("client_secret", None)
+    submitted_client_id = credentials.get("client_id")
+    existing_client_id = existing_credentials.get("client_id")
+    if (
+        isinstance(submitted_client_id, str)
+        and isinstance(existing_client_id, str)
+        and submitted_client_id.strip() == existing_client_id.strip()
+    ):
+        existing_secret = existing_credentials.get("client_secret")
+        if isinstance(existing_secret, str) and existing_secret.strip():
+            credentials["client_secret"] = existing_secret
+
+
+def _oauth_client_config_secret_required(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
+    return (
+        oauth_service_match is None
+        or oauth_service_match.provider.token_endpoint_auth_method != _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD
+    )
+
+
 @dataclass(frozen=True)
 class _DashboardCredentialAccess:
     """Credential storage access for one dashboard request target."""
@@ -830,16 +877,18 @@ class _DashboardCredentialAccess:
     ) -> _DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
         oauth_services = _oauth_services_for_request(request)
-        oauth_services.reject_non_editable_services(service_names)
-        allow_oauth_private_scopes = any(
-            oauth_services.allows_private_scope_for(service) for service in service_names
+        # Token services are rejected below, but they still need target resolution
+        # first so agent-scoped requests run authorization before route-specific 400s.
+        oauth_service_requires_target_resolution = any(
+            oauth_services.match(service) is not None for service in service_names
         ) and _request_may_target_scoped_credentials(request, agent_name)
         target = resolve_request_credentials_target(
             request,
             agent_name=agent_name,
             service_names=service_names,
-            allow_private_scopes=allow_private_scopes or allow_oauth_private_scopes,
+            allow_private_scopes=allow_private_scopes or oauth_service_requires_target_resolution,
         )
+        oauth_services.reject_non_editable_services(service_names)
         return cls(target=target, oauth_services=oauth_services)
 
     def match(self, service: str) -> _OAuthCredentialServiceMatch | None:
@@ -894,7 +943,10 @@ class _DashboardCredentialAccess:
             _reject_invalid_client_config_field_values(credentials)
             existing_credentials = load_credentials_for_target(service, self.target) or {}
             _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_id")
-            _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
+            if _oauth_client_config_secret_required(match):
+                _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
+            else:
+                _preserve_optional_oauth_client_config_secret(credentials, existing_credentials)
             return credentials
         return credentials
 
@@ -1142,16 +1194,14 @@ async def copy_credentials(
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    destination_match = _oauth_service_match(request, service)
-    source_match = _oauth_service_match(request, source_service)
-    _reject_oauth_token_service(destination_match)
-    _reject_oauth_token_service(source_match)
-    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service, source_service),
     )
+    destination_match = _oauth_service_match(request, service)
+    source_match = _oauth_service_match(request, source_service)
+    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     source_creds = access.load(source_service)
     destination_creds = access.load(service)
 
@@ -1177,9 +1227,9 @@ async def validate_credentials(
 ) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
-    _reject_oauth_token_service(_oauth_service_match(request, service))
     # This is a placeholder - actual testing would depend on the service
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    _reject_oauth_token_service(_oauth_service_match(request, service))
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:

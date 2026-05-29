@@ -40,7 +40,7 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 
 ```bash
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
-uvx mindroom config init --profile public
+uvx mindroom config init
 $EDITOR ~/.mindroom/.env
 uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run

@@ -838,7 +838,7 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             use_ai_decision=False,
-            available_agents_in_room=[],
+            available_responders_in_room=[],
         )
 
         assert result.outcome is TeamOutcome.REJECT
@@ -878,7 +878,7 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             use_ai_decision=False,
-            available_agents_in_room=[
+            available_responders_in_room=[
                 entity_ids(config, runtime_paths)["calculator"],
                 entity_ids(config, runtime_paths)["general"],
             ],
@@ -923,7 +923,7 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             use_ai_decision=False,
-            available_agents_in_room=[entity_ids(config, runtime_paths_for(config))["calculator"]],
+            available_responders_in_room=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             materializable_agent_names={"calculator"},
         )
 
@@ -1022,7 +1022,7 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             use_ai_decision=False,
-            available_agents_in_room=[
+            available_responders_in_room=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ],
@@ -1078,7 +1078,7 @@ class TestRouterTeamFormation:
             config=config,
             room=room,
             use_ai_decision=False,
-            available_agents_in_room=[
+            available_responders_in_room=[
                 entity_ids(config, runtime_paths_for(config))["alpha"],
                 entity_ids(config, runtime_paths_for(config))["general"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],

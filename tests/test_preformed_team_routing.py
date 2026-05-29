@@ -31,6 +31,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
     patch_response_runner_module,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -268,12 +269,16 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
             nio.RoomSendResponse.from_dict({"event_id": "$edit"}, "!room:localhost"),
         ]
         await bot._generate_response(
-            room_id="!room:localhost",
             prompt="@team remember this",
-            reply_to_event_id="$evt1",
-            thread_id=None,
             thread_history=thread_history,
             user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id="!room:localhost",
+                reply_to_event_id="$evt1",
+                prompt="@team remember this",
+                user_id="@user:localhost",
+                agent_name=bot.agent_name,
+            ),
         )
 
     if scheduled_tasks:
@@ -323,13 +328,17 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         ),
     ) as mock_edit:
         resolution = await bot._generate_response(
-            room_id="!room:localhost",
             prompt="@t1 please retry",
-            reply_to_event_id="$evt1",
-            thread_id=None,
             thread_history=[],
             existing_event_id="$existing_response",
             user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id="!room:localhost",
+                reply_to_event_id="$evt1",
+                prompt="@t1 please retry",
+                user_id="@user:localhost",
+                agent_name=bot.agent_name,
+            ),
         )
 
     assert resolution == "$existing_response"
@@ -345,7 +354,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     config_with_team: Config,
     tmp_path: Path,
 ) -> None:
-    """TeamBot should treat a plain reply as a plain reply even if it points at a threaded event."""
+    """TeamBot should answer the prompt event instead of following a stale plain-reply target."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
@@ -370,17 +379,21 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
 
     team_user_id = ids["t1"].full_id
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
-    event = MagicMock()
-    event.sender = "@user:localhost"
-    event.body = "@t1 please continue"
-    event.event_id = "$evt_plain_reply"
-    event.source = {
-        "content": {
-            "body": event.body,
-            "m.mentions": {"user_ids": [team_user_id]},
-            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}},
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$evt_plain_reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "@t1 please continue",
+                "m.mentions": {"user_ids": [team_user_id]},
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}},
+            },
         },
-    }
+    )
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
@@ -403,8 +416,8 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     assert bot.client.room_send.call_count >= 1
     first_content = bot.client.room_send.call_args_list[0].kwargs["content"]
     assert first_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$evt_plain_reply"
-    assert first_content["m.relates_to"].get("rel_type") is None
-    assert first_content["m.relates_to"].get("event_id") is None
+    assert first_content["m.relates_to"]["rel_type"] == "m.thread"
+    assert first_content["m.relates_to"]["event_id"] == "$evt_plain_reply"
 
 
 @pytest.mark.asyncio

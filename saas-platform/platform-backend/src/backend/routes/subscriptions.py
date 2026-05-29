@@ -5,6 +5,7 @@ from typing import Annotated, Any
 
 from backend.config import logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
+from backend.entitlements import decorate_subscription_for_response, is_expired_trial
 from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -43,20 +44,21 @@ async def get_user_subscription(request: Request, user: Annotated[dict, Depends(
         create_result = sb.table("subscriptions").insert(subscription_data).execute()
         if create_result.data:
             subscription = create_result.data[0]
-            subscription["max_storage_gb"] = limits["max_storage_gb"]
-            return subscription
+            return decorate_subscription_for_response(subscription, plan_limits=limits)
 
         logger.error(f"Failed to create subscription for account {account_id}")
         raise HTTPException(status_code=500, detail="Failed to create subscription")
 
-    # Add max_storage_gb from pricing config if not in database
     subscription = result.data[0]
-    if "max_storage_gb" not in subscription or subscription["max_storage_gb"] is None:
-        tier = subscription.get("tier", "free")
-        limits = get_plan_limits_from_metadata(tier)
-        subscription["max_storage_gb"] = limits["max_storage_gb"]
+    if is_expired_trial(subscription):
+        now_iso = datetime.now(UTC).isoformat()
+        sb.table("subscriptions").update({"status": "paused", "updated_at": now_iso}).eq(
+            "id", subscription["id"]
+        ).execute()
+        subscription["status"] = "paused"
+        subscription["updated_at"] = now_iso
 
-    return subscription
+    return decorate_subscription_for_response(subscription)
 
 
 @router.post("/my/subscription/cancel", response_model=SubscriptionCancelResponse)
@@ -65,9 +67,6 @@ async def cancel_subscription(
     req: Request, request: CancelSubscriptionRequest, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Cancel subscription."""
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-
     sb = ensure_supabase()
     account_id = user["account_id"]
 
@@ -85,6 +84,8 @@ async def cancel_subscription(
         raise HTTPException(status_code=400, detail="No active subscription found")
 
     stripe_sub_id = subscription["stripe_subscription_id"]
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
 
     try:
         if request.cancel_at_period_end:
@@ -111,9 +112,6 @@ async def cancel_subscription(
 @limiter.limit("5/minute")  # Sensitive operation
 async def reactivate_subscription(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Reactivate a cancelled subscription (if still in billing period)."""
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-
     sb = ensure_supabase()
     account_id = user["account_id"]
 
@@ -131,6 +129,8 @@ async def reactivate_subscription(request: Request, user: Annotated[dict, Depend
         raise HTTPException(status_code=400, detail="No Stripe subscription found")
 
     stripe_sub_id = subscription["stripe_subscription_id"]
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
 
     try:
         # Reactivate by removing the cancel_at_period_end flag

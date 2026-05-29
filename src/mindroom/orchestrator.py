@@ -23,6 +23,7 @@ from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     configured_bot_user_ids_for_room,
     entity_identity_registry,
+    is_configured_room,
 )
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
@@ -38,11 +39,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
-from mindroom.matrix.rooms import (
-    ensure_all_rooms_exist,
-    ensure_root_space,
-    ensure_user_in_rooms,
-)
+from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
     auto_resume_interrupted_threads,
@@ -153,14 +150,22 @@ def _signal_name(sig: int) -> str:
     return str(sig)
 
 
-def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, reason: str) -> NoReturn:
+def _raise_embedded_api_server_exit(
+    api_server: _EmbeddedApiServerContext,
+    *,
+    reason: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
     """Raise the fatal lifecycle error for an unexpected API server exit."""
     logger.error(
         "fatal_embedded_api_server_exit",
         **api_server.log_context(),
         reason=reason,
+        exc_info=(type(cause), cause, cause.__traceback__) if cause is not None else None,
     )
     msg = "Embedded API server exited unexpectedly"
+    if cause is not None:
+        raise RuntimeError(msg) from cause
     raise RuntimeError(msg)
 
 
@@ -1408,7 +1413,7 @@ class _MultiAgentOrchestrator:
         if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
             return
-        if plan.matrix_space_changed:
+        if plan.matrix_space_changed or plan.room_metadata_changed:
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
 
@@ -1606,16 +1611,18 @@ class _MultiAgentOrchestrator:
             return
 
         normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
+        root_space_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
         root_space_id = await ensure_root_space(
             router_bot.client,
             config,
             self.runtime_paths,
             normalized_room_ids,
+            admin_user_ids=root_space_user_ids,
         )
         if root_space_id is None:
             return
 
-        invite_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
+        invite_user_ids = root_space_user_ids
         if not invite_user_ids:
             return
 
@@ -1751,12 +1758,13 @@ class _MultiAgentOrchestrator:
 
         for room_id in joined_rooms:
             configured_bots = configured_bot_user_ids_for_room(config, room_id, self.runtime_paths)
-            if not configured_bots:
+            if not configured_bots and not is_configured_room(config, room_id, self.runtime_paths):
                 continue
 
             current_members = await get_room_members(router_bot.client, room_id)
             await self._invite_authorized_users_to_room(room_id, current_members, authorized_user_ids, config)
-            await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
+            if configured_bots:
+                await self._invite_configured_bots_to_room(room_id, current_members, configured_bots)
 
         logger.info("Ensured room invitations for all configured responders and authorized users")
 
@@ -1853,7 +1861,10 @@ async def _run_api_server(
     config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = _SignalAwareUvicornServer(config, shutdown_requested)
     logger.info("embedded_api_server_started", **api_server.log_context())
-    await server.serve()
+    try:
+        await server.serve()
+    except SystemExit as exc:
+        _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
     logger.info(
         "embedded_api_server_serve_returned",

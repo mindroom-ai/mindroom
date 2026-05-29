@@ -35,7 +35,13 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
-from tests.conftest import bind_runtime_paths, replace_turn_controller_deps, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    replace_turn_controller_deps,
+    request_envelope,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -334,7 +340,14 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         ),
         target=target,
         correlation_id="$event:localhost",
-        envelope=MagicMock(),
+        envelope=request_envelope(
+            room_id=target.room_id,
+            reply_to_event_id=target.reply_to_event_id or "$event:localhost",
+            target=target,
+            prompt=event.body,
+            user_id="@user:localhost",
+            agent_name="general",
+        ),
     )
 
     await controller._execute_response_action(

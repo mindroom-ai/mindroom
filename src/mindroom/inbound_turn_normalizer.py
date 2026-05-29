@@ -16,7 +16,9 @@ from mindroom.attachments import (
     register_thread_history_media_attachments,
     resolve_thread_attachment_ids,
 )
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
 from mindroom.matrix.image_handler import download_image
@@ -32,7 +34,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
-from mindroom.voice_handler import prepare_voice_message
+from mindroom.voice_handler import prepare_raw_voice_fallback_message, prepare_voice_message
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,7 +44,6 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.constants import RuntimePaths
-    from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
@@ -59,14 +60,14 @@ class VoiceNormalizationRequest:
 
     room: nio.MatrixRoom
     event: AudioMessageEvent
+    thread_id: str | None
 
 
 @dataclass(frozen=True)
 class _VoiceNormalizationResult:
-    """Normalized text event plus resolved delivery thread for one audio turn."""
+    """Normalized text event for one audio turn."""
 
     event: PreparedTextEvent
-    effective_thread_id: str | None
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ class DispatchPayloadWithAttachmentsRequest:
     media_thread_id: str | None
     thread_history: Sequence[ResolvedVisibleMessage]
     fallback_images: list[Image] | None = None
+    trusted_current_attachment_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -117,7 +119,6 @@ class InboundTurnNormalizerDeps:
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths
-    conversation_resolver: ConversationResolver
 
 
 @dataclass(frozen=True)
@@ -157,12 +158,7 @@ class InboundTurnNormalizer:
     async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult | None:
         """Normalize one audio message into a prepared text event."""
         client = self._client()
-        target = await self.deps.conversation_resolver.resolve_dispatch_target(
-            request.room,
-            request.event,
-            caller_label="voice_normalization",
-        )
-        effective_thread_id = target.resolved_thread_id
+        effective_thread_id = request.thread_id
         with bound_log_context(room_id=request.room.room_id, thread_id=effective_thread_id):
             prepared_voice = await prepare_voice_message(
                 client,
@@ -185,13 +181,45 @@ class InboundTurnNormalizer:
                         **prepared_voice.source,
                         "content": {
                             **prepared_voice.source.get("content", {}),
-                            "com.mindroom.source_kind": "voice",
+                            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
                         },
                     },
                     server_timestamp=request.event.server_timestamp,
-                    source_kind_override="voice",
+                    source_kind_override=VOICE_SOURCE_KIND,
                 ),
-                effective_thread_id=effective_thread_id,
+            )
+
+    async def prepare_raw_voice_fallback_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult:
+        """Register raw audio and return a prepared fallback event without STT."""
+        client = self._client()
+        effective_thread_id = request.thread_id
+        with bound_log_context(room_id=request.room.room_id, thread_id=effective_thread_id):
+            prepared_voice = await prepare_raw_voice_fallback_message(
+                client,
+                self.deps.storage_path,
+                request.room,
+                request.event,
+                self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                thread_id=effective_thread_id,
+            )
+            return _VoiceNormalizationResult(
+                event=PreparedTextEvent(
+                    sender=request.event.sender,
+                    event_id=request.event.event_id,
+                    body=prepared_voice.text,
+                    source={
+                        **prepared_voice.source,
+                        "content": {
+                            **prepared_voice.source.get("content", {}),
+                            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                        },
+                    },
+                    server_timestamp=request.event.server_timestamp
+                    if isinstance(request.event.server_timestamp, int)
+                    else None,
+                    source_kind_override=VOICE_SOURCE_KIND,
+                ),
             )
 
     async def prepare_file_sidecar_text_event(
@@ -340,20 +368,40 @@ class InboundTurnNormalizer:
             thread_id=request.media_thread_id,
             thread_history=request.thread_history,
         )
+        trusted_current_attachment_ids = merge_attachment_ids(request.trusted_current_attachment_ids)
         attachment_ids = merge_attachment_ids(
             request.current_attachment_ids,
             thread_attachment_ids,
             history_attachment_ids,
             history_media_attachment_ids,
         )
+        scoped_attachment_ids = [
+            attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
+        ]
         resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
             resolve_attachment_media(
                 self.deps.storage_path,
-                attachment_ids,
+                scoped_attachment_ids,
                 room_id=request.room_id,
                 thread_id=request.media_thread_id,
             )
         )
+        if trusted_current_attachment_ids:
+            (
+                trusted_resolved_attachment_ids,
+                trusted_audio,
+                trusted_images,
+                trusted_files,
+                trusted_videos,
+            ) = resolve_attachment_media(
+                self.deps.storage_path,
+                trusted_current_attachment_ids,
+            )
+            resolved_attachment_ids = merge_attachment_ids(trusted_resolved_attachment_ids, resolved_attachment_ids)
+            attachment_audio = [*trusted_audio, *attachment_audio]
+            attachment_images = [*trusted_images, *attachment_images]
+            attachment_files = [*trusted_files, *attachment_files]
+            attachment_videos = [*trusted_videos, *attachment_videos]
         if request.fallback_images:
             attachment_images = (
                 [*attachment_images, *request.fallback_images] if attachment_images else list(request.fallback_images)

@@ -18,6 +18,7 @@ from mindroom import runtime_env_policy
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
+VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
@@ -787,13 +788,19 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+SOURCE_KIND_KEY = "com.mindroom.source_kind"
+HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
+SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
+MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
+MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
+MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
@@ -820,6 +827,7 @@ OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 # Other modules derive their own views from this single source of truth.
 PROVIDER_ENV_KEYS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "azure": runtime_env_policy.AZURE_OPENAI_ENV_BY_KEY["api_key"],
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",

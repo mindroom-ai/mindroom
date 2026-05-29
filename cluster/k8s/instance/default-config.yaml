@@ -219,7 +219,7 @@ agents:
     - Highlight key developments and their significance.
     learning: true
     learning_mode: always
-    model: gpt_oss_120b
+    model: nemotron
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -380,43 +380,61 @@ memory:
   llm:
     provider: openai
     config:
-      model: gpt-5-nano-2025-08-07
+      model: gpt-5.4-nano
       temperature: 0.1
       top_p: 1
 models:
   default:
     provider: openrouter
-    id: google/gemini-2.5-flash
-  gpt5nano:
-    provider: openai
-    id: gpt-5-nano-2025-08-07
-  sonnet:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4-5
-  deepseek:
-    provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  gemini_flash:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  glm45:
-    provider: openrouter
-    id: z-ai/glm-4.5
+    id: google/gemini-3.5-flash
+    context_window: 1000000
   gpt5mini:
     provider: openrouter
-    id: google/gemini-2.5-flash
-  haiku:
-    provider: openrouter
-    id: google/gemini-2.5-flash
+    id: openai/gpt-5.4-mini
+    context_window: 400000
+  gpt5nano:
+    provider: openai
+    id: gpt-5.4-nano
+    context_window: 400000
   opus:
     provider: openrouter
-    id: anthropic/claude-sonnet-4-5
-  gpt4o:
+    id: anthropic/claude-opus-4.8
+    context_window: 1000000
+  sonnet:
     provider: openrouter
-    id: anthropic/claude-sonnet-4-5
-  gpt_oss_120b:
+    id: anthropic/claude-sonnet-4.6
+    context_window: 1000000
+  haiku:
     provider: openrouter
-    id: google/gemini-2.5-flash
+    id: anthropic/claude-haiku-4.5
+    context_window: 200000
+  gemini_flash:
+    provider: openrouter
+    id: google/gemini-3.5-flash
+    context_window: 1000000
+  gemini_lite:
+    provider: openrouter
+    id: google/gemini-3.1-flash-lite-preview
+  deepseek:
+    provider: openrouter
+    id: deepseek/deepseek-v4-pro
+    context_window: 1048576
+  glm:
+    provider: openrouter
+    id: z-ai/glm-5.1
+    context_window: 202752
+  kimi:
+    provider: openrouter
+    id: moonshotai/kimi-k2.6
+    context_window: 262144
+  tencent_hy3:
+    provider: openrouter
+    id: tencent/hy3-preview
+    context_window: 262144
+  nemotron:
+    provider: openrouter
+    id: nvidia/nemotron-3-super-120b-a12b:free
+    context_window: 262144
 plugins: []
 room_models:
   research: haiku
@@ -450,5 +468,5 @@ voice:
   intelligence:
     model: sonnet
   stt:
-    model: whisper-1
+    model: gpt-4o-transcribe
     provider: openai

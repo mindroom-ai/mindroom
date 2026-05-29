@@ -11,13 +11,17 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_WARMUP_SUFFIX_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
+    _SIDECAR_UPLOAD_FALLBACK_INDICATOR,
     _calculate_event_size,
     _create_preview,
     _is_edit_message,
@@ -27,6 +31,43 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
+
+_SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
+
+
+class _UploadClient:
+    rooms: dict = {}  # noqa: RUF012
+
+    def __init__(self, upload_result: object | BaseException) -> None:
+        self.upload_result = upload_result
+        self.uploaded_data: bytes | None = None
+
+    async def upload(self, **kwargs) -> tuple[object, None]:  # noqa: ANN003
+        if isinstance(self.upload_result, BaseException):
+            raise self.upload_result
+        data_provider = kwargs.get("data_provider")
+        if data_provider:
+            data = data_provider(None, None)
+            self.uploaded_data = data.read()
+        return self.upload_result, None
+
+
+def _large_text_content(prefix: str) -> dict[str, str]:
+    return {"body": prefix + ("x" * 100000), "msgtype": "m.text"}
+
+
+def _assert_text_sidecar_fallback(result: dict[str, object], expected_prefix: str) -> None:
+    assert result["msgtype"] == "m.text"
+    assert isinstance(result["body"], str)
+    assert result["body"].startswith(expected_prefix)
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in result["body"]
+    assert "m.file" not in result.values()
+    assert "filename" not in result
+    assert "info" not in result
+    assert "url" not in result
+    assert "file" not in result
+    assert "io.mindroom.long_text" not in result
+    assert _calculate_event_size(result) <= _NORMAL_MESSAGE_LIMIT
 
 
 def test_calculate_event_size() -> None:
@@ -210,6 +251,239 @@ async def test_prepare_large_message_truncation() -> None:
 
     # Preview should fit in limit
     assert _calculate_event_size(result) <= _NORMAL_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_upload_failure_falls_back_to_text() -> None:
+    """Failed JSON sidecar uploads should not create m.file events without media references."""
+    client = _UploadClient(RuntimeError("upload failed"))
+    content = _large_text_content("upload failure ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "upload failure ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_missing_content_uri_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upload responses without MXC URIs should not create malformed m.file previews."""
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.matrix.large_messages.logger", mock_logger)
+    client = _UploadClient(nio.UploadResponse(""))
+    content = _large_text_content("missing uri ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "missing uri ")
+    mock_logger.warning.assert_any_call(
+        "large_message_sidecar_unavailable_using_text_fallback",
+        room_id="!room:server",
+        original_size_bytes=_calculate_event_size(content),
+        is_edit=False,
+        has_mxc_uri=False,
+        has_file_info=False,
+    )
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "file_info",
+    [
+        None,
+        {},
+        {"size": 123},
+        {"mimetype": "application/json"},
+    ],
+)
+async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+    file_info: dict[str, object] | None,
+) -> None:
+    """Sidecar uploads without usable file metadata should use text instead of broken m.file."""
+
+    async def missing_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object] | None]:
+        return "mxc://server/missing-metadata", file_info
+
+    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", missing_file_metadata)
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    content = _large_text_content("missing metadata ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "missing metadata ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_back_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted sidecars need encrypted file metadata, not just size and mimetype."""
+
+    async def incomplete_encrypted_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        return "mxc://server/incomplete-encrypted-metadata", {
+            "size": 123,
+            "mimetype": "application/json",
+        }
+
+    room = MagicMock()
+    room.encrypted = True
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    client.rooms = {"!room:server": room}
+    monkeypatch.setattr(
+        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        incomplete_encrypted_file_metadata,
+    )
+    content = _large_text_content("encrypted missing metadata ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    _assert_text_sidecar_fallback(result, "encrypted missing metadata ")
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted sidecars with complete file metadata should keep the m.file preview."""
+    mxc_uri = "mxc://server/encrypted-sidecar"
+    file_info = {
+        "url": mxc_uri,
+        "key": {"kty": "oct", "k": "secret"},
+        "iv": "iv-value",
+        "hashes": {"sha256": "sha256-value"},
+        "v": "v2",
+        "size": 123,
+        "mimetype": "application/json",
+    }
+
+    async def encrypted_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        return mxc_uri, file_info
+
+    room = MagicMock()
+    room.encrypted = True
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    client.rooms = {"!room:server": room}
+    monkeypatch.setattr("mindroom.matrix.large_messages._upload_content_json_sidecar", encrypted_file_metadata)
+    content = _large_text_content("encrypted sidecar ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result["msgtype"] == "m.file"
+    assert result["file"] == file_info
+    assert "url" not in result
+    assert result["io.mindroom.long_text"]["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming edit previews should not advertise unusable encrypted sidecars."""
+
+    async def incomplete_encrypted_file_metadata(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        _full_content: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        return "mxc://server/incomplete-streaming-sidecar", {
+            "size": 123,
+            "mimetype": "application/json",
+        }
+
+    room = MagicMock()
+    room.encrypted = True
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
+    client.rooms = {"!room:server": room}
+    monkeypatch.setattr(
+        "mindroom.matrix.large_messages._upload_content_json_sidecar",
+        incomplete_encrypted_file_metadata,
+    )
+    text = "streaming encrypted fallback " + ("z" * 60000)
+    edit_content = {
+        "body": "* " + text,
+        "m.new_content": {
+            "body": text,
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    inner = result["m.new_content"]
+    assert inner["msgtype"] == "m.text"
+    assert "file" not in inner
+    assert "url" not in inner
+    assert "io.mindroom.long_text" not in inner
+    assert "[Streaming preview truncated]" in inner["body"]
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_edit_message_upload_failure_falls_back_to_text() -> None:
+    """Edit fallback should stay textual and fit inside the Matrix hard limit."""
+    client = _UploadClient(RuntimeError("upload failed"))
+    text = "edit fallback " + ("y" * 50000)
+    relates_to = {"rel_type": "m.replace", "event_id": "$abc"}
+    edit_content = {
+        "body": "* " + text,
+        "m.new_content": {"body": text, "msgtype": "m.text"},
+        "m.relates_to": relates_to,
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(client, "!room:server", edit_content)
+
+    assert result["msgtype"] == "m.text"
+    assert result["m.relates_to"] == relates_to
+    assert isinstance(result["body"], str)
+    assert result["body"].startswith("* edit fallback ")
+    inner = result["m.new_content"]
+    assert inner["msgtype"] == "m.text"
+    assert inner["m.relates_to"] == relates_to
+    assert inner["body"].startswith("edit fallback ")
+    assert _SIDECAR_UPLOAD_FALLBACK_TEXT in inner["body"]
+    assert "m.file" not in inner.values()
+    assert "filename" not in inner
+    assert "info" not in inner
+    assert "url" not in inner
+    assert "file" not in inner
+    assert "io.mindroom.long_text" not in inner
+    assert _calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
+    """Successful JSON sidecar uploads should keep the existing m.file preview behavior."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    content = _large_text_content("successful sidecar ")
+
+    result = await prepare_large_message(client, "!room:server", content)
+
+    assert result["msgtype"] == "m.file"
+    assert result["url"] == "mxc://server/sidecar"
+    assert result["info"]["mimetype"] == "application/json"
+    assert result["io.mindroom.long_text"]["version"] == 2
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == content
 
 
 @pytest.mark.asyncio
@@ -501,9 +775,9 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     content = {
         "body": "trusted metadata " * 10000,
         "msgtype": "m.text",
-        "com.mindroom.source_kind": source_kind,
+        SOURCE_KIND_KEY: source_kind,
         "com.mindroom.hook_source": "message_received",
-        "com.mindroom.skip_mentions": True,
+        SKIP_MENTIONS_KEY: True,
         "formatted_body": '<a href="https://matrix.to/#/@mindroom_agent:localhost">agent</a>',
         "m.mentions": {"user_ids": ["@mindroom_agent:localhost"]},
         ATTACHMENT_IDS_KEY: ["att-sidecar"],
@@ -527,9 +801,9 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
     resolved = await extract_and_resolve_message(event, client)
 
     assert resolved["body"] == content["body"]
-    assert resolved["content"]["com.mindroom.source_kind"] == source_kind
+    assert resolved["content"][SOURCE_KIND_KEY] == source_kind
     assert resolved["content"]["com.mindroom.hook_source"] == "message_received"
-    assert resolved["content"]["com.mindroom.skip_mentions"] is True
+    assert resolved["content"][SKIP_MENTIONS_KEY] is True
     assert resolved["content"]["formatted_body"] == content["formatted_body"]
     assert resolved["content"]["m.mentions"] == content["m.mentions"]
     assert resolved["content"][ATTACHMENT_IDS_KEY] == ["att-sidecar"]

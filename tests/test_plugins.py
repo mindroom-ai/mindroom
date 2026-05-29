@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,6 +25,9 @@ from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
@@ -48,6 +53,28 @@ def _minimal_runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_NAMESPACE": "",
         },
     )
+
+
+@contextmanager
+def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> Iterator[None]:
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+
+    try:
+        yield
+    finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_") or any(
+                module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in module_prefixes
+            ):
+                sys.modules.pop(module_name, None)
 
 
 def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_errors(
@@ -349,6 +376,42 @@ def test_explicit_python_plugin_spec_requires_importable_module(tmp_path: Path) 
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_skips_system_exit_while_resolving_explicit_python_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broken package import side effects should not terminate tolerant plugin loading."""
+    site_packages = tmp_path / "site-packages"
+    package_root = site_packages / "bad_pkg"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("raise SystemExit('package exit')\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    config = Config(plugins=["python:bad_pkg.sub"])
+
+    with _preserved_plugin_loader_state(module_prefixes=("bad_pkg",)):
+        assert load_plugins(config, runtime_paths) == []
+
+
+def test_load_plugins_propagates_keyboard_interrupt_while_resolving_explicit_python_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator interrupts during plugin spec resolution should still terminate startup."""
+    site_packages = tmp_path / "site-packages"
+    package_root = site_packages / "bad_pkg"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("raise KeyboardInterrupt('stop')\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    config = Config(plugins=["python:bad_pkg.sub"])
+
+    with _preserved_plugin_loader_state(module_prefixes=("bad_pkg",)), pytest.raises(KeyboardInterrupt):
+        load_plugins(config, runtime_paths)
 
 
 def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> None:
@@ -1647,6 +1710,54 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
         set_plugin_skill_roots(original_plugin_roots)
 
 
+def test_load_plugins_skips_system_exit_during_plugin_module_execution(tmp_path: Path) -> None:
+    """A plugin module raising SystemExit at import time should be treated as a broken plugin."""
+    good_root = tmp_path / "plugins" / "good"
+    bad_root = tmp_path / "plugins" / "bad"
+    good_root.mkdir(parents=True)
+    bad_root.mkdir(parents=True)
+    (good_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "good_plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (bad_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad_plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (good_root / "hooks.py").write_text(
+        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n",
+        encoding="utf-8",
+    )
+    (bad_root / "hooks.py").write_text("raise SystemExit('plugin exit')\n", encoding="utf-8")
+
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    config = Config(plugins=["./plugins/good", "./plugins/bad"])
+
+    with _preserved_plugin_loader_state():
+        plugins = load_plugins(config, runtime_paths)
+
+        assert [plugin.name for plugin in plugins] == ["good_plugin"]
+        registry = HookRegistry.from_plugins(plugins)
+        assert [hook.plugin_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["good_plugin"]
+
+
+def test_load_plugins_propagates_keyboard_interrupt_during_plugin_module_execution(tmp_path: Path) -> None:
+    """Operator interrupts during plugin module execution should still terminate startup."""
+    plugin_root = tmp_path / "plugins" / "bad"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad_plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("raise KeyboardInterrupt('stop')\n", encoding="utf-8")
+
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    config = Config(plugins=["./plugins/bad"])
+
+    with _preserved_plugin_loader_state(), pytest.raises(KeyboardInterrupt):
+        load_plugins(config, runtime_paths)
+
+
 def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
     """Duplicate plugin manifest names should fail before any plugin module imports run."""
     first_root = tmp_path / "plugins" / "first"
@@ -1942,6 +2053,69 @@ def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> No
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+def test_load_oauth_providers_isolates_system_exit_from_plugin_callback(tmp_path: Path) -> None:
+    """OAuth plugin callbacks should not be able to terminate provider loading."""
+    plugin_root = tmp_path / "plugins" / "bad-oauth"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad-oauth", "oauth_module": "oauth_provider.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "oauth_provider.py").write_text(
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    del settings, runtime_paths\n"
+        "    raise SystemExit('oauth exit')\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    baseline_config = _bind_runtime_paths(Config(plugins=[]), config_path)
+    config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    with _preserved_plugin_loader_state():
+        try:
+            clear_oauth_provider_cache()
+            baseline_providers = load_oauth_providers(baseline_config, runtime_paths)
+            clear_oauth_provider_cache()
+            providers = load_oauth_providers(config, runtime_paths)
+            assert providers == baseline_providers
+
+            clear_oauth_provider_cache()
+            with pytest.raises(plugin_module.PluginValidationError, match="Plugin OAuth provider registration failed"):
+                load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        finally:
+            clear_oauth_provider_cache()
+
+
+def test_load_oauth_providers_propagates_keyboard_interrupt_from_plugin_callback(tmp_path: Path) -> None:
+    """Operator interrupts during plugin OAuth callbacks should still terminate startup."""
+    plugin_root = tmp_path / "plugins" / "bad-oauth"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad-oauth", "oauth_module": "oauth_provider.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "oauth_provider.py").write_text(
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    del settings, runtime_paths\n"
+        "    raise KeyboardInterrupt('stop')\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    with _preserved_plugin_loader_state():
+        try:
+            clear_oauth_provider_cache()
+            with pytest.raises(KeyboardInterrupt):
+                load_oauth_providers(config, runtime_paths)
+        finally:
+            clear_oauth_provider_cache()
 
 
 @pytest.mark.asyncio

@@ -245,8 +245,8 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> None:
-    """Plain-reply unknown commands should not invent a thread root."""
+async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -> None:
+    """Plain-reply unknown commands should answer the command event, not the stale reply target."""
     # Create config
     config = bind_runtime_paths(
         Config(
@@ -336,5 +336,6 @@ async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> N
     msg = sent_messages[0]
     assert msg["room_id"] == "!test:localhost"
     assert "Unknown command" in msg["content"]["body"]
-    assert msg["thread_id"] is None
-    assert msg["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$test_event"}}
+    assert msg["thread_id"] == "$test_event"
+    assert msg["content"]["m.relates_to"]["event_id"] == "$test_event"
+    assert msg["content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$test_event"

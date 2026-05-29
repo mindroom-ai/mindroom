@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
@@ -16,11 +16,18 @@ from .dispatch_handoff import (
     event_content_dict,
     is_media_dispatch_event,
 )
+from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
     import nio
 
-type CoalescingKey = tuple[str, str | None, str]
+
+class CoalescingKey(NamedTuple):
+    """Physical coalescing scope for one requester in one room or thread."""
+
+    room_id: str
+    thread_id: str | None
+    requester_user_id: str
 
 
 @dataclass
@@ -42,6 +49,7 @@ class PendingEvent:
 class CoalescedBatch:
     """One flushed batch ready to dispatch through the text pipeline."""
 
+    coalescing_key: CoalescingKey
     room: nio.MatrixRoom
     primary_event: DispatchEvent
     requester_user_id: str
@@ -96,7 +104,11 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
     return original_sender, raw_audio_fallback
 
 
-_SOURCE_KIND_PRIORITY: dict[str, int] = {"voice": 0, "image": 1, "media": 2}
+_SOURCE_KIND_PRIORITY: dict[str, int] = {
+    VOICE_SOURCE_KIND: 0,
+    IMAGE_SOURCE_KIND: 1,
+    MEDIA_SOURCE_KIND: 2,
+}
 
 
 def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
@@ -142,8 +154,6 @@ def _batch_dispatch_metadata(
         return ()
     if len(ordered_pending_events) == 1 or not any(item.requires_solo_batch for item in metadata):
         return metadata
-    for item in metadata:
-        item.close()
     msg = "Pending dispatch metadata requires solo batches"
     raise ValueError(msg)
 
@@ -162,15 +172,19 @@ def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> d
     }
 
 
-def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]) -> CoalescedBatch:
+def build_coalesced_batch(
+    key: CoalescingKey,
+    pending_events: list[PendingEvent],
+) -> CoalescedBatch:
     """Build one normalized dispatch batch from queued pending events."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
     original_sender, raw_audio_fallback = _batch_metadata(ordered_pending_events)
     return CoalescedBatch(
+        coalescing_key=key,
         room=primary_pending_event.room,
         primary_event=primary_pending_event.event,
-        requester_user_id=key[2],
+        requester_user_id=key.requester_user_id,
         pending_events=tuple(ordered_pending_events),
         prompt=coalesced_prompt(
             [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],

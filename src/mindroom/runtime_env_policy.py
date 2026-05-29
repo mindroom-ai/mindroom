@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "AZURE_OPENAI_ENV_BY_KEY",
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
@@ -49,6 +50,14 @@ VERTEXAI_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "project_id": "ANTHROPIC_VERTEX_PROJECT_ID",
         "region": "CLOUD_ML_REGION",
+    },
+)
+AZURE_OPENAI_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "api_key": "AZURE_OPENAI_API_KEY",
+        "endpoint": "AZURE_OPENAI_ENDPOINT",
+        "api_version": "AZURE_OPENAI_API_VERSION",
+        "deployment": "AZURE_OPENAI_DEPLOYMENT",
     },
 )
 
@@ -142,6 +151,9 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "ACCOUNT_ID",
         "ANTHROPIC_VERTEX_BASE_URL",
         "CUSTOMER_ID",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "AZURE_OPENAI_ENDPOINT",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_CLOUD_PROJECT",

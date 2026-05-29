@@ -11,6 +11,7 @@ from mindroom.config.validation import duplicate_items, validate_history_limit_c
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
+from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -474,7 +475,7 @@ class DefaultsConfig(BaseModel):
 class EmbedderConfig(BaseModel):
     """Configuration for memory embedder."""
 
-    model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
+    model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
     api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(

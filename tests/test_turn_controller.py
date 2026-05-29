@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,11 +12,16 @@ import pytest
 
 from mindroom import interactive
 from mindroom.bot import AgentBot
+from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, IngressOrderReservation, ReadyPendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
     bind_runtime_paths,
@@ -31,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.message_target import MessageTarget
+    from mindroom.hooks import MessageEnvelope
 
 
 async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
@@ -52,6 +58,166 @@ async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 
     except TimeoutError as exc:
         msg = "Timed out waiting for async test condition"
         raise AssertionError(msg) from exc
+
+
+def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
+    """Build one plain Matrix text event."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": body, "msgtype": "m.text"},
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
+def _pending(event: nio.RoomMessageText) -> PendingEvent:
+    """Wrap one Matrix event as pending user ingress."""
+    return PendingEvent(
+        event=event,
+        room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+
+
+@pytest.mark.asyncio
+async def test_late_admit_rejection_closes_completed_ready_task_metadata_once() -> None:
+    """Owner cleanup should close completed ready-task metadata once after late admit rejection."""
+    close_count = 0
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
+    pending_event.dispatch_metadata = (
+        PendingDispatchMetadata(
+            kind="test",
+            payload=object(),
+            close=close_metadata,
+            requires_solo_batch=False,
+        ),
+    )
+
+    async def ready() -> ReadyPendingEvent:
+        return ReadyPendingEvent(pending_event=pending_event)
+
+    class RejectingGate:
+        async def admit(self, *_args: object, **_kwargs: object) -> None:
+            msg = "closed"
+            raise IngressAdmissionClosedError(msg)
+
+        def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
+            reservation.released = True
+            reservation.settled.set()
+
+    reservation = IngressOrderReservation(
+        room_id="!room:localhost",
+        requester_user_id="@user:localhost",
+        received_order=1,
+        receipt_time=1.0,
+    )
+    owner = PromptIngressReservationOwner(gate=RejectingGate(), reservation=reservation)
+    ready_task = asyncio.create_task(ready())
+    await ready_task
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await owner.admit(
+            CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+            ready_task=ready_task,
+            source_event_id="$late:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+
+    await owner.release()
+
+    assert close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cancellation() -> None:
+    """Owner cancellation should close metadata even when a task returns a ready result while cancelling."""
+    close_count = 0
+    cancelled = asyncio.Event()
+
+    def close_metadata() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
+    pending_event.dispatch_metadata = (
+        PendingDispatchMetadata(
+            kind="test",
+            payload=object(),
+            close=close_metadata,
+            requires_solo_batch=False,
+        ),
+    )
+
+    async def ready() -> ReadyPendingEvent:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            return ReadyPendingEvent(pending_event=pending_event)
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    owner = PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    owner.ready_task = asyncio.create_task(ready())
+    await asyncio.sleep(0)
+
+    await owner.cancel_ready_task()
+
+    assert cancelled.is_set()
+    assert close_count == 1
+    await owner.cancel_ready_task()
+    assert close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_release_settles_reservation_when_cancelled_during_ready_task_cleanup() -> None:
+    """Owner release must not orphan its ready task when callback cancellation interrupts cleanup."""
+
+    async def never_ready() -> ReadyPendingEvent | None:
+        await asyncio.Event().wait()
+        return None
+
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    reservation = gate.reserve_order(room_id="!room:localhost", requester_user_id="@user:localhost")
+    owner = PromptIngressReservationOwner(gate=gate, reservation=reservation)
+    ready_task = asyncio.create_task(never_ready())
+    owner.ready_task = ready_task
+
+    try:
+        release_task = asyncio.create_task(owner.release())
+        await asyncio.sleep(0)
+        release_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await release_task
+
+        assert reservation.released
+        assert reservation.settled.is_set()
+        assert ready_task.done()
+        assert ready_task.cancelled()
+        assert owner.ready_task is None
+    finally:
+        if not ready_task.done():
+            ready_task.cancel()
+        await asyncio.gather(ready_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -100,13 +266,11 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         delivery_gateway=bot._delivery_gateway,
     )
 
-    captured_target = None
+    captured_envelope: MessageEnvelope | None = None
+    captured_metadata: dict[str, object] | None = None
 
     async def generate_response(
-        room_id: str,
         prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
         thread_history: list[object],
         existing_event_id: str | None = None,
         existing_event_is_placeholder: bool = False,
@@ -115,22 +279,21 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         attachment_ids: list[str] | None = None,  # noqa: ARG001
         model_prompt: str | None = None,  # noqa: ARG001
         system_enrichment_items: tuple[object, ...] = (),  # noqa: ARG001
-        response_envelope: object | None = None,  # noqa: ARG001
+        response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,  # noqa: ARG001
-        target: MessageTarget | None = None,
-        matrix_run_metadata: dict[str, object] | None = None,  # noqa: ARG001
+        matrix_run_metadata: dict[str, object] | None = None,
     ) -> str | None:
-        nonlocal captured_target
-        captured_target = target
-        assert room_id == room.room_id
+        nonlocal captured_envelope, captured_metadata
+        assert response_envelope is not None
+        captured_envelope = response_envelope
+        captured_metadata = matrix_run_metadata
         assert prompt == "The user selected: Option 1"
-        assert reply_to_event_id == selection.question_event_id
-        assert thread_id == selection.thread_id
+        assert response_envelope.target.room_id == room.room_id
+        assert response_envelope.target.reply_to_event_id == selection.question_event_id
+        assert response_envelope.target.resolved_thread_id == selection.thread_id
         assert thread_history == []
         assert existing_event_id == "$ack:localhost"
         assert existing_event_is_placeholder is True
-        assert target is not None
-        assert target.reply_to_event_id == selection.question_event_id
 
         async def response_stream() -> AsyncIterator[str]:
             yield "Processed selection"
@@ -141,15 +304,12 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         ) as mock_edit:
             outcome = await send_streaming_response(
                 client=bot.client,
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
+                target=response_envelope.target,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 response_stream=response_stream(),
                 existing_event_id=existing_event_id,
                 adopt_existing_placeholder=existing_event_is_placeholder,
-                target=target,
             )
 
         mock_edit.assert_awaited()
@@ -163,6 +323,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         room,
         selection=selection,
         user_id="@user:localhost",
+        source_event_id="$selection:localhost",
     )
 
     bot._delivery_gateway.send_text.assert_awaited_once()
@@ -170,8 +331,11 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id is None
     generate_response_mock.assert_awaited_once()
-    assert captured_target is not None
-    assert captured_target.resolved_thread_id == selection.thread_id
+    assert captured_envelope is not None
+    assert captured_envelope.source_event_id == "$selection:localhost"
+    assert captured_envelope.target.resolved_thread_id == selection.thread_id
+    assert captured_metadata is not None
+    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
 
 
 @pytest.mark.asyncio
@@ -227,6 +391,7 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         room,
         selection=selection,
         user_id="@user:localhost",
+        source_event_id="$selection:localhost",
     )
 
     generate_response_mock.assert_awaited_once()

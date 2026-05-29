@@ -644,7 +644,6 @@ async def _run_scope_compaction(
         summary_input_budget=execution_plan.summary_input_budget_tokens,
         summary_model=summary_model,
         summary_model_name=execution_plan.compaction_model_name,
-        compaction_context_window=execution_plan.compaction_context_window,
         active_context_window=resolved_inputs.active_context_window,
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,

@@ -20,7 +20,7 @@ from mindroom.agent_policy import (
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
 )
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -116,6 +116,7 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "cultures",
+    "rooms",
     "room_models",
     "toolkits",
     "knowledge_bases",
@@ -338,6 +339,7 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
+    rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     toolkits: dict[str, ToolkitDefinition] = Field(
         default_factory=dict,
@@ -613,6 +615,7 @@ class Config(BaseModel):
     def validate_shared_only_integration_assignments(self) -> Config:
         """Reject shared-only integrations on isolating scopes for static and dynamic tool assignments."""
         invalid_assignments: list[str] = []
+        oauth_mcp_server_ids = self.oauth_mcp_server_ids()
         for agent_name in sorted(self.agents):
             scope_label = self.get_agent_scope_label(agent_name)
             execution_scope = self.get_agent_execution_scope(agent_name)
@@ -620,6 +623,7 @@ class Config(BaseModel):
                 self.get_agent_tools(agent_name),
                 execution_scope,
                 configured_mcp_server_ids=self.mcp_servers,
+                oauth_mcp_server_ids=oauth_mcp_server_ids,
             )
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
@@ -1101,6 +1105,13 @@ class Config(BaseModel):
             [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
             execution_scope,
             configured_mcp_server_ids=self.mcp_servers,
+            oauth_mcp_server_ids=self.oauth_mcp_server_ids(),
+        )
+
+    def oauth_mcp_server_ids(self) -> frozenset[str]:
+        """Return configured MCP server ids backed by requester-scoped OAuth."""
+        return frozenset(
+            server_id for server_id, server_config in self.mcp_servers.items() if server_config.auth is not None
         )
 
     def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:
@@ -1516,13 +1527,13 @@ class Config(BaseModel):
         return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
-        """Extract all room aliases configured for agents and teams.
+        """Extract all configured room aliases.
 
         Returns:
-            Set of all unique room aliases from agent and team configurations
+            Set of all unique room aliases from room, agent, and team configurations
 
         """
-        all_room_aliases = set()
+        all_room_aliases = set(self.rooms)
         for agent_config in self.agents.values():
             all_room_aliases.update(agent_config.rooms)
         for team_config in self.teams.values():

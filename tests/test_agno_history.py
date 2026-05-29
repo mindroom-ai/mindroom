@@ -57,7 +57,6 @@ from mindroom.execution_preparation import (
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
     _build_summary_input,
-    _effective_summary_input_budget_tokens,
     _emit_compaction_hook,
     _estimate_history_messages_tokens,
     _estimate_tool_definition_tokens,
@@ -1098,12 +1097,74 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
         )
 
 
-def test_effective_summary_input_budget_caps_per_chunk() -> None:
-    assert _effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
-    assert _effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
-    assert _effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
-    assert _effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
-    assert _effective_summary_input_budget_tokens(100_000, None) == 100_000
+@pytest.mark.asyncio
+async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(tmp_path: Path) -> None:
+    """Regression for ISSUE-216: rewrite must forward the full summary_input_budget.
+
+    Locks the contract that one healthy pass folds every selected run in one summary
+    call sized at the full resolved budget, with no hidden per-call cap by any name.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[
+                Message(role="user", content=f"run-{index} user " + ("u" * 20_000)),
+                Message(role="assistant", content=f"run-{index} assistant " + ("a" * 20_000)),
+            ],
+        )
+        for index in range(1, 6)
+    ]
+    working_session = _session("session-1", runs=runs)
+    summary_inputs: list[str] = []
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=fake_summary),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            wraps=_build_summary_input,
+        ) as build_summary_input_spy,
+    ):
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=None,
+            summary_input_budget=70_000,
+            before_tokens=0,
+            runs_before=len(runs),
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            lifecycle_notice_event_id=None,
+            progress_callback=None,
+            collect_compaction_hook_messages=False,
+        )
+
+    assert rewrite_result is not None
+    assert len(summary_inputs) == 1
+    assert build_summary_input_spy.call_count == 1
+    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 70_000
+    assert "run-1 user" in summary_inputs[0]
+    assert "run-5 user" in summary_inputs[0]
+    assert rewrite_result.compacted_run_count == 5
 
 
 @pytest.mark.asyncio
@@ -1151,7 +1212,6 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
             ),
             available_history_budget=None,
             summary_input_budget=8_000,
-            compaction_context_window=16_000,
             before_tokens=0,
             runs_before=1,
             threshold_tokens=None,
@@ -1609,7 +1669,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             history_settings=history_settings,
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
             active_context_window=16_000,
@@ -3574,7 +3633,6 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             ),
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             before_tokens=0,
             runs_before=2,
             threshold_tokens=None,
@@ -3632,7 +3690,6 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
             ),
             available_history_budget=1,
             summary_input_budget=16_000,
-            compaction_context_window=16_000,
             before_tokens=0,
             runs_before=1,
             threshold_tokens=None,
@@ -3724,7 +3781,6 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             ),
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
             active_context_window=16_000,
@@ -3823,7 +3879,6 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             history_settings=history_settings,
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             before_tokens=before_tokens,
             runs_before=2,
             threshold_tokens=None,

@@ -92,6 +92,8 @@ For `streamable-http` servers, `url` is required.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
+Static `headers` are process-global and shared by every requester.
+Use the OAuth `auth` block for remote MCP servers that need a different bearer token per requester.
 
 ## Per-Server Options
 
@@ -105,6 +107,7 @@ MindRoom resolves those placeholders from the current runtime environment when i
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Optional remote transport headers; supports `${ENV_VAR}` placeholders |
+| `auth` | object | `null` | Optional OAuth configuration for requester-scoped remote MCP access |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names |
 | `include_tools` | list[string] | `[]` | Optional allowlist of remote tool names to expose |
 | `exclude_tools` | list[string] | `[]` | Optional denylist of remote tool names to hide |
@@ -157,9 +160,87 @@ agents:
 These per-agent overrides filter the already discovered catalog for that agent assignment.
 They are useful when one server exposes many tools but one agent should see only a focused subset.
 
-MCP integrations are treated as shared-only integrations.
-Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use `mcp_<server_id>` tools.
-Use unscoped execution or `worker_scope: shared` instead.
+Non-OAuth MCP integrations are treated as shared-only integrations.
+Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use non-OAuth `mcp_<server_id>` tools.
+Use unscoped execution or `worker_scope: shared` for unauthenticated MCP servers and static-header MCP servers.
+OAuth-backed remote MCP servers are the exception because MindRoom loads a scoped OAuth token for the current requester at tool-call time.
+
+## OAuth-Backed Remote MCP
+
+Use `auth.type: oauth` for a remote MCP server that requires a requester-owned OAuth bearer token.
+OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
+
+```yaml
+mcp_servers:
+  example:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    tool_prefix: example
+    auth:
+      type: oauth
+      provider_id: mcp_example
+      display_name: Example MCP
+      resource: https://mcp.example.com/mcp
+      discovery: auto
+      token_endpoint_auth_method: none
+      pkce_code_challenge_method: S256
+      dynamic_client_registration: true
+      scopes: []
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: Use requester-scoped MCP tools
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - mcp_example
+```
+
+MindRoom registers a generated OAuth provider for the server.
+If `provider_id` is omitted, the provider ID defaults to `mcp_<server_id>`.
+When the provider ID starts with `mcp_`, OAuth tokens are stored under `<provider_id>_oauth`, and OAuth client configuration is read from `<provider_id>_oauth_client` unless you specify `client_config_services` or `shared_client_config_services`.
+When a custom provider ID does not start with `mcp_`, MindRoom prefixes `mcp_` for the generated credential service names so the tokens remain classified as MCP-owned runtime credentials.
+
+OAuth-backed MCP servers always expose a stable bridge surface:
+
+- `<prefix>_connection_status`
+- `<prefix>_list_tools`
+- `<prefix>_call_tool`
+
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-specific tool catalog.
+When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
+After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
+After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
+
+`discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
+MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
+It then reads the advertised authorization server and fetches OAuth authorization-server metadata.
+The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
+
+If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
+The generated client registration is stored in the generated OAuth client config service and reused for later users.
+Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
+Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
+
+Use `discovery: manual` when the provider does not publish metadata or when you want to pin endpoints explicitly:
+
+```yaml
+mcp_servers:
+  example_manual:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    auth:
+      type: oauth
+      discovery: manual
+      authorization_url: https://mcp.example.com/oauth/authorize
+      token_url: https://mcp.example.com/oauth/token
+      registration_url: https://mcp.example.com/oauth/register
+      token_endpoint_auth_method: none
+```
+
+OAuth discovery requires HTTPS by default and does not follow redirects.
+For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs, and set `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
 
 ## Tool Naming
 
@@ -345,6 +426,8 @@ If the catalog changed, MindRoom restarts the agents and teams that reference th
 
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
-- MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
+- Non-OAuth MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
+- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and can be used with isolating worker scopes.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.

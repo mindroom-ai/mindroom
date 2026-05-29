@@ -611,6 +611,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_tags"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.subagents"
 depends_on = [
     "mindroom.agent_descriptions",
@@ -619,6 +628,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.responder_availability",
+    "mindroom.thread_tags",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
 ]
@@ -1447,7 +1457,9 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
-depends_on = []
+depends_on = [
+    "mindroom.thread_tags",
+]
 visibility = [
     "mindroom.api.matrix_operations",
     "mindroom.bot",
@@ -1540,9 +1552,17 @@ depends_on = [
 visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
+    "mindroom.custom_tools.thread_tags",
+    "mindroom.thread_tags",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
+]
+
+[[modules]]
+path = "mindroom.thread_tags"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
 ]
 
 [[modules]]
@@ -2035,6 +2055,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.hooks.sender"
 depends_on = [
+    "mindroom.constants",
     "mindroom.hooks.types",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
@@ -2049,6 +2070,27 @@ depends_on = [
     "mindroom.handled_turns",
     "mindroom.thread_utils",
 ]
+
+[[modules]]
+path = "mindroom.prompt_ingress_reservation"
+depends_on = ["mindroom.coalescing"]
+visibility = ["mindroom.turn_controller"]
+
+[[modules]]
+path = "mindroom.text_ingress_dispatch"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.commands.parsing",
+    "mindroom.constants",
+    "mindroom.dispatch_handoff",
+    "mindroom.dispatch_source",
+    "mindroom.handled_turns",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.media",
+    "mindroom.matrix.rooms",
+    "mindroom.timing",
+]
+visibility = ["mindroom.turn_controller"]
 
 [[modules]]
 path = "mindroom.turn_controller"
@@ -2068,8 +2110,10 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
+    "mindroom.prompt_ingress_reservation",
     "mindroom.response_runner",
     "mindroom.routing",
+    "mindroom.text_ingress_dispatch",
     "mindroom.turn_store",
     "mindroom.turn_policy",
 ]
@@ -2103,6 +2147,7 @@ depends_on = [
     "mindroom.attachment_media",
     "mindroom.attachments",
     "mindroom.coalescing",
+    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
@@ -2496,6 +2541,7 @@ expose = [
     "add_room_to_space",
     "create_room",
     "edit_message_result",
+    "ensure_room_admin_power_levels",
     "ensure_thread_tags_power_level",
     "get_joined_rooms",
     "get_room_members",
@@ -2525,6 +2571,7 @@ expose = [
     "add_room_to_space",
     "create_room",
     "create_space",
+    "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
     "ensure_room_join_rule",
     "ensure_room_name",
@@ -2582,6 +2629,7 @@ expose = [
     "fetch_thread_event_sources_via_room_messages",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
@@ -2631,6 +2679,7 @@ expose = [
     "ToolCategory",
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
+    "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
     "ToolStatus",
@@ -2667,6 +2716,7 @@ expose = [
     "ToolCategory",
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
+    "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
     "ToolStatus",
@@ -2860,7 +2910,6 @@ expose = [
     "read_scope_state",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
-    "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",
@@ -2921,11 +2970,15 @@ expose = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "ScheduleFiredContext",
+    "SenderKind",
     "SessionHookContext",
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
+    "TurnIntent",
+    "TurnOrigin",
+    "TurnTrust",
     "build_hook_message_sender",
     "build_hook_matrix_admin",
     "build_hook_room_state_putter",
@@ -2946,7 +2999,6 @@ expose = [
     "render_system_enrichment_block",
     "send_and_track_message",
     "send_hook_message",
-    "should_handle_interactive_text_response",
     "validate_event_name",
 ]
 from = ["mindroom.hooks"]

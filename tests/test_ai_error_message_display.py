@@ -36,7 +36,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
-    resolve_response_thread_root_for_test,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -80,9 +80,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     install_runtime_cache_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
-    )
-    bot._conversation_resolver.resolve_response_thread_root = MagicMock(
-        side_effect=resolve_response_thread_root_for_test,
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
@@ -131,11 +128,14 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        response_envelope=request_envelope(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            prompt=prompt,
+        ),
         existing_event_id=existing_event_id,
     )
 

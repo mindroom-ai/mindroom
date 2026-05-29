@@ -200,7 +200,7 @@ You only run MindRoom locally.
 ### 1. Initialize local config
 
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init
 ```
 
 This creates:
@@ -208,45 +208,60 @@ This creates:
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
-The `--profile public` template defaults to the `openai` provider.
+The default `--matrix-server mindroom.chat` preset uses hosted Matrix and defaults to the `openai` provider.
 Use `--provider` to select a different provider preset:
 
 ```bash
 # Use Anthropic Claude
-uvx mindroom config init --profile public --provider anthropic
+uvx mindroom config init --provider anthropic
+
+# Use Azure OpenAI
+uvx mindroom config init --provider azure
 
 # Use Codex CLI ChatGPT subscription auth
-uvx mindroom config init --profile public-codex
+uvx mindroom config init --provider codex
+
+# Use local Ollama
+uvx mindroom config init --provider ollama
+
+# Use local llama.cpp through its OpenAI-compatible server
+uvx mindroom config init --provider llama.cpp
 
 # Use Vertex AI Claude (Google Cloud)
-uvx mindroom config init --profile public-vertexai-anthropic
+uvx mindroom config init --provider vertexai_claude
 ```
 
-`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
-The shorter `codex` profile alias is also accepted.
-Run `codex login` before starting MindRoom when using this profile.
+Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
+Use `--provider` for the model provider.
+Run `codex login` before starting MindRoom when using `--provider codex`.
 
-`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
-Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+`--provider azure` uses Azure OpenAI through your deployment name.
+Set `models.default.id` to the Azure deployment name you created.
 
-Other profiles:
+`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
+Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
 
-- `--profile full` — rich starter config with interactive provider selection (default)
-- `--profile minimal` or `--minimal` — bare-minimum config
+`--provider llama.cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
+Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
+These local provider configs run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
 
-### 2. Add model API key(s)
+Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
+
+### 2. Add remote-provider credentials when needed
 
 ```bash
 $EDITOR ~/.mindroom/.env
 ```
 
-Set at least one key:
+For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
+- `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI subscription auth: run `codex login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
+Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
 ### 3. Pair your local install from chat UI
 
@@ -442,6 +457,44 @@ MindRoom will:
 - Learn about [OpenClaw workspace import](https://docs.mindroom.chat/openclaw/) if you want file-based memory/context patterns
 - Explore [available tools](https://docs.mindroom.chat/tools/)
 - Set up [teams for multi-agent collaboration](https://docs.mindroom.chat/configuration/teams/)
+
+# iOS Beta
+
+MindRoom for iOS is distributed through Apple TestFlight while it is in beta.
+
+## Enroll
+
+Install [TestFlight](https://apps.apple.com/app/testflight/id899247664) from the App Store, then join the MindRoom beta:
+
+<p>
+  <a class="md-button md-button--primary" href="https://testflight.apple.com/join/WW68wXxw">Join the iOS Beta</a>
+</p>
+
+Open the link on your iPhone or iPad, tap **Accept**, then install **MindRoom AI** from TestFlight.
+
+If TestFlight says the beta is not accepting new testers, the current build is still waiting for Apple's Beta App Review.
+Try the button again later.
+If TestFlight says the beta is full, expired, or has no build available after the beta opens, email `support@mindroom.chat` with the Apple ID email address you use on your iOS device.
+
+## Sign In
+
+MindRoom is a Matrix client.
+After installing the beta, sign in with the Matrix homeserver and account you normally use.
+
+For the hosted MindRoom flow, use:
+
+- Homeserver: `https://mindroom.chat`
+- Client URL for desktop pairing: `https://chat.mindroom.chat`
+
+Then follow the [Getting Started](https://docs.mindroom.chat/getting-started/) guide to pair your local MindRoom runtime from the chat UI.
+
+## Beta Notes
+
+- TestFlight builds expire after 90 days.
+  Install updates from TestFlight when they appear.
+- The public beta link starts accepting new testers after Apple approves the current TestFlight build for external testing.
+- If the invitation is full, expired, or missing, email `support@mindroom.chat` with your Apple ID email address.
+- Include your device model, iOS version, app version, and homeserver URL when reporting beta issues.
 
 # Web Dashboard
 
@@ -669,6 +722,11 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
+When `agent_name` is present, credential routes require the authenticated dashboard requester to be allowed by `authorization.agent_reply_permissions` for that agent.
+Unauthorized agent-scoped requests return HTTP 403.
+Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
+Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
+
 ### Knowledge
 
 | Method | Endpoint | Description |
@@ -816,6 +874,9 @@ Set the API key for each provider you use in `config.yaml`:
 | Variable | Provider |
 |----------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
+| `AZURE_OPENAI_API_VERSION` | Optional Azure OpenAI API version override |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
@@ -841,6 +902,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
+| `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
@@ -956,10 +1019,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -1041,7 +1104,7 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
 Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
@@ -1163,8 +1226,16 @@ authorization:
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
+# Managed room metadata (optional)
+# Keys are managed room aliases.
+# Rooms listed here are created even before agents or teams are assigned.
+rooms:
+  lobby:
+    display_name: Lobby
+    description: Main assistant room
+
 # Room-specific model overrides (optional)
-# Keys are room aliases, values are model names from the models section
+# Keys are room aliases, values are model names from the models section.
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
@@ -1188,6 +1259,13 @@ matrix_delivery:
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+When `matrix_space.enabled` is `true`, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
+If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
+Room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 `matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
 Leave it `false` to preserve Matrix E2EE device-trust checks.
@@ -1674,7 +1752,8 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 The shared-only integrations require `worker_scope` unset or `shared`.
-That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
 Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
 `spotify` can still be proxied through the sandbox.
 
@@ -1971,6 +2050,7 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
 - `google` or `gemini` - Google Gemini models
@@ -2013,6 +2093,11 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+
+  # Azure OpenAI
+  azure:
+    provider: azure
+    id: your-azure-openai-deployment
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -2073,7 +2158,7 @@ Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
 The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
-For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
+For starter config generation, use `mindroom config init --provider codex`.
 
 ```yaml
 models:
@@ -2096,6 +2181,24 @@ You can set `extra_kwargs.prompt_cache_key` to override that derived key for a m
 Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
+
+## Azure OpenAI
+
+Use `provider: azure` when your model is deployed through Azure OpenAI.
+The `id` field should be your Azure OpenAI deployment name, not necessarily the upstream model name.
+MindRoom reads Azure OpenAI credentials and endpoint values from the config-adjacent `.env` file or exported environment.
+
+```yaml
+models:
+  default:
+    provider: azure
+    id: your-azure-openai-deployment
+```
+
+Azure deployment limits vary, so starter configs do not set `context_window` for Azure.
+Set `context_window` to the limit of your deployment when you know it.
+Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
+For starter config generation, use `mindroom config init --provider azure`.
 
 ## Context Window
 
@@ -2143,6 +2246,10 @@ API keys are read from environment variables:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+# Optional, only when overriding Agno's default Azure OpenAI API version:
+# AZURE_OPENAI_API_VERSION=2024-10-21
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...
@@ -2651,7 +2758,9 @@ If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit co
 
 The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
 
-`spotify`, `homeassistant`
+`spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+
+OAuth-backed remote MCP tools are requester-scoped and may appear in toolkits assigned to agents with isolating worker scopes.
 
 ## Conflict Detection
 
@@ -2794,7 +2903,14 @@ Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use 
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
 `thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only.
-`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag. Both can be combined. Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+Both can be combined.
+Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+`include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+The response includes `include_untagged: bool` and `truncated: bool`.
+Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
@@ -2808,7 +2924,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+The current shared-only integrations are `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+OAuth-backed remote MCP tools are requester-scoped and can be used with isolating worker scopes.
 
 ## Automatic Dependency Installation
 
@@ -5614,8 +5731,8 @@ The current upstream SDK implementations also honor provider env vars such as `O
 ### What It Does
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `whisper-1`.
-`generate_image()` uses the configured `image_model`, defaults to `dall-e-3`, and returns attached image bytes rather than only a remote URL.
+`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-4o-transcribe`.
+`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2`, and returns attached image bytes rather than only a remote URL.
 The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
@@ -5628,11 +5745,11 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
 | `all` | `boolean` | `no` | `false` | Enable all three OpenAI media functions. |
-| `transcription_model` | `text` | `no` | `whisper-1` | Model used by `transcribe_audio()`. |
+| `transcription_model` | `text` | `no` | `gpt-4o-transcribe` | Model used by `transcribe_audio()`. |
 | `text_to_speech_voice` | `text` | `no` | `alloy` | Default voice for `generate_speech()`. |
-| `text_to_speech_model` | `text` | `no` | `tts-1` | Default TTS model for `generate_speech()`. |
+| `text_to_speech_model` | `text` | `no` | `gpt-4o-mini-tts` | Default TTS model for `generate_speech()`. |
 | `text_to_speech_format` | `text` | `no` | `mp3` | Output format for generated speech, such as `mp3`, `wav`, or `opus`. |
-| `image_model` | `text` | `no` | `dall-e-3` | Image generation model for `generate_image()`. |
+| `image_model` | `text` | `no` | `gpt-image-2` | Image generation model for `generate_image()`. |
 | `image_quality` | `text` | `no` | `null` | Optional image quality override passed through to the API. |
 | `image_size` | `text` | `no` | `null` | Optional image size override passed through to the API. |
 | `image_style` | `text` | `no` | `null` | Optional image style override passed through to the API. |
@@ -5644,8 +5761,8 @@ agents:
   creator:
     tools:
       - openai:
-          transcription_model: whisper-1
-          image_model: dall-e-3
+          transcription_model: gpt-4o-transcribe
+          image_model: gpt-image-2
           text_to_speech_voice: alloy
 ```
 
@@ -6483,6 +6600,7 @@ In `thread_mode: room`, room-level `send` stays plain room messaging and does no
 `read` defaults to 20 messages and caps `limit` at 50.
 `thread-list` returns recent thread messages plus `edit_options` for messages that the current Matrix account can edit.
 Only `send`, `reply`, and `thread-reply` accept attachments, with a combined cap of five `attachment_ids` plus `attachment_file_paths` per call.
+Relative `attachment_file_paths` resolve from the agent workspace when one is available, and they must stay inside that workspace.
 The tool rate-limits each `(agent_name, requester_id, room_id)` combination to 12 weighted actions per 30 seconds, where each attachment increases the weight of a send or reply.
 
 ### Configuration
@@ -6504,7 +6622,7 @@ matrix_message(action="send", message="Posting this to the room timeline.", thre
 matrix_message(
     action="reply",
     message="I reviewed the thread and attached the export.",
-    attachment_file_paths=["/tmp/report.csv"],
+    attachment_file_paths=["exports/report.csv"],
 )
 matrix_message(action="react", target="$event123", message="✅")
 ```
@@ -6549,6 +6667,7 @@ agents:
 tag_thread("blocked")
 untag_thread("blocked")
 list_thread_tags(thread_id="$threadRootEvent")
+list_thread_tags(exclude_tag="resolved", include_untagged=True)
 ```
 
 ### Notes
@@ -6556,6 +6675,14 @@ list_thread_tags(thread_id="$threadRootEvent")
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
+- `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+- Both filters can be combined.
+- For full filter semantics, see [`tools`](https://docs.mindroom.chat/tools/).
+- `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+- `include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+- It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+- The response includes `include_untagged: bool` and `truncated: bool`.
+- Callers must check `truncated` before claiming the unresolved list is complete.
 
 ## [`thread_summary`]
 
@@ -6666,6 +6793,7 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In worker-routed shell and python tools, the agent workspace is also `~`, `$HOME`, and `$MINDROOM_AGENT_WORKSPACE`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
+Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`, `reply`, or `thread-reply`.
 
@@ -6686,7 +6814,7 @@ agents:
 list_attachments()
 get_attachment("att_abc123")
 get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
-register_attachment("/tmp/plan.pdf")
+register_attachment("incoming/plan.pdf")
 matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=["att_abc123"])
 ```
 
@@ -9254,6 +9382,8 @@ For `streamable-http` servers, `url` is required.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
+Static `headers` are process-global and shared by every requester.
+Use the OAuth `auth` block for remote MCP servers that need a different bearer token per requester.
 
 ## Per-Server Options
 
@@ -9267,6 +9397,7 @@ MindRoom resolves those placeholders from the current runtime environment when i
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Optional remote transport headers; supports `${ENV_VAR}` placeholders |
+| `auth` | object | `null` | Optional OAuth configuration for requester-scoped remote MCP access |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names |
 | `include_tools` | list[string] | `[]` | Optional allowlist of remote tool names to expose |
 | `exclude_tools` | list[string] | `[]` | Optional denylist of remote tool names to hide |
@@ -9319,9 +9450,87 @@ agents:
 These per-agent overrides filter the already discovered catalog for that agent assignment.
 They are useful when one server exposes many tools but one agent should see only a focused subset.
 
-MCP integrations are treated as shared-only integrations.
-Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use `mcp_<server_id>` tools.
-Use unscoped execution or `worker_scope: shared` instead.
+Non-OAuth MCP integrations are treated as shared-only integrations.
+Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use non-OAuth `mcp_<server_id>` tools.
+Use unscoped execution or `worker_scope: shared` for unauthenticated MCP servers and static-header MCP servers.
+OAuth-backed remote MCP servers are the exception because MindRoom loads a scoped OAuth token for the current requester at tool-call time.
+
+## OAuth-Backed Remote MCP
+
+Use `auth.type: oauth` for a remote MCP server that requires a requester-owned OAuth bearer token.
+OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
+
+```yaml
+mcp_servers:
+  example:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    tool_prefix: example
+    auth:
+      type: oauth
+      provider_id: mcp_example
+      display_name: Example MCP
+      resource: https://mcp.example.com/mcp
+      discovery: auto
+      token_endpoint_auth_method: none
+      pkce_code_challenge_method: S256
+      dynamic_client_registration: true
+      scopes: []
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: Use requester-scoped MCP tools
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - mcp_example
+```
+
+MindRoom registers a generated OAuth provider for the server.
+If `provider_id` is omitted, the provider ID defaults to `mcp_<server_id>`.
+When the provider ID starts with `mcp_`, OAuth tokens are stored under `<provider_id>_oauth`, and OAuth client configuration is read from `<provider_id>_oauth_client` unless you specify `client_config_services` or `shared_client_config_services`.
+When a custom provider ID does not start with `mcp_`, MindRoom prefixes `mcp_` for the generated credential service names so the tokens remain classified as MCP-owned runtime credentials.
+
+OAuth-backed MCP servers always expose a stable bridge surface:
+
+- `<prefix>_connection_status`
+- `<prefix>_list_tools`
+- `<prefix>_call_tool`
+
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-specific tool catalog.
+When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
+After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
+After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
+
+`discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
+MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
+It then reads the advertised authorization server and fetches OAuth authorization-server metadata.
+The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
+
+If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
+The generated client registration is stored in the generated OAuth client config service and reused for later users.
+Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
+Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
+
+Use `discovery: manual` when the provider does not publish metadata or when you want to pin endpoints explicitly:
+
+```yaml
+mcp_servers:
+  example_manual:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    auth:
+      type: oauth
+      discovery: manual
+      authorization_url: https://mcp.example.com/oauth/authorize
+      token_url: https://mcp.example.com/oauth/token
+      registration_url: https://mcp.example.com/oauth/register
+      token_endpoint_auth_method: none
+```
+
+OAuth discovery requires HTTPS by default and does not follow redirects.
+For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs, and set `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
 
 ## Tool Naming
 
@@ -9507,7 +9716,9 @@ If the catalog changed, MindRoom restarts the agents and teams that reference th
 
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
-- MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
+- Non-OAuth MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
+- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and can be used with isolating worker scopes.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
 
@@ -10955,6 +11166,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
+    origin: TurnOrigin,
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
     dispatch_policy_source_kind: str | None = None,
@@ -10963,9 +11175,31 @@ MessageEnvelope(
 # target.thread_id preserves the raw inbound thread ID.
 # target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
 # target.session_id is the canonical persistence key for the conversation.
+# origin is keyword-only in the dataclass constructor and is required.
+# Hook handlers normally inspect ctx.envelope.origin rather than constructing MessageEnvelope themselves.
+# Internal code and tests that construct MessageEnvelope must pass a TurnOrigin built by MindRoom's origin classifier.
 # dispatch_policy_source_kind is usually None.
 # When it is "active_thread_follow_up", source_kind still preserves the original modality such as "message" or "voice".
 # ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND and TRUSTED_INTERNAL_RELAY_SOURCE_KIND are exported from mindroom.hooks for comparisons.
+
+TurnOrigin(
+    transport_sender_id: str,
+    requester_id: str,
+    sender_entity_name: str | None,
+    requester_entity_name: str | None,
+    sender_kind: SenderKind,
+    requester_kind: SenderKind,
+    intent: TurnIntent,
+    source_kind: str,
+    trust: TurnTrust,
+)
+
+# TurnOrigin, TurnIntent, SenderKind, and TurnTrust are exported from mindroom.hooks for type comparisons.
+# sender_kind and requester_kind are "user" or "managed_entity".
+# intent is "user_message", "managed_message", "router_handoff", "router_notice", "scheduled_fire", "hook_message", "hook_dispatch", or "trusted_internal_relay".
+# trust is "external", "trusted_internal", or "trusted_user_relay".
+# origin.may_answer_interactive_prompt is true only for human-requested user messages and trusted human relays.
+# origin.may_dispatch_without_mention is true only for the synthetic turns that explicitly bypass the managed-sender mention gate.
 
 ResponseDraft(
     response_text: str,
@@ -11168,6 +11402,8 @@ Providers supply only provider-specific metadata and parsing behavior, such as O
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
+When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to satisfy `authorization.agent_reply_permissions` for that agent.
+Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
@@ -11202,7 +11438,8 @@ Client config services are local-only deployment configuration and cannot be mir
 Generic credential responses redact `client_secret` for client config services.
 Generic credential saves preserve the existing `client_secret` only when the saved `client_id` is unchanged.
 Changing `client_id` requires submitting the matching new `client_secret`.
-First-time client config saves require both fields to be non-empty.
+First-time confidential client config saves require both fields to be non-empty.
+Public OAuth clients that use `token_endpoint_auth_method: none` require `client_id` and may omit `client_secret`.
 Client config services cannot be copied through the generic copy route.
 Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
 
@@ -11218,6 +11455,16 @@ Built-in Google providers use the generic framework for Drive, Calendar, Sheets,
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
 The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.
+
+OAuth-backed remote MCP servers also use the generic framework.
+MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth` config entry and exposes it through the same `/api/oauth/{provider}/*` routes.
+Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
+Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
+These token services stay in the primary runtime credential store.
+The matching MCP toolkit loads the token for the current requester before opening the remote MCP transport, so the transport sends a requester-scoped bearer token instead of a process-global static header.
+Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
+Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
+If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
 
 # Knowledge Bases
 
@@ -12274,6 +12521,8 @@ In worker-routed shell and python tools, that workspace is also exposed as `~`, 
 
 `attachment_ids` accepts only context attachment IDs (`att_*`).
 `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
+Relative paths resolve from the agent workspace when one is available.
+Relative paths must stay inside the workspace.
 Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
 
 ### Why use this tool?
@@ -13065,6 +13314,10 @@ Use `authorization.agent_reply_permissions` to restrict which users each respond
 - A `*` user entry means "allow any sender" for that specific entity.
 - If an entity is not present in the map, it has no extra reply restriction.
 - Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
+- The same allowlist gates dashboard credential and OAuth management when a request targets an agent with `agent_name`.
+- Unauthorized agent-scoped credential requests return HTTP 403 before credentials are read, written, connected, or disconnected.
+- Under trusted upstream auth, MindRoom checks the resolved Matrix requester from the configured Matrix user ID header or email-to-Matrix template.
+- Under standalone API-key auth, set `MINDROOM_OWNER_USER_ID` so agent-scoped credential management resolves to the owner Matrix user instead of the generic standalone principal.
 - Internal MindRoom identities (agents, teams, router, and the internal `mindroom_user`) always bypass reply permissions — they are system participants, not end users.
 - `bot_accounts` are **not** exempt. Bridge bots listed in `bot_accounts` are still subject to reply permission checks.
 - Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.
@@ -13126,6 +13379,13 @@ matrix_space:
 
 When `enabled` is `true`, MindRoom creates a Space on startup and adds all managed rooms as children.
 Rooms created later (by agents joining new rooms or config changes) are automatically added to the Space.
+MindRoom grants root Space admin power to concrete Matrix users in `authorization.global_users`.
+MindRoom also grants root Space admin power to the configured `mindroom_user` when that internal account exists.
+Room-specific users in `authorization.room_permissions` are not root Space admins unless they are also listed in `authorization.global_users`.
+This lets owners add, remove, and reorder Space children in Matrix clients while keeping room-specific collaborators scoped to their rooms.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
 The `name` field controls the Space's display name and can be changed at any time.
@@ -13589,6 +13849,10 @@ matrix_space:
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
+Root Space admin power is granted before child links are written.
+The grant set is the concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` when that internal account exists.
+MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from `authorization.global_users`.
+Room-scoped authorization entries are intentionally not used for root Space admin grants.
 
 ## Delivery Policy
 
@@ -13818,7 +14082,7 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 
 ```bash
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
-uvx mindroom config init --profile public
+uvx mindroom config init
 $EDITOR ~/.mindroom/.env
 uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
@@ -13923,11 +14187,11 @@ This guide covers the simplest production-like setup:
 ## 1. Initialize Local Config
 
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init
 ```
 
 This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
-Use `uvx mindroom config init --profile public-codex` if you want the starter config to use `provider: codex`.
+Use `uvx mindroom config init --provider codex` if you want the starter config to use `provider: codex`.
 
 ## 2. Add AI Provider Key
 
@@ -15210,6 +15474,27 @@ MindRoom uses three Helm charts:
 - kubectl and helm installed
 - NGINX Ingress Controller
 - cert-manager (for TLS certificates)
+- Hetzner Cloud Controller Manager and Hetzner CSI Driver when using `hcloud-volumes`
+
+## Hetzner Scaling Baseline
+
+Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
+This keeps the current bill low while making later worker nodes possible.
+Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
+The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
+Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
+
+Production platform values should make the storage class explicit:
+
+```yaml
+provisioner:
+  instanceStorageClassName: hcloud-volumes
+
+autoscaling:
+  enabled: false
+```
+
+Enable `autoscaling.enabled` only after the cluster has metrics-server and enough nodes or headroom to schedule the extra replicas.
 
 ## Instance Deployment
 
@@ -15247,7 +15532,7 @@ Only enable trusted upstream auth when the instance is behind a verified access 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set-string trustedUpstreamAuth.enabled=true \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
@@ -15392,6 +15677,8 @@ Dedicated workers need access to the same PVC as the primary runtime.
 Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
 If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 The chart enforces this constraint during template rendering.
+For the hosted SaaS instance chart, keep the default `static_runner` backend on single-node clusters.
+Switching hosted instances to dedicated Kubernetes workers on a multi-node cluster requires either a real `ReadWriteMany` storage class or explicit node pinning.
 
 ### RBAC And Network Policy
 
@@ -15422,6 +15709,9 @@ env:
     value: "/etc/secrets/openrouter_key"
 ```
 
+For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
+The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+
 ## Ingress
 
 Each instance gets three hosts:
@@ -15443,12 +15733,14 @@ helm upgrade --install platform ./cluster/k8s/platform \
 ```
 
 The namespace must match `mindroom-{environment}` where `environment` is set in values.
+For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
+The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
 Platform ingress hosts:
 
 - `app.{domain}` - Platform frontend
 - `api.{domain}` - Platform backend API
-- `webhooks.{domain}/stripe` - Stripe webhooks
+- `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
 ## Local Development with Kind
 
@@ -15493,7 +15785,7 @@ Example provision request:
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
+  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
@@ -15528,6 +15820,10 @@ Each customer instance gets:
 - Dedicated ingress routes
 
 Platform services run in `mindroom-{environment}` namespace.
+The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
+The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
+Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
+The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.
 
 # CLI Reference
 
@@ -15647,6 +15943,9 @@ Start MindRoom with your configuration.
 │                                          ERROR)                                        │
 │                                          [env var: LOG_LEVEL]                          │
 │                                          [default: INFO]                               │
+│ --config        -c              PATH     Use this config file path. Defaults the       │
+│                                          storage location to the selected config       │
+│                                          directory unless --storage-path is set.       │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │ --api               --no-api             Start the bundled dashboard/API server        │
@@ -15804,7 +16103,11 @@ On Linux, MindRoom uses systemd user services.
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ install     Install and start MindRoom as a background user service.                   │
 │ uninstall   Stop and remove the MindRoom user service.                                 │
+│ start       Start the installed MindRoom user service.                                 │
+│ stop        Stop the installed MindRoom user service without removing it.              │
+│ restart     Restart the installed MindRoom user service.                               │
 │ status      Show MindRoom service status and recent logs.                              │
+│ logs        Follow MindRoom service logs.                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -15990,39 +16293,61 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with example agents, models, and sensible defaults.
+Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
 
-Profiles control the template style:
-
-- `--profile full` (default) — rich example config with interactive provider selection
-- `--profile minimal` — bare-minimum config
-- `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
-- `--profile public-codex` — hosted Matrix with Codex CLI subscription defaults
-- `--profile public-vertexai-anthropic` — hosted Matrix with Vertex AI Claude defaults
-
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `openai`, `openrouter`, or `vertexai_claude`.
+Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
-mindroom config init --profile public
+mindroom config init
 
-# Minimal config with Anthropic
-mindroom config init --minimal --provider anthropic
+# Self-hosted Matrix with Anthropic
+mindroom config init --matrix-server self-hosted --provider anthropic
 
 # Hosted Matrix with Codex CLI ChatGPT subscription auth
-mindroom config init --profile public-codex
+mindroom config init --matrix-server mindroom.chat --provider codex
+
+# Hosted Matrix with Ollama
+mindroom config init --matrix-server mindroom.chat --provider ollama
+
+# Hosted Matrix with llama.cpp
+mindroom config init --matrix-server mindroom.chat --provider llama.cpp
 
 # Hosted Matrix with Vertex AI Claude
-mindroom config init --profile public-vertexai-anthropic
+mindroom config init --matrix-server mindroom.chat --provider vertexai_claude
+
+# Preview generated YAML without writing files
+mindroom config init --matrix-server mindroom.chat --provider ollama --print
 
 # Force overwrite existing config
 mindroom config init --force
 ```
 
-The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
+Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
+It does not create or modify `config.yaml`, `.env`, or starter workspace files.
+
+The `--provider codex` preset generates `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+
+The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
+Pull both local models before running MindRoom:
+
+```bash
+ollama pull gemma4
+ollama pull qwen3.6:27b
+```
+
+The `--provider llama.cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
+Start llama.cpp with one of the configured model refs before running MindRoom:
+
+```bash
+llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
+llama-server -hf unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
+```
 
 ### config show
 
@@ -16238,7 +16563,7 @@ mindroom doctor
 ### Initialize a config
 
 ```bash
-mindroom config init --profile public
+mindroom config init
 ```
 
 ### Validate your config
