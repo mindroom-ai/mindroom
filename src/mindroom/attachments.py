@@ -495,7 +495,8 @@ async def _register_media_attachment(
     )
     if local_media_path is None:
         return None
-    return register_local_attachment(
+    return await asyncio.to_thread(
+        register_local_attachment,
         storage_path,
         local_media_path,
         kind=kind,

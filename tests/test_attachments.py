@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,8 +15,11 @@ import pytest
 
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
+    AttachmentRecord,
     _attachment_id_for_event,
+    _AttachmentKind,
     _register_image_attachment,
+    _register_media_attachment,
     filter_attachments_for_context,
     format_attachment_ids_prompt,
     load_attachment,
@@ -153,6 +157,56 @@ async def test_register_image_attachment_uses_detected_mime_type(tmp_path: Path)
     assert record is not None
     assert record.mime_type == "image/png"
     assert record.local_path.suffix == ".png"
+
+
+@pytest.mark.asyncio
+async def test_register_media_attachment_offloads_registration_work(tmp_path: Path) -> None:
+    """Matrix media registration should not hash files on the event loop."""
+    loop_thread_id = threading.get_ident()
+    registration_thread_ids: list[int] = []
+
+    def fake_register_local_attachment(
+        _storage_path: Path,
+        local_path: Path,
+        *,
+        kind: _AttachmentKind,
+        attachment_id: str | None = None,
+        filename: str | None = None,
+        mime_type: str | None = None,
+        room_id: str | None = None,
+        thread_id: str | None = None,
+        source_event_id: str | None = None,
+        sender: str | None = None,
+    ) -> AttachmentRecord:
+        registration_thread_ids.append(threading.get_ident())
+        return AttachmentRecord(
+            attachment_id=attachment_id or "att_generated",
+            local_path=local_path,
+            kind=kind,
+            filename=filename,
+            mime_type=mime_type,
+            room_id=room_id,
+            thread_id=thread_id,
+            source_event_id=source_event_id,
+            sender=sender,
+        )
+
+    with patch("mindroom.attachments.register_local_attachment", side_effect=fake_register_local_attachment):
+        record = await _register_media_attachment(
+            storage_path=tmp_path,
+            event_id="$media_event",
+            media_bytes=b"media-bytes",
+            mime_type="application/octet-stream",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            sender="@user:localhost",
+            filename="payload.bin",
+            kind="file",
+        )
+
+    assert record is not None
+    assert registration_thread_ids
+    assert registration_thread_ids[0] != loop_thread_id
 
 
 def test_resolve_attachment_media_includes_images(tmp_path: Path) -> None:
