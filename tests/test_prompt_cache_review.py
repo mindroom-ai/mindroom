@@ -33,8 +33,8 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
-        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-4-6","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
-        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-4-6","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
+        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
+        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
         encoding="utf-8",
     )
 
@@ -55,7 +55,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=2,
             message_blobs=("m1", "m2"),
@@ -67,7 +67,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=4,
             message_blobs=("m1", "m2", "m3", "m4"),
@@ -96,7 +96,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=1,
             message_blobs=('{"content":[{"text":"a","cache_control":{"type":"ephemeral"}}],"role":"user"}',),
@@ -108,7 +108,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=2,
             message_blobs=(
@@ -136,7 +136,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
         session_id="room:$thread",
         room_id="room",
         agent_name="opus",
-        model_id="claude-opus-4-6",
+        model_id="claude-opus-4-8",
         system_prompt="S",
         message_count=1,
         message_blobs=('{"content":[{"text":"a","cache_control":{"type":"ephemeral"}}],"role":"user"}',),
@@ -148,7 +148,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
         session_id="room:$thread",
         room_id="room",
         agent_name="opus",
-        model_id="claude-opus-4-6",
+        model_id="claude-opus-4-8",
         system_prompt="S",
         message_count=2,
         message_blobs=(

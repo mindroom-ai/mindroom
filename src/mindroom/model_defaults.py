@@ -67,7 +67,7 @@ class ModelPreset:
         return config
 
 
-_ANTHROPIC_OPUS = "claude-opus-4-7"
+_ANTHROPIC_OPUS = "claude-opus-4-8"
 _ANTHROPIC_SONNET = "claude-sonnet-4-6"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
 CODEX_GPT = "gpt-5.5"
@@ -83,7 +83,7 @@ GOOGLE_IMAGEN_FAST = "imagen-4.0-fast-generate-001"
 GOOGLE_IMAGEN_ULTRA = "imagen-4.0-ultra-generate-001"
 GOOGLE_VEO = "veo-2.0-generate-001"
 
-_OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-4.7"
+_OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-4.8"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-4.6"
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5"
 _OPENROUTER_GEMINI_FLASH = "google/gemini-3.5-flash"

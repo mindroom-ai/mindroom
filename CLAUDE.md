@@ -20,7 +20,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
 | Anthropic | Balanced default | Claude Sonnet 4.6 | `claude-sonnet-4-6` |
-| Anthropic | Max intelligence | Claude Opus 4.7 | `claude-opus-4-7` |
+| Anthropic | Max intelligence | Claude Opus 4.8 | `claude-opus-4-8` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-5.5 | `gpt-5.5` |
 | OpenAI Codex subscription | Frontier via Codex CLI | GPT-5.5 | `gpt-5.5` |
@@ -30,9 +30,9 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
 
-For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-7`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-8`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-4-6` and `claude-opus-4-7`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-4-6` and `claude-opus-4-8`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Gemini API text and coding work, prefer `gemini-3.5-flash` as the standard stable model unless you intentionally need the cheaper Flash-Lite tier.
 Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
