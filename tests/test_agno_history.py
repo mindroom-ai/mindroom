@@ -57,6 +57,7 @@ from mindroom.execution_preparation import (
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
     _build_summary_input,
+    _compaction_replay_messages,
     _emit_compaction_hook,
     _estimate_history_messages_tokens,
     _estimate_tool_definition_tokens,
@@ -3309,6 +3310,68 @@ def test_build_summary_input_preserves_previous_summary_text() -> None:
     assert "run-1 answer" in summary_input
 
 
+def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="legacy system prompt"),
+            Message(role="developer", content="legacy developer prompt"),
+            Message(role="instructions", content="legacy custom prompt"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
+        ],
+    )
+
+    replay_messages = _compaction_replay_messages(
+        run,
+        ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="instructions",
+        ),
+    )
+
+    assert [(message.role, message.content) for message in replay_messages] == [
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
+
+
+def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="Persisted system prompt that should not be summarized"),
+            Message(role="developer", content="Persisted developer prompt that should not be summarized"),
+            Message(role="instructions", content="Persisted custom prompt that should not be summarized"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
+        ],
+    )
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="instructions",
+        ),
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "Persisted system prompt" not in summary_input
+    assert "Persisted developer prompt" not in summary_input
+    assert "Persisted custom prompt" not in summary_input
+    assert "user request" in summary_input
+    assert "assistant answer" in summary_input
+    assert "tool result" in summary_input
+
+
 def test_build_summary_input_honors_tool_call_history_limit() -> None:
     run = _completed_run(
         "run-1",
@@ -3344,6 +3407,47 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "first result" not in summary_input
     assert "call-2" in summary_input
     assert "second result" in summary_input
+
+
+def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
+    conversation_messages = [
+        Message(role="user", content="user request"),
+        Message(role="assistant", content="assistant answer"),
+        Message(role="tool", content="tool result"),
+    ]
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+        system_message_role="instructions",
+    )
+    contaminated_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="legacy system prompt " * 20),
+                    Message(role="developer", content="legacy developer prompt " * 20),
+                    Message(role="instructions", content="legacy custom prompt " * 20),
+                    *conversation_messages,
+                ],
+            ),
+        ],
+    )
+    clean_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=conversation_messages)],
+    )
+
+    assert estimate_prompt_visible_history_tokens(
+        session=contaminated_session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    ) == estimate_prompt_visible_history_tokens(
+        session=clean_session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
 
 
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:

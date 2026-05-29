@@ -29,7 +29,7 @@ from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
     metadata_with_merged_seen_event_ids,
     read_scope_state,
@@ -1287,7 +1287,8 @@ def _compaction_replay_messages(
     run: RunOutput | TeamRunOutput,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    messages = [deepcopy(message) for message in run.messages or []]
+    skip_roles = set(_history_skip_roles(history_settings))
+    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     _strip_stale_anthropic_replay_fields(messages)
@@ -1578,11 +1579,12 @@ def _agent_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
+    skip_roles = _history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit)
+        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
     if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit)
-    return session.get_messages(agent_id=scope_id)
+        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
+    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
 
 
 def _team_session_history_messages(
@@ -1592,11 +1594,17 @@ def _team_session_history_messages(
     history_settings: ResolvedHistorySettings,
     limit: int | None,
 ) -> list[Message]:
+    skip_roles = _history_skip_roles(history_settings)
     if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit)
+        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
     if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit)
-    return session.get_messages(team_id=scope_id)
+        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
+    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
+
+
+def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
+    """Return prompt roles that should never be materialized as persisted history."""
+    return sorted(prompt_roles_for_history_storage(history_settings.system_message_role))
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
