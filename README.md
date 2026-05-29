@@ -158,6 +158,21 @@ Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, and 
 
 ## Quick Start
 
+### macOS Menu Bar App
+
+MindRoom also ships as a macOS menu bar app for running the local MindRoom service without keeping a terminal open.
+The app bundles `uv`, installs the `mindroom` CLI with `uv tool install`, uses `~/.mindroom` for normal config and state, and manages the existing `mindroom service` launchd service.
+
+```bash
+brew install --cask mindroom
+```
+
+Open **MindRoom** from `/Applications` or Spotlight.
+Use the menu bar item to install the MindRoom runtime, initialize the hosted `chat.mindroom.chat` config, pair with a code from the hosted chat UI, install the service, and open the dashboard.
+Self-hosted config and local-stack setup remain available from the same menu.
+
+See [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
+
 ### Prerequisites
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv) for Python package management
