@@ -469,7 +469,7 @@ models:
     id: claude-haiku-4-5
     provider: anthropic
   opus:
-    id: claude-opus-4-7
+    id: claude-opus-4-8
     provider: anthropic
   sonnet:
     id: claude-sonnet-4-6

@@ -186,7 +186,7 @@ def test_different_providers_with_extra_kwargs() -> None:
             },
             "anthropic_model": {
                 "provider": "anthropic",
-                "id": "claude-3-opus",
+                "id": "claude-opus-4-8",
                 "extra_kwargs": {
                     "temperature": 0.2,
                     "max_tokens": 2048,
