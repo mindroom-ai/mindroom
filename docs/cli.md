@@ -284,6 +284,7 @@ On Linux, MindRoom uses systemd user services.
 │ stop        Stop the installed MindRoom user service without removing it.              │
 │ restart     Restart the installed MindRoom user service.                               │
 │ status      Show MindRoom service status and recent logs.                              │
+│ logs        Follow MindRoom service logs.                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
