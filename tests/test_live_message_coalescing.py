@@ -1539,7 +1539,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
-            await second_lookup_started.wait()
+            await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
 
             third_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, third))
             await asyncio.wait_for(third_task, timeout=0.5)
@@ -1630,7 +1630,7 @@ async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_
             await asyncio.wait_for(first_task, timeout=0.5)
 
             second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
-            await second_lookup_started.wait()
+            await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
 
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
