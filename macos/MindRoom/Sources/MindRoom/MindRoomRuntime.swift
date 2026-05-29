@@ -1,6 +1,6 @@
 import Foundation
 
-enum MindRoomRuntimeAction {
+enum MindRoomRuntimeAction: Equatable {
     case installRuntime
     case updateRuntime
     case installService
