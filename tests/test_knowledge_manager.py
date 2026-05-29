@@ -866,6 +866,44 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_config_mode_round_trip_marks_semantic_index_stale_after_file_mode_edits(tmp_path: Path) -> None:
+    """Config-only mode transitions must not silently revive stale semantic indexes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("semantic old", encoding="utf-8")
+    semantic_config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
+    file_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        watch=True,
+        modes={"docs": "files"},
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, semantic_config)
+
+    await refresh_knowledge_binding("docs", config=semantic_config, runtime_paths=runtime_paths)
+    ready_lookup = get_published_index("docs", config=semantic_config, runtime_paths=runtime_paths)
+    assert ready_lookup.availability is KnowledgeAvailability.READY
+
+    client = TestClient(main.app)
+    response = client.put("/api/config/save", json=file_config.authored_model_dump())
+    assert response.status_code == 200
+    doc.write_text("semantic new", encoding="utf-8")
+    response = client.put("/api/config/save", json=semantic_config.authored_model_dump())
+    assert response.status_code == 200
+
+    current_config, current_runtime_paths = config_lifecycle.read_app_committed_runtime_config(main.app)
+    stale_lookup = get_published_index("docs", config=current_config, runtime_paths=current_runtime_paths)
+
+    assert stale_lookup.availability is KnowledgeAvailability.STALE
+    assert stale_lookup.state is not None
+    assert published_index_refresh_state(stale_lookup.state) == "stale"
+
+
+@pytest.mark.asyncio
 async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

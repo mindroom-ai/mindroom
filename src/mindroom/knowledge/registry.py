@@ -805,6 +805,12 @@ def _published_index_keys_for_shared_source(
 
 
 def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, reason: str) -> bool:
+    mark_published_index_stale_and_evict(matching_key, reason=reason)
+    return True
+
+
+def mark_published_index_stale_and_evict(matching_key: PublishedIndexKey, *, reason: str) -> bool:
+    """Mark one published index stale and evict matching process-local handles."""
     mark_published_index_stale(matching_key, reason=reason)
     _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(matching_key))
     return True

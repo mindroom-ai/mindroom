@@ -2180,6 +2180,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_scheduler",
+    "mindroom.knowledge.status",
     "mindroom.knowledge.utils",
 ]
 
@@ -2380,6 +2381,7 @@ expose = [
     "KnowledgeResolution",
     "OrchestratorKnowledgeRefreshScheduler",
     "PerBindingKnowledgeRefreshScheduler",
+    "reconcile_knowledge_mode_transition_states",
     "resolve_agent_knowledge_access",
     "StandaloneKnowledgeRefreshScheduler",
 ]

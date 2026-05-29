@@ -15251,7 +15251,11 @@ class TestMultiAgentOrchestrator:
             updated = await orchestrator.update_config()
 
         assert updated is False
-        mock_sync_runtime.assert_awaited_once_with(config, start_watcher=True)
+        mock_sync_runtime.assert_awaited_once_with(
+            config,
+            start_watcher=True,
+            previous_config=config,
+        )
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio
