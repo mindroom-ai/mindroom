@@ -29,6 +29,11 @@ final class MindRoomCommandRunner: ObservableObject {
         runRuntimeAction(.serviceStatus, updateStatusFromOutput: true)
     }
 
+    var lastOutputForDisplay: String {
+        get { lastOutput }
+        set { lastOutput = newValue }
+    }
+
     func run(_ command: MindRoomCommand) {
         switch command {
         case .openDashboard:
