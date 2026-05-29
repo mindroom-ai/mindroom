@@ -44,6 +44,12 @@ def _get_log_command() -> str:
     return f"tail -f {stdout_log} {stderr_log}"
 
 
+def _get_log_args() -> list[str]:
+    """Return the argv for following service logs."""
+    log_dir = _get_log_dir()
+    return ["tail", "-f", str(log_dir / "stdout.log"), str(log_dir / "stderr.log")]
+
+
 def _get_recent_logs(num_lines: int = 10) -> list[str]:
     """Return recent service logs."""
     log_dir = _get_log_dir()
@@ -260,5 +266,6 @@ manager = ServiceManager(
     restart_service=_restart_service,
     get_service_status=_get_service_status,
     get_log_command=_get_log_command,
+    get_log_args=_get_log_args,
     get_recent_logs=_get_recent_logs,
 )

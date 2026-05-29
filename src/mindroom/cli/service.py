@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import platform
-import shlex
+import signal
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -198,6 +198,12 @@ def service_status(
 def service_logs() -> None:
     """Follow MindRoom service logs."""
     manager = _manager_or_exit()
-    result = subprocess.run(shlex.split(manager.get_log_command()), check=False)
-    if result.returncode != 0:
+    try:
+        result = subprocess.run(manager.get_log_args(), check=False)
+    except KeyboardInterrupt:
+        raise typer.Exit(0) from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        _err_console.print(f"[bold red]Error:[/bold red] Failed to run log command: {exc}")
+        raise typer.Exit(1) from None
+    if result.returncode not in (0, -signal.SIGINT):
         raise typer.Exit(result.returncode)
