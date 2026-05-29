@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import platform
+import shlex
+import subprocess
 from typing import TYPE_CHECKING
 
 import typer
@@ -190,3 +192,12 @@ def service_status(
 
     _console.print()
     _console.print(f"[dim]Full logs: {manager.get_log_command()}[/dim]")
+
+
+@service_app.command("logs")
+def service_logs() -> None:
+    """Follow MindRoom service logs."""
+    manager = _manager_or_exit()
+    result = subprocess.run(shlex.split(manager.get_log_command()), check=False)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)

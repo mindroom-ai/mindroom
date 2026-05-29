@@ -446,6 +446,7 @@ def test_service_help_is_registered() -> None:
     assert "restart" in result.output
     assert "uninstall" in result.output
     assert "status" in result.output
+    assert "logs" in result.output
 
 
 @patch("mindroom.cli.service._get_service_manager")
@@ -518,6 +519,25 @@ def test_service_restart_command_succeeds(mock_get_manager: MagicMock) -> None:
     assert result.exit_code == 0
     assert "Service restarted" in result.output
     mock_manager.restart_service.assert_called_once_with()
+
+
+@patch("mindroom.cli.service.subprocess.run")
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_logs_command_follows_platform_logs(mock_get_manager: MagicMock, mock_run: MagicMock) -> None:
+    """Service logs follows the platform-specific log stream command."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_log_command.return_value = "tail -f /var/log/mindroom/stdout.log /var/log/mindroom/stderr.log"
+    mock_get_manager.return_value = mock_manager
+    mock_run.return_value = MagicMock(returncode=0)
+
+    result = runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0
+    mock_manager.get_log_command.assert_called_once_with()
+    mock_run.assert_called_once_with(
+        ["tail", "-f", "/var/log/mindroom/stdout.log", "/var/log/mindroom/stderr.log"],
+        check=False,
+    )
 
 
 @patch("mindroom.cli.service._get_service_manager")
