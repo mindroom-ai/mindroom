@@ -64,6 +64,32 @@ def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver
     assert first_snapshot == second_snapshot
 
 
+def test_serialized_kubernetes_worker_validation_snapshot_tolerates_plugin_load_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker validation snapshots should match the tolerant primary startup path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config(plugins=[{"path": "plugins/broken"}])
+    tolerate_values: list[object] = []
+
+    def fake_resolver(*_args: object, **kwargs: object) -> dict[str, ToolValidationInfo]:
+        tolerate_values.append(kwargs.get("tolerate_plugin_load_errors"))
+        return {"fake": ToolValidationInfo(name="fake")}
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
+        fake_resolver,
+    )
+
+    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+        runtime_paths,
+        runtime_config=runtime_config,
+    )
+
+    assert tolerate_values == [True]
+
+
 def test_serialized_kubernetes_worker_validation_snapshot_clear_recomputes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

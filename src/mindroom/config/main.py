@@ -1250,6 +1250,7 @@ class Config(BaseModel):
                 config_path=config_path_prefix,
                 tool_name=entry.name,
             )
+            return
 
         validate_authored_tool_entry_overrides(
             entry.name,

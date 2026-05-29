@@ -85,6 +85,7 @@ def serialized_kubernetes_worker_validation_snapshot(
             snapshot = resolved_tool_validation_snapshot_for_runtime(
                 runtime_paths,
                 config,
+                tolerate_plugin_load_errors=True,
             )
             cached_snapshot = serialize_tool_validation_snapshot(snapshot)
             _WORKER_VALIDATION_SNAPSHOT_CACHE[cache_key] = cached_snapshot
