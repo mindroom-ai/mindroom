@@ -84,6 +84,9 @@ Set the API key for each provider you use in `config.yaml`:
 | Variable | Provider |
 |----------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
+| `AZURE_OPENAI_API_VERSION` | Optional Azure OpenAI API version override |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
@@ -109,6 +112,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
+| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
+| `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
@@ -224,10 +229,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -309,7 +314,7 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
 Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
@@ -382,6 +387,9 @@ memory:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and operating procedures
+    # Default: semantic.
+    # Use files to skip embeddings and expose workspace files.
+    mode: semantic
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
@@ -431,8 +439,16 @@ authorization:
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
+# Managed room metadata (optional)
+# Keys are managed room aliases.
+# Rooms listed here are created even before agents or teams are assigned.
+rooms:
+  lobby:
+    display_name: Lobby
+    description: Main assistant room
+
 # Room-specific model overrides (optional)
-# Keys are room aliases, values are model names from the models section
+# Keys are room aliases, values are model names from the models section.
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
 
@@ -456,6 +472,13 @@ matrix_delivery:
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+When `matrix_space.enabled` is `true`, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
+If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
+Room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 `matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
 Leave it `false` to preserve Matrix E2EE device-trust checks.

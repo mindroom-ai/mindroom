@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Container, Mapping
     from pathlib import Path
 
 
-_IndexMetadataFields = tuple[tuple[str, ...], str, str | None, str | None, str | None, int | None, str | None]
+_IndexMetadataFields = tuple[dict[str, str], str, str | None, str | None, str | None, int | None, str | None]
 
 
 def load_index_metadata_payload(metadata_path: Path) -> dict[str, object] | None:  # noqa: D103
@@ -49,24 +49,27 @@ def parse_index_metadata_fields(
     """Parse the shared published-index fields from a JSON object."""
     raw_settings = payload.get("settings")
     raw_status = payload.get("status")
-    if (
-        not isinstance(raw_settings, list)
-        or not all(isinstance(item, str) for item in raw_settings)
-        or not isinstance(raw_status, str)
-        or raw_status not in allowed_statuses
-    ):
+    if not isinstance(raw_settings, dict) or not isinstance(raw_status, str) or raw_status not in allowed_statuses:
         return None
+    settings: dict[str, str] = {}
+    for key, value in raw_settings.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            return None
+        settings[key] = value
 
     collection = optional_metadata_str(payload.get("collection"))
     indexed_count = _coerce_nonnegative_metadata_int(payload.get("indexed_count"))
     source_signature = optional_metadata_str(payload.get("source_signature"))
-    if (require_complete_fields_for_all_statuses or raw_status == "complete") and (
-        collection is None or indexed_count is None or source_signature is None
+    settings_mode = optional_metadata_str(settings.get("mode"))
+    require_complete_fields = require_complete_fields_for_all_statuses or raw_status == "complete"
+    collection_required = require_complete_fields and not (raw_status == "complete" and settings_mode == "files")
+    if require_complete_fields and (
+        (collection_required and collection is None) or indexed_count is None or source_signature is None
     ):
         return None
 
     return (
-        cast("tuple[str, ...]", tuple(raw_settings)),
+        settings,
         raw_status,
         collection,
         optional_metadata_str(payload.get("last_published_at")),
@@ -79,12 +82,12 @@ def parse_index_metadata_fields(
 def write_index_metadata_payload(  # noqa: D103
     metadata_path: Path,
     *,
-    settings: tuple[str, ...],
+    settings: Mapping[str, str],
     status: str,
     **fields: object | None,
 ) -> None:
     payload = {
-        "settings": list(settings),
+        "settings": dict(settings),
         "status": status,
         **{key: value for key, value in fields.items() if value is not None},
     }

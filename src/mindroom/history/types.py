@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypeGuard
+from typing import Literal, Protocol, TypedDict, TypeGuard, cast
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -15,6 +16,13 @@ CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summar
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
 
+class HistoryScopeMetadata(TypedDict):
+    """JSON-safe persisted history-scope identity."""
+
+    kind: _ScopeKind
+    scope_id: str
+
+
 @dataclass(frozen=True)
 class HistoryScope:
     """One logical persisted-history scope inside a stored Agno session."""
@@ -22,10 +30,38 @@ class HistoryScope:
     kind: _ScopeKind
     scope_id: str
 
+    def __post_init__(self) -> None:
+        """Validate the persisted-history scope identity."""
+        if self.kind not in {"agent", "team"}:
+            message = f"Invalid history scope kind: {self.kind!r}"
+            raise ValueError(message)
+        if not self.scope_id:
+            message = "History scope requires a non-empty scope_id"
+            raise ValueError(message)
+
     @property
     def key(self) -> str:
         """Return the stable serialized storage key for this scope."""
         return f"{self.kind}:{self.scope_id}"
+
+    def to_metadata(self) -> HistoryScopeMetadata:
+        """Return JSON-safe history-scope metadata."""
+        return {
+            "kind": self.kind,
+            "scope_id": self.scope_id,
+        }
+
+    @classmethod
+    def from_metadata(cls, raw_metadata: object) -> HistoryScope | None:
+        """Return normalized history-scope metadata."""
+        if not isinstance(raw_metadata, Mapping):
+            return None
+        metadata = cast("Mapping[str, object]", raw_metadata)
+        kind = metadata.get("kind")
+        scope_id = metadata.get("scope_id")
+        if kind not in {"agent", "team"} or not isinstance(scope_id, str) or not scope_id:
+            return None
+        return cls(kind=cast("_ScopeKind", kind), scope_id=scope_id)
 
 
 @dataclass(frozen=True)

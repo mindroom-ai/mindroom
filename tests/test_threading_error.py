@@ -93,6 +93,7 @@ from tests.conftest import (
     install_generate_response_mock,
     make_event_cache_mock,
     make_matrix_client_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -4134,6 +4135,7 @@ class TestThreadingBehavior:
 
         try:
             await bot._turn_controller.handle_media_event(room, audio_event)
+            await drain_coalescing(bot)
             await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
@@ -7590,12 +7592,15 @@ class TestThreadingBehavior:
             bot._generate_response.assert_called_once()
 
             # Now simulate the response being sent
+            target = bot._conversation_resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
             await bot._send_response(
-                room.room_id,
-                event.event_id,
-                "I can help you with that!",
-                None,
-                reply_to_event=event,
+                target=target,
+                response_text="I can help you with that!",
             )
 
         # Check the final response content.
@@ -7949,13 +7954,11 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root message"),
             _message(event_id="$thread_reply:localhost", body="Thread reply"),
         ]
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_history",
-                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
-            ) as mock_fetch,
-        ):
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_history",
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+        ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -8261,13 +8264,11 @@ class TestThreadingBehavior:
             _message(event_id="$thread_root:localhost", body="Root message"),
             _message(event_id="$reply:localhost", body="Reply"),
         ]
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "get_thread_history",
-                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
-            ) as mock_history,
-        ):
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_history",
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+        ) as mock_history:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
@@ -9272,11 +9273,14 @@ class TestThreadingBehavior:
         ) as mock_fetch_thread_history:
             request = await bot._response_runner._refresh_model_history_after_lock(
                 ResponseRequest(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id="$thread_root:localhost",
                     thread_history=degraded_history,
                     prompt="thread follow-up",
+                    response_envelope=request_envelope(
+                        room_id=room.room_id,
+                        reply_to_event_id=event.event_id,
+                        thread_id="$thread_root:localhost",
+                        prompt="thread follow-up",
+                    ),
                     requires_model_history_refresh=True,
                 ),
             )
@@ -9359,7 +9363,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
-        """Ingress coalescing should attribute any thread proof refreshes it triggers."""
+        """Ingress coalescing should reject indeterminate thread proof refreshes it triggers."""
         room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
@@ -9393,10 +9397,10 @@ class TestThreadingBehavior:
                     ),
                 ),
             ) as mock_resolve,
+            pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
         ):
-            thread_id = await resolver.coalescing_thread_id(room, event)
+            await resolver.coalescing_thread_id(room, event)
 
-        assert thread_id == "$thread_root:localhost"
         mock_access.assert_called_once_with(
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="coalescing_thread_id",
@@ -9409,8 +9413,8 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
-    async def test_coalescing_thread_id_keeps_lookup_failure_candidate(self, bot: AgentBot) -> None:
-        """Lookup-failed plain replies should still coalesce by candidate root."""
+    async def test_coalescing_thread_id_rejects_lookup_failure_candidate(self, bot: AgentBot) -> None:
+        """Lookup-failed plain replies should not be admitted under a guessed coalescing key."""
         room = _matrix_room()
         event = nio.RoomMessageText.from_dict(
             {
@@ -9431,10 +9435,9 @@ class TestThreadingBehavior:
         with (
             patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
             patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            pytest.raises(RuntimeError, match="Could not resolve canonical coalescing thread"),
         ):
-            thread_id = await resolver.coalescing_thread_id(room, event)
-
-        assert thread_id == "$maybe_root:localhost"
+            await resolver.coalescing_thread_id(room, event)
 
     @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(
@@ -9518,7 +9521,7 @@ class TestThreadingBehavior:
 
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
-        """Plain-reply commands should stay plain replies without thread promotion."""
+        """Plain-reply commands should answer the command event without following stale reply targets."""
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
@@ -9620,7 +9623,8 @@ class TestThreadingBehavior:
             content = call_args.kwargs["content"]
 
             assert "m.relates_to" in content
-            assert "rel_type" not in content["m.relates_to"]
+            assert content["m.relates_to"]["rel_type"] == "m.thread"
+            assert content["m.relates_to"]["event_id"] == "$cmd_reply:localhost"
             assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
 
     @pytest.mark.asyncio
@@ -10012,11 +10016,15 @@ class TestThreadingBehavior:
             bot._generate_response.assert_called_once()
 
             # Now simulate the response being sent
+            target = bot._conversation_resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id="$thread_root:localhost",
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
             await bot._send_response(
-                room.room_id,
-                event.event_id,
-                "I can help with that complex question!",
-                "$thread_root:localhost",
+                target=target,
+                response_text="I can help with that complex question!",
             )
 
         # Check the final response content.

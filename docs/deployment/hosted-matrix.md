@@ -28,11 +28,11 @@ This guide covers the simplest production-like setup:
 ## 1. Initialize Local Config
 
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init
 ```
 
 This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
-Use `uvx mindroom config init --profile public-codex` if you want the starter config to use `provider: codex`.
+Use `uvx mindroom config init --provider codex` if you want the starter config to use `provider: codex`.
 
 ## 2. Add AI Provider Key
 

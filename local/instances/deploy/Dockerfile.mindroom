@@ -49,8 +49,9 @@ WORKDIR /app
 # - curl for health checks
 # - git and git-lfs for remote knowledge base cloning/sync
 # - bash and tmux for shell tooling and detached interactive CLI flows
+# - tini to reap orphaned subprocesses when MindRoom runs as PID 1
 # - common small CLI utilities used by headless auth/install workflows
-RUN apt-get update && apt-get install -y bash bzip2 curl git git-lfs jq nano procps ripgrep tmux unzip \
+RUN apt-get update && apt-get install -y bash bzip2 curl git git-lfs jq nano procps ripgrep tini tmux unzip \
     && printf 'set-option -g exit-empty off\n' > /etc/tmux.conf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -79,5 +80,7 @@ ENV PATH="/app/.venv/bin:${PATH}"
 USER 1000:1000
 
 EXPOSE 8765
+# Run through an init process so orphaned subprocesses do not accumulate as zombies.
+ENTRYPOINT ["tini", "--"]
 # Run the app from the prebuilt virtualenv to avoid rebuilding at runtime
 CMD ["/app/.venv/bin/mindroom", "run"]

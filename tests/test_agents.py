@@ -2952,6 +2952,45 @@ def test_knowledge_base_config_preserves_description() -> None:
     assert config.knowledge_bases["research"].description == ("Research plans, experiment notes, and decision records.")
 
 
+def test_knowledge_base_config_defaults_to_semantic_mode() -> None:
+    """Existing knowledge bases should keep semantic search unless configured otherwise."""
+    config = Config(
+        agents={"calculator": AgentConfig(display_name="Calculator", knowledge_bases=["research"])},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path="./knowledge_docs/research",
+            ),
+        },
+    )
+
+    assert config.knowledge_bases["research"].mode == "semantic"
+
+
+def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Path) -> None:
+    """File-only knowledge should tell workspace-aware agents where to use grep/read tools."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    workspace_root = tmp_path / "agents" / "general" / "workspace"
+    knowledge_root = workspace_root / "research"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(
+        description="Research notes and decision records.",
+        path=str(knowledge_root),
+        mode="files",
+    )
+
+    agent = _create_agent_for_test("general", config)
+
+    rendered_instructions = "\n".join(str(instruction) for instruction in agent.instructions)
+    assert "File-only knowledge bases are available in the workspace." in rendered_instructions
+    assert "- research: `knowledge/research`" in rendered_instructions
+    assert "Research notes and decision records." in rendered_instructions
+    assert "search_knowledge_base" in rendered_instructions
+
+
 def test_agent_knowledge_search_tool_description_lists_configured_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

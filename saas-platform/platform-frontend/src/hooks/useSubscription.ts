@@ -9,8 +9,8 @@ import { logger } from '@/lib/logger'
 export interface Subscription {
   id: string
   account_id: string
-  tier: 'free' | 'starter' | 'professional' | 'enterprise'
-  status: 'active' | 'cancelled' | 'past_due' | 'trialing'
+  tier: 'free' | 'byok' | 'hobby' | 'pro' | 'enterprise'
+  status: 'active' | 'cancelled' | 'past_due' | 'trialing' | 'paused' | 'incomplete'
   stripe_subscription_id: string | null
   stripe_customer_id: string | null
   current_period_start: string | null
@@ -20,6 +20,8 @@ export interface Subscription {
   max_agents: number
   max_messages_per_day: number
   max_storage_gb: number
+  can_run_instances: boolean
+  trial_days_remaining: number | null
   created_at: string
   updated_at: string
 }

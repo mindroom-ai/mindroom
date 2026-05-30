@@ -31,7 +31,7 @@ CREATE TABLE accounts (
     full_name TEXT,
     company_name TEXT,
     stripe_customer_id TEXT UNIQUE,
-    tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'starter', 'professional', 'enterprise')),
+    tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
     is_admin BOOLEAN DEFAULT FALSE,
     status TEXT DEFAULT 'active', -- active, suspended, deleted, pending_verification
 
@@ -66,7 +66,7 @@ CREATE TABLE subscriptions (
     subscription_id TEXT UNIQUE, -- External subscription ID (e.g., from Stripe)
     stripe_subscription_id TEXT UNIQUE,
     stripe_price_id TEXT,
-    tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'starter', 'professional', 'enterprise')),
+    tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'byok', 'hobby', 'pro', 'enterprise')),
     status TEXT NOT NULL DEFAULT 'trialing' CHECK (status IN ('trialing', 'active', 'cancelled', 'past_due', 'paused')),
 
     -- Limits based on tier
@@ -112,6 +112,13 @@ CREATE TABLE instances (
     api_url TEXT,
     matrix_url TEXT, -- Synapse Matrix server URL
     matrix_server_url TEXT, -- Alias for compatibility
+
+    -- Non-secret OpenRouter key metadata for included AI budget plans
+    openrouter_key_hash TEXT,
+    openrouter_key_label TEXT,
+    openrouter_key_limit_usd INTEGER,
+    openrouter_key_limit_reset TEXT,
+    openrouter_key_created_at TIMESTAMPTZ,
 
     -- Resource limits
     memory_limit_mb INTEGER DEFAULT 512,

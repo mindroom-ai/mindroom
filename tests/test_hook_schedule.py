@@ -14,6 +14,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, build_hook_matrix_admin, hook
 from mindroom.logging_config import setup_logging
 from mindroom.scheduling import (
@@ -439,7 +440,7 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
     mock_hook_send.assert_awaited_once()
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "dispatch"
-    assert content["com.mindroom.source_kind"] == "hook_dispatch"
+    assert content[SOURCE_KIND_KEY] == "hook_dispatch"
 
 
 @pytest.mark.asyncio

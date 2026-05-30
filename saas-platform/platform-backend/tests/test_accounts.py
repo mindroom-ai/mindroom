@@ -4,7 +4,10 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from backend.deps import verify_user
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from main import app
 
 
 class TestAccountsEndpoints:
@@ -13,8 +16,6 @@ class TestAccountsEndpoints:
     @pytest.fixture
     def client(self) -> TestClient:
         """Create test client."""
-        from main import app  # noqa: PLC0415
-
         return TestClient(app)
 
     @pytest.fixture
@@ -28,8 +29,6 @@ class TestAccountsEndpoints:
     @pytest.fixture
     def mock_verify_user(self):
         """Mock user verification."""
-        from main import app  # noqa: PLC0415
-        from backend.deps import verify_user
 
         def override_verify_user():
             return {"account_id": "acc_test_123", "email": "test@example.com"}
@@ -52,7 +51,7 @@ class TestAccountsEndpoints:
                 {
                     "id": "sub_123",
                     "account_id": "acc_test_123",
-                    "tier": "professional",
+                    "tier": "pro",
                     "status": "active",
                     "instances": [{"id": "inst_123", "instance_id": "123", "status": "running"}],
                 }
@@ -69,7 +68,7 @@ class TestAccountsEndpoints:
         assert data["id"] == "acc_test_123"
         assert data["email"] == "test@example.com"
         assert len(data["subscriptions"]) == 1
-        assert data["subscriptions"][0]["tier"] == "professional"
+        assert data["subscriptions"][0]["tier"] == "pro"
 
     def test_get_current_account_not_found(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting account when it doesn't exist."""
@@ -85,9 +84,6 @@ class TestAccountsEndpoints:
 
     def test_get_current_account_unauthorized(self, client: TestClient):
         """Test getting account without authentication."""
-        from main import app  # noqa: PLC0415
-        from backend.deps import verify_user
-        from fastapi import HTTPException
 
         def override_verify_user():
             raise HTTPException(status_code=401, detail="Unauthorized")
@@ -154,7 +150,6 @@ class TestAccountsEndpoints:
             "status": "active",
             "max_agents": 1,
             "max_messages_per_day": 100,
-            "max_storage_gb": 10,
             "created_at": datetime.now(UTC).isoformat(),
         }
         mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
@@ -168,6 +163,31 @@ class TestAccountsEndpoints:
         assert "Free tier account created" in data["message"]
         assert data["account_id"] == "acc_test_123"
         assert data["subscription"]["tier"] == "free"
+
+    def test_setup_account_adds_storage_limit_when_database_row_omits_it(
+        self, mock_supabase: MagicMock, mock_verify_user: Mock
+    ):
+        """Test account setup returns pricing storage limits when Supabase omits the field."""
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+        new_subscription = {
+            "id": "sub_new_123",
+            "account_id": "acc_test_123",
+            "tier": "free",
+            "status": "active",
+            "max_agents": 1,
+            "max_messages_per_day": 100,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
+
+        with TestClient(app, raise_server_exceptions=False) as non_raising_client:
+            response = non_raising_client.post("/my/account/setup")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["subscription"]["max_storage_gb"] == 1
+        inserted_subscription = mock_supabase.table().insert.call_args.args[0]
+        assert "max_storage_gb" not in inserted_subscription
 
     def test_setup_account_existing_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test setting up account when user already has subscription."""
@@ -196,7 +216,6 @@ class TestAccountsEndpoints:
                     "status": "active",
                     "max_agents": 1,
                     "max_messages_per_day": 100,
-                    "max_storage_gb": 10,
                 }
             ]
         )
@@ -253,14 +272,14 @@ class TestAccountsEndpoints:
                 {
                     "id": "sub_1",
                     "account_id": "acc_test_123",
-                    "tier": "starter",
+                    "tier": "byok",
                     "status": "cancelled",
                     "instances": [],
                 },
                 {
                     "id": "sub_2",
                     "account_id": "acc_test_123",
-                    "tier": "professional",
+                    "tier": "pro",
                     "status": "active",
                     "instances": [
                         {"id": "inst_1", "instance_id": "1", "status": "running"},

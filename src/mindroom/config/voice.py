@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from mindroom.model_defaults import OPENAI_TRANSCRIPTION
+
 
 class _VoiceSTTConfig(BaseModel):
     """Configuration for voice speech-to-text."""
 
     provider: str = Field(default="openai", description="STT provider (openai or compatible)")
-    model: str = Field(default="whisper-1", description="STT model name")
+    model: str = Field(default=OPENAI_TRANSCRIPTION, description="STT model name")
     api_key: str | None = Field(default=None, description="API key for STT service")
     host: str | None = Field(default=None, description="Host URL for self-hosted STT")
 

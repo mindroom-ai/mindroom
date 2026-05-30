@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
+import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 import { cache } from '@/lib/cache'
+import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { getRuntimeConfig } from '@/lib/runtime-config'
 import { logger } from '@/lib/logger'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
@@ -399,12 +400,21 @@ export default function InstancePage() {
             {instance.matrix_server_url && (
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gray-50 dark:bg-gray-700 rounded-2xl">
                 <div className="flex items-center gap-3">
-                  <Database className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                  <MessageCircle className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
-                    <p className="font-medium dark:text-white">Matrix Server</p>
+                    <p className="font-medium dark:text-white">Chat Interface</p>
                     <p className="text-sm text-gray-600 dark:text-gray-400">{instance.matrix_server_url}</p>
                   </div>
                 </div>
+                <a
+                  href={buildCinnyLoginUrl(instance.matrix_server_url)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors whitespace-nowrap"
+                >
+                  Open Chat Interface
+                  <ExternalLink className="w-4 h-4" />
+                </a>
               </div>
             )}
           </div>

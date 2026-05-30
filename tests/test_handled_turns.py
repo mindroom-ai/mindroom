@@ -10,11 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.handled_turns import (
-    HandledTurnLedger,
-    HandledTurnRecord,
-    HandledTurnState,
-)
+from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
@@ -473,10 +469,10 @@ def test_updates_preserve_requester_and_correlation_when_not_reprovided(temp_dir
     assert turn_record.correlation_id == "corr-123"
 
 
-def test_loads_legacy_response_tracker_shape(temp_dir: Path) -> None:
-    """Legacy response tracker JSON should load into the new ledger."""
-    legacy_file = temp_dir / "legacy_responded.json"
-    legacy_file.write_text(
+def test_removed_response_id_aliases_do_not_populate_current_event_ids(temp_dir: Path) -> None:
+    """Removed response ID aliases should not act as an alternate schema."""
+    tracker_file = temp_dir / "removed_aliases_responded.json"
+    tracker_file.write_text(
         json.dumps(
             {
                 "$event": {
@@ -490,33 +486,33 @@ def test_loads_legacy_response_tracker_shape(temp_dir: Path) -> None:
         encoding="utf-8",
     )
 
-    tracker = HandledTurnLedger("legacy", base_path=temp_dir)
+    tracker = HandledTurnLedger("removed_aliases", base_path=temp_dir)
 
     assert tracker.has_responded("$event")
-    assert _get_response_event_id(tracker, "$event") == "$response"
-    assert tracker.get_visible_echo_event_id("$event") == "$echo"
+    assert _get_response_event_id(tracker, "$event") is None
+    assert tracker.get_visible_echo_event_id("$event") is None
     turn_record = tracker.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.anchor_event_id == "$event"
     assert turn_record.source_event_ids == ("$event",)
 
 
-def test_loads_legacy_record_without_completed_flag_as_terminal(temp_dir: Path) -> None:
-    """Legacy records without `completed` should remain terminally handled."""
-    legacy_file = temp_dir / "legacy_default_responded.json"
-    legacy_file.write_text(
+def test_record_without_completed_flag_defaults_to_terminal(temp_dir: Path) -> None:
+    """Records without `completed` normalize to a terminal handled turn."""
+    tracker_file = temp_dir / "default_completed_responded.json"
+    tracker_file.write_text(
         json.dumps(
             {
                 "$event": {
                     "timestamp": time.time(),
-                    "response_id": None,
+                    "response_event_id": None,
                 },
             },
         ),
         encoding="utf-8",
     )
 
-    tracker = HandledTurnLedger("legacy_default", base_path=temp_dir)
+    tracker = HandledTurnLedger("default_completed", base_path=temp_dir)
 
     assert tracker.has_responded("$event")
     assert _get_response_event_id(tracker, "$event") is None
@@ -525,9 +521,9 @@ def test_loads_legacy_record_without_completed_flag_as_terminal(temp_dir: Path) 
     assert turn_record.completed
 
 
-def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) -> None:
-    """Legacy records without the new request fields should still load cleanly."""
-    tracker = HandledTurnLedger("legacy_missing_request_context", base_path=temp_dir)
+def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -> None:
+    """Requester and correlation IDs remain optional record context."""
+    tracker = HandledTurnLedger("missing_request_context", base_path=temp_dir)
     _write_responses_file(
         tracker,
         {
@@ -539,7 +535,7 @@ def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) ->
         },
     )
 
-    reloaded = HandledTurnLedger("legacy_missing_request_context", base_path=temp_dir)
+    reloaded = HandledTurnLedger("missing_request_context", base_path=temp_dir)
     turn_record = reloaded.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"
@@ -547,10 +543,10 @@ def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) ->
     assert turn_record.correlation_id is None
 
 
-def test_loads_legacy_coalesced_record_shape(temp_dir: Path) -> None:
-    """Legacy response field names should still load coalesced turn metadata."""
-    legacy_file = temp_dir / "legacy_coalesced_responded.json"
-    legacy_file.write_text(
+def test_removed_response_id_aliases_do_not_populate_coalesced_event_ids(temp_dir: Path) -> None:
+    """Removed response aliases should not populate coalesced response metadata."""
+    tracker_file = temp_dir / "removed_aliases_coalesced_responded.json"
+    tracker_file.write_text(
         json.dumps(
             {
                 "$first": {
@@ -578,13 +574,13 @@ def test_loads_legacy_coalesced_record_shape(temp_dir: Path) -> None:
         encoding="utf-8",
     )
 
-    tracker = HandledTurnLedger("legacy_coalesced", base_path=temp_dir)
+    tracker = HandledTurnLedger("removed_aliases_coalesced", base_path=temp_dir)
 
     turn_record = tracker.get_turn_record("$first")
     assert turn_record is not None
     assert turn_record.source_event_ids == ("$first", "$primary")
-    assert turn_record.response_event_id == "$response"
-    assert turn_record.visible_echo_event_id == "$echo"
+    assert turn_record.response_event_id is None
+    assert turn_record.visible_echo_event_id is None
     assert turn_record.source_event_prompts == {
         "$first": "first",
         "$primary": "primary",
@@ -910,7 +906,7 @@ def test_invalid_agent_name_rejected(temp_dir: Path) -> None:
         HandledTurnLedger("../escape", base_path=temp_dir)
 
 
-def test_record_outcome_overwrites_previous_response_id(temp_dir: Path) -> None:
+def test_record_outcome_overwrites_previous_response_event_id(temp_dir: Path) -> None:
     """A later outcome write should replace the stored response event ID."""
     tracker = HandledTurnLedger("test_replace_response", base_path=temp_dir)
 

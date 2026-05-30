@@ -5,7 +5,8 @@
 ## MindRoom Docs
 
 - [Home](https://docs.mindroom.chat/)
-- [Getting Started](https://docs.mindroom.chat/getting-started/)
+- [Overview](https://docs.mindroom.chat/getting-started/)
+- [iOS Beta](https://docs.mindroom.chat/ios-beta/)
 - [Dashboard](https://docs.mindroom.chat/dashboard/)
 - [Overview](https://docs.mindroom.chat/configuration/)
 - [Agents](https://docs.mindroom.chat/configuration/agents/)

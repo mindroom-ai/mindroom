@@ -109,3 +109,17 @@ def test_redact_sensitive_data_supports_explicit_bounds_for_durable_tool_logs() 
         "message": "xxxxx... [truncated]",
         "items": ["0", "1", "... [truncated]"],
     }
+
+
+def test_redact_sensitive_data_redacts_secret_before_truncated_bound() -> None:
+    """Bounded redaction should keep scanning far enough to redact text that can survive truncation."""
+    redacted = redact_sensitive_data(
+        {"message": "x" * 50 + " api_key=sk-test-secret " + "y" * 5000},
+        max_string_length=120,
+    )
+
+    message = redacted["message"]
+    assert isinstance(message, str)
+    assert REDACTED in message
+    assert "sk-test-secret" not in message
+    assert len(message) <= 120

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from agno.models.azure import AzureOpenAI
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -190,7 +191,7 @@ def test_different_providers_with_extra_kwargs() -> None:
             },
             "anthropic_model": {
                 "provider": "anthropic",
-                "id": "claude-3-opus",
+                "id": "claude-opus-4-8",
                 "extra_kwargs": {
                     "temperature": 0.2,
                     "max_tokens": 2048,
@@ -329,6 +330,94 @@ def test_configure_model_for_compaction_disables_reply_oriented_claude_settings(
     assert model.max_tokens == MINDROOM_COMPACTION_SUMMARY_MAX_TOKENS
     assert model.timeout == MINDROOM_COMPACTION_PROVIDER_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "custom": "keep"}
+
+
+def test_azure_openai_provider_uses_runtime_env() -> None:
+    """Azure provider should create Agno AzureOpenAI with runtime .env settings."""
+    runtime_root = Path(tempfile.mkdtemp())
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        "AZURE_OPENAI_ENDPOINT=https://example-resource.openai.azure.com\n"
+        "AZURE_OPENAI_API_VERSION=2024-10-21\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "azure_model": ModelConfig(
+                provider="azure",
+                id="team-chat-deployment",
+                context_window=258_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "azure_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "azure_model")
+
+    assert isinstance(model, AzureOpenAI)
+    assert model.id == "team-chat-deployment"
+    assert model.api_key == "sk-azure"
+    assert model.azure_endpoint == "https://example-resource.openai.azure.com"
+    assert model.api_version == "2024-10-21"
+
+
+def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() -> None:
+    """Azure provider should support *_FILE endpoint secrets and Azure-specific overrides."""
+    runtime_root = Path(tempfile.mkdtemp())
+    endpoint_file = runtime_root / "azure-endpoint.txt"
+    endpoint_file.write_text("https://file-resource.openai.azure.com\n", encoding="utf-8")
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        f"AZURE_OPENAI_ENDPOINT_FILE={endpoint_file}\n"
+        "OPENAI_API_VERSION=2023-01-01\n"
+        "AZURE_OPENAI_DEPLOYMENT=env-chat-deployment\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "azure_model": ModelConfig(
+                provider="azure",
+                id="config-chat-deployment",
+                context_window=258_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "azure_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "azure_model")
+
+    assert isinstance(model, AzureOpenAI)
+    assert model.azure_endpoint == "https://file-resource.openai.azure.com"
+    assert model.azure_deployment == "env-chat-deployment"
+    assert model.api_version != "2023-01-01"
 
 
 def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:

@@ -4,8 +4,9 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +34,7 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.knowledge import KnowledgeRefreshScheduler
+from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -51,9 +52,70 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from starlette.types import ASGIApp, Receive, Scope, Send
+
     from mindroom.config.main import Config
+
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
+_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
+_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DASHBOARD_CORS_EXPOSE_HEADERS = (config_lifecycle.CONFIG_GENERATION_HEADER,)
+_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+@dataclass(frozen=True)
+class _DashboardCorsSettings:
+    """Dashboard CORS settings derived from the runtime environment."""
+
+    allow_origins: tuple[str, ...]
+    allow_credentials: bool
+
+
+class _RuntimeDashboardCorsMiddleware:
+    """Apply dashboard CORS settings from the app's current runtime context."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        api_app: FastAPI,
+        fallback_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        self.app = app
+        self.api_app = api_app
+        self.fallback_runtime_paths = fallback_runtime_paths
+        self._middleware_by_settings: dict[_DashboardCorsSettings, CORSMiddleware] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        middleware = self._middleware_for_current_runtime()
+        await middleware(scope, receive, send)
+
+    def _middleware_for_current_runtime(self) -> CORSMiddleware:
+        settings = _dashboard_cors_settings(self._current_runtime_paths())
+        middleware = self._middleware_by_settings.get(settings)
+        if middleware is None:
+            middleware = CORSMiddleware(
+                self.app,
+                allow_origins=list(settings.allow_origins),
+                allow_credentials=settings.allow_credentials,
+                allow_methods=["*"],
+                allow_headers=["*"],
+                expose_headers=list(_DASHBOARD_CORS_EXPOSE_HEADERS),
+            )
+            self._middleware_by_settings[settings] = middleware
+        return middleware
+
+    def _current_runtime_paths(self) -> constants.RuntimePaths:
+        try:
+            return _app_runtime_paths(self.api_app)
+        except TypeError:
+            return self.fallback_runtime_paths
 
 
 class DraftAgentPolicyDefaultsRequest(BaseModel):
@@ -244,6 +306,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
+        source_fingerprint = (
+            current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
+        )
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -251,6 +316,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             runtime_config=runtime_config,
             auth_state=auth_state,
             config_load_result=config_load_result,
+            source_fingerprint=source_fingerprint,
         )
     config_lifecycle.register_api_app(api_app)
 
@@ -262,6 +328,44 @@ async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
         return
     snapshot = _app_context(api_app)
     await source_watcher.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
+
+
+def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
+    try:
+        return config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return None
+
+
+def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[Config, constants.RuntimePaths] | None:
+    try:
+        return config_lifecycle.read_app_committed_runtime_config(api_app)
+    except HTTPException:
+        return None
+
+
+def _reconcile_knowledge_mode_transitions(
+    previous: tuple[Config, constants.RuntimePaths] | None,
+    api_app: FastAPI,
+) -> None:
+    if previous is None:
+        return
+    previous_config, previous_runtime_paths = previous
+    current_config, current_runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    if current_runtime_paths != previous_runtime_paths:
+        return
+    reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
+
+
+async def _reload_config_after_file_change(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    previous = _read_app_runtime_config_or_none(api_app)
+    loaded = config_lifecycle.load_config_into_app(runtime_paths, api_app)
+    if loaded:
+        _reconcile_knowledge_mode_transitions(previous, api_app)
+    await _sync_standalone_knowledge_watchers(api_app)
 
 
 async def _watch_config(
@@ -304,8 +408,7 @@ async def _watch_config(
             if current_mtime != last_mtime:
                 last_mtime = current_mtime
                 logger.info("Config file changed", path=str(config_path))
-                config_lifecycle.load_config_into_app(runtime_paths, api_app)
-                await _sync_standalone_knowledge_watchers(api_app)
+                await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
             last_mtime = 0.0
         except Exception:
@@ -370,24 +473,86 @@ def bind_orchestrator_knowledge_refresh_scheduler(
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
-app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
-initialize_api_app(app, constants.resolve_primary_runtime_paths())
+def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
+    """Return generated-docs routes for this runtime."""
+    docs_enabled = runtime_paths.env_flag(
+        "MINDROOM_ENABLE_API_DOCS",
+        default=not bool(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+    )
+    if not docs_enabled:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
 
-# Configure CORS for the standalone frontend dev server.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3003",  # Frontend dev server alternative port
-        "http://localhost:5173",  # Vite dev server default
-        "http://127.0.0.1:3003",  # Alternative localhost
-        "http://127.0.0.1:5173",
-        "*",  # Allow all origins for development (remove in production)
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+
+def _origin_from_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlsplit(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                _origin_from_url(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                _origin_from_url(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
+def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _DashboardCorsSettings:
+    """Return dashboard CORS settings for one runtime context."""
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+        return _DashboardCorsSettings(allow_origins=("*",), allow_credentials=False)
+
+    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_api_cors_origins(runtime_paths))
+        if hosted_origins:
+            return _DashboardCorsSettings(allow_origins=hosted_origins, allow_credentials=True)
+
+    origins = _parse_dashboard_cors_allowed_origins(configured_origins)
+    return _DashboardCorsSettings(
+        allow_origins=origins,
+        allow_credentials="*" not in origins,
+    )
+
+
+def _parse_dashboard_cors_allowed_origins(configured_origins: str | None) -> tuple[str, ...]:
+    """Parse a comma-separated dashboard CORS origin list."""
+    if configured_origins is None:
+        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+
+
+def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
+    """Add dashboard CORS middleware without wildcard credential defaults."""
+    api_app.add_middleware(
+        _RuntimeDashboardCorsMiddleware,
+        api_app=api_app,
+        fallback_runtime_paths=runtime_paths,
+    )
+
+
+_runtime_paths = constants.resolve_primary_runtime_paths()
+_api_docs = _api_docs_kwargs(_runtime_paths)
+app = FastAPI(
+    title="MindRoom Dashboard API",
+    lifespan=_lifespan,
+    docs_url=_api_docs["docs_url"],
+    redoc_url=_api_docs["redoc_url"],
+    openapi_url=_api_docs["openapi_url"],
 )
+initialize_api_app(app, _runtime_paths)
+_add_dashboard_cors_middleware(app, _runtime_paths)
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:
@@ -520,12 +685,14 @@ async def save_config(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
+    previous = _read_request_runtime_config_or_none(request)
     generation = config_lifecycle.replace_committed_config(
         request,
         new_config,
         error_prefix="Failed to save configuration",
         expected_generation=x_mindroom_config_generation,
     )
+    _reconcile_knowledge_mode_transitions(previous, request.app)
     _set_config_generation_header(response, generation)
     return {"success": True}
 
@@ -552,12 +719,14 @@ async def save_raw_config_source(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
+    previous = _read_request_runtime_config_or_none(request)
     generation = config_lifecycle.replace_raw_config_source(
         request,
         payload.source,
         error_prefix="Failed to save raw configuration",
         expected_generation=x_mindroom_config_generation,
     )
+    _reconcile_knowledge_mode_transitions(previous, request.app)
     _set_config_generation_header(response, generation)
     return {"success": True}
 
@@ -776,9 +945,13 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
 
     def read_rooms(config_data: dict[str, Any]) -> list[str]:
         rooms: set[str] = set()
+        rooms.update(config_data.get("rooms", {}))
         for agent_data in config_data.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
+        for team_data in config_data.get("teams", {}).values():
+            team_rooms = team_data.get("rooms", [])
+            rooms.update(team_rooms)
         return sorted(rooms)
 
     return config_lifecycle.read_committed_config(request, read_rooms)

@@ -356,7 +356,7 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
-            patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -407,7 +407,7 @@ class TestDMIntegration:
             # Verify the bot decided to respond even though not configured for the room
             bot._generate_response.assert_called_once()
             call_args = bot._generate_response.call_args
-            assert call_args.kwargs["room_id"] == "!dm:localhost"
+            assert call_args.kwargs["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args.kwargs["prompt"] == "Hello researcher, can you help?"
 
     async def test_agent_processes_dm_messages_when_not_configured_for_room(self, tmp_path: Path) -> None:
@@ -453,7 +453,7 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
-            patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -500,5 +500,5 @@ class TestDMIntegration:
             # Verify the bot decided to respond in the DM room
             bot._generate_response.assert_called_once()
             call_args = bot._generate_response.call_args
-            assert call_args[1]["room_id"] == "!dm:localhost"
+            assert call_args[1]["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args[1]["prompt"] == "Hello agent!"

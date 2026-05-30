@@ -10,6 +10,7 @@ from mindroom.dispatch_source import (
     is_automation_source_kind,
     is_voice_event,
 )
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from .context import (
     AfterResponseContext,
@@ -40,7 +41,7 @@ from .context import (
 from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import render_enrichment_block, render_system_enrichment_block
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
-from .ingress import HookIngressPolicy, hook_ingress_policy, should_handle_interactive_text_response
+from .ingress import HookIngressPolicy, hook_ingress_policy
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
 from .sender import build_hook_message_sender, send_and_track_message, send_hook_message
 from .state import build_hook_room_state_putter, build_hook_room_state_querier
@@ -135,10 +136,14 @@ __all__ = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "ScheduleFiredContext",
+    "SenderKind",
     "SessionHookContext",
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "TurnIntent",
+    "TurnOrigin",
+    "TurnTrust",
     "build_hook_matrix_admin",
     "build_hook_message_sender",
     "build_hook_room_state_putter",
@@ -159,7 +164,6 @@ __all__ = [
     "render_system_enrichment_block",
     "send_and_track_message",
     "send_hook_message",
-    "should_handle_interactive_text_response",
     "validate_event_name",
 ]
 

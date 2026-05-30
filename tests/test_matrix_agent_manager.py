@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -92,10 +94,44 @@ def _recording_httpx_async_client(
     return _FakeAsyncClient
 
 
+def _recording_httpx_sequence_client(
+    captured_requests: list[tuple[str, str, dict[str, object] | None]],
+    responses: list[httpx.Response],
+) -> type[object]:
+    """Build a minimal AsyncClient replacement that records GET and POST requests."""
+
+    class _FakeAsyncClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, url: str, **_: object) -> httpx.Response:
+            captured_requests.append(("GET", url, None))
+            return responses.pop(0)
+
+        async def post(
+            self,
+            url: str,
+            json: dict[str, object],
+            **_: object,
+        ) -> httpx.Response:
+            captured_requests.append(("POST", url, json))
+            return responses.pop(0)
+
+    return _FakeAsyncClient
+
+
 @pytest.fixture(autouse=True)
 def _clear_matrix_registration_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep matrix registration tests deterministic unless explicitly overridden."""
     monkeypatch.delenv("MATRIX_REGISTRATION_TOKEN", raising=False)
+    monkeypatch.delenv("MATRIX_REGISTRATION_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("MATRIX_REGISTRATION_SHARED_SECRET_FILE", raising=False)
     monkeypatch.delenv("MINDROOM_PROVISIONING_URL", raising=False)
     monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_ID", raising=False)
     monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
@@ -496,6 +532,74 @@ class TestMatrixRegistration:
                 "Test User",
                 runtime_paths=runtime_paths,
             )
+
+    @pytest.mark.asyncio
+    async def test_register_user_uses_synapse_shared_secret_file_when_configured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted Synapse instances can create bot accounts with shared-secret registration."""
+        test_pass = "test_pass"  # noqa: S105
+        shared_secret_path = tmp_path / "matrix-registration-secret"
+        shared_secret_path.write_text("shared-secret-value\n", encoding="utf-8")
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MATRIX_REGISTRATION_SHARED_SECRET_FILE=str(shared_secret_path),
+        )
+        mock_client = AsyncMock()
+        mock_client.login.return_value = nio.LoginResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+        with (
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_sequence_client(
+                    captured_requests,
+                    [
+                        httpx.Response(200, json={"nonce": "nonce-123"}),
+                        httpx.Response(200, json={"user_id": "@test_user:localhost"}),
+                    ],
+                ),
+            ),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+        ):
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            user_id = await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                test_pass,
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
+
+        assert user_id == "@test_user:localhost"
+        assert captured_requests[0] == ("GET", "http://localhost:8008/_synapse/admin/v1/register", None)
+        assert captured_requests[1][0:2] == ("POST", "http://localhost:8008/_synapse/admin/v1/register")
+        payload = captured_requests[1][2]
+        assert payload is not None
+        expected_mac = hmac.new(
+            b"shared-secret-value",
+            b"\x00".join([b"nonce-123", b"test_user", test_pass.encode("utf-8"), b"notadmin"]),
+            hashlib.sha1,
+        ).hexdigest()
+        assert payload == {
+            "nonce": "nonce-123",
+            "username": "test_user",
+            "password": test_pass,
+            "admin": False,
+            "mac": expected_mac,
+            "displayname": "Test User",
+        }
+        mock_client.register.assert_not_called()
+        mock_client.register_with_token.assert_not_called()
+        mock_client.login.assert_called_once_with(test_pass)
+        mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
     async def test_register_user_uses_provisioning_service_register_agent_when_configured(

@@ -78,8 +78,10 @@ export async function isAdmin() {
     return false
   }
 
+  const { apiUrl } = getServerRuntimeConfig()
+
   try {
-    const response = await fetch(`${API_URL}/my/account/admin-status`, {
+    const response = await fetch(`${apiUrl}/my/account/admin-status`, {
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',

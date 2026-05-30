@@ -51,6 +51,7 @@ from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, ResolvedReplayPlan
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.manager import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -93,6 +94,29 @@ def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None
     return runtime_paths
 
 
+def _fake_indexing_settings(base_id: str) -> IndexingSettings:
+    return IndexingSettings(
+        base_id=base_id,
+        storage_root="memory",
+        knowledge_path=f"memory/{base_id}",
+        mode="semantic",
+        embedder_provider="openai",
+        embedder_model="text-embedding-3-small",
+        embedder_host="",
+        embedder_dimensions="",
+        chunk_size="5000",
+        chunk_overlap="0",
+        repo_identity="",
+        git_branch="",
+        git_lfs="",
+        git_skip_hidden="",
+        git_include_patterns="",
+        git_exclude_patterns="",
+        include_extensions="",
+        exclude_extensions="()",
+    )
+
+
 def _knowledge_lookup(
     knowledge: object | None,
     *,
@@ -115,7 +139,7 @@ def _knowledge_lookup(
         base_id=base_id,
         storage_root="memory",
         knowledge_path=f"memory/{base_id}",
-        indexing_settings=(),
+        indexing_settings=_fake_indexing_settings(base_id),
     )
     return SimpleNamespace(
         key=key,

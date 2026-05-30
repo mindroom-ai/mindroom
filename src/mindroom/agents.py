@@ -372,6 +372,37 @@ def _build_additional_context(
     return additional_context
 
 
+def _file_mode_knowledge_instruction_block(
+    agent_name: str,
+    config: Config,
+    agent_runtime: ResolvedAgentRuntime,
+) -> str | None:
+    """Describe workspace-accessible file-only knowledge bases to the model."""
+    workspace = agent_runtime.workspace
+    if workspace is None:
+        return None
+
+    lines = [
+        "File-only knowledge bases are available in the workspace.",
+        "Use file or coding tools such as grep, list, and read instead of search_knowledge_base for these sources.",
+        "Available file-only sources:",
+    ]
+    source_lines: list[str] = []
+    for base_id in config.get_agent_knowledge_base_ids(agent_name):
+        base_config = config.get_knowledge_base_config(base_id)
+        if base_config.mode != "files":
+            continue
+        relative_path = Path("knowledge") / base_id
+        resolved_path = workspace.root / relative_path
+        if not resolved_path.exists():
+            continue
+        description = " ".join(base_config.description.split()) or "No description configured."
+        source_lines.append(f"- {base_id}: `{relative_path.as_posix()}`. {description}")
+    if not source_lines:
+        return None
+    return "\n".join([*lines, *source_lines])
+
+
 def _tool_supports_base_dir(tool_name: str) -> bool:
     """Return whether a registered tool exposes a base_dir config field."""
     metadata = TOOL_METADATA.get(tool_name)
@@ -1241,6 +1272,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     if agent_runtime.tool_base_dir is not None:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
+
+    file_mode_knowledge_instruction = _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    if file_mode_knowledge_instruction is not None:
+        instructions.append(file_mode_knowledge_instruction)
 
     show_tool_calls = show_tool_calls_for_agent(config, agent_name)
     if not show_tool_calls:

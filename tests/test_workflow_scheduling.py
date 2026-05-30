@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
@@ -76,13 +76,16 @@ def mock_config() -> Config:
                 "shell": AgentConfig(display_name="Shell"),
                 "analyst": AgentConfig(display_name="Analyst"),
             },
+            teams={
+                "ops": TeamConfig(display_name="Ops Team", role="Operations team", agents=["research", "analyst"]),
+            },
             models={"default": ModelConfig(provider="test", id="test-model")},
         ),
     )
     persist_entity_accounts(
         config,
         runtime_paths_for(config),
-        usernames={alias: alias for alias in ["router", *config.agents]},
+        usernames={alias: alias for alias in ["router", *config.agents, *config.teams]},
     )
     return config
 
@@ -187,7 +190,7 @@ class TestParseWorkflowSchedule:
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("research"), _mid("email_assistant")],
+            available_responders=[_mid("research"), _mid("email_assistant")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -220,7 +223,7 @@ class TestParseWorkflowSchedule:
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("general")],
+            available_responders=[_mid("general")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -246,7 +249,7 @@ class TestParseWorkflowSchedule:
             "Daily at 9am, give me a market analysis",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("finance")],
+            available_responders=[_mid("finance")],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -271,12 +274,30 @@ class TestParseWorkflowSchedule:
             "Schedule something",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("general")],
+            available_responders=[_mid("general")],
         )
 
         assert isinstance(result, _WorkflowParseError)
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
+
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_empty_available_responders_returns_parse_error(
+        self,
+        mock_agent_class: Mock,
+        mock_config: MagicMock,
+    ) -> None:
+        """Empty responder sets should fail deterministically for direct callers."""
+        result = await _parse_workflow_schedule(
+            "Schedule something",
+            config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
+            available_responders=[],
+        )
+
+        assert isinstance(result, _WorkflowParseError)
+        assert result.error == "No agents or teams available for scheduling."
+        mock_agent_class.assert_not_called()
 
     @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
@@ -302,16 +323,17 @@ class TestParseWorkflowSchedule:
             "remind me later",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[
+            available_responders=[
                 _mid("general"),
                 _mid("research"),
+                _mid("ops"),
                 _mid("finance"),
                 _mid("analyst"),
             ],
         )
 
         prompt = mock_agent.arun.call_args.args[0]
-        assert "Available agents and teams: @general, @research, @finance, @analyst" in prompt
+        assert "Available agents and teams: @general, @research, @ops, @finance, @analyst" in prompt
         assert "@@" not in prompt
 
     @patch("mindroom.model_loading.get_model_instance")
@@ -392,7 +414,7 @@ class TestParseWorkflowSchedule:
             "If someone mentions urgent then notify the team immediately",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
-            available_agents=[_mid("general")],
+            available_responders=[_mid("general")],
         )
 
         assert isinstance(result, _WorkflowParseError)

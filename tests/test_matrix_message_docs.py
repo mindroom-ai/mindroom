@@ -30,6 +30,7 @@ def test_matrix_message_description_covers_critical_behavior() -> None:
     assert 'thread_id="room"' in description
     assert "combined limit" in description
     assert "5 per call" in description
+    assert "Relative paths resolve from the agent workspace" in description
 
 
 def test_matrix_message_parameter_descriptions_are_exposed() -> None:
@@ -57,6 +58,7 @@ def test_matrix_message_parameter_descriptions_are_exposed() -> None:
     assert "att_*" in attachment_ids_description
     assert "cannot exceed 5" in attachment_ids_description
     assert "cannot exceed 5" in attachment_paths_description
+    assert "relative paths resolve from the agent workspace" in attachment_paths_description
 
     assert "current room context" in room_id_description
     assert "react" in target_description
