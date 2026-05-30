@@ -41,7 +41,7 @@ from mindroom.attachments import _attachment_id_for_event, register_local_attach
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, IngressOrderReservation, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, active_follow_up_coalescing_key
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -7601,6 +7601,7 @@ class TestAgentBot:
                     event_source=voice_event.source,
                 ),
                 CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                False,
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
@@ -12120,9 +12121,9 @@ class TestAgentBot:
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ) as mock_has_active_response,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
+            ) as mock_active_thread_ids,
             patch.object(
                 bot._response_runner,
                 "reserve_waiting_human_message",
@@ -12137,9 +12138,7 @@ class TestAgentBot:
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
-        mock_has_active_response.assert_called_once()
-        active_target = mock_has_active_response.call_args.args[0]
-        assert active_target.resolved_thread_id == target.resolved_thread_id
+        mock_active_thread_ids.assert_called_once_with(room.room_id)
         mock_reserve_waiting_human_message.assert_called_once()
         signal_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert signal_target.resolved_thread_id == target.resolved_thread_id
@@ -12150,9 +12149,10 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
+        assert pending_event.requester_user_id == "@user:localhost"
+        assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
@@ -12266,8 +12266,8 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
                 bot._response_runner,
@@ -12291,7 +12291,7 @@ class TestAgentBot:
             )
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+            assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
             ready_event = await mock_admit.await_args.kwargs["ready_task"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
@@ -12303,6 +12303,7 @@ class TestAgentBot:
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
         pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
+        assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
@@ -12406,6 +12407,7 @@ class TestAgentBot:
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
+        assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
 
@@ -12485,8 +12487,8 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
                 bot._response_runner,
@@ -12512,8 +12514,9 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
         assert isinstance(pending_event, PendingEvent)
+        assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND

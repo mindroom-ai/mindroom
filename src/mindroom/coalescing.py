@@ -14,6 +14,7 @@ from .coalescing_batch import (
     CoalescingKey,
     PendingEvent,
     build_coalesced_batch,
+    is_active_follow_up_coalescing_key,
 )
 from .coalescing_cleanup import (
     ClaimedSegmentOwner,
@@ -54,6 +55,10 @@ _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 logger = get_logger(__name__)
+
+
+async def _allow_dispatch(_key: CoalescingKey) -> None:
+    return
 
 
 class GatePhase(enum.Enum):
@@ -167,7 +172,6 @@ class _GateEntry:
     grace_deadline: float | None = None
     drain_all_requested: bool = False
     drain_context: _DrainContext | None = None
-    buffered_in_flight_max_order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -212,19 +216,20 @@ class CoalescingGate:
         debounce_seconds: Callable[[], float],
         upload_grace_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
+        wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
+        self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._order_book = CoalescingOrderBook()
-        self._in_flight_buffered_max_order: dict[CoalescingKey, int] = {}
         self._active_drain_context: _DrainContext | None = None
 
     def _remove_gate(self, key: CoalescingKey) -> None:
         self._gates.pop(key, None)
-        self._wake_owner_gates(key)
+        self._wake_related_gates(key)
 
     def _get_or_create_gate(self, key: CoalescingKey) -> _GateEntry:
         gate = self._gates.get(key)
@@ -251,6 +256,10 @@ class CoalescingGate:
     def _same_owner(left: CoalescingKey, right: CoalescingKey) -> bool:
         return left.room_id == right.room_id and left.requester_user_id == right.requester_user_id
 
+    @staticmethod
+    def _same_target(left: CoalescingKey, right: CoalescingKey) -> bool:
+        return left.room_id == right.room_id and left.thread_id == right.thread_id
+
     def _wake_owner(self, room_id: str, requester_user_id: str) -> None:
         for gate_key, gate in self._gates.items():
             if gate_key.room_id == room_id and gate_key.requester_user_id == requester_user_id:
@@ -260,6 +269,32 @@ class CoalescingGate:
         for other_key, other_gate in self._gates.items():
             if other_key != key and self._same_owner(other_key, key):
                 self._wake(other_gate)
+
+    def _wake_target_gates(self, key: CoalescingKey) -> None:
+        for other_key, other_gate in self._gates.items():
+            if other_key != key and self._same_target(other_key, key):
+                self._wake(other_gate)
+
+    def _wake_related_gates(self, key: CoalescingKey) -> None:
+        self._wake_owner_gates(key)
+        if is_active_follow_up_coalescing_key(key):
+            self._wake_target_gates(key)
+
+    @staticmethod
+    def _gate_has_work_before(
+        gate: _GateEntry,
+        *,
+        before_order: int,
+        source_event_id: str | None = None,
+    ) -> bool:
+        def matches(queued: _QueuedEvent) -> bool:
+            return queued.received_order < before_order and (
+                source_event_id is None or queued.source_event_id == source_event_id
+            )
+
+        return any(matches(queued) for queued in gate.queue) or any(
+            matches(claimed) for claimed in gate.claimed_admissions
+        )
 
     def _older_owner_root_gates(
         self,
@@ -275,16 +310,29 @@ class CoalescingGate:
             if gate_key != key
             and self._same_owner(gate_key, key)
             and gate_key.thread_id is None
-            and (
-                any(
-                    queued.received_order < before_order and queued.source_event_id == key.thread_id
-                    for queued in gate.queue
-                )
-                or any(
-                    claimed.received_order < before_order and claimed.source_event_id == key.thread_id
-                    for claimed in gate.claimed_admissions
-                )
-            )
+            and self._gate_has_work_before(gate, before_order=before_order, source_event_id=key.thread_id)
+        ]
+
+    def _older_target_active_follow_up_gates(
+        self,
+        key: CoalescingKey,
+        *,
+        before_order: int,
+    ) -> list[_GateEntry]:
+        """Return active follow-up gates that can block a resolved target."""
+        return [
+            gate
+            for gate_key, gate in self._gates.items()
+            if gate_key != key
+            and self._same_target(gate_key, key)
+            and is_active_follow_up_coalescing_key(gate_key)
+            and self._gate_has_work_before(gate, before_order=before_order)
+        ]
+
+    def _older_gate_blockers(self, key: CoalescingKey, *, before_order: int) -> list[_GateEntry]:
+        return [
+            *self._older_owner_root_gates(key, before_order=before_order),
+            *self._older_target_active_follow_up_gates(key, before_order=before_order),
         ]
 
     async def _wait_until_front_claimable(
@@ -295,17 +343,24 @@ class CoalescingGate:
         front_order: int,
     ) -> None:
         while True:
+            if is_active_follow_up_coalescing_key(key):
+                # The target of older same-room reservations is still unknown, so wait
+                # room-wide here. Once admitted, gate blockers below are target-scoped.
+                await self._wait_for_reservations(
+                    gate,
+                    self._order_book.older_room_reservations(key, before_order=front_order),
+                )
             await self._wait_for_reservations(
                 gate,
                 self._order_book.older_owner_reservations(key, before_order=front_order),
             )
-            older_gates = self._older_owner_root_gates(key, before_order=front_order)
-            if not older_gates:
+            blockers = self._older_gate_blockers(key, before_order=front_order)
+            if not blockers:
                 return
             wake_generation = gate.wake_generation
             gate.wake_event.clear()
-            older_gates = self._older_owner_root_gates(key, before_order=front_order)
-            if not older_gates or gate.wake_generation != wake_generation:
+            blockers = self._older_gate_blockers(key, before_order=front_order)
+            if not blockers or gate.wake_generation != wake_generation:
                 continue
             await gate.wake_event.wait()
 
@@ -331,57 +386,6 @@ class CoalescingGate:
             except TimeoutError:
                 self._release_unsettled_reservations(unsettled, drain_context.result)
                 return
-
-    def _set_buffered_in_flight_max_order(
-        self,
-        key: CoalescingKey,
-        gate: _GateEntry,
-        *,
-        after_order: int,
-    ) -> None:
-        buffered_orders = [queued.received_order for queued in gate.queue if queued.received_order > after_order]
-        buffered_orders.extend(
-            self._order_book.unsettled_owner_reservation_orders_after(key, after_order=after_order),
-        )
-        gate.buffered_in_flight_max_order = max(buffered_orders, default=None)
-        if gate.buffered_in_flight_max_order is None:
-            self._in_flight_buffered_max_order.pop(key, None)
-        else:
-            self._in_flight_buffered_max_order[key] = gate.buffered_in_flight_max_order
-
-    def _set_related_root_followup_buffered_orders(
-        self,
-        key: CoalescingKey,
-        pending_events: list[PendingEvent],
-        *,
-        after_order: int,
-    ) -> None:
-        if key.thread_id is not None:
-            return
-        source_event_ids = {pending_event.event.event_id for pending_event in pending_events}
-        related_keys = {
-            CoalescingKey(key.room_id, source_event_id, key.requester_user_id) for source_event_id in source_event_ids
-        }
-        buffered_orders = self._order_book.unsettled_owner_reservation_orders_after(key, after_order=after_order)
-        if buffered_orders:
-            buffered_max_order = max(buffered_orders)
-            for related_key in related_keys:
-                existing_max_order = self._in_flight_buffered_max_order.get(related_key)
-                self._in_flight_buffered_max_order[related_key] = max(
-                    existing_max_order or buffered_max_order,
-                    buffered_max_order,
-                )
-        for other_key, other_gate in self._gates.items():
-            if other_key in related_keys:
-                self._set_buffered_in_flight_max_order(other_key, other_gate, after_order=after_order)
-
-    def _prune_in_flight_buffered_orders(self) -> None:
-        """Drop buffered markers whose reservations settled without creating that gate."""
-        for key, buffered_max_order in list(self._in_flight_buffered_max_order.items()):
-            if key in self._gates:
-                continue
-            if not self._order_book.has_unsettled_owner_reservation_at_or_before(key, buffered_max_order):
-                self._in_flight_buffered_max_order.pop(key, None)
 
     @staticmethod
     def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
@@ -409,7 +413,6 @@ class CoalescingGate:
     @staticmethod
     def _claim_front_events(gate: _GateEntry, count: int) -> list[_QueuedEvent]:
         gate.claimed_admissions = [gate.queue.popleft() for _ in range(count)]
-        gate.buffered_in_flight_max_order = None
         return gate.claimed_admissions
 
     @staticmethod
@@ -462,10 +465,17 @@ class CoalescingGate:
         self._wake_owner(room_id, requester_user_id)
         return reservation
 
+    def retarget_order_reservation(self, reservation: IngressOrderReservation, *, requester_user_id: str) -> None:
+        """Move an unsettled receive-order reservation to another owner key."""
+        previous_requester_user_id = reservation.requester_user_id
+        if not self._order_book.retarget(reservation, requester_user_id=requester_user_id):
+            return
+        self._wake_owner(reservation.room_id, previous_requester_user_id)
+        self._wake_owner(reservation.room_id, requester_user_id)
+
     def release_order_reservation(self, reservation: IngressOrderReservation) -> None:
         """Release a receive-order reservation that will not become a queued admission."""
         self._release_order_reservation(reservation, wake=True)
-        self._prune_in_flight_buffered_orders()
 
     def _release_order_reservation(self, reservation: IngressOrderReservation, *, wake: bool) -> None:
         if not self._order_book.release(reservation):
@@ -483,7 +493,6 @@ class CoalescingGate:
                 continue
             self._release_order_reservation(reservation, wake=True)
             drain_result.released_reservation_count += 1
-        self._prune_in_flight_buffered_orders()
 
     async def _wait_for_order_reservations_for_drain(self, drain_context: _DrainContext) -> None:
         while True:
@@ -595,13 +604,10 @@ class CoalescingGate:
         latest_receipt_time = gate.queue[0].receipt_time
         if not coalesce_normal_events:
             return latest_receipt_time
-        buffered_in_flight_max_order = gate.buffered_in_flight_max_order
         for queued in list(gate.queue)[1:]:
             if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 break
-            if (
-                buffered_in_flight_max_order is None or queued.received_order > buffered_in_flight_max_order
-            ) and queued.receipt_time > latest_receipt_time + debounce_seconds:
+            if queued.receipt_time > latest_receipt_time + debounce_seconds:
                 break
             latest_receipt_time = queued.receipt_time
         return latest_receipt_time
@@ -780,12 +786,6 @@ class CoalescingGate:
             resolved_received_at = received_at if received_at is not None else time.time()
             receipt_time = order_reservation.receipt_time
             self._release_order_reservation(order_reservation, wake=False)
-        buffered_max_order = self._in_flight_buffered_max_order.get(key)
-        if buffered_max_order is not None and received_order <= buffered_max_order:
-            gate.buffered_in_flight_max_order = max(
-                gate.buffered_in_flight_max_order or buffered_max_order,
-                buffered_max_order,
-            )
         admission = _QueuedEvent(
             admission_key=key,
             received_order=received_order,
@@ -797,9 +797,8 @@ class CoalescingGate:
             ready_result=ready_result,
         )
         self._insert_queued_event(gate, admission)
-        self._prune_in_flight_buffered_orders()
         self._schedule_drain(key, gate)
-        self._wake_owner_gates(key)
+        self._wake_related_gates(key)
         kind = self._queued_kind(admission)
         path = self._enqueue_path(kind)
         if ready_result is not None:
@@ -1181,9 +1180,8 @@ class CoalescingGate:
         *,
         bypass_grace: bool,
     ) -> str:
-        """Dispatch a claimed batch while buffering new ingress on the same gate."""
+        """Dispatch a claimed batch."""
         flush_start = time.monotonic()
-        in_flight_start_order = self._order_book.next_received_order
         gate.phase = GatePhase.IN_FLIGHT
         gate.deadline = None
         gate.grace_deadline = None
@@ -1233,11 +1231,9 @@ class CoalescingGate:
                 outcome=outcome,
             )
             gate.phase = GatePhase.DEBOUNCE
-            self._set_buffered_in_flight_max_order(key, gate, after_order=in_flight_start_order)
-            self._set_related_root_followup_buffered_orders(key, pending_events, after_order=in_flight_start_order)
             gate.grace_deadline = None
             gate.deadline = None
-            self._wake_owner_gates(key)
+            self._wake_related_gates(key)
 
     async def _dispatch_claimed_events(
         self,
@@ -1276,7 +1272,6 @@ class CoalescingGate:
             after_order=front.received_order,
             before_order=grace_result.before_order,
             before_or_at_receipt_time=grace_result.quiet_deadline,
-            buffered_in_flight_max_order=gate.buffered_in_flight_max_order,
         )
         if same_window_reservations:
             await self._wait_for_reservations(gate, same_window_reservations)
@@ -1377,7 +1372,7 @@ class CoalescingGate:
             raise
         finally:
             self._clear_claimed_admissions(gate, admissions)
-            self._wake_owner_gates(key)
+            self._wake_related_gates(key)
 
     async def _dispatch_front_barrier(
         self,
@@ -1409,7 +1404,6 @@ class CoalescingGate:
             after_order=front.received_order,
             before_order=debounce_result.before_order,
             before_or_at_receipt_time=debounce_result.quiet_deadline,
-            buffered_in_flight_max_order=gate.buffered_in_flight_max_order,
         )
         if same_window_reservations:
             await self._wait_for_reservations(gate, same_window_reservations)
@@ -1437,14 +1431,60 @@ class CoalescingGate:
         if not gate.queue:
             gate.drain_all_requested = False
 
+    async def _dispatch_active_follow_up_backlog(self, key: CoalescingKey, gate: _GateEntry) -> bool:
+        """Dispatch the post-idle active-response backlog as one receive-ordered batch."""
+        if not is_active_follow_up_coalescing_key(key):
+            return False
+        front = gate.queue[0]
+        if self._queued_kind(front) is not QueueKind.NORMAL:
+            return False
+
+        backlog_max_order = self._order_book.next_received_order
+        backlog_reservations = self._order_book.unsettled_room_reservations_in_window(
+            key,
+            after_order=front.received_order,
+            before_order=backlog_max_order + 1,
+        )
+        if backlog_reservations:
+            await self._wait_for_reservations(gate, backlog_reservations)
+            return True
+
+        candidate_count = self._claimable_front_normal_run_length(
+            key,
+            gate,
+            coalesce_normal_events=True,
+            max_received_order=backlog_max_order,
+        )
+        if candidate_count == 0:
+            return False
+
+        claimed_admissions = self._claim_front_events(gate, candidate_count)
+        await self._dispatch_claim(
+            key,
+            gate,
+            claimed_admissions,
+            bypass_grace=True,
+            allow_upload_grace=False,
+        )
+        return True
+
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
         front = gate.queue[0]
         await self._wait_until_front_claimable(key, gate, front_order=front.received_order)
         if not gate.queue:
             return
 
+        drain_context = self._current_drain_context(gate)
+        if not (self._is_shutting_down() or self._is_bounded_drain(drain_context)):
+            await self._wait_until_dispatch_allowed(key)
+        if not gate.queue:
+            return
+
         front = gate.queue[0]
         if await self._dispatch_front_barrier(key, gate, self._queued_kind(front)):
+            return
+
+        if await self._dispatch_active_follow_up_backlog(key, gate):
             return
 
         debounce_result = await self._wait_for_debounce(
@@ -1479,8 +1519,6 @@ class CoalescingGate:
                 current_gate.drain_task = None
             if self._gate_work_count(current_gate) == 0:
                 self._remove_gate(key)
-                if not self._order_book.unsettled_owner_reservation_orders_after(key, after_order=0):
-                    self._in_flight_buffered_max_order.pop(key, None)
             elif outcome in {"failed", "cancelled"} and not self._is_shutting_down():
                 self._ensure_drain_task(key, current_gate)
                 self._wake(current_gate)
@@ -1653,4 +1691,3 @@ class _CoalescingDrainCoordinator:
             self._clear_context()
             if drain_completed:
                 self.gate._gates.clear()
-                self.gate._in_flight_buffered_max_order.clear()

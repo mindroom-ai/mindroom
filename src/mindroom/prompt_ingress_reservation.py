@@ -23,6 +23,7 @@ class PromptIngressReservationOwner:
 
     gate: CoalescingGate
     reservation: IngressOrderReservation
+    active_response_thread_ids_at_receipt: frozenset[str | None] = frozenset()
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
 
@@ -64,6 +65,10 @@ class PromptIngressReservationOwner:
             raise
         self.admitted = True
         self.ready_task = None
+
+    def retarget(self, requester_user_id: str) -> None:
+        """Move this reservation to a different coalescing owner before admission."""
+        self.gate.retarget_order_reservation(self.reservation, requester_user_id=requester_user_id)
 
     async def cancel_ready_task(self) -> None:
         """Cancel or collect the owned ready task once."""

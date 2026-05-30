@@ -94,6 +94,13 @@ class CoalescingOrderBook:
         reservation.settled.set()
         return True
 
+    def retarget(self, reservation: IngressOrderReservation, *, requester_user_id: str) -> bool:
+        """Move an unsettled reservation to a different owner key."""
+        if reservation.released or reservation.requester_user_id == requester_user_id:
+            return False
+        reservation.requester_user_id = requester_user_id
+        return True
+
     def unsettled(self) -> list[IngressOrderReservation]:
         """Return all currently unresolved reservations."""
         return list(self._reservations)
@@ -115,6 +122,30 @@ class CoalescingOrderBook:
             if self.reservation_matches_key(reservation, key) and reservation.received_order < before_order
         ]
 
+    def older_room_reservations(self, key: CoalescingKey, *, before_order: int) -> list[IngressOrderReservation]:
+        """Return unresolved same-room reservations older than a receive order."""
+        return [
+            reservation
+            for reservation in self._reservations
+            if reservation.room_id == key.room_id and reservation.received_order < before_order
+        ]
+
+    def unsettled_room_reservations_in_window(
+        self,
+        key: CoalescingKey,
+        *,
+        after_order: int,
+        before_order: int | None,
+    ) -> list[IngressOrderReservation]:
+        """Return unresolved same-room reservations inside one receive-order window."""
+        return [
+            reservation
+            for reservation in self._reservations
+            if reservation.room_id == key.room_id
+            and reservation.received_order > after_order
+            and (before_order is None or reservation.received_order < before_order)
+        ]
+
     def has_older_unresolved_owner_reservation(self, key: CoalescingKey, received_order: int) -> bool:
         """Return whether older unresolved same-owner reservation blocks this order."""
         return any(
@@ -129,7 +160,6 @@ class CoalescingOrderBook:
         after_order: int,
         before_order: int | None,
         before_or_at_receipt_time: float,
-        buffered_in_flight_max_order: int | None = None,
     ) -> list[IngressOrderReservation]:
         """Return unresolved same-owner reservations that belong to a claim window."""
         return [
@@ -138,31 +168,5 @@ class CoalescingOrderBook:
             if self.reservation_matches_key(reservation, key)
             and reservation.received_order > after_order
             and (before_order is None or reservation.received_order < before_order)
-            and (
-                reservation.receipt_time <= before_or_at_receipt_time
-                or (
-                    buffered_in_flight_max_order is not None
-                    and reservation.received_order <= buffered_in_flight_max_order
-                )
-            )
+            and reservation.receipt_time <= before_or_at_receipt_time
         ]
-
-    def unsettled_owner_reservation_orders_after(
-        self,
-        key: CoalescingKey,
-        *,
-        after_order: int,
-    ) -> list[int]:
-        """Return unresolved same-owner reservation orders after a receive order."""
-        return [
-            reservation.received_order
-            for reservation in self._reservations
-            if self.reservation_matches_key(reservation, key) and reservation.received_order > after_order
-        ]
-
-    def has_unsettled_owner_reservation_at_or_before(self, key: CoalescingKey, received_order: int) -> bool:
-        """Return whether an unresolved same-owner reservation exists at or before an order."""
-        return any(
-            self.reservation_matches_key(reservation, key) and reservation.received_order <= received_order
-            for reservation in self._reservations
-        )

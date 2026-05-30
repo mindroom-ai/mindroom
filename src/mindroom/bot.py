@@ -71,6 +71,7 @@ from .agents import create_agent, get_rooms_for_entity, show_tool_calls_for_agen
 from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
+from .coalescing_batch import CoalescingKey, is_active_follow_up_coalescing_key
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
@@ -372,6 +373,7 @@ class AgentBot:
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
+            wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -517,6 +519,12 @@ class AgentBot:
                 edit_regenerator=self._edit_regenerator,
             ),
         )
+
+    async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
+        """Hold active follow-up dispatch until the response lock for its target is idle."""
+        if not is_active_follow_up_coalescing_key(key):
+            return
+        await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
         """Refresh startup collaborators when Matrix login authenticates as a different user."""
