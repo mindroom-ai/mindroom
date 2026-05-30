@@ -118,6 +118,7 @@ from mindroom.turn_origin import (
     classify_turn_origin,
     original_sender_for_router_handoff,
     original_sender_for_router_relay,
+    requester_id_from_trusted_original_sender,
 )
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
@@ -335,13 +336,17 @@ class TurnController:
                     self.deps.runtime_paths,
                 )
             source_kind = source_kind_from_content(content)
-            trusted_original_sender = self._trusted_human_original_sender(
-                sender=sender,
-                content=content,
+            trusted_requester = requester_id_from_trusted_original_sender(
+                original_sender=original_sender,
+                original_sender_entity_name=self._managed_entity_name_for_sender(original_sender),
                 source_kind=source_kind,
+                sender_trusts_original_sender=self._should_trust_original_sender_metadata(
+                    sender=sender,
+                    source_kind=source_kind,
+                ),
             )
-            if trusted_original_sender is not None:
-                return trusted_original_sender
+            if trusted_requester is not None:
+                return trusted_requester
             return sender
         return get_effective_sender_id_for_reply_permissions(
             sender,

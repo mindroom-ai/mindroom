@@ -150,6 +150,23 @@ def original_sender_for_router_relay(
     return None
 
 
+def requester_id_from_trusted_original_sender(
+    *,
+    original_sender: str | None,
+    original_sender_entity_name: str | None,
+    source_kind: str | None,
+    sender_trusts_original_sender: bool,
+) -> str | None:
+    """Return original-sender metadata that may act as the dispatch requester."""
+    if not sender_trusts_original_sender or not original_sender:
+        return None
+    if original_sender_entity_name is None:
+        return original_sender
+    if source_kind == SCHEDULED_SOURCE_KIND:
+        return original_sender
+    return None
+
+
 def _turn_trust(
     *,
     sender_kind: SenderKind,

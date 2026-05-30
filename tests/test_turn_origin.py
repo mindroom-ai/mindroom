@@ -11,6 +11,7 @@ from mindroom.turn_origin import (
     classify_turn_origin,
     original_sender_for_router_handoff,
     original_sender_for_router_relay,
+    requester_id_from_trusted_original_sender,
 )
 
 
@@ -113,6 +114,45 @@ def test_plain_hook_with_managed_requester_still_requires_mention() -> None:
     assert origin.intent == TurnIntent.HOOK_MESSAGE
     assert not origin.may_dispatch_without_mention
     assert origin.blocks_unmentioned_managed_sender
+
+
+def test_requester_id_from_trusted_original_sender_accepts_human_metadata() -> None:
+    """Trusted human original-sender metadata may act as the requester."""
+    assert (
+        requester_id_from_trusted_original_sender(
+            original_sender="@human:localhost",
+            original_sender_entity_name=None,
+            source_kind=HOOK_DISPATCH_SOURCE_KIND,
+            sender_trusts_original_sender=True,
+        )
+        == "@human:localhost"
+    )
+
+
+def test_requester_id_from_trusted_original_sender_accepts_managed_scheduled_fires() -> None:
+    """Scheduled fires may preserve a managed requester such as the router."""
+    assert (
+        requester_id_from_trusted_original_sender(
+            original_sender="@mindroom_router:localhost",
+            original_sender_entity_name="router",
+            source_kind=SCHEDULED_SOURCE_KIND,
+            sender_trusts_original_sender=True,
+        )
+        == "@mindroom_router:localhost"
+    )
+
+
+def test_requester_id_from_trusted_original_sender_rejects_managed_plain_hooks() -> None:
+    """Managed original-sender metadata is only a requester for scheduled fires."""
+    assert (
+        requester_id_from_trusted_original_sender(
+            original_sender="@mindroom_router:localhost",
+            original_sender_entity_name="router",
+            source_kind=HOOK_SOURCE_KIND,
+            sender_trusts_original_sender=True,
+        )
+        is None
+    )
 
 
 def test_router_handoff_is_trusted_user_relay() -> None:
