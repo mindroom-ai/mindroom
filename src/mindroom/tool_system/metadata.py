@@ -1137,14 +1137,18 @@ def _unavailable_tool_metadata_from_failed_plugin(
     candidate_registrations: Mapping[str, dict[str, ToolMetadata]],
 ) -> dict[str, ToolMetadata]:
     """Return tools known to belong to one plugin that failed in tolerant startup mode."""
-    metadata_by_name = {
-        tool_name: metadata
-        for registrations in candidate_registrations.values()
-        for tool_name, metadata in registrations.items()
-    }
-    if metadata_by_name or plugin_base.tools_module_path is None:
-        return metadata_by_name
-    return _declared_tool_metadata_from_broken_plugin_source(plugin_base.tools_module_path)
+    metadata_by_name: dict[str, ToolMetadata] = {}
+    for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path):
+        if module_path is not None:
+            metadata_by_name.update(_declared_tool_metadata_from_broken_plugin_source(module_path))
+    metadata_by_name.update(
+        {
+            tool_name: metadata
+            for registrations in candidate_registrations.values()
+            for tool_name, metadata in registrations.items()
+        },
+    )
+    return metadata_by_name
 
 
 def resolved_tool_validation_snapshot_for_runtime(
