@@ -170,8 +170,6 @@ def request_execution_env(
                 process_env=source_env,
             ),
         )
-    if execution_env:
-        return dict(execution_env)
     return dict(constants.execution_tool_runtime_env_values(runtime_paths))
 
 
