@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import GROQ_TRANSCRIPTION, GROQ_TTS
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -32,21 +33,21 @@ if TYPE_CHECKING:
             label="Transcription Model",
             type="text",
             required=False,
-            default="whisper-large-v3",
+            default=GROQ_TRANSCRIPTION,
         ),
         ConfigField(
             name="translation_model",
             label="Translation Model",
             type="text",
             required=False,
-            default="whisper-large-v3",
+            default=GROQ_TRANSCRIPTION,
         ),
         ConfigField(
             name="tts_model",
             label="Tts Model",
             type="text",
             required=False,
-            default="playai-tts",
+            default=GROQ_TTS,
         ),
         ConfigField(
             name="tts_voice",

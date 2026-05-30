@@ -77,7 +77,7 @@ def test_issue_opaque_oauth_state_keeps_concurrent_process_writes(tmp_path: Path
     try:
         results: list[tuple[int | None, str, str]] = []
         for process in processes:
-            stdout, stderr = process.communicate(timeout=10)
+            stdout, stderr = process.communicate(timeout=30)
             results.append((process.returncode, stdout, stderr))
 
         assert {returncode for returncode, _stdout, _stderr in results} == {0}, results

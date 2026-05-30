@@ -12,10 +12,12 @@ interface PricingPlan {
   name: string
   price_monthly: string
   price_yearly: string
-  price_model?: string
   description: string
   features: string[]
   recommended?: boolean
+  included_ai_budget_usd?: number
+  requires_customer_provider_keys?: boolean
+  resource_profile?: 'small' | 'pro'
   limits?: {
     max_agents: number | string
     max_messages_per_day: number | string
@@ -99,7 +101,7 @@ export default function BillingPage() {
   const tierInfo = {
     name: currentPlan?.name || 'Free',
     price: currentPlan ?
-      `${currentPlan.price_monthly}${currentPlan.price_model === 'per_user' ? '/user/month' : '/month'}` :
+      `${currentPlan.price_monthly}/month` :
       '$0/month',
   }
 
@@ -345,7 +347,11 @@ export default function BillingPage() {
             .filter(([key]) => key !== 'free' && key !== 'enterprise')
             .map(([key, plan]) => {
               const isCurrentPlan = key === currentTier
-              const isDowngrade = ['starter', 'professional'].indexOf(key) < ['starter', 'professional'].indexOf(currentTier)
+              const tierOrder: PlanId[] = ['free', 'byok', 'hobby', 'pro', 'enterprise']
+              const currentTierRank = tierOrder.indexOf(currentTier)
+              const candidateTierRank = tierOrder.indexOf(key as PlanId)
+              const isDowngrade =
+                currentTierRank !== -1 && candidateTierRank !== -1 && candidateTierRank < currentTierRank
 
               return (
                 <div
@@ -367,7 +373,7 @@ export default function BillingPage() {
                   <p className="text-2xl font-bold mb-2">
                     {plan.price_monthly}
                     <span className="text-sm text-gray-500 dark:text-gray-400">
-                      {plan.price_model === 'per_user' ? '/user/month' : '/month'}
+                      /month
                     </span>
                   </p>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">{plan.description}</p>

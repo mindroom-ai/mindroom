@@ -168,6 +168,10 @@ Use `authorization.agent_reply_permissions` to restrict which users each respond
 - A `*` user entry means "allow any sender" for that specific entity.
 - If an entity is not present in the map, it has no extra reply restriction.
 - Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
+- The same allowlist gates dashboard credential and OAuth management when a request targets an agent with `agent_name`.
+- Unauthorized agent-scoped credential requests return HTTP 403 before credentials are read, written, connected, or disconnected.
+- Under trusted upstream auth, MindRoom checks the resolved Matrix requester from the configured Matrix user ID header or email-to-Matrix template.
+- Under standalone API-key auth, set `MINDROOM_OWNER_USER_ID` so agent-scoped credential management resolves to the owner Matrix user instead of the generic standalone principal.
 - Internal MindRoom identities (agents, teams, router, and the internal `mindroom_user`) always bypass reply permissions — they are system participants, not end users.
 - `bot_accounts` are **not** exempt. Bridge bots listed in `bot_accounts` are still subject to reply permission checks.
 - Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.

@@ -459,7 +459,7 @@ class ConfigManagerTools(Toolkit):
             return "Agents in This Room", []
 
         registry = entity_identity_registry(config, self.runtime_paths)
-        available_agent_names = {
+        available_responder_names = {
             agent_name
             for matrix_id in responder_candidate_entities_from_cached_room(
                 room,
@@ -470,7 +470,7 @@ class ConfigManagerTools(Toolkit):
             if (agent_name := registry.current_entity_name_for_user_id(matrix_id.full_id, include_router=False))
             is not None
         }
-        agent_entries = [(name, agent) for name, agent in all_agents if name in available_agent_names]
+        agent_entries = [(name, agent) for name, agent in all_agents if name in available_responder_names]
         return "Agents in This Room", agent_entries
 
     def _list_agents(self, *, agent_scope: _AgentScope = "current_room") -> str:

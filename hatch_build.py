@@ -11,6 +11,7 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 _BUN_INSTALL_MAX_ATTEMPTS = 3
 _BUN_INSTALL_RETRY_DELAY_SECONDS = 2.0
+_GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 
 
 class FrontendBuildHook(BuildHookInterface):
@@ -69,6 +70,22 @@ def _build_frontend(frontend_dir: Path, output_dir: Path, bun: str) -> None:
         [bun, "run", "vite", "build", "--outDir", str(output_dir)],
         cwd=frontend_dir,
     )
+    _assert_no_git_lfs_pointers(output_dir)
+
+
+def _assert_no_git_lfs_pointers(output_dir: Path) -> None:
+    """Reject frontend builds that accidentally bundle unresolved Git LFS pointers."""
+    pointer_files = [
+        path.relative_to(output_dir).as_posix()
+        for path in output_dir.rglob("*")
+        if path.is_file() and path.read_bytes().startswith(_GIT_LFS_POINTER_PREFIX)
+    ]
+    if not pointer_files:
+        return
+
+    joined = ", ".join(pointer_files)
+    msg = f"Frontend build contains unresolved Git LFS pointer assets: {joined}. Run git lfs pull before building."
+    raise RuntimeError(msg)
 
 
 def _run_command(

@@ -812,6 +812,27 @@ async def test_attachments_tool_register_attachment_uses_resolved_thread_scope(t
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_resolves_relative_paths_from_workspace(tmp_path: Path) -> None:
+    """Registering a relative file path should use the agent workspace root."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    generated_file = workspace / "scratch" / "generated.txt"
+    generated_file.parent.mkdir()
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment("scratch/generated.txt"))
+
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["local_path"] == str(generated_file.resolve())
+    attachment = load_attachment(tmp_path, payload["attachment_id"])
+    assert attachment is not None
+    assert attachment.local_path == generated_file.resolve()
+
+
+@pytest.mark.asyncio
 async def test_send_context_attachments_inherits_resolved_thread_scope(tmp_path: Path) -> None:
     """Attachment sends should stay in the resolved thread even when raw thread_id is absent."""
     sample_file = tmp_path / "upload.txt"
@@ -1032,6 +1053,32 @@ async def test_send_context_attachments_sends_local_file_paths_by_auto_registeri
     assert result.newly_registered_attachment_ids == result.resolved_attachment_ids
     assert result.newly_registered_attachment_ids[0] in list_tool_runtime_attachment_ids(current_context)
     mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_context_attachments_rejects_workspace_relative_file_path_escape(tmp_path: Path) -> None:
+    """Workspace-relative attachment paths must not resolve outside the agent workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        result, send_error = await send_context_attachments(
+            ctx,
+            attachment_ids=[],
+            attachment_file_paths=["../outside.txt"],
+            workspace_root=workspace,
+        )
+
+    assert result is None
+    assert send_error is not None
+    assert "workspace" in send_error
+    mocked.assert_not_awaited()
 
 
 def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import OPENAI_IMAGE, OPENAI_TRANSCRIPTION, OPENAI_TTS
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
             label="Transcription Model",
             type="text",
             required=False,
-            default="whisper-1",
+            default=OPENAI_TRANSCRIPTION,
         ),
         ConfigField(
             name="text_to_speech_voice",
@@ -74,7 +75,7 @@ if TYPE_CHECKING:
             label="Text To Speech Model",
             type="text",
             required=False,
-            default="tts-1",
+            default=OPENAI_TTS,
         ),
         ConfigField(
             name="text_to_speech_format",
@@ -88,7 +89,7 @@ if TYPE_CHECKING:
             label="Image Model",
             type="text",
             required=False,
-            default="dall-e-3",
+            default=OPENAI_IMAGE,
         ),
         ConfigField(
             name="image_quality",

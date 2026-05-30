@@ -15,16 +15,25 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import MessageContext
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+)
+from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import should_agent_respond
-from mindroom.turn_policy import ResponseAction, TurnPolicy, TurnPolicyDeps
-from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
+from tests.conftest import bind_runtime_paths, create_mock_room, request_envelope, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -175,6 +184,85 @@ class TestAgentResponseLogic:
         assert action is not None
         assert action.kind == "reject"
         assert action.rejection_message == "Team request includes no available members."
+
+    @pytest.mark.asyncio
+    async def test_single_visible_responder_replies_when_planning_history_degraded(self) -> None:
+        """A degraded dispatch read must not silence the sole visible responder in a thread."""
+        room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
+        runtime = MagicMock()
+        runtime.client = None
+        runtime.config = self.config
+        runtime.orchestrator = None
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=self.runtime_paths,
+                agent_name="calculator",
+                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
+            ),
+        )
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread-root:localhost",
+            thread_history=thread_history_result(
+                [],
+                is_full_history=False,
+                diagnostics={
+                    THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                    THREAD_HISTORY_ERROR_DIAGNOSTIC: "dispatch_read_timeout",
+                },
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        assert context.planning_thread_history_unavailable is True
+        target = MessageTarget.resolve(room.room_id, context.thread_id, "$event")
+        dispatch = PreparedDispatch(
+            requester_user_id=self.sender,
+            context=context,
+            target=target,
+            correlation_id="$event",
+            envelope=request_envelope(
+                room_id=room.room_id,
+                reply_to_event_id="$event",
+                thread_id=context.thread_id,
+                prompt="continue",
+                user_id=self.sender,
+                target=target,
+                agent_name="calculator",
+            ),
+        )
+
+        candidate_ids = entity_ids(self.config, self.runtime_paths)
+        with patch(
+            "mindroom.turn_policy.responder_candidate_entities_for_room",
+            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+        ):
+            multiple_visible_action = await policy.resolve_response_action(
+                dispatch,
+                room,
+                "continue",
+                False,
+                has_active_response_for_target=lambda _target: False,
+            )
+
+        assert multiple_visible_action.kind == "skip"
+
+        with patch(
+            "mindroom.turn_policy.responder_candidate_entities_for_room",
+            new=AsyncMock(return_value=[candidate_ids["calculator"]]),
+        ):
+            single_visible_action = await policy.resolve_response_action(
+                dispatch,
+                room,
+                "continue",
+                False,
+                has_active_response_for_target=lambda _target: False,
+            )
+
+        assert single_visible_action.kind == "individual"
 
     def test_effective_response_action_does_not_convert_reject_to_configured_team(self) -> None:
         """Configured-team execution only upgrades individual actions."""

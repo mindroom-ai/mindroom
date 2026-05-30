@@ -94,12 +94,13 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 ### Knowledge
 
-Manage file-backed RAG knowledge bases:
+Manage file-backed semantic or files-only knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `description`, `path`, and refresh-on-access `watch` settings
+- **Create/edit/delete knowledge bases** with `description`, `mode`, `path`, and refresh-on-access `watch` settings
+- **Choose semantic search or files-only access** depending on whether a base should build embeddings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
-- **Reindex** a knowledge base on demand
+- **Reindex or sync** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
 
@@ -108,8 +109,8 @@ Git-backed knowledge bases are managed from the dashboard, but file mutations st
 - The dashboard hides upload, dropzone, and per-file delete controls for Git-backed bases.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
-- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
-- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and reindex instead.
+- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases, then rebuilds semantic indexes or publishes files-mode source metadata.
+- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and sync or reindex instead.
 - Chat/runtime requests use last successfully published indexes and do not wait for indexing or Git sync.
 
 ### Credentials
@@ -227,6 +228,11 @@ Credentials support scoping via query parameters:
 
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
+
+When `agent_name` is present, credential routes require the authenticated dashboard requester to be allowed by `authorization.agent_reply_permissions` for that agent.
+Unauthorized agent-scoped requests return HTTP 403.
+Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
+Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
 
 ### Knowledge
 

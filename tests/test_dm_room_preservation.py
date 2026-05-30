@@ -437,11 +437,9 @@ class TestDMPreservationDuringCleanup:
         # The router bot is a member of the root space
         members = ["@mindroom_router:server"]
 
-        with (
-            patch(
-                "mindroom.matrix.room_cleanup.get_room_members",
-                return_value=members,
-            ),
+        with patch(
+            "mindroom.matrix.room_cleanup.get_room_members",
+            return_value=members,
         ):
             kicked_bots = await _cleanup_orphaned_bots_in_room(
                 client,

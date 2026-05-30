@@ -129,6 +129,16 @@ def is_sender_allowed_for_agent_reply(
     Internal MindRoom identities (agents/teams/router and internal user) bypass
     this allowlist because they are system participants, not end users.
     """
+    if _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config):
+        return True
+
+    # Internal MindRoom participants are not restricted by per-user reply lists.
+    # Bridge bot accounts are intentionally not exempt.
+    return sender_id in current_internal_sender_ids(config, runtime_paths)
+
+
+def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: Config) -> bool:
+    """Check only the configured per-agent reply allowlist for one sender."""
     agent_reply_permissions = config.authorization.agent_reply_permissions
     allowed_users = agent_reply_permissions.get(agent_name)
     if allowed_users is None:
@@ -138,13 +148,17 @@ def is_sender_allowed_for_agent_reply(
     if "*" in allowed_users:
         return True
 
-    # Internal MindRoom participants are not restricted by per-user reply lists.
-    # Bridge bot accounts are intentionally not exempt.
-    if sender_id in current_internal_sender_ids(config, runtime_paths):
-        return True
-
     resolved_sender = config.authorization.resolve_alias(sender_id)
     return any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in allowed_users)
+
+
+def is_sender_allowed_for_agent_credential_management(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+) -> bool:
+    """Check whether a dashboard requester may manage credentials for one agent."""
+    return _is_sender_allowed_by_agent_reply_allowlist(sender_id, agent_name, config)
 
 
 def get_effective_sender_id_for_reply_permissions(

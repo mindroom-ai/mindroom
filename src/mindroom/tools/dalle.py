@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import OPENAI_DALLE
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
             label="Model",
             type="text",
             required=False,
-            default="dall-e-3",
+            default=OPENAI_DALLE,
         ),
         ConfigField(
             name="n",

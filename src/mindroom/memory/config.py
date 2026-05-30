@@ -11,6 +11,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
 from mindroom.timing import timed
 
 logger = get_logger(__name__)
@@ -77,7 +78,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         host = (
             get_ollama_host(runtime_paths=runtime_paths)
             or app_config.memory.embedder.config.host
-            or "http://localhost:11434"
+            or OLLAMA_HOST_DEFAULT
         )
         embedder_provider_config["ollama_base_url"] = host
     elif embedder_provider == "sentence_transformers" and app_config.memory.embedder.config.dimensions is not None:
@@ -94,7 +95,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         for key, value in app_config.memory.llm.config.items():
             if key == "host" and app_config.memory.llm.provider == "ollama":
                 llm_config["config"]["ollama_base_url"] = (
-                    get_ollama_host(runtime_paths=runtime_paths) or value or "http://localhost:11434"
+                    get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
                 )
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
@@ -111,13 +112,13 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         )
     else:
         # Fallback if no LLM configured
-        logger.warning("No memory LLM configured, using default ollama/llama3.2")
+        logger.warning(f"No memory LLM configured, using default ollama/{MEMORY_OLLAMA_LLM}")
 
         llm_config = {
             "provider": "ollama",
             "config": {
-                "model": "llama3.2",
-                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434",
+                "model": MEMORY_OLLAMA_LLM,
+                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
                 "temperature": 0.1,
                 "top_p": 1,
             },

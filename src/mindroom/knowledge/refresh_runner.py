@@ -519,6 +519,14 @@ async def _refresh_knowledge_binding_locked(
     base_id = key.base_id
     manager: KnowledgeManager | None = None
     try:
+        if config.get_knowledge_base_config(base_id).mode == "files":
+            return await _refresh_file_mode_binding_locked(
+                key,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            )
+
         binding = resolve_knowledge_binding(
             base_id,
             config,
@@ -563,6 +571,116 @@ async def _refresh_knowledge_binding_locked(
         config=config,
         runtime_paths=runtime_paths,
     )
+
+
+async def _publish_file_mode_source_metadata(
+    key: PublishedIndexKey,
+    manager: KnowledgeManager,
+) -> KnowledgeRefreshResult:
+    """Publish current source metadata for a file-only base without building vectors."""
+    source_signature = await asyncio.to_thread(
+        knowledge_source_signature,
+        manager.config,
+        manager.base_id,
+        manager._knowledge_source_path(),
+        tracked_relative_paths=manager._git_tracked_relative_paths,
+    )
+    now = datetime.now(tz=UTC).isoformat()
+    await asyncio.to_thread(
+        save_published_index_state,
+        published_index_metadata_path(key),
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection=None,
+            last_published_at=now,
+            published_revision=manager._git_last_successful_commit,
+            indexed_count=0,
+            source_signature=source_signature,
+            refresh_job="idle",
+            reason=None,
+            last_error=None,
+            updated_at=now,
+            last_refresh_at=now,
+        ),
+    )
+    return KnowledgeRefreshResult(
+        key=key,
+        indexed_count=0,
+        index_published=True,
+        availability=KnowledgeAvailability.READY,
+        last_error=None,
+    )
+
+
+async def publish_file_mode_source_metadata_for_base(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeRefreshResult:
+    """Resolve and publish current source metadata for a file-only base."""
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+    binding = resolve_knowledge_binding(
+        base_id,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        create=True,
+    )
+    manager = KnowledgeManager(
+        base_id=base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    return await _publish_file_mode_source_metadata(key, manager)
+
+
+async def _refresh_file_mode_binding_locked(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> KnowledgeRefreshResult:
+    """Refresh source metadata for a file-only base without building vectors."""
+    binding = resolve_knowledge_binding(
+        key.base_id,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        create=True,
+    )
+    manager = KnowledgeManager(
+        base_id=key.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    if manager._git_config() is not None:
+        git_sync_result = await manager.sync_git_source()
+        if git_sync_result.get("updated", False):
+            await mark_knowledge_source_changed_async(
+                key.base_id,
+                config=manager.config,
+                runtime_paths=manager.runtime_paths,
+                execution_identity=execution_identity,
+                reason="git_source_updated",
+            )
+
+    return await _publish_file_mode_source_metadata(key, manager)
 
 
 async def _maybe_publish_unchanged_index(
@@ -820,8 +938,13 @@ async def _reconcile_cancelled_refresh(
         and state.status == "complete"
         and published_index_settings_compatible(state.settings, key.indexing_settings)
         and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
-        and await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
+        if state.settings.mode == "files":
+            await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
+            return
+        if not await asyncio.to_thread(published_index_collection_exists_for_state, key, state):
+            await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
+            return
         index = publish_knowledge_index_from_state(
             key,
             state=state,

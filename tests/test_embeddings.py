@@ -15,6 +15,7 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
     effective_mem0_embedder_signature,
 )
+from mindroom.model_defaults import OPENAI_EMBEDDING_LARGE, SENTENCE_TRANSFORMERS_DEFAULT
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
@@ -139,29 +140,29 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
 
     embedder = create_sentence_transformers_embedder(
         TEST_RUNTIME_PATHS,
-        "sentence-transformers/all-MiniLM-L6-v2",
+        SENTENCE_TRANSFORMERS_DEFAULT,
         dimensions=384,
     )
 
     assert captured["installed"] == TEST_RUNTIME_PATHS
     assert isinstance(embedder, DummyEmbedder)
     assert embedder.kwargs == {
-        "id": "sentence-transformers/all-MiniLM-L6-v2",
+        "id": SENTENCE_TRANSFORMERS_DEFAULT,
         "dimensions": 384,
     }
 
 
 def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:
     """Memory and knowledge signatures should match known OpenAI model defaults."""
-    assert effective_mem0_embedder_signature("openai", "text-embedding-3-large") == (
+    assert effective_mem0_embedder_signature("openai", OPENAI_EMBEDDING_LARGE) == (
         "openai",
-        "text-embedding-3-large",
+        OPENAI_EMBEDDING_LARGE,
         "",
         "3072",
     )
-    assert effective_knowledge_embedder_signature("openai", "text-embedding-3-large") == (
+    assert effective_knowledge_embedder_signature("openai", OPENAI_EMBEDDING_LARGE) == (
         "openai",
-        "text-embedding-3-large",
+        OPENAI_EMBEDDING_LARGE,
         "",
         "3072",
     )
@@ -169,9 +170,9 @@ def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:
 
 def test_mem0_openai_signature_separates_implicit_and_explicit_dimensions() -> None:
     """Implicit OpenAI dimensions and explicit shortened dimensions should not share collections."""
-    assert effective_mem0_embedder_signature("openai", "text-embedding-3-large") != effective_mem0_embedder_signature(
+    assert effective_mem0_embedder_signature("openai", OPENAI_EMBEDDING_LARGE) != effective_mem0_embedder_signature(
         "openai",
-        "text-embedding-3-large",
+        OPENAI_EMBEDDING_LARGE,
         dimensions=1536,
     )
 

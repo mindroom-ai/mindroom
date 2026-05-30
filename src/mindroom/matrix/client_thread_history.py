@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +51,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
+_MAX_ENUMERATED_THREAD_ROOTS = 2000
+_MAX_THREAD_ENUMERATION_PAGES = 100
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -1137,9 +1139,129 @@ async def get_room_threads_page(
     return response.thread_roots, response.next_batch
 
 
+def _append_unique_thread_root_ids(
+    thread_roots: Iterable[nio.Event],
+    thread_root_ids: list[str],
+    seen_thread_root_ids: set[str],
+    *,
+    max_thread_roots: int,
+) -> tuple[int, bool]:
+    """Append unseen thread roots up to the cap and report discarded roots."""
+    new_root_count = 0
+    for thread_root in thread_roots:
+        thread_root_id = thread_root.event_id
+        if not thread_root_id:
+            continue
+        if thread_root_id in seen_thread_root_ids:
+            continue
+        if len(thread_root_ids) >= max_thread_roots:
+            return new_root_count, True
+        seen_thread_root_ids.add(thread_root_id)
+        thread_root_ids.append(thread_root_id)
+        new_root_count += 1
+
+    return new_root_count, False
+
+
+def _non_empty_thread_root_page_truncated(
+    *,
+    discarded_due_to_cap: bool,
+    next_token: str | None,
+    new_root_count: int,
+    thread_root_count: int,
+    max_thread_roots: int,
+) -> bool:
+    """Report whether a non-empty /threads page exhausted enumeration safety guards."""
+    return (
+        discarded_due_to_cap
+        or (next_token is not None and new_root_count == 0)
+        or (next_token is not None and thread_root_count >= max_thread_roots)
+    )
+
+
+async def enumerate_room_thread_root_ids(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    max_thread_roots: int = _MAX_ENUMERATED_THREAD_ROOTS,
+    page_size: int = 100,
+) -> tuple[list[str], bool]:
+    """Return unique room thread-root IDs in /threads order."""
+    thread_root_ids: list[str] = []
+    truncated = max_thread_roots <= 0
+    if truncated:
+        return thread_root_ids, truncated
+
+    seen_thread_root_ids: set[str] = set()
+    seen_next_tokens: set[str] = set()
+    page_token: str | None = None
+    pages_fetched = 0
+
+    while not truncated:
+        thread_roots, next_token = await get_room_threads_page(
+            client,
+            room_id,
+            limit=page_size,
+            page_token=page_token,
+        )
+        pages_fetched += 1
+        if thread_roots:
+            new_root_count, discarded_due_to_cap = _append_unique_thread_root_ids(
+                thread_roots,
+                thread_root_ids,
+                seen_thread_root_ids,
+                max_thread_roots=max_thread_roots,
+            )
+            if _non_empty_thread_root_page_truncated(
+                discarded_due_to_cap=discarded_due_to_cap,
+                next_token=next_token,
+                new_root_count=new_root_count,
+                thread_root_count=len(thread_root_ids),
+                max_thread_roots=max_thread_roots,
+            ):
+                truncated = True
+                break
+        elif next_token is not None:
+            logger.warning(
+                "Room thread enumeration stopped on empty page with pagination token",
+                room_id=room_id,
+                page_count=pages_fetched,
+                thread_root_count=len(thread_root_ids),
+            )
+            truncated = True
+            break
+        if next_token is None:
+            break
+        if next_token in seen_next_tokens:
+            logger.warning(
+                "Room thread enumeration stopped on repeated pagination token",
+                room_id=room_id,
+                page_count=pages_fetched,
+                thread_root_count=len(thread_root_ids),
+            )
+            truncated = True
+            break
+        if pages_fetched >= _MAX_THREAD_ENUMERATION_PAGES:
+            logger.warning(
+                "Room thread enumeration stopped at page cap",
+                room_id=room_id,
+                page_count=pages_fetched,
+                thread_root_count=len(thread_root_ids),
+                max_pages=_MAX_THREAD_ENUMERATION_PAGES,
+            )
+            truncated = True
+            break
+
+        seen_next_tokens.add(next_token)
+        page_token = next_token
+
+    return thread_root_ids, truncated
+
+
 __all__ = [
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_event_sources_via_room_messages",

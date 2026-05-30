@@ -479,15 +479,15 @@ async def stop_entities(
     sync_tasks: dict[str, asyncio.Task],
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
-    # Cancel teardown-sensitive background work before stopping sync loops.
+    # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
+    # appear after the checkpoint decision.
+    for entity_name in entities_to_restart:
+        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+
     for entity_name in entities_to_restart:
         bot = agent_bots.get(entity_name)
         if bot is not None:
             await bot.prepare_for_sync_shutdown()
-
-    # Cancel sync tasks next so restarted entities do not accumulate duplicate loops.
-    for entity_name in entities_to_restart:
-        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
     stop_tasks = [
         agent_bots[entity_name].stop(reason="restart")
@@ -510,8 +510,15 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
             await iteration.wait()
-            # sync_forever returned normally, so the bot was stopped intentionally.
-            break
+            if not bot.running:
+                # sync_forever returned normally after an intentional stop.
+                break
+            retry_count += 1
+            logger.warning(
+                "sync_loop_returned_while_bot_running",
+                agent=bot.agent_name,
+                retry_count=retry_count,
+            )
         except asyncio.CancelledError:
             # Task cancellation is part of normal shutdown.
             logger.info("sync_task_cancelled", agent=bot.agent_name)
@@ -524,10 +531,18 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
         finally:
             if iteration is not None:
-                await bot.prepare_for_sync_shutdown()
                 await iteration.cancel()
+                await bot.prepare_for_sync_shutdown()
 
-        if not bot.running or (max_retries >= 0 and retry_count >= max_retries):
+        if not bot.running:
+            break
+        if max_retries >= 0 and retry_count >= max_retries:
+            logger.error(
+                "sync_loop_retries_exhausted",
+                agent=bot.agent_name,
+                retry_count=retry_count,
+                max_retries=max_retries,
+            )
             break
 
         wait_time = retry_delay_seconds(

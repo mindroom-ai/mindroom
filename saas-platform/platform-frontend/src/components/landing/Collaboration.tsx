@@ -457,7 +457,9 @@ export function Collaboration() {
     );
     const el = document.getElementById("collaboration");
     if (el) obs.observe(el);
-    return () => el && obs.unobserve(el);
+    return () => {
+      if (el) obs.unobserve(el);
+    };
   }, []);
 
   const currentTabConfig = TAB_CONFIG[tab];

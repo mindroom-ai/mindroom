@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from scripts.smoke_helpers import (
     error,
     getenv_int,
@@ -122,7 +123,7 @@ def main() -> int:
                     "ANTHROPIC_API_KEY=test-anthropic",
                     "GOOGLE_API_KEY=",
                     "OPENROUTER_API_KEY=",
-                    "OLLAMA_HOST=http://localhost:11434",
+                    f"OLLAMA_HOST={OLLAMA_HOST_DEFAULT}",
                     f"HOST_HOMESERVER_PORT={stack_synapse_port}",
                     f"HOST_DASHBOARD_PORT={stack_mindroom_port}",
                     f"HOST_CLIENT_PORT={stack_client_port}",

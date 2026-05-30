@@ -25,6 +25,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixAccount, MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
+from mindroom.model_defaults import GOOGLE_AVATAR_IMAGE, GOOGLE_AVATAR_PROMPT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,9 +35,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
-# Gemini 3.1 Flash Image Preview is the current Google image-generation model.
-_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+_PROMPT_MODEL = GOOGLE_AVATAR_PROMPT
+_IMAGE_MODEL = GOOGLE_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
 
 _ROOM_PURPOSES = {

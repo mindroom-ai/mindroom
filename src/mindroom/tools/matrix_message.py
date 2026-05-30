@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.metadata import (
+    SetupType,
+    ToolCategory,
+    ToolManagedInitArg,
+    ToolStatus,
+    register_tool_with_metadata,
+)
 
 if TYPE_CHECKING:
     from mindroom.custom_tools.matrix_message import MatrixMessageTools
@@ -24,6 +30,7 @@ if TYPE_CHECKING:
     dependencies=["agno"],
     docs_url="https://github.com/mindroom-ai/mindroom",
     function_names=("matrix_message",),
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
 )
 def matrix_message_tools() -> type[MatrixMessageTools]:
     """Return native Matrix messaging tools."""

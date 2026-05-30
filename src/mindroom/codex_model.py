@@ -19,6 +19,7 @@ from agno.models.response import ModelResponse
 from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
+from mindroom.model_defaults import CODEX_GPT
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
 if TYPE_CHECKING:
@@ -267,7 +268,7 @@ def _merge_codex_extra_body(request_params: dict[str, Any], codex_extra_body: di
 class CodexResponses(OpenAIResponses):
     """Agno Responses model backed by the local Codex CLI ChatGPT OAuth credentials."""
 
-    id: str = "gpt-5.5"
+    id: str = CODEX_GPT
     name: str = "CodexResponses"
     provider: str = "OpenAI Codex"
     base_url: str = _CODEX_BASE_URL

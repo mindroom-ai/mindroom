@@ -107,7 +107,7 @@ def _collect_plugin_bases(
 def _log_skipped_plugin_entry(
     plugin_path: str,
     root: Path | None,
-    exc: Exception,
+    exc: BaseException,
 ) -> None:
     """Log one broken plugin entry without aborting the rest of startup."""
     if root is not None and (not root.exists() or not root.is_dir()):
@@ -176,6 +176,9 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         spec = util.find_spec(module_name)
     except ModuleNotFoundError:
         return None
+    except (Exception, SystemExit) as exc:
+        msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
+        raise PluginValidationError(msg) from exc
     if spec is None:
         return None
 

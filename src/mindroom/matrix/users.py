@@ -1,5 +1,7 @@
 """Matrix user account management for agents."""
 
+import hashlib
+import hmac
 import secrets
 from dataclasses import dataclass
 from functools import cached_property
@@ -375,6 +377,100 @@ async def _register_user_with_token(
     )
 
 
+def _synapse_shared_secret_registration_mac(
+    *,
+    shared_secret: str,
+    nonce: str,
+    username: str,
+    password: str,
+    admin: bool = False,
+) -> str:
+    mac = hmac.new(key=shared_secret.encode("utf-8"), digestmod=hashlib.sha1)
+    for index, value in enumerate((nonce, username, password, "admin" if admin else "notadmin")):
+        if index:
+            mac.update(b"\x00")
+        mac.update(value.encode("utf-8"))
+    return mac.hexdigest()
+
+
+def _synapse_shared_secret_nonce(response: httpx.Response) -> str:
+    if not response.is_success:
+        detail, _ = _registration_http_error_details(response)
+        msg = f"Synapse shared-secret registration nonce request failed: HTTP {response.status_code}: {detail}"
+        raise matrix_startup_error(msg, permanent=response.status_code in {400, 401, 403, 404})
+    try:
+        body = response.json()
+    except ValueError as exc:
+        msg = "Synapse shared-secret registration nonce response missing valid JSON."
+        raise matrix_startup_error(msg, permanent=True) from exc
+    if not isinstance(body, dict):
+        msg = "Synapse shared-secret registration nonce response payload must be an object."
+        raise matrix_startup_error(msg, permanent=True)
+    nonce = body.get("nonce")
+    if not isinstance(nonce, str) or not nonce.strip():
+        msg = "Synapse shared-secret registration nonce response missing nonce."
+        raise matrix_startup_error(msg, permanent=True)
+    return nonce.strip()
+
+
+async def _register_user_with_synapse_shared_secret(
+    *,
+    homeserver: str,
+    user_id: str,
+    username: str,
+    password: str,
+    display_name: str,
+    shared_secret: str,
+    runtime_paths: RuntimePaths,
+) -> str:
+    """Register a user with Synapse's shared-secret admin registration API."""
+    register_url = f"{homeserver.rstrip('/')}/_synapse/admin/v1/register"
+    try:
+        async with httpx.AsyncClient(
+            timeout=10,
+            verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
+        ) as client:
+            nonce = _synapse_shared_secret_nonce(await client.get(register_url))
+            response = await client.post(
+                register_url,
+                json={
+                    "nonce": nonce,
+                    "username": username,
+                    "password": password,
+                    "admin": False,
+                    "mac": _synapse_shared_secret_registration_mac(
+                        shared_secret=shared_secret,
+                        nonce=nonce,
+                        username=username,
+                        password=password,
+                    ),
+                    "displayname": display_name,
+                },
+            )
+    except httpx.HTTPError as exc:
+        msg = f"Could not reach Synapse shared-secret registration endpoint ({homeserver}): {exc}"
+        raise matrix_startup_error(msg) from exc
+
+    detail, errcode = _registration_http_error_details(response)
+    if response.is_success:
+        actual_user_id = _direct_registration_success_user_id(response)
+        logger.info("matrix_user_registered_with_synapse_shared_secret", user_id=actual_user_id)
+    elif errcode == "M_USER_IN_USE":
+        actual_user_id = user_id
+        logger.info("matrix_user_already_exists", user_id=user_id)
+    else:
+        msg = f"Synapse shared-secret registration failed for user {username}: {detail}"
+        raise matrix_startup_error(msg, permanent=response.status_code in {400, 401, 403, 404})
+
+    return await _login_existing_user_or_raise_collision(
+        homeserver=homeserver,
+        user_id=actual_user_id,
+        password=password,
+        display_name=display_name,
+        runtime_paths=runtime_paths,
+    )
+
+
 def _validated_returned_user_id(raw_user_id: object, *, source: str) -> str:
     if not isinstance(raw_user_id, str) or not raw_user_id.strip():
         msg = f"{source} response missing user_id"
@@ -662,6 +758,7 @@ async def _register_user(
     server_name = extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
     user_id = MatrixID.from_username(username, server_name).full_id
     registration_token = provisioning.registration_token_from_env(runtime_paths=runtime_paths)
+    registration_shared_secret = provisioning.registration_shared_secret_from_env(runtime_paths=runtime_paths)
 
     provisioning_result = await _register_user_via_provisioning_if_configured(
         homeserver=homeserver,
@@ -673,6 +770,16 @@ async def _register_user(
     )
     if provisioning_result is not None:
         return provisioning_result
+    if registration_shared_secret:
+        return await _register_user_with_synapse_shared_secret(
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            shared_secret=registration_shared_secret,
+            runtime_paths=runtime_paths,
+        )
     if registration_token:
         return await _register_user_with_token(
             homeserver=homeserver,

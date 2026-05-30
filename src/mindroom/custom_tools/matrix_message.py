@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor type hints at runtime.
 from threading import Lock
 from typing import ClassVar
 
@@ -12,6 +13,7 @@ from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import normalize_str_list, resolve_context_thread_id, room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.matrix.message_extras import MessageExtraSection, parse_message_extra_sections
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
@@ -26,14 +28,15 @@ class MatrixMessageTools(Toolkit):
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
     _ROOM_TIMELINE_SENTINEL: ClassVar[str] = "room"
+    _MESSAGE_EXTRAS_ACTIONS: ClassVar[frozenset[str]] = frozenset({"send", "thread-reply", "reply", "edit"})
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"send", "thread-reply", "reply", "react", "read", "room-threads", "thread-list", "edit", "context"},
     )
-    _operations: ClassVar[matrix_conversation_operations.MatrixMessageOperations] = (
-        matrix_conversation_operations.MatrixMessageOperations()
-    )
 
-    def __init__(self) -> None:
+    def __init__(self, *, tool_output_workspace_root: Path | None = None) -> None:
+        self._operations = matrix_conversation_operations.MatrixMessageOperations(
+            tool_output_workspace_root=tool_output_workspace_root,
+        )
         super().__init__(
             name="matrix_message",
             tools=[self.matrix_message],
@@ -66,6 +69,10 @@ class MatrixMessageTools(Toolkit):
     @staticmethod
     def _action_supports_attachments(action: str) -> bool:
         return action in {"send", "thread-reply", "reply"}
+
+    @classmethod
+    def _action_supports_message_extras(cls, action: str) -> bool:
+        return action in cls._MESSAGE_EXTRAS_ACTIONS
 
     def _validate_matrix_message_request(
         self,
@@ -114,6 +121,30 @@ class MatrixMessageTools(Toolkit):
                 message="Not authorized to access the target room.",
             )
         return None
+
+    def _validate_message_extras(
+        self,
+        *,
+        action: str,
+        message_extras: list[dict[str, object]] | None,
+    ) -> tuple[list[MessageExtraSection] | None, str | None]:
+        if not message_extras:
+            return None, None
+        if not self._action_supports_message_extras(action):
+            allowed_actions = ", ".join(sorted(self._MESSAGE_EXTRAS_ACTIONS))
+            return None, self._payload(
+                "error",
+                action=action,
+                message=f"message_extras is only supported for {allowed_actions} actions.",
+            )
+        try:
+            return parse_message_extra_sections(message_extras), None
+        except (TypeError, ValueError) as exc:
+            return None, self._payload(
+                "error",
+                action=action,
+                message=str(exc),
+            )
 
     @classmethod
     def _check_rate_limit(
@@ -179,6 +210,7 @@ class MatrixMessageTools(Toolkit):
         thread_id: str | None = None,
         ignore_mentions: bool = True,
         as_voice: bool = False,
+        message_extras: list[dict[str, object]] | None = None,
         limit: int | None = None,
         page_token: str | None = None,
     ) -> str:
@@ -232,20 +264,31 @@ class MatrixMessageTools(Toolkit):
         - Attachments are only supported for `send`, `reply`, and `thread-reply`.
         - `attachment_ids` are context-scoped `att_*` IDs.
         - `attachment_file_paths` are local file paths that will be registered into the current attachment context before sending.
+          Relative paths resolve from the agent workspace, the same root used as `HOME` in worker-routed tools.
         - The combined limit of `attachment_ids` plus `attachment_file_paths` is 5 per call.
         - A send or reply call may include text, attachments, or both, but not neither.
         - `as_voice=True` marks successful audio attachments as Matrix voice messages and is only valid for send, reply, and thread-reply.
+
+        Message extras:
+        - `message_extras` adds collapsible MindRoom sections to send, reply, thread-reply, and edit events.
+        - Keep the visible `message` brief; put supporting evidence in extras.
+        - Each section has `title`, `content`, optional `content_type`, and optional `collapsed`.
+        - Supported `content_type` values are `text/plain`, `text/markdown`, and `text/html`; default is `text/markdown`.
+        - HTML content may use sanitized rich fragments: paragraphs, headings, lists, tables, blockquotes, code/pre blocks, basic inline formatting, and links.
+          Do not include scripts, styles, images, forms, media, SVG/math, or interactive elements; links should use `http`, `https`, or `mailto`.
+        - Example: `message_extras=[{"title": "Evidence", "content_type": "text/html", "content": "<table><tr><td>42</td></tr></table>", "collapsed": true}]`.
 
         Args:
             action (str): Supported actions are `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`; they send text or attachments, react to an event, read messages, list room thread roots or thread messages, edit a prior event, or return targeting metadata.
             message (str | None): Text body for `send`, `reply`, `thread-reply`, and `edit`; reaction emoji for `react` with a thumbs-up default when empty; use `None` for `read`, `room-threads`, `thread-list`, and `context`.
             attachment_ids (list[str] | None): Context-scoped `att_*` attachment IDs; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_file_paths` cannot exceed 5.
-            attachment_file_paths (list[str] | None): Local file paths to register and send in the current context; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_ids` cannot exceed 5.
+            attachment_file_paths (list[str] | None): Local file paths to register and send in the current context; relative paths resolve from the agent workspace. Only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_ids` cannot exceed 5.
             room_id (str | None): Optional target room ID or alias; defaults to the current room context when omitted.
             target (str | None): Event ID to react to for `react` or to edit for `edit`.
             thread_id (str | None): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
             ignore_mentions (bool): Text-send safety flag for `send`, `reply`, and `thread-reply`; default `True` writes `com.mindroom.skip_mentions=True` to suppress mention-triggered agent dispatch, while `False` keeps mentions active and also writes `com.mindroom.original_sender=<human requester id>` when the requester is not the sending bot.
             as_voice (bool): When true for `send`, `reply`, or `thread-reply`, prepare audio attachments as Matrix voice messages. Ignored by default.
+            message_extras (list[dict[str, object]] | None): Optional collapsible MindRoom sections for supporting evidence. Each section supports title, content, content_type (`text/plain`, `text/markdown`, or sanitized `text/html`), and collapsed.
             limit (int | None): Maximum messages returned for `read` or `thread-list`, or thread roots returned for `room-threads`; defaults to 20 and is capped at 50.
             page_token (str | None): Pagination token for `room-threads`, returned by a previous `room-threads` call to fetch the next page of thread roots.
 
@@ -286,6 +329,12 @@ class MatrixMessageTools(Toolkit):
         )
         if validation_error is not None:
             return validation_error
+        parsed_message_extras, extras_error = self._validate_message_extras(
+            action=normalized_action,
+            message_extras=message_extras,
+        )
+        if extras_error is not None:
+            return extras_error
 
         if normalized_action == "context":
             return self._message_context(
@@ -315,6 +364,7 @@ class MatrixMessageTools(Toolkit):
             thread_id=thread_id,
             ignore_mentions=ignore_mentions,
             as_voice=as_voice,
+            message_extras=parsed_message_extras,
             read_limit=self._read_limit(limit),
             page_token=page_token,
             room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,

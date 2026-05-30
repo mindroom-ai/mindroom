@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import Request
@@ -14,33 +14,38 @@ from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.mcp.config import MCPServerConfig
+from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
+    authorization: dict[str, object] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
-    config = Config.model_validate(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-            "agents": {
-                "general": {
-                    "display_name": "General",
-                    "role": "test",
-                    "tools": ["calculator"],
-                    "instructions": ["hi"],
-                    "rooms": ["lobby"],
-                },
-            },
-            "defaults": {
-                "markdown": True,
-                "worker_grantable_credentials": worker_grantable_credentials,
+    payload: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "role": "test",
+                "tools": ["calculator"],
+                "instructions": ["hi"],
+                "rooms": ["lobby"],
             },
         },
-    )
+        "defaults": {
+            "markdown": True,
+            "worker_grantable_credentials": worker_grantable_credentials,
+        },
+    }
+    if authorization is not None:
+        payload["authorization"] = authorization
+    config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
 
@@ -652,6 +657,44 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "client_secret is required" in response.json()["detail"]
         assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_public_mcp_oauth_client_config_save_allows_missing_first_time_secret(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Generated public MCP OAuth client config should allow client_id-only saves."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        provider = mcp_oauth_provider(
+            "demo",
+            MCPServerConfig(
+                transport="streamable-http",
+                url="https://mcp.example.test/mcp",
+                auth={
+                    "type": "oauth",
+                    "discovery": "manual",
+                    "authorization_url": "https://auth.example.test/authorize",
+                    "token_url": "https://auth.example.test/token",
+                },
+            ),
+        )
+
+        with patch.object(credentials_api, "load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+            response = client.post(
+                "/api/credentials/mcp_demo_oauth_client",
+                json={
+                    "credentials": {
+                        "client_id": "stored-client-id",
+                        "client_secret": "",
+                    },
+                },
+            )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("mcp_demo_oauth_client") == {
+            "client_id": "stored-client-id",
+            "_source": "ui",
+        }
 
     def test_oauth_client_config_save_rejects_missing_first_time_client_id(
         self,
@@ -1387,6 +1430,89 @@ class TestCredentialsAPI:
 
         assert response.status_code == 404
         assert response.json()["detail"] == "Unknown agent: missing"
+
+    def test_agent_credentials_require_agent_reply_permission(self, client: TestClient) -> None:
+        """Agent-scoped credential routes should reject requesters outside the agent allowlist."""
+        use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+
+        agent_response = client.get(
+            "/api/credentials/openai/api-key?agent_name=general",
+            headers=bob_headers,
+        )
+        global_response = client.get(
+            "/api/credentials/openai/api-key",
+            headers=bob_headers,
+        )
+
+        assert agent_response.status_code == 403
+        assert global_response.status_code == 200
+        assert global_response.json()["has_key"] is False
+
+    def test_agent_oauth_token_credentials_authorize_before_generic_rejection(self, client: TestClient) -> None:
+        """Unauthorized agent-scoped OAuth token routes should return 403 before route-specific 400s."""
+        use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+
+        token_response = client.get(
+            "/api/credentials/google_drive_oauth?agent_name=general",
+            headers=bob_headers,
+        )
+        copy_response = client.post(
+            "/api/credentials/copied_service/copy-from/google_drive_oauth?agent_name=general",
+            headers=bob_headers,
+        )
+
+        assert token_response.status_code == 403
+        assert copy_response.status_code == 403
+
+    def test_homeassistant_token_connect_authorizes_before_probe(self, client: TestClient) -> None:
+        """Unauthorized agent-scoped Home Assistant connects should not contact the provider."""
+        use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+
+        with patch(
+            "mindroom.api.homeassistant_integration._test_connection",
+            new_callable=AsyncMock,
+        ) as test_connection:
+            response = client.post(
+                "/api/homeassistant/connect/token?agent_name=general",
+                headers=bob_headers,
+                json={
+                    "instance_url": "homeassistant.local:8123",
+                    "long_lived_token": "ha-token",
+                },
+            )
+
+        assert response.status_code == 403
+        test_connection.assert_not_awaited()
 
     def test_shared_agent_name_hides_non_allowlisted_shared_credentials(
         self,

@@ -163,10 +163,10 @@ export async function getPricingConfig() {
 }
 
 // Stripe Integration
-export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly', quantity: number = 1) {
+export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly') {
   const response = await apiCall('/stripe/checkout', {
     method: 'POST',
-    body: JSON.stringify({ tier, billing_cycle: billingCycle, quantity })
+    body: JSON.stringify({ tier, billing_cycle: billingCycle })
   })
   if (!response.ok) {
     const error = await response.text()

@@ -116,7 +116,7 @@ jobs:
         run: python -m cluster.k8s.kind.smoke_instance
 
       - name: Smoke mindroom-stack compose
-        run: python -m scripts.smoke_mindroom_stack "${GITHUB_WORKSPACE}/mindroom-stack"
+        run: uv run python -m scripts.smoke_mindroom_stack "${GITHUB_WORKSPACE}/mindroom-stack"
 
       - name: Tear down kind cluster
         if: always()

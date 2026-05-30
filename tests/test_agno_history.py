@@ -57,7 +57,7 @@ from mindroom.execution_preparation import (
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
     _build_summary_input,
-    _effective_summary_input_budget_tokens,
+    _compaction_replay_messages,
     _emit_compaction_hook,
     _estimate_history_messages_tokens,
     _estimate_tool_definition_tokens,
@@ -624,6 +624,46 @@ def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None
     assert agent.store_history_messages is False
 
 
+def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="Current system prompt"),
+                    Message(role="developer", content="Current developer prompt"),
+                    Message(role="user", content="user request"),
+                    Message(role="assistant", content="assistant answer"),
+                    Message(role="tool", content="tool result"),
+                ],
+            ),
+        ],
+    )
+
+    storage.upsert_session(session)
+
+    assert session.runs is not None
+    assert [(message.role, message.content) for message in session.runs[0].messages or []] == [
+        ("system", "Current system prompt"),
+        ("developer", "Current developer prompt"),
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert [(message.role, message.content) for message in persisted.runs[0].messages or []] == [
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
+
+
 def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -1098,12 +1138,74 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
         )
 
 
-def test_effective_summary_input_budget_caps_per_chunk() -> None:
-    assert _effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
-    assert _effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
-    assert _effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
-    assert _effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
-    assert _effective_summary_input_budget_tokens(100_000, None) == 100_000
+@pytest.mark.asyncio
+async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(tmp_path: Path) -> None:
+    """Regression for ISSUE-216: rewrite must forward the full summary_input_budget.
+
+    Locks the contract that one healthy pass folds every selected run in one summary
+    call sized at the full resolved budget, with no hidden per-call cap by any name.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[
+                Message(role="user", content=f"run-{index} user " + ("u" * 20_000)),
+                Message(role="assistant", content=f"run-{index} assistant " + ("a" * 20_000)),
+            ],
+        )
+        for index in range(1, 6)
+    ]
+    working_session = _session("session-1", runs=runs)
+    summary_inputs: list[str] = []
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=fake_summary),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            wraps=_build_summary_input,
+        ) as build_summary_input_spy,
+    ):
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=None,
+            summary_input_budget=70_000,
+            before_tokens=0,
+            runs_before=len(runs),
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            lifecycle_notice_event_id=None,
+            progress_callback=None,
+            collect_compaction_hook_messages=False,
+        )
+
+    assert rewrite_result is not None
+    assert len(summary_inputs) == 1
+    assert build_summary_input_spy.call_count == 1
+    assert build_summary_input_spy.call_args.kwargs["max_input_tokens"] == 70_000
+    assert "run-1 user" in summary_inputs[0]
+    assert "run-5 user" in summary_inputs[0]
+    assert rewrite_result.compacted_run_count == 5
 
 
 @pytest.mark.asyncio
@@ -1151,7 +1253,6 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
             ),
             available_history_budget=None,
             summary_input_budget=8_000,
-            compaction_context_window=16_000,
             before_tokens=0,
             runs_before=1,
             threshold_tokens=None,
@@ -1609,7 +1710,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             history_settings=history_settings,
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
             active_context_window=16_000,
@@ -2843,6 +2943,8 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         ],
     )
     storage.upsert_session(session)
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
     agent = _agent(db=storage)
 
     prepared = await prepare_history_for_run_for_test(
@@ -2854,7 +2956,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         config=config,
         execution_identity=None,
         storage=storage,
-        session=session,
+        session=persisted,
         history_settings=ResolvedHistorySettings(
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
@@ -3190,26 +3292,84 @@ def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -
     assert "<previous_summary>" in summary_input
 
 
-def test_build_summary_input_excludes_persisted_system_prompt() -> None:
+def test_build_summary_input_preserves_previous_summary_text() -> None:
+    run = _completed_run("run-1")
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary="Useful prior conversation.\n\n## Your Identity\nIDENTITY.md\nCurrent Date and Time",
+        compacted_runs=[run],
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "<previous_summary>" in summary_input
+    assert "Useful prior conversation" in summary_input
+    assert "IDENTITY.md" in summary_input
+    assert "Current Date and Time" in summary_input
+    assert "run-1 question" in summary_input
+    assert "run-1 answer" in summary_input
+
+
+def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="legacy system prompt"),
+            Message(role="developer", content="legacy developer prompt"),
+            Message(role="instructions", content="legacy custom prompt"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
+        ],
+    )
+
+    replay_messages = _compaction_replay_messages(
+        run,
+        ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="instructions",
+        ),
+    )
+
+    assert [(message.role, message.content) for message in replay_messages] == [
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
+
+
+def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
     run = _completed_run(
         "run-1",
         messages=[
             Message(role="system", content="Persisted system prompt that should not be summarized"),
+            Message(role="developer", content="Persisted developer prompt that should not be summarized"),
+            Message(role="instructions", content="Persisted custom prompt that should not be summarized"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
         ],
     )
 
     summary_input, included_runs = _build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="instructions",
+        ),
         max_input_tokens=1_000,
     )
 
     assert included_runs == [run]
     assert "Persisted system prompt" not in summary_input
+    assert "Persisted developer prompt" not in summary_input
+    assert "Persisted custom prompt" not in summary_input
     assert "user request" in summary_input
     assert "assistant answer" in summary_input
+    assert "tool result" in summary_input
 
 
 def test_build_summary_input_honors_tool_call_history_limit() -> None:
@@ -3249,6 +3409,47 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "second result" in summary_input
 
 
+def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
+    conversation_messages = [
+        Message(role="user", content="user request"),
+        Message(role="assistant", content="assistant answer"),
+        Message(role="tool", content="tool result"),
+    ]
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+        system_message_role="instructions",
+    )
+    contaminated_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="legacy system prompt " * 20),
+                    Message(role="developer", content="legacy developer prompt " * 20),
+                    Message(role="instructions", content="legacy custom prompt " * 20),
+                    *conversation_messages,
+                ],
+            ),
+        ],
+    )
+    clean_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=conversation_messages)],
+    )
+
+    assert estimate_prompt_visible_history_tokens(
+        session=contaminated_session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    ) == estimate_prompt_visible_history_tokens(
+        session=clean_session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
     session = _session(
         "session-1",
@@ -3256,7 +3457,6 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
             _completed_run(
                 "run-1",
                 messages=[
-                    Message(role="system", content="Persisted system"),
                     Message(role="user", content="old user"),
                     Message(
                         role="assistant",
@@ -3289,47 +3489,6 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
     )
 
     expected_messages = [
-        Message(role="user", content="new user"),
-        Message(role="assistant", content="new assistant"),
-    ]
-    assert estimated_tokens == _estimate_history_messages_tokens(expected_messages)
-
-
-def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_role() -> None:
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="developer", content="Persisted developer prompt"),
-                    Message(role="user", content="old user"),
-                    Message(role="assistant", content="old assistant"),
-                ],
-            ),
-            _completed_run(
-                "run-2",
-                messages=[
-                    Message(role="user", content="new user"),
-                    Message(role="assistant", content="new assistant"),
-                ],
-            ),
-        ],
-    )
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="messages", limit=3),
-        max_tool_calls_from_history=None,
-        system_message_role="developer",
-    )
-
-    estimated_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=history_settings,
-    )
-
-    expected_messages = [
-        Message(role="assistant", content="old assistant"),
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
@@ -3574,7 +3733,6 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             ),
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             before_tokens=0,
             runs_before=2,
             threshold_tokens=None,
@@ -3632,7 +3790,6 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
             ),
             available_history_budget=1,
             summary_input_budget=16_000,
-            compaction_context_window=16_000,
             before_tokens=0,
             runs_before=1,
             threshold_tokens=None,
@@ -3724,7 +3881,6 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             ),
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
             active_context_window=16_000,
@@ -3823,7 +3979,6 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             history_settings=history_settings,
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
-            compaction_context_window=16_000,
             before_tokens=before_tokens,
             runs_before=2,
             threshold_tokens=None,

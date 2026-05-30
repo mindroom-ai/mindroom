@@ -615,7 +615,7 @@ async def decide_team_formation(
     use_ai_decision: bool = True,
     is_dm_room: bool = False,
     is_thread: bool = False,
-    available_agents_in_room: list[MatrixID] | None = None,
+    available_responders_in_room: list[MatrixID] | None = None,
     materializable_agent_names: set[str] | None = None,
 ) -> TeamResolution:
     """Determine if a team should form and with which mode.
@@ -632,7 +632,7 @@ async def decide_team_formation(
         use_ai_decision: Whether to use AI for mode selection
         is_dm_room: Whether this is a DM room
         is_thread: Whether the current message is in a thread
-        available_agents_in_room: Optional pre-filtered room agents for sender-visible availability
+        available_responders_in_room: Optional pre-filtered room responders for sender-visible availability
         materializable_agent_names: Optional live agent names that can currently produce a response
 
     Returns:
@@ -648,7 +648,7 @@ async def decide_team_formation(
         runtime_paths,
         is_dm_room=is_dm_room,
         is_thread=is_thread,
-        available_agents_in_room=available_agents_in_room,
+        available_responders_in_room=available_responders_in_room,
     )
     if team_request.intent is None or not team_request.requested_members:
         return TeamResolution.none()
@@ -658,7 +658,7 @@ async def decide_team_formation(
         config,
         runtime_paths,
         room=room,
-        sender_visible_agents=available_agents_in_room,
+        sender_visible_responders=available_responders_in_room,
         materializable_agent_names=materializable_agent_names,
     )
     resolution = _resolve_team_request(
@@ -750,7 +750,7 @@ def _select_team_request(
     *,
     is_dm_room: bool,
     is_thread: bool,
-    available_agents_in_room: list[MatrixID] | None,
+    available_responders_in_room: list[MatrixID] | None,
 ) -> _SelectedTeamRequest:
     """Return the normalized team request implied by one message context."""
     normalized_tagged_agents = _normalize_team_request_members(tagged_agents, config, runtime_paths)
@@ -783,19 +783,19 @@ def _select_team_request(
     if not (is_dm_room and not is_thread and not normalized_tagged_agents and room and config):
         return _SelectedTeamRequest(None, [])
 
-    available_agents = available_agents_in_room
-    if available_agents is None:
-        available_agents = get_available_responders_in_room(room, config, runtime_paths)
-    normalized_available_agents = _normalize_team_request_members(available_agents, config, runtime_paths)
-    if len(normalized_available_agents) <= 1:
+    available_responders = available_responders_in_room
+    if available_responders is None:
+        available_responders = get_available_responders_in_room(room, config, runtime_paths)
+    normalized_available_responders = _normalize_team_request_members(available_responders, config, runtime_paths)
+    if len(normalized_available_responders) <= 1:
         return _SelectedTeamRequest(None, [])
 
     logger.info(
         "team_formation_requested",
         trigger="dm_room_multiple_agents",
-        agents=[agent.full_id for agent in normalized_available_agents],
+        agents=[responder.full_id for responder in normalized_available_responders],
     )
-    return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_agents)
+    return _SelectedTeamRequest(TeamIntent.DM_AUTO_TEAM, normalized_available_responders)
 
 
 def _sender_unavailable_team_agents_message(agent_names: list[str], *, prefix: str = "Team request") -> str:
@@ -848,12 +848,12 @@ def _evaluate_team_members(
     runtime_paths: RuntimePaths,
     *,
     room: nio.MatrixRoom | None,
-    sender_visible_agents: list[MatrixID] | None,
+    sender_visible_responders: list[MatrixID] | None,
     materializable_agent_names: set[str] | None,
 ) -> list[TeamResolutionMember]:
     """Evaluate one status and response capability for each requested member."""
     room_visible_ids: set[str] | None = None
-    if sender_visible_agents is None and room is not None and config is not None:
+    if sender_visible_responders is None and room is not None and config is not None:
         room_visible_ids = {
             agent_id.full_id
             for agent_id in _normalize_team_request_members(
@@ -863,10 +863,10 @@ def _evaluate_team_members(
             )
         }
     sender_visible_ids: set[str] | None = None
-    if sender_visible_agents is not None:
+    if sender_visible_responders is not None:
         sender_visible_ids = {
             agent_id.full_id
-            for agent_id in _normalize_team_request_members(sender_visible_agents, config, runtime_paths)
+            for agent_id in _normalize_team_request_members(sender_visible_responders, config, runtime_paths)
         }
 
     unsupported_agents: dict[str, tuple[str, ...] | None] = {}
@@ -1074,7 +1074,7 @@ def resolve_configured_team(
         config,
         runtime_paths,
         room=None,
-        sender_visible_agents=None,
+        sender_visible_responders=None,
         materializable_agent_names=materializable_agent_names,
     )
     return _resolve_team_request(
@@ -1518,7 +1518,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
-    transient_system_context_collector: list[str] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
@@ -1556,8 +1555,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         system_enrichment_items,
         unavailable_bases,
     )
-    if transient_system_context_collector is not None:
-        transient_system_context_collector.append(render_system_enrichment_block(system_enrichment_items))
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -1912,7 +1909,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
-    transient_system_context_collector: list[str] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
@@ -1958,8 +1954,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         system_enrichment_items,
         unavailable_bases,
     )
-    if transient_system_context_collector is not None:
-        transient_system_context_collector.append(render_system_enrichment_block(system_enrichment_items))
     agent_names = team_members.display_names
     display_names = team_members.display_names
     team: Team | None = None

@@ -103,7 +103,8 @@ describe('InstanceCard - Simplified Tests', () => {
       // Check URLs are displayed (use getAllByText since domain appears multiple times)
       expect(screen.getAllByText('customer.mindroom.chat')).toHaveLength(2) // Domain and Frontend
       expect(screen.getByText('customer.api.mindroom.chat')).toBeInTheDocument()
-      expect(screen.getByText('customer.matrix.mindroom.chat')).toBeInTheDocument()
+      expect(screen.getByText('Chat Interface')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: /^Open chat$/i })).toBeInTheDocument()
 
       // Check tier (it's showing as 'pro' not 'Pro' due to capitalize class)
       expect(screen.getByText(/pro/i)).toBeInTheDocument()
@@ -138,6 +139,17 @@ describe('InstanceCard - Simplified Tests', () => {
       expect(openButton).toHaveAttribute('href', 'https://customer.mindroom.chat')
     })
 
+    it('should display Open Chat Interface button for running instances', () => {
+      render(<InstanceCard instance={mockInstance} />)
+
+      const openButton = screen.getByRole('link', { name: /Open Chat Interface/i })
+      expect(openButton).toBeInTheDocument()
+      expect(openButton).toHaveAttribute(
+        'href',
+        'https://chat.mindroom.chat/login/https%3A%2F%2Fcustomer.matrix.mindroom.chat/'
+      )
+    })
+
     it('should not display Open MindRoom button for stopped instances', () => {
       const stoppedInstance = { ...mockInstance, status: 'stopped' as Instance['status'] }
       render(<InstanceCard instance={stoppedInstance} />)
@@ -163,6 +175,7 @@ describe('InstanceCard - Simplified Tests', () => {
       expect(screen.queryByText('Domain')).not.toBeInTheDocument()
       expect(screen.queryByText('Frontend')).not.toBeInTheDocument()
       expect(screen.queryByText('API')).not.toBeInTheDocument()
+      expect(screen.queryByText('Chat Interface')).not.toBeInTheDocument()
     })
 
     it('should show default tier when not specified', () => {

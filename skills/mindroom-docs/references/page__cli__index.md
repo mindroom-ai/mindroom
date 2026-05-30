@@ -116,6 +116,9 @@ Start MindRoom with your configuration.
 │                                          ERROR)                                        │
 │                                          [env var: LOG_LEVEL]                          │
 │                                          [default: INFO]                               │
+│ --config        -c              PATH     Use this config file path. Defaults the       │
+│                                          storage location to the selected config       │
+│                                          directory unless --storage-path is set.       │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │ --api               --no-api             Start the bundled dashboard/API server        │
@@ -273,7 +276,11 @@ On Linux, MindRoom uses systemd user services.
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ install     Install and start MindRoom as a background user service.                   │
 │ uninstall   Stop and remove the MindRoom user service.                                 │
+│ start       Start the installed MindRoom user service.                                 │
+│ stop        Stop the installed MindRoom user service without removing it.              │
+│ restart     Restart the installed MindRoom user service.                               │
 │ status      Show MindRoom service status and recent logs.                              │
+│ logs        Follow MindRoom service logs.                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -459,39 +466,61 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with example agents, models, and sensible defaults.
+Create a starter `config.yaml` with example agents, models, memory, and sensible defaults.
 
-Profiles control the template style:
-
-- `--profile full` (default) — rich example config with interactive provider selection
-- `--profile minimal` — bare-minimum config
-- `--profile public` — hosted Matrix (`mindroom.chat`) with prefilled homeserver settings
-- `--profile public-codex` — hosted Matrix with Codex CLI subscription defaults
-- `--profile public-vertexai-anthropic` — hosted Matrix with Vertex AI Claude defaults
-
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `openai`, `openrouter`, or `vertexai_claude`.
+Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
-mindroom config init --profile public
+mindroom config init
 
-# Minimal config with Anthropic
-mindroom config init --minimal --provider anthropic
+# Self-hosted Matrix with Anthropic
+mindroom config init --matrix-server self-hosted --provider anthropic
 
 # Hosted Matrix with Codex CLI ChatGPT subscription auth
-mindroom config init --profile public-codex
+mindroom config init --matrix-server mindroom.chat --provider codex
+
+# Hosted Matrix with Ollama
+mindroom config init --matrix-server mindroom.chat --provider ollama
+
+# Hosted Matrix with llama.cpp
+mindroom config init --matrix-server mindroom.chat --provider llama.cpp
 
 # Hosted Matrix with Vertex AI Claude
-mindroom config init --profile public-vertexai-anthropic
+mindroom config init --matrix-server mindroom.chat --provider vertexai_claude
+
+# Preview generated YAML without writing files
+mindroom config init --matrix-server mindroom.chat --provider ollama --print
 
 # Force overwrite existing config
 mindroom config init --force
 ```
 
-The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
+Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
+It does not create or modify `config.yaml`, `.env`, or starter workspace files.
+
+The `--provider codex` preset generates `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+
+The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
+Pull both local models before running MindRoom:
+
+```bash
+ollama pull gemma4
+ollama pull qwen3.6:27b
+```
+
+The `--provider llama.cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
+Start llama.cpp with one of the configured model refs before running MindRoom:
+
+```bash
+llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
+llama-server -hf unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
+```
 
 ### config show
 
@@ -707,7 +736,7 @@ mindroom doctor
 ### Initialize a config
 
 ```bash
-mindroom config init --profile public
+mindroom config init
 ```
 
 ### Validate your config

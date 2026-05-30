@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from agno.media import Audio, File, Image, Video
@@ -15,6 +16,47 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 logger = get_logger(__name__)
+
+_MAX_INLINE_MEDIA_RECORDS = 512
+_INLINE_MEDIA_RECORDS_BY_ID: OrderedDict[str, AttachmentRecord] = OrderedDict()
+_INLINE_MEDIA_RECORDS_BY_PATH: OrderedDict[str, AttachmentRecord] = OrderedDict()
+
+
+def _remember_attachment_record(record: AttachmentRecord) -> None:
+    _INLINE_MEDIA_RECORDS_BY_ID[record.attachment_id] = record
+    _INLINE_MEDIA_RECORDS_BY_ID.move_to_end(record.attachment_id)
+    while len(_INLINE_MEDIA_RECORDS_BY_ID) > _MAX_INLINE_MEDIA_RECORDS:
+        _INLINE_MEDIA_RECORDS_BY_ID.popitem(last=False)
+
+    path_key = str(record.local_path.absolute())
+    _INLINE_MEDIA_RECORDS_BY_PATH[path_key] = record
+    _INLINE_MEDIA_RECORDS_BY_PATH.move_to_end(path_key)
+    while len(_INLINE_MEDIA_RECORDS_BY_PATH) > _MAX_INLINE_MEDIA_RECORDS:
+        _INLINE_MEDIA_RECORDS_BY_PATH.popitem(last=False)
+
+
+def _inline_media_content_key(record: AttachmentRecord) -> tuple[str, ...]:
+    mime_type = record.mime_type or ""
+    if record.content_sha256:
+        return (record.kind, mime_type, record.content_sha256)
+    return (record.kind, mime_type, "filepath", str(record.local_path))
+
+
+def _partition_inline_media_by_content(
+    attachment_records: list[AttachmentRecord],
+    *,
+    current_attachment_ids: set[str],
+) -> list[AttachmentRecord]:
+    inline_records: list[AttachmentRecord] = []
+    seen_keys: set[tuple[str, ...]] = set()
+    current_records = [record for record in attachment_records if record.attachment_id in current_attachment_ids]
+    historical_records = [record for record in attachment_records if record.attachment_id not in current_attachment_ids]
+    for record in [*current_records, *historical_records]:
+        key = _inline_media_content_key(record)
+        if record.attachment_id in current_attachment_ids or key not in seen_keys:
+            inline_records.append(record)
+            seen_keys.add(key)
+    return inline_records
 
 
 def _attachment_records_to_media(
@@ -32,6 +74,7 @@ def _attachment_records_to_media(
         if record.kind == "audio":
             audio.append(
                 Audio(
+                    id=record.attachment_id,
                     filepath=str(record.local_path),
                     mime_type=record.mime_type,
                 ),
@@ -39,6 +82,7 @@ def _attachment_records_to_media(
         elif record.kind == "image":
             images.append(
                 Image(
+                    id=record.attachment_id,
                     filepath=str(record.local_path),
                     mime_type=record.mime_type,
                 ),
@@ -46,6 +90,7 @@ def _attachment_records_to_media(
         elif record.kind == "file":
             try:
                 file_media = File(
+                    id=record.attachment_id,
                     filepath=str(record.local_path),
                     mime_type=record.mime_type,
                     filename=record.filename,
@@ -54,6 +99,7 @@ def _attachment_records_to_media(
                 # Agno validates file MIME types against a strict allow-list.
                 # Fall back to filepath+filename so arbitrary attachments still work.
                 file_media = File(
+                    id=record.attachment_id,
                     filepath=str(record.local_path),
                     filename=record.filename,
                 )
@@ -61,6 +107,7 @@ def _attachment_records_to_media(
         elif record.kind == "video":
             videos.append(
                 Video(
+                    id=record.attachment_id,
                     filepath=str(record.local_path),
                     mime_type=record.mime_type,
                 ),
@@ -75,6 +122,7 @@ def resolve_attachment_media(
     *,
     room_id: str | None = None,
     thread_id: str | None = None,
+    current_attachment_ids: set[str] | None = None,
 ) -> tuple[list[str], list[Audio], list[Image], list[File], list[Video]]:
     """Resolve attachment IDs into Agno media objects.
 
@@ -100,8 +148,15 @@ def resolve_attachment_media(
                 thread_id=thread_id,
             )
     resolved_attachment_ids = [record.attachment_id for record in attachment_records]
+    for record in attachment_records:
+        _remember_attachment_record(record)
+    media_records = (
+        _partition_inline_media_by_content(attachment_records, current_attachment_ids=current_attachment_ids)
+        if current_attachment_ids is not None
+        else attachment_records
+    )
     attachment_audio, attachment_images, attachment_files, attachment_videos = _attachment_records_to_media(
-        attachment_records,
+        media_records,
     )
     emit_elapsed_timing(
         "response_payload.resolve_attachment_media",

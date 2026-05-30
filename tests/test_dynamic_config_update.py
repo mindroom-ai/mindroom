@@ -273,7 +273,7 @@ class TestDynamicConfigUpdate:
                     request,
                     updated_config,
                     runtime_paths,
-                    available_agents=[
+                    available_responders=[
                         MatrixID(username="email_assistant", domain="localhost"),
                         MatrixID(username="callagent", domain="localhost"),
                     ],

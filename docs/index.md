@@ -113,7 +113,7 @@ mindroom run
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
 | **Memory** | Mem0-inspired memory system with agent and team scopes |
-| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
+| **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
@@ -157,7 +157,7 @@ mindroom run
 - [Skills](skills.md) - OpenClaw-compatible skills system
 - [Plugins](plugins.md) - Extend with custom tools, OAuth providers, and skills
 - [OAuth Framework](oauth-framework.md) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](knowledge.md) - Configure RAG-backed document indexing
+- [Knowledge Bases](knowledge.md) - Configure semantic indexing or files-only knowledge access
 - [Memory System](memory.md) - How agent memory works
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
 - [Voice Messages](voice.md) - Voice message transcription

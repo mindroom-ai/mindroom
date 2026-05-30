@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import secrets
 import time
 import warnings
@@ -30,9 +31,16 @@ from authlib.integrations.requests_client import OAuth2Session  # noqa: E402
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
-_TOKEN_ENDPOINT_AUTH_METHOD = "client_secret_post"  # noqa: S105
 _PKCECodeChallengeMethod = Literal["S256"]
+_TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
+_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
+_DEFAULT_REFRESH_SKEW_SECONDS = 60.0
+_DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
+_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "none"  # noqa: S105
+_SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
+    {_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD, "client_secret_post", "client_secret_basic"},
+)
+_SUPPORTED_PKCE_CODE_CHALLENGE_METHODS = frozenset({None, "S256"})
 
 
 class OAuthProviderError(RuntimeError):
@@ -77,8 +85,17 @@ class OAuthClientConfig:
     """Resolved OAuth client settings for one runtime."""
 
     client_id: str
-    client_secret: str
+    client_secret: str | None
     redirect_uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthRuntimeEndpoints:
+    """OAuth endpoints resolved for one runtime."""
+
+    authorization_url: str
+    token_url: str
+    token_endpoint_auth_method: _TokenEndpointAuthMethod | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +132,7 @@ _OAuthTokenExchanger = Callable[
     OAuthTokenResult | Awaitable[OAuthTokenResult],
 ]
 _OAuthClaimValidator = Callable[[_OAuthClaimValidationContext], None]
+_OAuthRuntimeBootstrapper = Callable[["OAuthProvider", "RuntimePaths"], Awaitable[OAuthRuntimeEndpoints]]
 
 
 def _normalize_env_names(names: str | Sequence[str] | None) -> tuple[str, ...]:
@@ -176,7 +194,9 @@ def _default_token_parser(
 
     token_data: dict[str, Any] = {
         "token": access_token,
-        "token_uri": provider.token_url,
+        "token_uri": token_response.get("_mindroom_token_url")
+        if isinstance(token_response.get("_mindroom_token_url"), str)
+        else provider.token_url,
         "client_id": client_config.client_id,
         "scopes": list(scopes),
         "_source": "oauth",
@@ -244,6 +264,23 @@ def oauth_expires_at_from_response(token_response: Mapping[str, Any]) -> float |
     return None
 
 
+def _token_data_needs_refresh(
+    token_data: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    refresh_token = token_data.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        return False
+    token = token_data.get("token") or token_data.get("access_token")
+    if not isinstance(token, str) or not token:
+        return True
+    expires_at = token_data.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+        return False
+    return float(expires_at) <= (now if now is not None else time.time()) + _DEFAULT_REFRESH_SKEW_SECONDS
+
+
 def _generate_pkce_code_verifier() -> str:
     """Return one high-entropy PKCE verifier."""
     return secrets.token_urlsafe(64)
@@ -270,7 +307,10 @@ class OAuthProvider:
     shared_client_config_services: tuple[str, ...] = ()
     default_redirect_path: str | None = None
     extra_auth_params: Mapping[str, str] = field(default_factory=dict)
+    extra_token_params: Mapping[str, str] = field(default_factory=dict)
+    token_endpoint_auth_method: _TokenEndpointAuthMethod = _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD
     pkce_code_challenge_method: _PKCECodeChallengeMethod | None = None
+    allow_empty_scopes: bool = False
     allowed_email_domains: tuple[str, ...] = ()
     allowed_hosted_domains: tuple[str, ...] = ()
     allowed_email_domains_env: str | Sequence[str] | None = None
@@ -279,6 +319,7 @@ class OAuthProvider:
     token_parser: _OAuthTokenParser | None = None
     token_exchanger: _OAuthTokenExchanger | None = None
     claim_validator: _OAuthClaimValidator | None = None
+    runtime_bootstrapper: _OAuthRuntimeBootstrapper | None = None
 
     def __post_init__(self) -> None:
         """Validate provider identifiers and redirect path shape."""
@@ -298,6 +339,12 @@ class OAuthProvider:
                     "must not end with '_oauth_client'"
                 )
                 raise ValueError(msg)
+        self._validate_client_config_services()
+        self._validate_provider_options()
+        self._validate_redirect_path()
+
+    def _validate_client_config_services(self) -> None:
+        """Validate OAuth client config service names."""
         for service in self.all_client_config_services:
             validate_service_name(service)
             if not is_oauth_client_config_service(service):
@@ -306,12 +353,21 @@ class OAuthProvider:
         if not self.all_client_config_services:
             msg = f"OAuth provider '{self.id}' must declare at least one client config service"
             raise ValueError(msg)
-        if not self.scopes:
+
+    def _validate_provider_options(self) -> None:
+        """Validate provider OAuth options."""
+        if not self.scopes and not self.allow_empty_scopes:
             msg = f"OAuth provider '{self.id}' must declare at least one scope"
             raise ValueError(msg)
-        if self.pkce_code_challenge_method not in {None, "S256"}:
+        if self.token_endpoint_auth_method not in _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS:
+            msg = f"OAuth provider '{self.id}' has unsupported token endpoint auth method"
+            raise ValueError(msg)
+        if self.pkce_code_challenge_method not in _SUPPORTED_PKCE_CODE_CHALLENGE_METHODS:
             msg = f"OAuth provider '{self.id}' supports only S256 PKCE"
             raise ValueError(msg)
+
+    def _validate_redirect_path(self) -> None:
+        """Validate provider callback path shape."""
         redirect_path = self.redirect_path
         if not redirect_path.startswith("/"):
             msg = f"OAuth provider '{self.id}' default_redirect_path must start with '/'"
@@ -345,6 +401,19 @@ class OAuthProvider:
                 return _OAuthClientConfigResolution(config=config, service=service)
         return None
 
+    async def client_config_resolution_async(
+        self,
+        runtime_paths: RuntimePaths,
+    ) -> _OAuthClientConfigResolution | None:
+        """Return stored client settings, after any lazy runtime bootstrap."""
+        resolution = self.client_config_resolution(runtime_paths)
+        if resolution is not None:
+            return resolution
+        if self.runtime_bootstrapper is None:
+            return None
+        await self.runtime_endpoints(runtime_paths)
+        return self.client_config_resolution(runtime_paths)
+
     def _stored_client_config_from_service(
         self,
         runtime_paths: RuntimePaths,
@@ -358,25 +427,55 @@ class OAuthProvider:
         client_secret = credentials.get("client_secret")
         if not isinstance(client_id, str) or not client_id.strip():
             return None
-        if not isinstance(client_secret, str) or not client_secret.strip():
+        if self.token_endpoint_auth_method != _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD and (
+            not isinstance(client_secret, str) or not client_secret.strip()
+        ):
             return None
         redirect_uri = credentials.get("redirect_uri") if use_stored_redirect_uri else None
         return OAuthClientConfig(
             client_id=client_id.strip(),
-            client_secret=client_secret.strip(),
+            client_secret=client_secret.strip() if isinstance(client_secret, str) and client_secret.strip() else None,
             redirect_uri=redirect_uri.strip()
             if isinstance(redirect_uri, str) and redirect_uri.strip()
             else self.default_redirect_uri(runtime_paths),
         )
 
-    def require_client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig:
-        """Return client settings or raise one safe user-facing configuration error."""
-        client_config = self.client_config(runtime_paths)
-        if client_config is not None:
-            return client_config
+    async def require_client_config_async(self, runtime_paths: RuntimePaths) -> OAuthClientConfig:
+        """Return client settings after lazy bootstrap or raise a safe configuration error."""
+        resolution = await self.client_config_resolution_async(runtime_paths)
+        if resolution is not None:
+            return resolution.config
+        raise self._missing_client_config_error()
+
+    def _missing_client_config_error(self) -> _OAuthProviderNotConfiguredError:
+        """Build one safe client-configuration error."""
         services = ", ".join(self.all_client_config_services) or "a *_oauth_client credential service"
-        msg = f"OAuth provider '{self.id}' is not configured. Store client_id and client_secret in {services}."
-        raise _OAuthProviderNotConfiguredError(msg)
+        required_fields = (
+            "client_id"
+            if self.token_endpoint_auth_method == _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD
+            else "client_id and client_secret"
+        )
+        msg = f"OAuth provider '{self.id}' is not configured. Store {required_fields} in {services}."
+        return _OAuthProviderNotConfiguredError(msg)
+
+    async def runtime_endpoints(self, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
+        """Return OAuth endpoints, resolving dynamic provider metadata when configured."""
+        if self.runtime_bootstrapper is not None:
+            endpoints = await self.runtime_bootstrapper(self, runtime_paths)
+        else:
+            endpoints = OAuthRuntimeEndpoints(
+                authorization_url=self.authorization_url,
+                token_url=self.token_url,
+                token_endpoint_auth_method=self.token_endpoint_auth_method,
+            )
+        if not endpoints.authorization_url.strip() or not endpoints.token_url.strip():
+            msg = f"OAuth provider '{self.id}' could not resolve authorization and token endpoints."
+            raise OAuthProviderError(msg)
+        return endpoints
+
+    def _runtime_token_endpoint_auth_method(self, endpoints: OAuthRuntimeEndpoints) -> _TokenEndpointAuthMethod:
+        """Return the token endpoint auth method after endpoint resolution."""
+        return endpoints.token_endpoint_auth_method or self.token_endpoint_auth_method
 
     def default_redirect_uri(self, runtime_paths: RuntimePaths) -> str:
         """Return the local default redirect URI for this provider."""
@@ -393,21 +492,22 @@ class OAuthProvider:
             return None
         return _generate_pkce_code_verifier()
 
-    def authorization_uri(
+    async def authorization_uri_async(
         self,
         runtime_paths: RuntimePaths,
         *,
         state: str,
         code_verifier: str | None = None,
     ) -> str:
-        """Build the provider authorization URL for one state token."""
-        client_config = self.require_client_config(runtime_paths)
+        """Build the provider authorization URL, resolving lazy runtime metadata first."""
+        endpoints = await self.runtime_endpoints(runtime_paths)
+        client_config = await self.require_client_config_async(runtime_paths)
         client = OAuth2Session(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
             scope=self.scopes,
             redirect_uri=client_config.redirect_uri,
-            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
+            token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
         )
         auth_params = dict(self.extra_auth_params)
         if self.pkce_code_challenge_method is not None:
@@ -418,7 +518,7 @@ class OAuthProvider:
             auth_params["code_challenge_method"] = self.pkce_code_challenge_method
         try:
             authorization_url, _ = client.create_authorization_url(
-                self.authorization_url,
+                endpoints.authorization_url,
                 state=state,
                 **auth_params,
             )
@@ -434,7 +534,8 @@ class OAuthProvider:
         code_verifier: str | None = None,
     ) -> OAuthTokenResult:
         """Exchange an authorization code for normalized credentials."""
-        client_config = self.require_client_config(runtime_paths)
+        endpoints = await self.runtime_endpoints(runtime_paths)
+        client_config = await self.require_client_config_async(runtime_paths)
         if self.pkce_code_challenge_method is not None and not code_verifier:
             msg = "OAuth provider requires a PKCE code verifier"
             raise OAuthProviderError(msg)
@@ -453,7 +554,7 @@ class OAuthProvider:
             client_secret=client_config.client_secret,
             scope=self.scopes,
             redirect_uri=client_config.redirect_uri,
-            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
+            token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
         ) as client:
             try:
@@ -461,10 +562,11 @@ class OAuthProvider:
                     "code": code,
                     "grant_type": "authorization_code",
                 }
+                fetch_kwargs.update(self.extra_token_params)
                 if self.pkce_code_challenge_method is not None:
                     fetch_kwargs["code_verifier"] = code_verifier
                 token_response = await client.fetch_token(
-                    self.token_url,
+                    endpoints.token_url,
                     **fetch_kwargs,
                 )
             except (AuthlibBaseError, HTTPError) as exc:
@@ -474,11 +576,86 @@ class OAuthProvider:
             msg = "OAuth token exchange failed"
             raise OAuthProviderError(msg)
         parser = self.token_parser or _default_token_parser
+        token_response = dict(token_response)
+        token_response["_mindroom_token_url"] = endpoints.token_url
         return _token_result_with_core_metadata(
             self,
             parser(self, token_response, client_config, runtime_paths),
             client_id=client_config.client_id,
         )
+
+    async def refresh_token_data(
+        self,
+        token_data: Mapping[str, Any],
+        runtime_paths: RuntimePaths,
+    ) -> dict[str, Any] | None:
+        """Refresh expiring token data and return updated credentials, or None."""
+        if not _token_data_needs_refresh(token_data):
+            return None
+        refresh_token = cast("str", token_data["refresh_token"])
+
+        endpoints = await self.runtime_endpoints(runtime_paths)
+        client_config = await self.require_client_config_async(runtime_paths)
+        async with AsyncOAuth2Client(
+            client_id=client_config.client_id,
+            client_secret=client_config.client_secret,
+            scope=self.scopes,
+            token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
+            timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+        ) as client:
+            try:
+                token_response = await client.refresh_token(
+                    endpoints.token_url,
+                    refresh_token=refresh_token,
+                    **self.extra_token_params,
+                )
+            except (AuthlibBaseError, HTTPError) as exc:
+                msg = "OAuth token refresh failed"
+                raise OAuthProviderError(msg) from exc
+        if not isinstance(token_response, Mapping):
+            msg = "OAuth token refresh failed"
+            raise OAuthProviderError(msg)
+
+        refresh_response = dict(token_response)
+        refresh_response["_mindroom_token_url"] = endpoints.token_url
+        response_refresh_token = refresh_response.get("refresh_token")
+        existing_refresh_token = token_data.get("refresh_token")
+        if (
+            (not isinstance(response_refresh_token, str) or not response_refresh_token)
+            and isinstance(existing_refresh_token, str)
+            and existing_refresh_token
+        ):
+            refresh_response["refresh_token"] = existing_refresh_token
+
+        response_claims = refresh_response.get("_oauth_claims")
+        existing_claims = token_data.get("_oauth_claims")
+        if (
+            (not isinstance(response_claims, Mapping) or not response_claims)
+            and isinstance(existing_claims, Mapping)
+            and existing_claims
+        ):
+            refresh_response["_oauth_claims"] = existing_claims
+        if (
+            refresh_response.get("_oauth_claims_verified") is not True
+            and token_data.get("_oauth_claims_verified") is True
+        ):
+            refresh_response["_oauth_claims_verified"] = True
+        parser = self.token_parser or _default_token_parser
+        result = parser(self, refresh_response, client_config, runtime_paths)
+        verified_claims = refresh_response.get("_oauth_claims")
+        if (
+            not result.claims_verified
+            and refresh_response.get("_oauth_claims_verified") is True
+            and isinstance(verified_claims, Mapping)
+        ):
+            result = OAuthTokenResult(
+                token_data=result.token_data,
+                claims=dict(verified_claims),
+                claims_verified=True,
+            )
+        result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
+        self.validate_claims(result, runtime_paths)
+        return self.token_result_with_safe_claims(result).token_data
 
     def resolved_allowed_email_domains(self, runtime_paths: RuntimePaths) -> tuple[str, ...]:
         """Return email-domain restrictions from provider config and env."""

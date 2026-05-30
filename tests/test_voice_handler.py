@@ -122,6 +122,123 @@ class TestVoiceHandler:
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
 
+    @pytest.mark.parametrize(
+        ("matrix_mime_type", "expected_filename", "expected_mime_type"),
+        [
+            ("audio/mp4", "audio.m4a", "audio/mp4"),
+            ("audio/m4a", "audio.m4a", "audio/m4a"),
+            ("audio/x-m4a", "audio.m4a", "audio/x-m4a"),
+            ("audio/mp3", "audio.mp3", "audio/mp3"),
+            ("audio/webm", "audio.webm", "audio/webm"),
+            ("audio/ogg; codecs=opus", "audio.ogg", "audio/ogg"),
+            ("  AUDIO/WAV  ", "audio.wav", "audio/wav"),
+        ],
+    )
+    def test_stt_upload_metadata_preserves_matrix_audio_mime_type(
+        self,
+        matrix_mime_type: str,
+        expected_filename: str,
+        expected_mime_type: str,
+    ) -> None:
+        """Matrix audio MIME types should be uploaded to STT with matching metadata."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type(matrix_mime_type)
+
+        assert filename == expected_filename
+        assert mime_type == expected_mime_type
+
+    def test_stt_upload_metadata_defaults_to_ogg(self) -> None:
+        """Missing Matrix MIME metadata should keep the legacy OGG upload shape."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type(None)
+
+        assert filename == "audio.ogg"
+        assert mime_type == "audio/ogg"
+
+    def test_stt_upload_metadata_defaults_to_ogg_for_non_audio_mime_type(self) -> None:
+        """Non-audio Matrix MIME metadata should keep the legacy OGG upload shape."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("text/plain")
+
+        assert filename == "audio.ogg"
+        assert mime_type == "audio/ogg"
+
+    def test_stt_upload_metadata_preserves_unknown_audio_mime_type(self) -> None:
+        """Unknown audio MIME metadata should preserve the audio type with a generic extension."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("audio/unknown")
+
+        assert filename == "audio.bin"
+        assert mime_type == "audio/unknown"
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_uses_configured_stt_host_and_api_key_with_tls_verification(self) -> None:
+        """STT requests should keep TLS verification enabled while honoring configured credentials."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(
+                        api_key="configured-api-key",
+                        host="https://stt.example.test",
+                        model="whisper-1",
+                    ),
+                ),
+            ),
+        )
+        client_init_kwargs: list[dict[str, object]] = []
+        post_calls: list[dict[str, object]] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, str]:
+                return {"text": " transcribed text "}
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs: object) -> None:
+                client_init_kwargs.append(kwargs)
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> FakeResponse:
+                post_calls.append(
+                    {
+                        "url": url,
+                        "headers": headers,
+                        "files": files,
+                        "data": data,
+                    },
+                )
+                return FakeResponse()
+
+        with patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+                mime_type="audio/ogg",
+            )
+
+        assert transcription == "transcribed text"
+        assert len(client_init_kwargs) == 1
+        assert client_init_kwargs[0].get("verify", True) is not False
+        assert post_calls == [
+            {
+                "url": "https://stt.example.test/v1/audio/transcriptions",
+                "headers": {"Authorization": "Bearer configured-api-key"},
+                "files": {"file": ("audio.ogg", b"audio-bytes", "audio/ogg")},
+                "data": {"model": "whisper-1"},
+            },
+        ]
+
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""
         config = _runtime_bound_config(
@@ -221,13 +338,15 @@ class TestVoiceHandler:
                 "mindroom.voice_handler._download_audio",
                 new=AsyncMock(return_value=Audio(content=b"audio", mime_type="audio/ogg")),
             ),
-            patch("mindroom.voice_handler._transcribe_audio", return_value="help me"),
+            patch("mindroom.voice_handler._transcribe_audio", return_value="help me") as mock_transcribe,
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
             result = await _handle_voice_message(client, room, event, config)
 
         assert result == "🎤 @openclaw help me"
+        mock_transcribe.assert_awaited_once()
+        assert mock_transcribe.await_args.kwargs["mime_type"] == "audio/ogg"
         assert mock_process.await_count == 1
         assert mock_process.await_args.kwargs["available_agent_names"] == ["openclaw"]
         assert mock_process.await_args.kwargs["available_team_names"] == []
