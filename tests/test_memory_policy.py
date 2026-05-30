@@ -11,7 +11,6 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._policy import (
     agent_scope_user_id,
-    allowed_scope_storage_paths,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
@@ -80,24 +79,6 @@ def test_get_allowed_memory_user_ids_for_team_context(config: Config) -> None:
         "agent_general",
         "team_calculator+general",
     }
-
-
-def test_allowed_scope_storage_paths_orders_scopes_and_expands_storage_roots(
-    tmp_path: Path,
-    config: Config,
-) -> None:
-    """Allowed scope traversal is sorted and expands each scope to its storage roots."""
-    config.agents = {
-        "general": AgentConfig(display_name="General"),
-        "calculator": AgentConfig(display_name="Calculator"),
-    }
-    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-
-    assert list(allowed_scope_storage_paths("general", tmp_path, config, runtime_paths_for(config))) == [
-        ("agent_general", agent_state_root_path(tmp_path, "general")),
-        ("team_calculator+general", agent_state_root_path(tmp_path, "general")),
-        ("team_calculator+general", agent_state_root_path(tmp_path, "calculator")),
-    ]
 
 
 def test_effective_storage_paths_for_mixed_private_team_is_rejected(tmp_path: Path, config: Config) -> None:
