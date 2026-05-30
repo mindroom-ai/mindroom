@@ -1,3 +1,27 @@
+{{- define "mindroom.instanceSecretName" -}}
+{{- $instanceSecrets := .instanceSecrets | default (dict) -}}
+{{- $instanceSecrets.name | default (printf "mindroom-api-keys-%s" (toString .customer)) -}}
+{{- end }}
+
+{{- define "mindroom.instanceSecretsCreate" -}}
+{{- $instanceSecrets := .instanceSecrets | default (dict) -}}
+{{- $create := true -}}
+{{- if hasKey $instanceSecrets "create" -}}
+{{- $createValue := lower (toString $instanceSecrets.create) -}}
+{{- $create = has $createValue (list "1" "true" "yes" "on") -}}
+{{- end -}}
+{{- $create -}}
+{{- end }}
+
+{{- define "mindroom.instanceSecretHash" -}}
+{{- $instanceSecrets := .instanceSecrets | default (dict) -}}
+{{- if $instanceSecrets.hash -}}
+{{- $instanceSecrets.hash -}}
+{{- else -}}
+{{- printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.openai_key | default "") (.anthropic_key | default "") (.openrouter_key | default "") (.google_key | default "") (.deepseek_key | default "") (.supabaseServiceKey | default "") (.sandbox_proxy_token | default "") (.credentials_encryption_key | default "") (.matrixOidc.clientSecret | default "") (.matrixRegistrationSharedSecret | default .matrix_admin_password | default "") | sha256sum -}}
+{{- end -}}
+{{- end }}
+
 {{- define "mindroom.workerBackendEnv" -}}
 {{- $workerBackend := .workerBackend -}}
 {{- $instanceNamespace := .instanceNamespace -}}
@@ -58,7 +82,7 @@
 - name: sandbox-runner
   image: {{ $values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
   imagePullPolicy: {{ $values.mindroom_image_pull_policy | default "Always" }}
-  command: ["/app/run-sandbox-runner.sh"]
+  command: ["tini", "--", "/app/run-sandbox-runner.sh"]
   ports:
   - containerPort: 8766
   env:
@@ -67,15 +91,13 @@
   - name: MINDROOM_SANDBOX_PROXY_TOKEN
     valueFrom:
       secretKeyRef:
-        name: mindroom-api-keys-{{ $values.customer }}
+        name: {{ include "mindroom.instanceSecretName" $values }}
         key: sandbox_proxy_token
-  {{- if $values.credentials_encryption_key }}
   - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
     valueFrom:
       secretKeyRef:
-        name: mindroom-api-keys-{{ $values.customer }}
+        name: {{ include "mindroom.instanceSecretName" $values }}
         key: credentials_encryption_key
-  {{- end }}
   - name: MINDROOM_CONFIG_PATH
     value: "/app/config.yaml"
   - name: MINDROOM_STORAGE_PATH
@@ -92,12 +114,7 @@
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "1Gi"
-      cpu: "500m"
+    {{- toYaml ($values.sandboxRunnerResources | default (dict)) | nindent 4 }}
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:

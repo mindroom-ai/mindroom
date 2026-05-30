@@ -20,6 +20,7 @@ from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_p
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -369,7 +370,7 @@ def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
     for model in config.models.values():
         if model.provider == "ollama" and model.host:
             return model.host
-    return runtime_paths.env_value("OLLAMA_HOST", default="http://localhost:11434") or "http://localhost:11434"
+    return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:

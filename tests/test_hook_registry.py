@@ -19,7 +19,7 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import _eligible_hooks
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, message_origin, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,6 +83,7 @@ def _message_received_context(
             mentioned_agents=(),
             agent_name=agent_name,
             source_kind="message",
+            origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
     )
 

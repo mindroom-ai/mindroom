@@ -38,6 +38,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
+from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -764,9 +765,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -794,9 +793,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -822,9 +819,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -850,9 +845,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.side_effect = [None, delivered_matrix_event("$edit2")]
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -879,9 +872,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.side_effect = [RuntimeError("transport boom"), delivered_matrix_event("$edit2")]
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )

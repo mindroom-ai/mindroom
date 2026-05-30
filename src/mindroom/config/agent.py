@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
@@ -437,6 +445,30 @@ class TeamConfig(BaseModel):
             num_history_messages=self.num_history_messages,
         )
         return self
+
+
+class RoomConfig(BaseModel):
+    """Configuration for a managed Matrix room."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
+    description: str = Field(default="", description="Dashboard-facing room purpose")
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        """Keep room display names absent or trimmed non-empty strings."""
+        stripped = value.strip() if value is not None else ""
+        return stripped or None
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Omit empty display-name metadata from authored serialization."""
+        data = handler(self)
+        if data.get("display_name") is None:
+            data.pop("display_name", None)
+        return data
 
 
 class CultureConfig(BaseModel):

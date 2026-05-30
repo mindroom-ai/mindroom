@@ -2,12 +2,13 @@
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, limiter, verify_user
+from backend.entitlements import assert_instance_entitlement
 from backend.k8s import check_deployment_exists, instance_deployment_ref, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
@@ -22,6 +23,7 @@ router = APIRouter()
 
 # Track instances being synced to prevent duplicates
 _syncing_instances: set[str] = set()
+ProvisionerAction = Callable[[Request, int, str], Awaitable[dict[str, Any]]]
 
 
 async def _background_sync_instance_status(instance_id: str) -> None:
@@ -187,6 +189,8 @@ async def provision_user_instance(
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
     subscription = sub_result.data[0]
+    assert_instance_entitlement(subscription, "provision")
+
     inst_result = (
         sb.table("instances")
         .select("*")
@@ -239,14 +243,19 @@ async def provision_user_instance(
 
 # Helper function for user instance actions
 async def _verify_instance_ownership_and_proxy(
-    instance_id: int, user: dict, provisioner_func: Callable
+    request: Request,
+    instance_id: int,
+    user: dict,
+    provisioner_func: ProvisionerAction,
+    *,
+    require_active_subscription: bool,
 ) -> dict[str, Any]:
     """Verify user owns instance and proxy to provisioner."""
     sb = ensure_supabase()
 
     result = (
         sb.table("instances")
-        .select("id")
+        .select("id,subscription_id")
         .eq("instance_id", instance_id)
         .eq("account_id", user["account_id"])
         .limit(1)
@@ -255,7 +264,14 @@ async def _verify_instance_ownership_and_proxy(
     if not result.data:
         raise HTTPException(status_code=404, detail="Instance not found or access denied")
 
-    return await provisioner_func(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    if require_active_subscription:
+        instance = result.data[0]
+        sub_result = sb.table("subscriptions").select("*").eq("id", instance["subscription_id"]).limit(1).execute()
+        if not sub_result.data:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+        assert_instance_entitlement(sub_result.data[0], "run")
+
+    return await provisioner_func(request, instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
@@ -264,7 +280,9 @@ async def start_user_instance(
     request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Start user's instance."""
-    return await _verify_instance_ownership_and_proxy(instance_id, user, start_instance_provisioner)
+    return await _verify_instance_ownership_and_proxy(
+        request, instance_id, user, start_instance_provisioner, require_active_subscription=True
+    )
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
@@ -273,7 +291,9 @@ async def stop_user_instance(
     request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Stop user's instance."""
-    return await _verify_instance_ownership_and_proxy(instance_id, user, stop_instance_provisioner)
+    return await _verify_instance_ownership_and_proxy(
+        request, instance_id, user, stop_instance_provisioner, require_active_subscription=False
+    )
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
@@ -282,4 +302,6 @@ async def restart_user_instance(
     request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Restart user's instance."""
-    return await _verify_instance_ownership_and_proxy(instance_id, user, restart_instance_provisioner)
+    return await _verify_instance_ownership_and_proxy(
+        request, instance_id, user, restart_instance_provisioner, require_active_subscription=True
+    )

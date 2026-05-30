@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import re
 import uuid
 from collections import OrderedDict
@@ -16,8 +17,15 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
@@ -33,6 +41,20 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/m4a": ".m4a",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/webm": ".webm",
+    "audio/x-m4a": ".m4a",
+    "audio/x-wav": ".wav",
+}
 _VOICE_MENTION_PATTERN = re.compile(
     r"(?<![\w])@(?P<localpart>[A-Za-z0-9._=/+\-]+)(?::(?P<domain>[A-Za-z0-9.\-:\[\]]+))?",
 )
@@ -218,11 +240,74 @@ async def prepare_voice_message(
         normalized.transcribed_message
         or f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     )
+    return _build_prepared_voice_message(
+        event,
+        config,
+        runtime_paths,
+        text=text,
+        attachment_id=attachment_id,
+        thread_id=thread_id,
+        raw_audio_fallback=normalized.transcribed_message is None,
+    )
 
-    extra_content: dict[str, Any] = {ORIGINAL_SENDER_KEY: event.sender}
+
+async def prepare_raw_voice_fallback_message(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: AudioMessageEvent,
+    config: Config,
+    *,
+    runtime_paths: RuntimePaths,
+    thread_id: str | None,
+) -> _PreparedVoiceMessage:
+    """Download/register audio and build a fallback text event without STT."""
+    audio = await _download_audio(client, event)
+    attachment_id = None
+    if audio is None or audio.content is None:
+        logger.error("Failed to download audio file for raw voice fallback")
+    else:
+        attachment_record = await register_audio_attachment(
+            storage_path,
+            event_id=event.event_id,
+            audio_bytes=audio.content,
+            mime_type=audio.mime_type,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            sender=event.sender,
+            filename=event.body if isinstance(event.body, str) else None,
+        )
+        attachment_id = attachment_record.attachment_id if attachment_record is not None else None
+
+    return _build_prepared_voice_message(
+        event,
+        config,
+        runtime_paths,
+        text=f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}",
+        attachment_id=attachment_id,
+        thread_id=thread_id,
+        raw_audio_fallback=True,
+    )
+
+
+def _build_prepared_voice_message(
+    event: AudioMessageEvent,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    text: str,
+    attachment_id: str | None,
+    thread_id: str | None,
+    raw_audio_fallback: bool,
+) -> _PreparedVoiceMessage:
+    """Build the prepared text/source wrapper for normalized or fallback voice."""
+    extra_content: dict[str, Any] = {
+        ORIGINAL_SENDER_KEY: event.sender,
+        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+    }
     if attachment_id is not None:
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
-    if normalized.transcribed_message is None:
+    if raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     original_content = event.source.get("content") if isinstance(event.source, dict) else None
     inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
@@ -285,7 +370,12 @@ async def _handle_voice_message(
             return None
 
         # Transcribe the audio
-        transcription = await _transcribe_audio(voice_audio.content, config, runtime_paths)
+        transcription = await _transcribe_audio(
+            voice_audio.content,
+            config,
+            runtime_paths,
+            mime_type=voice_audio.mime_type,
+        )
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
             return None
@@ -333,13 +423,42 @@ async def _download_audio(
     return Audio(content=audio_data, mime_type=media_mime_type(event))
 
 
-async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: RuntimePaths) -> str | None:
+def _stt_upload_filename_and_mime_type(mime_type: str | None) -> tuple[str, str]:
+    """Return multipart filename and MIME type for an STT upload."""
+    normalized_mime_type = (mime_type or "audio/ogg").split(";", 1)[0].strip().lower() or "audio/ogg"
+    if not normalized_mime_type.startswith("audio/"):
+        logger.warning(
+            "Non-audio MIME type declared for STT upload; using OGG fallback",
+            mime_type=normalized_mime_type,
+        )
+        normalized_mime_type = "audio/ogg"
+
+    extension = _STT_AUDIO_EXTENSION_BY_MIME_TYPE.get(normalized_mime_type)
+    if extension is None:
+        extension = mimetypes.guess_extension(normalized_mime_type)
+        if extension is None:
+            logger.warning(
+                "Unknown audio MIME type for STT upload; using .bin extension",
+                mime_type=normalized_mime_type,
+            )
+            extension = ".bin"
+    return f"audio{extension}", normalized_mime_type
+
+
+async def _transcribe_audio(
+    audio_data: bytes,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    mime_type: str | None = None,
+) -> str | None:
     """Transcribe audio using OpenAI-compatible API.
 
     Args:
         audio_data: Audio file bytes
         config: Application configuration
         runtime_paths: Explicit runtime context for STT credential lookup
+        mime_type: Matrix-declared MIME type for the audio payload
 
     Returns:
         Transcription text or None if failed
@@ -355,10 +474,11 @@ async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: Ru
             return None
         headers = {"Authorization": f"Bearer {api_key}"}
 
-        files = {"file": ("audio.ogg", audio_data, "audio/ogg")}
+        filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
+        files = {"file": (filename, audio_data, upload_mime_type)}
         form_data = {"model": config.voice.stt.model}
 
-        async with httpx.AsyncClient(verify=False) as http_client:  # noqa: S501
+        async with httpx.AsyncClient() as http_client:
             response = await http_client.post(url, headers=headers, files=files, data=form_data)
             if response.status_code != 200:
                 logger.error(

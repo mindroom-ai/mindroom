@@ -180,10 +180,8 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
     bot._send_response.assert_awaited_once_with(
-        "!test:example.com",
-        "$message:example.com",
-        "⏹️ Stopping generation...",
-        None,
+        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
+        response_text="⏹️ Stopping generation...",
     )
 
 
@@ -240,10 +238,8 @@ async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> Non
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
     bot._send_response.assert_awaited_once_with(
-        "!test:example.com",
-        "$message:example.com",
-        "⏹️ Stopping generation...",
-        "$thread:example.com",
+        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
+        response_text="⏹️ Stopping generation...",
     )
 
 

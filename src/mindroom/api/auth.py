@@ -8,7 +8,7 @@ import json
 import secrets
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -32,6 +32,7 @@ _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
+_REDIRECT_TARGET_DECODE_PASSES = 5
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/homeassistant/callback",
@@ -107,6 +108,7 @@ class _ApiAuthSettings:
     supabase_anon_key: str | None
     account_id: str | None
     mindroom_api_key: str | None
+    public_url: str | None = None
     trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
 
 
@@ -128,6 +130,7 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
+        public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
         trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
     )
 
@@ -630,9 +633,22 @@ async def request_has_frontend_access(request: Request) -> bool:
 
 def sanitize_next_path(next_path: str | None) -> str:
     """Normalize redirect targets to an absolute in-app path."""
-    if not next_path or not next_path.startswith("/") or next_path.startswith("//"):
+    if not next_path or not next_path.startswith("/") or _is_protocol_relative_redirect(next_path):
         return "/"
     return next_path
+
+
+def _is_protocol_relative_redirect(next_path: str) -> bool:
+    """Return whether a browser may normalize one target to a protocol-relative URL."""
+    candidate = next_path
+    for _ in range(_REDIRECT_TARGET_DECODE_PASSES):
+        if candidate.replace("\\", "/").startswith("//"):
+            return True
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return candidate.replace("\\", "/").startswith("//")
 
 
 def _request_path_with_query(request: Request) -> str:
@@ -641,13 +657,30 @@ def _request_path_with_query(request: Request) -> str:
     return f"{path}?{query}" if query else path
 
 
+def _public_origin(public_url: str | None) -> str | None:
+    if not public_url:
+        return None
+    parsed = urlsplit(public_url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings, next_path: str | None) -> str:
+    public_origin = _public_origin(auth_settings.public_url)
+    if public_origin is None:
+        return str(request.url)
+    path = sanitize_next_path(next_path or _request_path_with_query(request))
+    return f"{public_origin}{path}"
+
+
 def login_redirect_for_request(request: Request, *, next_path: str | None = None) -> RedirectResponse | None:
     """Return the dashboard login redirect for one browser request when configured."""
     auth_settings = _request_auth_state(request).settings
     if auth_settings.trusted_upstream.enabled:
         return None
     if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
-        redirect_to = quote(str(request.url), safe="")
+        redirect_to = quote(_platform_redirect_target(request, auth_settings, next_path), safe="")
         return RedirectResponse(f"{auth_settings.platform_login_url}?redirect_to={redirect_to}")
     if auth_settings.mindroom_api_key:
         login_target = sanitize_next_path(next_path or _request_path_with_query(request))

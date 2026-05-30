@@ -1,19 +1,26 @@
 @import "./styles/tokens.css";
 @import "./styles/animations.css";
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
 
 @layer utilities {
   .glass {
-    @apply backdrop-blur-xl bg-white/70 dark:bg-stone-900/70 border border-white/20 dark:border-white/10;
+    @apply backdrop-blur-xl bg-white/70 border border-white/20;
   }
   .glass-subtle {
-    @apply backdrop-blur-md bg-white/50 dark:bg-stone-900/50 border border-white/10 dark:border-white/5;
+    @apply backdrop-blur-md bg-white/50 border border-white/10;
   }
   .glass-card {
-    @apply backdrop-blur-xl bg-white/60 dark:bg-stone-900/60 border border-white/20 dark:border-white/10 shadow-xl;
+    @apply backdrop-blur-xl bg-white/60 border border-white/20 shadow-xl;
+  }
+  .dark .glass {
+    @apply bg-stone-900/70 border-white/10;
+  }
+  .dark .glass-subtle {
+    @apply bg-stone-900/50 border-white/5;
+  }
+  .dark .glass-card {
+    @apply bg-stone-900/60 border-white/10;
   }
   .gradient-mesh {
     background-image:
@@ -135,13 +142,21 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    @apply bg-gray-300/50 dark:bg-stone-700/50 rounded-full;
+    @apply bg-gray-300/50 rounded-full;
     border: 2px solid transparent;
     background-clip: padding-box;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400/70 dark:bg-stone-600/70;
+    @apply bg-gray-400/70;
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    @apply bg-stone-700/50;
+  }
+
+  .dark ::-webkit-scrollbar-thumb:hover {
+    @apply bg-stone-600/70;
   }
 
   /* Firefox scrollbar styling */

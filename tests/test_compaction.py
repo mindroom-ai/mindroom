@@ -21,10 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.history.compaction import (
-    _estimate_tool_definition_tokens,
-    compute_prompt_token_breakdown,
-)
+from mindroom.history.compaction import _estimate_tool_definition_tokens, compute_prompt_token_breakdown
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.storage import read_scope_state, write_scope_state
@@ -423,7 +420,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
             models={
                 "default": ModelConfig(
                     provider="vertexai_claude",
-                    id="claude-opus-4-7",
+                    id="claude-opus-4-8",
                     context_window=200_000,
                 ),
             },
@@ -438,7 +435,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         run_id="run-1",
         session_id="session-1",
         status="completed",
-        model="claude-opus-4-7",
+        model="claude-opus-4-8",
         model_provider="VertexAI",
         metrics={"input_tokens": 153_294, "cache_read_tokens": 281_264},
         context_input_tokens=153_294,

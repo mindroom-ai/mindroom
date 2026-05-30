@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { getServerRuntimeConfig } from '@/lib/runtime-config'
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
     request: {
       headers: request.headers,
@@ -17,41 +17,20 @@ export async function middleware(request: NextRequest) {
     supabaseAnonKey,
     {
       cookies: {
-        get(name: string) {
-          return request.cookies.get(name)?.value
+        getAll() {
+          return request.cookies.getAll()
         },
-        set(name: string, value: string, options: any) {
-          request.cookies.set({
-            name,
-            value,
-            ...options,
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value }) => {
+            request.cookies.set(name, value)
           })
           response = NextResponse.next({
             request: {
               headers: request.headers,
             },
           })
-          response.cookies.set({
-            name,
-            value,
-            ...options,
-          })
-        },
-        remove(name: string, options: any) {
-          request.cookies.set({
-            name,
-            value: '',
-            ...options,
-          })
-          response = NextResponse.next({
-            request: {
-              headers: request.headers,
-            },
-          })
-          response.cookies.set({
-            name,
-            value: '',
-            ...options,
+          cookiesToSet.forEach(({ name, value, options }) => {
+            response.cookies.set(name, value, options)
           })
         },
       },
@@ -97,7 +76,7 @@ export async function middleware(request: NextRequest) {
       if (!data.is_admin) {
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
-    } catch (error) {
+    } catch {
       // Admin check exception - redirect to dashboard
       return NextResponse.redirect(new URL('/dashboard', request.url))
     }
@@ -167,7 +146,7 @@ function safeOrigin(input?: string) {
   if (!input) return undefined
   try {
     return new URL(input).origin
-  } catch (error) {
+  } catch {
     return undefined
   }
 }

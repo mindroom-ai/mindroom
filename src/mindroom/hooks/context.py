@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.turn_origin import TurnOrigin
 
     from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
@@ -232,9 +233,28 @@ class MessageEnvelope:
     mentioned_agents: tuple[str, ...]
     agent_name: str
     source_kind: str
+    origin: TurnOrigin = field(kw_only=True)
     hook_source: str | None = None
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate runtime invariants not enforced by dataclass typing."""
+        if self.origin is None:
+            message = "MessageEnvelope.origin is required"
+            raise TypeError(message)
+        if self.room_id != self.target.room_id:
+            message = "MessageEnvelope.room_id must match MessageEnvelope.target.room_id"
+            raise ValueError(message)
+        if self.sender_id != self.origin.transport_sender_id:
+            message = "MessageEnvelope.sender_id must match MessageEnvelope.origin.transport_sender_id"
+            raise ValueError(message)
+        if self.requester_id != self.origin.requester_id:
+            message = "MessageEnvelope.requester_id must match MessageEnvelope.origin.requester_id"
+            raise ValueError(message)
+        if self.source_kind != self.origin.source_kind:
+            message = "MessageEnvelope.source_kind must match MessageEnvelope.origin.source_kind"
+            raise ValueError(message)
 
 
 @dataclass(slots=True)

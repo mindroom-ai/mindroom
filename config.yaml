@@ -222,7 +222,7 @@ agents:
     - Highlight key developments and their significance.
     learning: true
     learning_mode: always
-    model: gpt_oss_120b
+    model: nemotron
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -469,7 +469,7 @@ models:
     id: claude-haiku-4-5
     provider: anthropic
   opus:
-    id: claude-opus-4-7
+    id: claude-opus-4-8
     provider: anthropic
   sonnet:
     id: claude-sonnet-4-6
@@ -483,17 +483,17 @@ models:
     provider: openai
   # --- Google ---
   gemini_flash:
-    id: gemini-3-flash-preview
+    id: gemini-3.5-flash
     provider: google
   # --- OpenRouter ---
   deepseek:
     id: deepseek/deepseek-v3.2
     provider: openrouter
-  gpt_oss:
-    id: openai/gpt-oss-120b
+  nemotron:
+    id: nvidia/nemotron-3-super-120b-a12b:free
     provider: openrouter
-  gpt_oss_120b:
-    id: openai/gpt-oss-120b
+  tencent_hy3:
+    id: tencent/hy3-preview
     provider: openrouter
 plugins: []
 room_models:

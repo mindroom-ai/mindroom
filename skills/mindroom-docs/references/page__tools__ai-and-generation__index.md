@@ -39,8 +39,8 @@ The current upstream SDK implementations also honor provider env vars such as `O
 ### What It Does
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `whisper-1`.
-`generate_image()` uses the configured `image_model`, defaults to `dall-e-3`, and returns attached image bytes rather than only a remote URL.
+`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-4o-transcribe`.
+`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2`, and returns attached image bytes rather than only a remote URL.
 The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
@@ -53,11 +53,11 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
 | `all` | `boolean` | `no` | `false` | Enable all three OpenAI media functions. |
-| `transcription_model` | `text` | `no` | `whisper-1` | Model used by `transcribe_audio()`. |
+| `transcription_model` | `text` | `no` | `gpt-4o-transcribe` | Model used by `transcribe_audio()`. |
 | `text_to_speech_voice` | `text` | `no` | `alloy` | Default voice for `generate_speech()`. |
-| `text_to_speech_model` | `text` | `no` | `tts-1` | Default TTS model for `generate_speech()`. |
+| `text_to_speech_model` | `text` | `no` | `gpt-4o-mini-tts` | Default TTS model for `generate_speech()`. |
 | `text_to_speech_format` | `text` | `no` | `mp3` | Output format for generated speech, such as `mp3`, `wav`, or `opus`. |
-| `image_model` | `text` | `no` | `dall-e-3` | Image generation model for `generate_image()`. |
+| `image_model` | `text` | `no` | `gpt-image-2` | Image generation model for `generate_image()`. |
 | `image_quality` | `text` | `no` | `null` | Optional image quality override passed through to the API. |
 | `image_size` | `text` | `no` | `null` | Optional image size override passed through to the API. |
 | `image_style` | `text` | `no` | `null` | Optional image style override passed through to the API. |
@@ -69,8 +69,8 @@ agents:
   creator:
     tools:
       - openai:
-          transcription_model: whisper-1
-          image_model: dall-e-3
+          transcription_model: gpt-4o-transcribe
+          image_model: gpt-image-2
           text_to_speech_voice: alloy
 ```
 

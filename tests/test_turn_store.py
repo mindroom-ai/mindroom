@@ -11,7 +11,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.turn_store import TurnStore, TurnStoreDeps, _normalized_matrix_source_event_ids
+from mindroom.turn_store import (
+    TurnStore,
+    TurnStoreDeps,
+    _normalized_matrix_source_event_ids,
+    _normalized_matrix_source_event_ids_or_anchor,
+)
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -50,9 +55,9 @@ def test_normalized_matrix_source_event_ids_deduplicates_and_falls_back_to_ancho
     """Run metadata source IDs should use handled-turn normalization with anchor fallback."""
     assert _normalized_matrix_source_event_ids(["$first", "", "$first", "$anchor"]) == ("$first", "$anchor")
     assert _normalized_matrix_source_event_ids([None, "$first", 2, "$first"]) == ("$first",)
-    assert _normalized_matrix_source_event_ids([], fallback_event_id="$anchor") == ("$anchor",)
-    assert _normalized_matrix_source_event_ids("not-a-list", fallback_event_id="$anchor") == ("$anchor",)
-    assert _normalized_matrix_source_event_ids([""], fallback_event_id="") == ()
+    assert _normalized_matrix_source_event_ids_or_anchor([], anchor_event_id="$anchor") == ("$anchor",)
+    assert _normalized_matrix_source_event_ids_or_anchor("not-a-list", anchor_event_id="$anchor") == ("$anchor",)
+    assert _normalized_matrix_source_event_ids_or_anchor([""], anchor_event_id="") == ()
 
 
 def test_build_run_metadata_uses_shared_source_event_id_normalization(tmp_path: Path) -> None:

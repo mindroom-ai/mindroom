@@ -16,6 +16,27 @@ MindRoom uses three Helm charts:
 - kubectl and helm installed
 - NGINX Ingress Controller
 - cert-manager (for TLS certificates)
+- Hetzner Cloud Controller Manager and Hetzner CSI Driver when using `hcloud-volumes`
+
+## Hetzner Scaling Baseline
+
+Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
+This keeps the current bill low while making later worker nodes possible.
+Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
+The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
+Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
+
+Production platform values should make the storage class explicit:
+
+```yaml
+provisioner:
+  instanceStorageClassName: hcloud-volumes
+
+autoscaling:
+  enabled: false
+```
+
+Enable `autoscaling.enabled` only after the cluster has metrics-server and enough nodes or headroom to schedule the extra replicas.
 
 ## Instance Deployment
 
@@ -53,7 +74,7 @@ Only enable trusted upstream auth when the instance is behind a verified access 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set-string trustedUpstreamAuth.enabled=true \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
@@ -198,6 +219,8 @@ Dedicated workers need access to the same PVC as the primary runtime.
 Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
 If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 The chart enforces this constraint during template rendering.
+For the hosted SaaS instance chart, keep the default `static_runner` backend on single-node clusters.
+Switching hosted instances to dedicated Kubernetes workers on a multi-node cluster requires either a real `ReadWriteMany` storage class or explicit node pinning.
 
 ### RBAC And Network Policy
 
@@ -228,6 +251,9 @@ env:
     value: "/etc/secrets/openrouter_key"
 ```
 
+For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
+The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+
 ## Ingress
 
 Each instance gets three hosts:
@@ -249,12 +275,14 @@ helm upgrade --install platform ./cluster/k8s/platform \
 ```
 
 The namespace must match `mindroom-{environment}` where `environment` is set in values.
+For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
+The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
 Platform ingress hosts:
 
 - `app.{domain}` - Platform frontend
 - `api.{domain}` - Platform backend API
-- `webhooks.{domain}/stripe` - Stripe webhooks
+- `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
 ## Local Development with Kind
 
@@ -299,7 +327,7 @@ Example provision request:
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
+  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
@@ -334,3 +362,7 @@ Each customer instance gets:
 - Dedicated ingress routes
 
 Platform services run in `mindroom-{environment}` namespace.
+The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
+The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
+Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
+The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.

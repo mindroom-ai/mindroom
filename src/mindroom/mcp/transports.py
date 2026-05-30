@@ -95,13 +95,18 @@ async def _open_remote_transport(
     *,
     transport: MCPTransport,
     client: _RemoteTransportClient,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
+    headers = {
+        **_interpolate_mcp_headers(server_config.headers, runtime_paths),
+        **(dict(extra_headers) if extra_headers is not None else {}),
+    }
     async with client(
         server_config.url,
-        headers=_interpolate_mcp_headers(server_config.headers, runtime_paths),
+        headers=headers,
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
     ) as streams:
@@ -112,6 +117,8 @@ def build_transport_handle(
     server_id: str,
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> _MCPTransportHandle:
     """Build a deferred transport opener for one configured MCP server."""
     if server_config.transport == "stdio":
@@ -124,6 +131,7 @@ def build_transport_handle(
                 runtime_paths,
                 transport="sse",
                 client=sse_client,
+                extra_headers=extra_headers,
             ),
         )
     if server_config.transport == "streamable-http":
@@ -134,6 +142,7 @@ def build_transport_handle(
                 runtime_paths,
                 transport="streamable-http",
                 client=streamablehttp_client,
+                extra_headers=extra_headers,
             ),
         )
     msg = f"Unsupported MCP transport for server '{server_id}': {server_config.transport}"

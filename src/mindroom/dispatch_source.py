@@ -5,15 +5,31 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast, runtime_checkable
 
-_MESSAGE_SOURCE_KIND = "message"
-_VOICE_SOURCE_KIND = "voice"
-_IMAGE_SOURCE_KIND = "image"
-_MEDIA_SOURCE_KIND = "media"
+from mindroom.constants import SOURCE_KIND_KEY
+
+MESSAGE_SOURCE_KIND = "message"
+VOICE_SOURCE_KIND = "voice"
+IMAGE_SOURCE_KIND = "image"
+MEDIA_SOURCE_KIND = "media"
+EDIT_SOURCE_KIND = "edit"
 SCHEDULED_SOURCE_KIND = "scheduled"
 HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
+_KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        MESSAGE_SOURCE_KIND,
+        VOICE_SOURCE_KIND,
+        IMAGE_SOURCE_KIND,
+        MEDIA_SOURCE_KIND,
+        EDIT_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        HOOK_DISPATCH_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    },
+)
 _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         SCHEDULED_SOURCE_KIND,
@@ -53,9 +69,15 @@ def is_automation_source_kind(source_kind: str) -> bool:
     return source_kind in _AUTOMATION_SOURCE_KINDS
 
 
-def _source_kind_from_content(content: Mapping[str, Any]) -> str | None:
-    source_kind = content.get("com.mindroom.source_kind")
-    return source_kind if isinstance(source_kind, str) else None
+def _source_kind_from_value(value: object) -> str | None:
+    """Return a canonical source kind from arbitrary metadata."""
+    return value if isinstance(value, str) and value in _KNOWN_SOURCE_KINDS else None
+
+
+def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
+    """Return canonical source-kind metadata from Matrix content."""
+    source_kind = content.get(SOURCE_KIND_KEY)
+    return _source_kind_from_value(source_kind)
 
 
 def _trusted_source_kind_from_event_content(
@@ -68,13 +90,13 @@ def _trusted_source_kind_from_event_content(
     if not sender_is_trusted(event_or_envelope.sender):
         return None
     if isinstance(event_or_envelope, _HasContent):
-        return _source_kind_from_content(cast("Mapping[str, Any]", event_or_envelope.content))
+        return source_kind_from_content(cast("Mapping[str, Any]", event_or_envelope.content))
     if not isinstance(event_or_envelope, _HasSource):
         return None
     content = event_or_envelope.source.get("content")
     if not isinstance(content, Mapping):
         return None
-    return _source_kind_from_content(cast("Mapping[str, Any]", content))
+    return source_kind_from_content(cast("Mapping[str, Any]", content))
 
 
 def is_voice_event(
@@ -93,4 +115,4 @@ def is_voice_event(
             sender_is_trusted=sender_is_trusted,
         )
     )
-    return source_kind == _VOICE_SOURCE_KIND
+    return source_kind == VOICE_SOURCE_KIND

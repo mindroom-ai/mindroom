@@ -11,6 +11,9 @@
 {{- $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") -}}
 {{- $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) -}}
 {{- $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") -}}
+{{- $instanceSecretName := include "mindroom.instanceSecretName" .Values -}}
+{{- $instanceSecretHash := include "mindroom.instanceSecretHash" .Values -}}
+{{- $configHash := printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.Values.customer | toString) (.Values.baseDomain | toString) (.Values.accountId | default "" | toString) (.Values.storagePath | toString) (.Values.workerBackend | default "static_runner" | toString) (.Values.supabaseUrl | default "" | toString) (.Values.supabaseAnonKey | default "" | toString) ($trustedUpstreamAuth.enabled | default "" | toString) ($trustedUpstreamAuth.userIdHeader | default "" | toString) ($trustedUpstreamAuth.emailHeader | default "" | toString) ($trustedUpstreamAuth.matrixUserIdHeader | default "" | toString) ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | toString) ($trustedUpstreamAuth.requireJwt | default "" | toString) ($trustedUpstreamAuth.jwtHeader | default "" | toString) ($trustedUpstreamAuth.jwksUrl | default "" | toString) ($trustedUpstreamAuth.jwtAudience | default "" | toString) ($trustedUpstreamAuth.jwtIssuer | default "" | toString) ($trustedUpstreamAuth.jwtEmailClaim | default "email" | toString) ($trustedUpstreamAuth.jwtUserIdClaim | default "" | toString) ($trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | toString) (.Values.authorizationGlobalUsers | default (list) | toJson) (.Values.matrixRoomAccess | default (dict) | toJson) | sha256sum -}}
 {{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
 {{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
 {{- end -}}
@@ -53,16 +56,19 @@ spec:
       labels:
         app: mindroom
         customer: {{ .Values.customer | quote }}
-      {{- if .Values.credentials_encryption_key }}
       annotations:
-        mindroom.ai/credentials-encryption-key-hash: {{ .Values.credentials_encryption_key | sha256sum | quote }}
-      {{- end }}
+        mindroom.ai/config-hash: {{ $configHash | quote }}
+        mindroom.ai/instance-secret-hash: {{ $instanceSecretHash | quote }}
     spec:
       {{- if $controlPlaneNodeName }}
       nodeName: {{ $controlPlaneNodeName }}
       {{- end }}
       {{- if eq $workerBackend "kubernetes" }}
       serviceAccountName: {{ $workerManagerServiceAccountName }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
       - name: wait-for-synapse
@@ -124,15 +130,13 @@ spec:
         - name: MINDROOM_SANDBOX_PROXY_TOKEN
           valueFrom:
             secretKeyRef:
-              name: mindroom-api-keys-{{ .Values.customer }}
+              name: {{ $instanceSecretName }}
               key: sandbox_proxy_token
-        {{- if .Values.credentials_encryption_key }}
         - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
-              name: mindroom-api-keys-{{ .Values.customer }}
+              name: {{ $instanceSecretName }}
               key: credentials_encryption_key
-        {{- end }}
         - name: MINDROOM_SANDBOX_EXECUTION_MODE
           value: "selective"
         - name: MINDROOM_SANDBOX_PROXY_TOOLS
@@ -141,6 +145,8 @@ spec:
           value: "http://synapse-{{ .Values.customer }}:8008"
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: MATRIX_REGISTRATION_SHARED_SECRET_FILE
+          value: "/etc/secrets/matrix_registration_shared_secret"
         - name: MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS
           value: {{ .Values.matrixHomeserverStartupTimeoutSeconds | quote }}
         - name: SUPABASE_URL
@@ -209,12 +215,7 @@ spec:
           mountPath: /etc/secrets
           readOnly: true
         resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "2Gi"
-            cpu: "1000m"
+          {{- toYaml (.Values.mindroomResources | default (dict)) | nindent 10 }}
         # Startup only needs the API process to bind the socket; readiness waits for full bootstrap.
         startupProbe:
           httpGet:
@@ -251,7 +252,7 @@ spec:
           name: mindroom-config-{{ .Values.customer }}
       - name: api-keys
         secret:
-          secretName: mindroom-api-keys-{{ .Values.customer }}
+          secretName: {{ $instanceSecretName }}
           defaultMode: 0400
       {{- if eq $workerBackend "static_runner" }}
 {{ include "mindroom.staticRunnerVolume" . | nindent 6 }}

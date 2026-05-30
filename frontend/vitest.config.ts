@@ -17,12 +17,7 @@ export default defineConfig({
       "**/tests/e2e/**", // Exclude E2E tests which are Playwright tests
     ],
     pool: "threads",
-    poolOptions: {
-      threads: {
-        maxThreads: 12,
-        minThreads: 1,
-      },
-    },
+    maxWorkers: 12,
   },
   resolve: {
     alias: {

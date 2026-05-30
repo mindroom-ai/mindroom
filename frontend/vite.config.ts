@@ -5,7 +5,6 @@ import path from "path";
 // Get ports from environment variables or use defaults
 const mindroomPort = process.env.MINDROOM_PORT || "8765";
 const frontendPort = parseInt(process.env.FRONTEND_PORT || "3003");
-const isDocker = process.env.DOCKER_CONTAINER === "1";
 
 // Load MINDROOM_API_KEY from the repo-root .env (parent of frontend/).
 // The empty prefix '' makes loadEnv read ALL vars, not just VITE_-prefixed ones.
