@@ -4475,6 +4475,62 @@ def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tm
     assert Path(key.knowledge_path) == runtime_paths.config_dir / "knowledge_docs"
 
 
+def test_shared_file_memory_path_accepts_literal_dollar_in_path(tmp_path: Path) -> None:
+    """Literal dollar signs in path names should not disable file-memory binding."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./notes$archive")},
+        memory={"backend": "file", "file": {"path": "./notes$archive"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.storage_root / "agents" / "helper" / "workspace" / "notes$archive"
+
+
+def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config_relative(tmp_path: Path) -> None:
+    """Agent-level file memory does not make arbitrary shared paths workspace-relative."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+        memory={"backend": "mem0"},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "memory"
+
+
 @pytest.mark.asyncio
 async def test_file_memory_knowledge_search_uses_requesting_agent_workspace(tmp_path: Path) -> None:
     """Search should query the file-memory workspace for the active agent binding."""

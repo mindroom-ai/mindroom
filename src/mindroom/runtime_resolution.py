@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +31,8 @@ from mindroom.workspaces import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+
+_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{[A-Z0-9_]+\}|[A-Z0-9_]+)")
 
 
 @dataclass(frozen=True)
@@ -89,7 +92,7 @@ def _knowledge_refresh_enabled(
 
 def _relative_literal_path_parts(path_text: str | None) -> tuple[str, ...] | None:
     """Return normalized relative path parts for non-env literal config paths."""
-    if path_text is None or "$" in path_text:
+    if path_text is None or _PATH_PLACEHOLDER_PATTERN.search(path_text):
         return None
     path = Path(path_text).expanduser()
     if path.is_absolute() or ".." in path.parts:
@@ -118,8 +121,6 @@ def _resolve_agent_file_memory_knowledge_path_from_runtime(
     config: Config,
 ) -> Path | None:
     """Resolve a shared file-memory knowledge base against an already-resolved workspace."""
-    if not _shared_knowledge_path_uses_agent_file_memory(agent_runtime.agent_name, base_id, config):
-        return None
     if agent_runtime.workspace is None:
         return None
     return resolve_workspace_relative_path(
