@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.post("/my/sso-cookie", response_model=StatusResponse)
-@limiter.limit("5/minute")
+@limiter.limit("30/minute")
 async def set_sso_cookie(
     request: Request,
     response: Response,

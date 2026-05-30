@@ -853,6 +853,7 @@ class TestCredentialsSync:
         expected_services = {
             "OPENAI_API_KEY": "openai",
             "ANTHROPIC_API_KEY": "anthropic",
+            "AZURE_OPENAI_API_KEY": "azure",
             "GOOGLE_API_KEY": "google",
             "OPENROUTER_API_KEY": "openrouter",
             "DEEPSEEK_API_KEY": "deepseek",

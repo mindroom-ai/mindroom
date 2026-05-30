@@ -50,14 +50,13 @@ class TestSubscriptionsEndpoints:
         subscription = {
             "id": "sub_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "pro",
             "status": "active",
             "stripe_subscription_id": "stripe_sub_123",
             "current_period_start": datetime.now(UTC).isoformat(),
             "current_period_end": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
             "max_agents": 10,
             "max_messages_per_day": 1000,
-            "max_storage_gb": 100,
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -70,8 +69,10 @@ class TestSubscriptionsEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["id"] == "sub_123"
-        assert data["tier"] == "professional"
+        assert data["tier"] == "pro"
         assert data["status"] == "active"
+        assert data["can_run_instances"] is True
+        assert data["trial_days_remaining"] is None
 
     def test_get_user_subscription_auto_creates_free_plan(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
@@ -117,6 +118,8 @@ class TestSubscriptionsEndpoints:
         assert data["id"] == inserted_row["id"]
         assert data["tier"] == "free"
         assert data["status"] == "active"
+        assert data["can_run_instances"] is False
+        assert data["trial_days_remaining"] is None
         assert data["max_agents"] == plan_limits["max_agents"]
         assert data["max_messages_per_day"] == plan_limits["max_messages_per_day"]
         assert data["max_storage_gb"] == plan_limits["max_storage_gb"]
@@ -298,13 +301,12 @@ class TestSubscriptionsEndpoints:
         subscription = {
             "id": "sub_123",
             "account_id": "acc_test_123",
-            "tier": "professional",
+            "tier": "pro",
             "status": "trialing",
             "trial_ends_at": trial_end.isoformat(),
             "stripe_subscription_id": "stripe_sub_123",
             "max_agents": 10,
             "max_messages_per_day": 1000,
-            "max_storage_gb": 100,
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -318,3 +320,45 @@ class TestSubscriptionsEndpoints:
         data = response.json()
         assert data["status"] == "trialing"
         assert data["trial_ends_at"] is not None
+        assert data["can_run_instances"] is True
+        assert data["trial_days_remaining"] == 7
+
+    def test_expired_trial_is_paused_when_subscription_is_read(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
+    ):
+        """An expired trial should stop looking usable immediately, not only after nightly cleanup."""
+        expired_trial = {
+            "id": "sub_123",
+            "account_id": "acc_test_123",
+            "tier": "pro",
+            "status": "trialing",
+            "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            "stripe_subscription_id": "stripe_sub_123",
+            "max_agents": 10,
+            "max_messages_per_day": 1000,
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+
+        subscription_query = MagicMock()
+        subscription_query.select.return_value = subscription_query
+        subscription_query.eq.return_value = subscription_query
+        subscription_query.limit.return_value = subscription_query
+        subscription_query.execute.return_value = Mock(data=[expired_trial])
+
+        subscription_update = MagicMock()
+        subscription_update.update.return_value = subscription_update
+        subscription_update.eq.return_value = subscription_update
+        subscription_update.execute.return_value = Mock(data=[])
+
+        mock_supabase.table.side_effect = [subscription_query, subscription_update]
+
+        response = client.get("/my/subscription")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "paused"
+        assert data["can_run_instances"] is False
+        assert data["trial_days_remaining"] == 0
+        subscription_update.update.assert_called_once()
+        assert subscription_update.update.call_args[0][0]["status"] == "paused"

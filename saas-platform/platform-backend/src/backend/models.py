@@ -36,8 +36,8 @@ class SubscriptionOut(BaseModel):
 
     id: str
     account_id: str
-    tier: Literal["free", "starter", "professional", "enterprise"]
-    status: Literal["active", "cancelled", "past_due", "trialing", "incomplete"]
+    tier: Literal["free", "byok", "hobby", "pro", "enterprise"]
+    status: Literal["active", "cancelled", "past_due", "trialing", "paused", "incomplete"]
     stripe_subscription_id: str | None = None
     stripe_customer_id: str | None = None
     current_period_start: str | None = None
@@ -47,6 +47,8 @@ class SubscriptionOut(BaseModel):
     max_agents: int
     max_messages_per_day: int
     max_storage_gb: int
+    can_run_instances: bool
+    trial_days_remaining: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 

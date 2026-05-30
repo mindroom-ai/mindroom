@@ -29,7 +29,7 @@ from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, prompt_roles_for_history_storage
 from mindroom.history.storage import (
     metadata_with_merged_seen_event_ids,
     read_scope_state,
@@ -71,7 +71,6 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
         "tools_schema",
     },
 )
-_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
 
@@ -257,7 +256,6 @@ async def compact_scope_history(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
     summary_input_budget: int,
-    compaction_context_window: int | None,
     summary_model: Model,
     summary_model_name: str,
     active_context_window: int | None,
@@ -320,7 +318,6 @@ async def compact_scope_history(
         history_settings=history_settings,
         available_history_budget=available_history_budget,
         summary_input_budget=summary_input_budget,
-        compaction_context_window=compaction_context_window,
         before_tokens=before_tokens,
         runs_before=before_run_count,
         threshold_tokens=threshold_tokens,
@@ -414,7 +411,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
     summary_input_budget: int,
-    compaction_context_window: int | None,
     before_tokens: int,
     runs_before: int,
     threshold_tokens: int | None,
@@ -430,10 +426,6 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     all_compacted_run_ids: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
-    per_call_summary_input_budget = _effective_summary_input_budget_tokens(
-        summary_input_budget,
-        compaction_context_window,
-    )
 
     while True:
         working_visible_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
@@ -480,7 +472,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             previous_summary=_current_summary_text(working_session),
             compacted_runs=compactable_runs,
             history_settings=history_settings,
-            max_input_tokens=per_call_summary_input_budget,
+            max_input_tokens=summary_input_budget,
         )
         if not included_runs:
             logger.warning(
@@ -488,7 +480,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                 session_id=session_id,
                 scope=scope.key,
                 candidate_runs=len(compactable_runs),
-                summary_input_budget=per_call_summary_input_budget,
+                summary_input_budget=summary_input_budget,
             )
             if total_compacted_run_count == 0:
                 return None
@@ -500,7 +492,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             compactable_runs=compactable_runs,
             initial_summary_input=summary_input,
             initial_included_runs=included_runs,
-            summary_input_budget=per_call_summary_input_budget,
+            summary_input_budget=summary_input_budget,
             session_id=session_id,
             scope=scope,
             history_settings=history_settings,
@@ -962,14 +954,6 @@ def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) 
     return min(tokens, context_window // 2)
 
 
-def _effective_summary_input_budget_tokens(summary_input_budget: int, compaction_context_window: int | None) -> int:
-    """Return the conservative per-call summary input budget."""
-    if compaction_context_window is None or compaction_context_window <= 0:
-        return summary_input_budget
-    per_call_cap = max(2_000, min(compaction_context_window // 4, 32_000))
-    return min(summary_input_budget, per_call_cap)
-
-
 def resolve_compaction_runtime_settings(
     *,
     config: Config,
@@ -1303,7 +1287,7 @@ def _compaction_replay_messages(
     run: RunOutput | TeamRunOutput,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    skip_roles = set(_history_skip_roles(history_settings) or [])
+    skip_roles = set(_history_skip_roles(history_settings))
     messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
@@ -1618,13 +1602,9 @@ def _team_session_history_messages(
     return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
 
 
-def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
-    """Return the effective Agno skip_roles filter for persisted history replay."""
-    if not history_settings.skip_history_system_role:
-        return None
-    if history_settings.system_message_role in _STANDARD_HISTORY_ROLES:
-        return None
-    return [history_settings.system_message_role]
+def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
+    """Return prompt roles that should never be materialized as persisted history."""
+    return sorted(prompt_roles_for_history_storage(history_settings.system_message_role))
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:

@@ -1308,8 +1308,8 @@ async def test_cancel_all_scheduled_tasks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_scheduled_tasks_for_room_includes_cancelled_without_workflow() -> None:
-    """Cancelled tasks without workflow payload are still returned for non-pending listings."""
+async def test_get_scheduled_tasks_for_room_skips_cancelled_without_workflow() -> None:
+    """Cancelled tasks must carry the same workflow payload as active tasks."""
     client = AsyncMock()
     mock_response = nio.RoomGetStateResponse.from_dict(
         [
@@ -1331,10 +1331,7 @@ async def test_get_scheduled_tasks_for_room_includes_cancelled_without_workflow(
 
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", include_non_pending=True)
 
-    assert len(tasks) == 1
-    assert tasks[0].task_id == "old_cancelled"
-    assert tasks[0].status == "cancelled"
-    assert tasks[0].workflow.description == "Cancelled task"
+    assert tasks == []
 
 
 @pytest.mark.asyncio
@@ -1458,8 +1455,15 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
     """Editing should fail for cancelled/completed tasks."""
     client = AsyncMock()
     room = MagicMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        message="original task",
+        description="original task",
+        room_id="!test:server",
+    )
     state_response = nio.RoomGetStateEventResponse(
-        content={"status": "cancelled"},
+        content={"status": "cancelled", "workflow": workflow.model_dump_json()},
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key="task123",
         room_id="!test:server",

@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, STREAM_STATUS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, STREAM_STATUS_INTERRUPTED, STREAM_STATUS_KEY
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.stale_stream_cleanup import (
@@ -1463,6 +1463,185 @@ async def test_cleanup_repairs_pending_stream_status_on_restart_note_messages(tm
 
 
 @pytest.mark.asyncio
+async def test_cleanup_repairs_threaded_pending_restart_note_without_auto_resume(tmp_path: Path) -> None:
+    """Pending restart-note messages should keep repair-only behavior even when threaded."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    interrupted_body = build_restart_interrupted_body("Working ⋯")
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$message",
+            body=interrupted_body,
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "pending"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == []
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    assert cast("dict[str, object]", sent_content["m.new_content"])["body"] == interrupted_body
+
+
+@pytest.mark.asyncio
+async def test_cleanup_returns_restart_marked_terminal_thread_for_auto_resume(tmp_path: Path) -> None:
+    """Terminal restart-interrupted messages should still seed auto-resume after graceful shutdown."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    restart_body = build_restart_interrupted_body("Partial answer")
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$message",
+            body=restart_body,
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "error"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-root",
+            target_event_id="$message",
+            partial_text="Partial answer",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_status", ["error", STREAM_STATUS_INTERRUPTED])
+async def test_cleanup_returns_generic_interrupted_thread_from_graceful_restart(
+    tmp_path: Path,
+    stream_status: str,
+) -> None:
+    """Generic terminal interrupted messages from shutdown should be resumable but user cancels should not."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$interrupted",
+            body="Partial answer\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: stream_status},
+        ),
+        _make_message_event(
+            event_id="$cancelled",
+            body="User-stopped answer\n\n**[Response cancelled by user]**",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 1),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "cancelled"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert [thread.target_event_id for thread in interrupted] == ["$interrupted"]
+    assert interrupted[0].partial_text == "Partial answer"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_completed_message_ending_with_generic_interrupted_note(tmp_path: Path) -> None:
+    """Completed responses that happen to mention the generic note are not restart-resumable."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$completed",
+            body="Literal text\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "completed"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_restart_interrupted_thread_after_auto_resume_was_queued(tmp_path: Path) -> None:
+    """A later startup should not queue another resume for the same interrupted target."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    restart_body = build_restart_interrupted_body("Partial answer")
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$message",
+            body=restart_body,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "error"},
+        ),
+        _make_message_event(
+            event_id="$resume",
+            body=f"@Test Agent {AUTO_RESUME_MESSAGE}",
+            sender=entity_ids(config, runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$message"),
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_uses_canonical_stream_body_instead_of_transient_warmup_suffix(tmp_path: Path) -> None:
     """Restart cleanup should resume from canonical stream text, not the transient worker warmup suffix."""
     config = _make_config(tmp_path)
@@ -2068,7 +2247,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
         patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
-        patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
     ):

@@ -183,6 +183,7 @@ MindRoom adds important runtime behavior here by loading scoped credentials, enf
 | --- | --- | --- | --- | --- |
 | `HOMEASSISTANT_URL` | `url` | `yes` | `null` | Dashboard field label for the Home Assistant base URL. The dedicated integration flow stores the normalized value as `instance_url`. |
 | `HOMEASSISTANT_TOKEN` | `password` | `yes` | `null` | Dashboard field label for a long-lived access token. OAuth setup stores `access_token` and `refresh_token` instead. |
+| `HOMEASSISTANT_ALLOW_PRIVATE_URL` | `boolean` | `no` | `false` | Allows a trusted self-hosted Home Assistant URL on a private, local, or loopback network. The dedicated integration flow stores this as `allow_private_url`. |
 
 ### Example
 
@@ -209,6 +210,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 - `homeassistant`, `gmail`, `google_calendar`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
+- Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
 - The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.
 
 ## Related Docs

@@ -60,35 +60,51 @@ class MockPrice:
         mock_response = MagicMock()
         mock_response.data = [
             types.SimpleNamespace(
-                id="price_1S6FvF3GVsrZHuzXrDZ5H7EW",
+                id="price_1TZQNK3GVsrZHuzX6EWO8kgD",
                 product="prod_test",
                 unit_amount=1000,
                 recurring=types.SimpleNamespace(interval="month"),
-                metadata={"plan": "starter", "billing_cycle": "monthly"},
+                metadata={"tier": "byok", "billing_cycle": "monthly"},
                 active=True,
             ),
             types.SimpleNamespace(
-                id="price_1S6FvF3GVsrZHuzXDjv76gwE",
+                id="price_1TZQNK3GVsrZHuzXqbwHwhph",
                 product="prod_test",
                 unit_amount=9600,
                 recurring=types.SimpleNamespace(interval="year"),
-                metadata={"plan": "starter", "billing_cycle": "yearly"},
+                metadata={"tier": "byok", "billing_cycle": "yearly"},
                 active=True,
             ),
             types.SimpleNamespace(
-                id="price_1S6FvG3GVsrZHuzXBwljASJB",
+                id="price_1TZQNL3GVsrZHuzXR6EQuT9v",
                 product="prod_test",
-                unit_amount=800,
+                unit_amount=2000,
                 recurring=types.SimpleNamespace(interval="month"),
-                metadata={"plan": "professional", "billing_cycle": "monthly"},
+                metadata={"tier": "hobby", "billing_cycle": "monthly"},
                 active=True,
             ),
             types.SimpleNamespace(
-                id="price_1S6FvG3GVsrZHuzXQV9y2VEo",
+                id="price_1TZQNL3GVsrZHuzXiSmtuLKu",
                 product="prod_test",
-                unit_amount=7680,
+                unit_amount=19200,
                 recurring=types.SimpleNamespace(interval="year"),
-                metadata={"plan": "professional", "billing_cycle": "yearly"},
+                metadata={"tier": "hobby", "billing_cycle": "yearly"},
+                active=True,
+            ),
+            types.SimpleNamespace(
+                id="price_1TZQNM3GVsrZHuzXzhGy4cW8",
+                product="prod_test",
+                unit_amount=20000,
+                recurring=types.SimpleNamespace(interval="month"),
+                metadata={"tier": "pro", "billing_cycle": "monthly"},
+                active=True,
+            ),
+            types.SimpleNamespace(
+                id="price_1TZQNM3GVsrZHuzXI0JGgiEo",
+                product="prod_test",
+                unit_amount=192000,
+                recurring=types.SimpleNamespace(interval="year"),
+                metadata={"tier": "pro", "billing_cycle": "yearly"},
                 active=True,
             ),
         ]
@@ -100,36 +116,52 @@ class MockPrice:
     def retrieve(price_id: str) -> Any:  # noqa: ANN401
         """Mock retrieve method."""
         prices = {
-            "price_1S6FvF3GVsrZHuzXrDZ5H7EW": {
+            "price_1TZQNK3GVsrZHuzX6EWO8kgD": {
                 "product": "prod_test",
                 "amount": 1000,
                 "interval": "month",
                 "interval_count": 1,
-                "plan": "starter",
+                "tier": "byok",
                 "billing_cycle": "monthly",
             },
-            "price_1S6FvF3GVsrZHuzXDjv76gwE": {
+            "price_1TZQNK3GVsrZHuzXqbwHwhph": {
                 "product": "prod_test",
                 "amount": 9600,
                 "interval": "year",
                 "interval_count": 1,
-                "plan": "starter",
+                "tier": "byok",
                 "billing_cycle": "yearly",
             },
-            "price_1S6FvG3GVsrZHuzXBwljASJB": {
+            "price_1TZQNL3GVsrZHuzXR6EQuT9v": {
                 "product": "prod_test",
-                "amount": 800,
+                "amount": 2000,
                 "interval": "month",
                 "interval_count": 1,
-                "plan": "professional",
+                "tier": "hobby",
                 "billing_cycle": "monthly",
             },
-            "price_1S6FvG3GVsrZHuzXQV9y2VEo": {
+            "price_1TZQNL3GVsrZHuzXiSmtuLKu": {
                 "product": "prod_test",
-                "amount": 7680,
+                "amount": 19200,
                 "interval": "month",
                 "interval_count": 12,
-                "plan": "professional",
+                "tier": "hobby",
+                "billing_cycle": "yearly",
+            },
+            "price_1TZQNM3GVsrZHuzXzhGy4cW8": {
+                "product": "prod_test",
+                "amount": 20000,
+                "interval": "month",
+                "interval_count": 1,
+                "tier": "pro",
+                "billing_cycle": "monthly",
+            },
+            "price_1TZQNM3GVsrZHuzXI0JGgiEo": {
+                "product": "prod_test",
+                "amount": 192000,
+                "interval": "month",
+                "interval_count": 12,
+                "tier": "pro",
                 "billing_cycle": "yearly",
             },
         }
@@ -142,7 +174,7 @@ class MockPrice:
                 recurring=types.SimpleNamespace(
                     interval=data["interval"], interval_count=data.get("interval_count", 1)
                 ),
-                metadata={"plan": data["plan"], "billing_cycle": data["billing_cycle"]},
+                metadata={"tier": data["tier"], "billing_cycle": data["billing_cycle"]},
                 active=True,
             )
         # Raise InvalidRequestError for unknown price IDs

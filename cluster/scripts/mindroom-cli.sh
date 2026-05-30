@@ -87,7 +87,7 @@ case "$1" in
             -d "{
                 \"account_id\": \"$TEST_ACCOUNT_ID\",
                 \"subscription_id\": \"sub-$2\",
-                \"tier\": \"starter\",
+                \"tier\": \"byok\",
                 \"instance_id\": \"$2\"
             }"
         ;;

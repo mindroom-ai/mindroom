@@ -49,7 +49,7 @@ class PublishedIndexKey:
     base_id: str
     storage_root: str
     knowledge_path: str
-    indexing_settings: tuple[str, ...]
+    indexing_settings: manager_module.IndexingSettings
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class KnowledgeSourceRoot:
 class PublishedIndexState:
     """Persisted state for the published knowledge index."""
 
-    settings: tuple[str, ...]
+    settings: manager_module.IndexingSettings
     status: Literal["resetting", "indexing", "complete", "failed"]
     collection: str | None = None
     last_published_at: str | None = None
@@ -276,9 +276,12 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
         indexed_count,
         source_signature,
     ) = fields
+    indexing_settings = manager_module.IndexingSettings.from_metadata(settings)
+    if indexing_settings is None:
+        return None
 
     return PublishedIndexState(
-        settings=settings,
+        settings=indexing_settings,
         status=cast('Literal["resetting", "indexing", "complete", "failed"]', status),
         collection=collection,
         last_published_at=last_published_at,
@@ -297,7 +300,7 @@ def save_published_index_state(metadata_path: Path, state: PublishedIndexState) 
     """Atomically persist published index metadata."""
     write_index_metadata_payload(
         metadata_path,
-        settings=state.settings,
+        settings=state.settings.to_metadata(),
         status=state.status,
         collection=state.collection,
         last_published_at=state.last_published_at,
@@ -478,38 +481,32 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
 
 
 def _indexing_settings_query_compatible(
-    published_settings: tuple[str, ...],
-    current_settings: tuple[str, ...],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether current queries can use a collection from published settings."""
-    prefix_length = manager_module.INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH
-    if len(published_settings) < prefix_length or len(current_settings) < prefix_length:
-        return published_settings == current_settings
-    return published_settings[:prefix_length] == current_settings[:prefix_length]
+    return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
 
 
 def _indexing_settings_corpus_compatible(
-    published_settings: tuple[str, ...],
-    current_settings: tuple[str, ...],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether published content is safe for the current corpus config."""
-    corpus_indexes = manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES
-    if len(published_settings) <= max(corpus_indexes) or len(current_settings) <= max(corpus_indexes):
-        return published_settings == current_settings
-    return all(published_settings[index] == current_settings[index] for index in corpus_indexes)
+    return published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
 
 
 def indexing_settings_metadata_equal(
-    published_settings: tuple[str, ...],
-    current_settings: tuple[str, ...],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether persisted metadata exactly matches current indexing settings."""
     return published_settings == current_settings
 
 
 def published_index_settings_compatible(
-    published_settings: tuple[str, ...],
-    current_settings: tuple[str, ...],
+    published_settings: manager_module.IndexingSettings,
+    current_settings: manager_module.IndexingSettings,
 ) -> bool:
     """Return whether a published index can be queried under the current config."""
     return _indexing_settings_query_compatible(
@@ -772,6 +769,7 @@ def _published_index_keys_for_shared_source(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[PublishedIndexKey, ...]:
+    base_mode = config.get_knowledge_base_config(base_id).mode
     key = resolve_published_index_key(
         base_id,
         config=config,
@@ -779,9 +777,11 @@ def _published_index_keys_for_shared_source(
         execution_identity=execution_identity,
         create=False,
     )
-    matching_keys = [key]
+    matching_keys = [key] if base_mode == "semantic" else []
     for candidate_base_id in config.knowledge_bases:
         if candidate_base_id == base_id:
+            continue
+        if config.get_knowledge_base_config(candidate_base_id).mode != "semantic":
             continue
         try:
             candidate_key = resolve_published_index_key(
@@ -805,6 +805,12 @@ def _published_index_keys_for_shared_source(
 
 
 def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, reason: str) -> bool:
+    mark_published_index_stale_and_evict(matching_key, reason=reason)
+    return True
+
+
+def mark_published_index_stale_and_evict(matching_key: PublishedIndexKey, *, reason: str) -> bool:
+    """Mark one published index stale and evict matching process-local handles."""
     mark_published_index_stale(matching_key, reason=reason)
     _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(matching_key))
     return True

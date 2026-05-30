@@ -394,10 +394,13 @@ async def handle_confirmation_reaction(
         )
 
     # Send the response
+    target = bot._conversation_resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=pending_change.thread_id,
+        reply_to_event_id=event.reacts_to,
+    )
     await bot._send_response(
-        room.room_id,
-        event.reacts_to,  # Reply to the confirmation message
-        response_text,
-        pending_change.thread_id,
+        target=target,
+        response_text=response_text,
         skip_mentions=True,
     )

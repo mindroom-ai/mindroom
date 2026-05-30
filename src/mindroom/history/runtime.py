@@ -23,6 +23,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
 )
+from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
@@ -644,7 +645,6 @@ async def _run_scope_compaction(
         summary_input_budget=execution_plan.summary_input_budget_tokens,
         summary_model=summary_model,
         summary_model_name=execution_plan.compaction_model_name,
-        compaction_context_window=execution_plan.compaction_context_window,
         active_context_window=resolved_inputs.active_context_window,
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
@@ -1217,6 +1217,7 @@ def create_scope_session_storage(
         state_root=_team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
         subdir="sessions",
         session_table=f"{storage_name}_sessions",
+        prompt_roles=prompt_roles_for_history_storage(),
     )
 
 

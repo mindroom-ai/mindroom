@@ -75,6 +75,7 @@ export interface KnowledgeGitConfig {
 }
 
 export interface KnowledgeBaseConfig {
+  mode?: "semantic" | "files";
   description?: string;
   path: string;
   watch: boolean;
@@ -226,6 +227,10 @@ export interface Team {
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
 }
 
+export type TeamConfig = Omit<Team, "id" | "rooms"> & {
+  rooms?: string[];
+};
+
 export interface Culture {
   id: string; // The key in the cultures object
   description: string;
@@ -239,6 +244,11 @@ export interface Room {
   description?: string;
   agents: string[]; // List of agent IDs in this room
   model?: string; // Room-specific model override
+}
+
+export interface RoomConfig {
+  display_name?: string;
+  description?: string;
 }
 
 export interface VoiceSTTConfig {
@@ -285,8 +295,9 @@ export interface Config {
   router: {
     model: string;
   };
+  rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
   room_models?: Record<string, string>; // Room-specific model overrides for teams
-  teams?: Record<string, Omit<Team, "id">>; // Teams configuration
+  teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
 }

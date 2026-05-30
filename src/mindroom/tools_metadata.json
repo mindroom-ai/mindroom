@@ -3236,7 +3236,7 @@
         },
         {
           "authored_override": true,
-          "default": "imagen-3.0-generate-002",
+          "default": "imagen-4.0-generate-001",
           "description": null,
           "label": "Image Generation Model",
           "name": "image_generation_model",
@@ -3378,7 +3378,7 @@
         "search_gifs"
       ],
       "helper_text": null,
-      "icon": "GiGift",
+      "icon": "SiGiphy",
       "icon_color": "text-purple-500",
       "name": "giphy",
       "setup_type": "api_key",
@@ -4642,7 +4642,7 @@
         },
         {
           "authored_override": true,
-          "default": "whisper-1",
+          "default": "gpt-4o-transcribe",
           "description": null,
           "label": "Transcription Model",
           "name": "transcription_model",
@@ -4666,7 +4666,7 @@
         },
         {
           "authored_override": true,
-          "default": "tts-1",
+          "default": "gpt-4o-mini-tts",
           "description": null,
           "label": "Text To Speech Model",
           "name": "text_to_speech_model",
@@ -4690,7 +4690,7 @@
         },
         {
           "authored_override": true,
-          "default": "dall-e-3",
+          "default": "gpt-image-2",
           "description": null,
           "label": "Image Model",
           "name": "image_model",
@@ -5381,7 +5381,7 @@
         "summarize_table"
       ],
       "helper_text": null,
-      "icon": "SiAmazonredshift",
+      "icon": "AwsRedshift",
       "icon_color": "text-red-600",
       "name": "redshift",
       "setup_type": "special",
@@ -11672,6 +11672,18 @@
           "placeholder": "Bearer token",
           "required": true,
           "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
+          "label": "Allow Private Home Assistant URL",
+          "name": "HOMEASSISTANT_ALLOW_PRIVATE_URL",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],

@@ -5,10 +5,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from backend.config import PROVISIONER_API_KEY, logger
-from pydantic import BaseModel
+from backend.config import PROVISIONER_API_KEY, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_admin
-from backend.utils.audit import create_audit_log
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -24,6 +22,7 @@ from backend.models import (
     SyncResult,
     UpdateAccountStatusResponse,
 )
+from backend.pricing import PRICING_CONFIG_MODEL
 from backend.routes.provisioner import (
     provision_instance,
     restart_instance_provisioner,
@@ -32,7 +31,9 @@ from backend.routes.provisioner import (
     sync_instances,
     uninstall_instance,
 )
+from backend.utils.audit import create_audit_log
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 
 router = APIRouter()
 ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
@@ -51,6 +52,17 @@ def audit_log_entry(
         details=details,
         success=True,  # Admin actions that reach this point are successful
     )
+
+
+def _monthly_plan_prices_usd() -> dict[str, int]:
+    """Return configured monthly prices in dollars for automatic MRR estimates."""
+    prices: dict[str, int] = {}
+    for tier, plan in PRICING_CONFIG_MODEL.plans.items():
+        if isinstance(plan.price_monthly, int):
+            prices[tier] = plan.price_monthly // 100
+        else:
+            prices[tier] = 0
+    return prices
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
@@ -325,7 +337,7 @@ async def get_dashboard_metrics(
         _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
         subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
+        tier_prices = _monthly_plan_prices_usd()
         mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 
         seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
@@ -588,11 +600,6 @@ async def admin_delete_account_complete(
     # 3. Cancel any active Stripe subscriptions
     if account.get("stripe_customer_id"):
         try:
-            import stripe
-            from backend.config import STRIPE_API_KEY
-
-            stripe.api_key = STRIPE_API_KEY
-
             # List and cancel all subscriptions for this customer
             subscriptions = stripe.Subscription.list(customer=account["stripe_customer_id"], status="active")
             for subscription in subscriptions.data:

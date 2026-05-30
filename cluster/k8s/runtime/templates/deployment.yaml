@@ -71,6 +71,8 @@ spec:
           image: {{ include "mindroom-runtime.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
+            - tini
+            - --
             - /app/.venv/bin/mindroom
             - run
             - --api-host
@@ -282,6 +284,8 @@ spec:
           image: {{ include "mindroom-runtime.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
+            - tini
+            - --
             - /app/run-sandbox-runner.sh
           ports:
             - name: sandbox

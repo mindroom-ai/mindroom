@@ -13,6 +13,7 @@ from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
+from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import orchestrator_runtime_paths
 
@@ -351,8 +352,8 @@ class TestMemoryConfig:
 
         # Verify LLM fallback config
         assert result["llm"]["provider"] == "ollama"
-        assert result["llm"]["config"]["model"] == "llama3.2"
-        assert result["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
+        assert result["llm"]["config"]["model"] == MEMORY_OLLAMA_LLM
+        assert result["llm"]["config"]["ollama_base_url"] == OLLAMA_HOST_DEFAULT
 
     def test_chroma_directory_creation(
         self,

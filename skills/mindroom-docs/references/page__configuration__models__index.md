@@ -5,6 +5,7 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
 - `google` or `gemini` - Google Gemini models
@@ -47,6 +48,11 @@ models:
   gpt:
     provider: openai
     id: gpt-5.4
+
+  # Azure OpenAI
+  azure:
+    provider: azure
+    id: your-azure-openai-deployment
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -107,7 +113,7 @@ Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
 MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
 The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
-For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
+For starter config generation, use `mindroom config init --provider codex`.
 
 ```yaml
 models:
@@ -130,6 +136,24 @@ You can set `extra_kwargs.prompt_cache_key` to override that derived key for a m
 Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
+
+## Azure OpenAI
+
+Use `provider: azure` when your model is deployed through Azure OpenAI.
+The `id` field should be your Azure OpenAI deployment name, not necessarily the upstream model name.
+MindRoom reads Azure OpenAI credentials and endpoint values from the config-adjacent `.env` file or exported environment.
+
+```yaml
+models:
+  default:
+    provider: azure
+    id: your-azure-openai-deployment
+```
+
+Azure deployment limits vary, so starter configs do not set `context_window` for Azure.
+Set `context_window` to the limit of your deployment when you know it.
+Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
+For starter config generation, use `mindroom config init --provider azure`.
 
 ## Context Window
 
@@ -177,6 +201,10 @@ API keys are read from environment variables:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+# Optional, only when overriding Agno's default Azure OpenAI API version:
+# AZURE_OPENAI_API_VERSION=2024-10-21
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...

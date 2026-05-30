@@ -301,7 +301,7 @@ def test_source_workspace_env_hook_rejects_oversized_stderr_on_success(
     """Successful hooks cannot write unbounded stderr output."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    hook_path = _write_hook(workspace, "python -c \"import sys; sys.stderr.write('x' * 3000)\"\nexport FOO=bar\n")
+    hook_path = _write_hook(workspace, "printf '%*s' 3000 '' >&2\nexport FOO=bar\n")
     monkeypatch.setattr(sandbox_exec, "_WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES", 2048)
 
     with pytest.raises(WorkspaceEnvHookError, match="stderr output"):

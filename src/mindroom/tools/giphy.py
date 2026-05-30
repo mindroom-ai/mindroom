@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="GiGift",
+    icon="SiGiphy",
     icon_color="text-purple-500",
     config_fields=[
         ConfigField(

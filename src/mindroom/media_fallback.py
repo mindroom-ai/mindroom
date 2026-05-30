@@ -11,7 +11,13 @@ if TYPE_CHECKING:
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _INLINE_MEDIA_FIELD_PATTERN = re.compile(r"(?:document|image|audio|video)\.source\.base64(?:\.media_type)?")
 _INLINE_MEDIA_MIME_MISMATCH_PATTERN = re.compile(r"image was specified using the .* media type")
-_INLINE_MEDIA_UNSUPPORTED_PATTERN = re.compile(r"(?:audio|image|video|file|document) input is not supported")
+_INLINE_MEDIA_UNSUPPORTED_PATTERN = re.compile(
+    r"(?:"
+    r"(?:audio|image|video|file|document) input is not supported"
+    r"|support input (?:audio|image|video|file|document)"
+    r"|at most 0 (?:audio|image|video|file|document)\(s\) may be provided"
+    r")",
+)
 
 
 def _is_media_validation_error_text(error_text: str) -> bool:

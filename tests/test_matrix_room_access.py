@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom import topic_generator
+from mindroom.config.agent import RoomConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
@@ -64,6 +65,16 @@ def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
 
     config = load_config_yaml(config_path)
     assert config.matrix_room_access.mode == "single_user_private"
+
+
+def test_room_config_normalizes_blank_display_name() -> None:
+    """Room display names should be absent or trimmed non-empty strings."""
+    assert RoomConfig(display_name="   ").display_name is None
+    assert RoomConfig(display_name="  Project Lobby  ").display_name == "Project Lobby"
+    assert Config(rooms={"lobby": {"display_name": "   "}}).authored_model_dump()["rooms"] == {"lobby": {}}
+    assert Config(rooms={"lobby": {"display_name": "  Project Lobby  "}}).authored_model_dump()["rooms"] == {
+        "lobby": {"display_name": "Project Lobby"},
+    }
 
 
 def test_matrix_room_access_invite_only_matching() -> None:
@@ -175,6 +186,8 @@ async def test_existing_room_reconciliation_respects_flag(
     monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    ensure_room_name = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", ensure_room_name)
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
     ensure_thread_tags_power_level = AsyncMock(return_value=True)
     monkeypatch.setattr(
@@ -195,11 +208,62 @@ async def test_existing_room_reconciliation_respects_flag(
     )
 
     assert room_id == "!lobby:example.com"
+    ensure_room_name.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        "Lobby",
+    )
     ensure_thread_tags_power_level.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
     )
     assert configure_access.await_count == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_existing_room_without_explicit_display_name_does_not_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent/team-derived rooms should not overwrite manually renamed Matrix rooms."""
+    config = _config_with_runtime_paths(tmp_path)
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#lobby:example.com",
+        room_id="!lobby:example.com",
+        servers=["example.com"],
+    )
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    ensure_room_name = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", ensure_room_name)
+    ensure_topic = AsyncMock()
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", ensure_topic)
+    monkeypatch.setattr(matrix_rooms, "ensure_thread_tags_power_level", AsyncMock(return_value=True))
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_name=None,
+        power_users=[],
+    )
+
+    assert room_id == "!lobby:example.com"
+    ensure_room_name.assert_not_awaited()
+    ensure_topic.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        "lobby",
+        "Lobby",
+        config,
+        runtime_paths_for(config),
+    )
 
 
 @pytest.mark.asyncio
@@ -963,6 +1027,55 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     assert room_ids == {"ops": "!ops:example.com"}
     assert ensure_room_exists_mock.await_count == 2
     logger_exception.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_resets_authored_room_to_default_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Authored room entries without display_name should manage the default Matrix name."""
+    config = _config_with_runtime_paths(tmp_path, rooms={"project_room": {}})
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.managed_entity_power_user_ids_for_room",
+        lambda _room_key, _config, _runtime_paths: [],
+    )
+    ensure_room_exists_mock = AsyncMock(return_value="!project:example.com")
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"project_room": "!project:example.com"}
+    ensure_room_exists_mock.assert_awaited_once()
+    assert ensure_room_exists_mock.await_args.kwargs["room_name"] == "Project Room"
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_leaves_membership_only_room_name_unmanaged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent/team-derived rooms should not imply Matrix room rename intent."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        agents={"assistant": {"display_name": "Assistant", "rooms": ["project_room"]}},
+    )
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.managed_entity_power_user_ids_for_room",
+        lambda _room_key, _config, _runtime_paths: [],
+    )
+    ensure_room_exists_mock = AsyncMock(return_value="!project:example.com")
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"project_room": "!project:example.com"}
+    ensure_room_exists_mock.assert_awaited_once()
+    assert ensure_room_exists_mock.await_args.kwargs["room_name"] is None
 
 
 @pytest.mark.asyncio

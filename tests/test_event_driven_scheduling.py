@@ -91,7 +91,7 @@ class TestEventDrivenScheduling:
             "If I get an email about 'urgent', call me",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("email_assistant"), _mid("phone_agent")],
+            available_responders=[_mid("email_assistant"), _mid("phone_agent")],
         )
 
         # Verify the result is a workflow (not an error)
@@ -136,7 +136,7 @@ class TestEventDrivenScheduling:
             "When Bitcoin drops below $40k, notify me",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("crypto_agent"), _mid("notification_agent")],
+            available_responders=[_mid("crypto_agent"), _mid("notification_agent")],
         )
 
         # Verify
@@ -174,7 +174,7 @@ class TestEventDrivenScheduling:
             "If server CPU goes above 80%, scale up",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("monitoring_agent"), _mid("ops_agent")],
+            available_responders=[_mid("monitoring_agent"), _mid("ops_agent")],
         )
 
         # Verify
@@ -212,7 +212,7 @@ class TestEventDrivenScheduling:
             "When the build fails, create a ticket",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("ci_agent"), _mid("ticket_agent")],
+            available_responders=[_mid("ci_agent"), _mid("ticket_agent")],
         )
 
         # Verify
@@ -250,7 +250,7 @@ class TestEventDrivenScheduling:
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("reddit_agent"), _mid("analyst")],
+            available_responders=[_mid("reddit_agent"), _mid("analyst")],
         )
 
         # Verify
@@ -288,7 +288,7 @@ class TestEventDrivenScheduling:
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("email_assistant"), _mid("notification_agent")],
+            available_responders=[_mid("email_assistant"), _mid("notification_agent")],
         )
 
         # Verify
@@ -326,7 +326,7 @@ class TestEventDrivenScheduling:
             "Test request",
             mock_config,
             runtime_paths,
-            available_agents=[_mid("test_agent")],
+            available_responders=[_mid("test_agent")],
         )
 
         # Verify the prompt contains generic event-driven guidance

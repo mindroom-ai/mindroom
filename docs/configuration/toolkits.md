@@ -102,7 +102,9 @@ If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit co
 
 The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
 
-`spotify`, `homeassistant`
+`spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+
+OAuth-backed remote MCP tools are requester-scoped and may appear in toolkits assigned to agents with isolating worker scopes.
 
 ## Conflict Detection
 

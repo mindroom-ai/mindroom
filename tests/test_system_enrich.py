@@ -24,6 +24,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
@@ -48,7 +49,9 @@ from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_m
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    message_origin,
     patch_response_runner_module,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -102,7 +105,12 @@ def _envelope(
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind="message",
+        source_kind=MESSAGE_SOURCE_KIND,
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
     )
 
 
@@ -553,12 +561,15 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
     ):
         delivery = await bot._response_runner.process_and_respond(
             ResponseRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 thread_history=[],
                 prompt="Please reply",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please reply",
+                    user_id="@user:localhost",
+                ),
                 system_enrichment_items=system_items,
             ),
         )
@@ -581,7 +592,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         yield "stream chunk"
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-        response_stream = args[6]
+        response_stream = args[4]
         chunks = [str(chunk) async for chunk in response_stream]
         return StreamTransportOutcome(
             last_physical_stream_event_id="$response",
@@ -602,12 +613,15 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
     ):
         delivery = await bot._response_runner.process_and_respond_streaming(
             ResponseRequest(
-                room_id="!room:localhost",
-                reply_to_event_id="$event",
-                thread_id=None,
                 thread_history=[],
                 prompt="Please reply",
                 user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    prompt="Please reply",
+                    user_id="@user:localhost",
+                ),
                 system_enrichment_items=system_items,
             ),
         )

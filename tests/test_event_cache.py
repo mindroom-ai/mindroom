@@ -433,11 +433,9 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
 
     try:
         await asyncio.wait_for(write_started.wait(), timeout=0.2)
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
-                AsyncMock(side_effect=AssertionError("coordinator timeout should not fetch")),
-            ),
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+            AsyncMock(side_effect=AssertionError("coordinator timeout should not fetch")),
         ):
             result = await asyncio.wait_for(
                 conversation_cache.get_dispatch_thread_snapshot(
@@ -518,11 +516,9 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
 
     try:
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
-                AsyncMock(side_effect=never_returns),
-            ),
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+            AsyncMock(side_effect=never_returns),
         ):
             result = await asyncio.wait_for(
                 conversation_cache.get_dispatch_thread_snapshot(

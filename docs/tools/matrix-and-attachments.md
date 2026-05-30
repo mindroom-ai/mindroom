@@ -45,6 +45,7 @@ In `thread_mode: room`, room-level `send` stays plain room messaging and does no
 `read` defaults to 20 messages and caps `limit` at 50.
 `thread-list` returns recent thread messages plus `edit_options` for messages that the current Matrix account can edit.
 Only `send`, `reply`, and `thread-reply` accept attachments, with a combined cap of five `attachment_ids` plus `attachment_file_paths` per call.
+Relative `attachment_file_paths` resolve from the agent workspace when one is available, and they must stay inside that workspace.
 The tool rate-limits each `(agent_name, requester_id, room_id)` combination to 12 weighted actions per 30 seconds, where each attachment increases the weight of a send or reply.
 
 ### Configuration
@@ -66,7 +67,7 @@ matrix_message(action="send", message="Posting this to the room timeline.", thre
 matrix_message(
     action="reply",
     message="I reviewed the thread and attached the export.",
-    attachment_file_paths=["/tmp/report.csv"],
+    attachment_file_paths=["exports/report.csv"],
 )
 matrix_message(action="react", target="$event123", message="✅")
 ```
@@ -111,6 +112,7 @@ agents:
 tag_thread("blocked")
 untag_thread("blocked")
 list_thread_tags(thread_id="$threadRootEvent")
+list_thread_tags(exclude_tag="resolved", include_untagged=True)
 ```
 
 ### Notes
@@ -118,6 +120,14 @@ list_thread_tags(thread_id="$threadRootEvent")
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
+- `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+- Both filters can be combined.
+- For full filter semantics, see [`tools`](./index.md).
+- `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+- `include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+- It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+- The response includes `include_untagged: bool` and `truncated: bool`.
+- Callers must check `truncated` before claiming the unresolved list is complete.
 
 ## [`thread_summary`]
 
@@ -228,6 +238,7 @@ Use `mindroom_output_path` before handing attachments to worker-routed workspace
 In worker-routed shell and python tools, the agent workspace is also `~`, `$HOME`, and `$MINDROOM_AGENT_WORKSPACE`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
 The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
+Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`, `reply`, or `thread-reply`.
 
@@ -248,7 +259,7 @@ agents:
 list_attachments()
 get_attachment("att_abc123")
 get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
-register_attachment("/tmp/plan.pdf")
+register_attachment("incoming/plan.pdf")
 matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=["att_abc123"])
 ```
 

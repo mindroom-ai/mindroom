@@ -103,12 +103,15 @@ async def wait_for_background_tasks(
     timeout: float | None = None,  # noqa: ASYNC109
     *,
     owner: object | None = None,
-) -> None:
+) -> bool:
     """Wait for all background tasks to complete.
 
     Args:
         timeout: Optional timeout in seconds
         owner: Optional logical owner to scope the wait to one bot
+
+    Returns:
+        True when all tasks completed, False when timeout cancellation was needed.
 
     """
     deadline: float | None = None
@@ -118,7 +121,7 @@ async def wait_for_background_tasks(
     while True:
         tasks = _tasks_for_owner(owner)
         if not tasks:
-            return
+            return True
 
         remaining: float | None = None
         if deadline is not None:
@@ -126,11 +129,11 @@ async def wait_for_background_tasks(
             if remaining <= 0:
                 logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
                 await _cancel_and_drain_background_tasks(tasks, owner=owner)
-                return
+                return False
 
         done, pending = await asyncio.wait(tasks, timeout=remaining)
         await asyncio.gather(*done, return_exceptions=True)
         if pending:
             logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
             await _cancel_and_drain_background_tasks(tuple(pending), owner=owner)
-            return
+            return False

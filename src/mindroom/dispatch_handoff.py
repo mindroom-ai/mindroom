@@ -11,9 +11,13 @@ from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.media import (
     MatrixMediaDispatchEvent,
     extract_media_caption,
@@ -28,7 +32,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey
 
 
 class _PendingEventLike(Protocol):
@@ -64,6 +68,7 @@ class PendingDispatchMetadata:
     payload: object
     close: Callable[[], None]
     requires_solo_batch: bool = False
+    target_key: tuple[str, str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,7 @@ class DispatchIngressMetadata:
     """Trusted ingress source and policy metadata for one dispatch handoff."""
 
     source_kind: str
+    coalescing_key: CoalescingKey | None = None
     dispatch_policy_source_kind: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
@@ -156,7 +162,7 @@ def _collect_batch_mentions_and_formatted_bodies(
         formatted_body = content.get("formatted_body")
         if isinstance(formatted_body, str) and formatted_body:
             formatted_parts.append(formatted_body)
-        if pending_event.trust_internal_payload_metadata and content.get("com.mindroom.skip_mentions") is True:
+        if pending_event.trust_internal_payload_metadata and content.get(SKIP_MENTIONS_KEY) is True:
             skip_mentions = True
     if not inspected_content:
         return None, None, None
@@ -217,7 +223,7 @@ def payload_metadata_from_source(
         raw_audio_fallback=raw_audio_fallback is True,
         mentioned_user_ids=mentioned_user_ids,
         formatted_bodies=formatted_bodies,
-        skip_mentions=content.get("com.mindroom.skip_mentions") is True,
+        skip_mentions=content.get(SKIP_MENTIONS_KEY) is True,
     )
 
 
@@ -264,11 +270,37 @@ _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
-        "com.mindroom.hook_source",
-        "com.mindroom.skip_mentions",
-        "com.mindroom.source_kind",
+        HOOK_SOURCE_KEY,
+        SKIP_MENTIONS_KEY,
+        SOURCE_KIND_KEY,
     },
 )
+
+
+def _normalize_batch_thread_relation(content: dict[str, Any], batch: CoalescedBatch) -> None:
+    thread_id = batch.coalescing_key.thread_id
+    if thread_id is None:
+        relates_to = content.get("m.relates_to")
+        if isinstance(relates_to, dict) and isinstance(relates_to.get("m.in_reply_to"), dict):
+            content["m.relates_to"] = {"m.in_reply_to": relates_to["m.in_reply_to"]}
+        else:
+            content.pop("m.relates_to", None)
+        return
+    content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+
+
+def _batch_requires_thread_relation_normalization(event: DispatchEvent, batch: CoalescedBatch) -> bool:
+    thread_id = batch.coalescing_key.thread_id
+    content = event_content_dict(event)
+    if content is None:
+        return thread_id is not None
+    if thread_id is None:
+        return "m.relates_to" in content
+    if "m.relates_to" in content:
+        return content["m.relates_to"] != {"rel_type": "m.thread", "event_id": thread_id}
+    if thread_id == event.event_id:
+        return False
+    return isinstance(event, PreparedTextEvent) or batch.source_kind == VOICE_SOURCE_KIND
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
@@ -289,19 +321,29 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
         primary_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     if payload.attachment_ids:
         primary_content[ATTACHMENT_IDS_KEY] = list(payload.attachment_ids)
+    if _batch_requires_thread_relation_normalization(batch.primary_event, batch):
+        _normalize_batch_thread_relation(primary_content, batch)
     merged["content"] = primary_content
     return merged
 
 
 def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
-    if source_kind in {"message", event.source_kind_override}:
+    if source_kind in {MESSAGE_SOURCE_KIND, event.source_kind_override}:
         return event
     return replace(event, source_kind_override=source_kind)
 
 
+def _prepared_source_kind_override(source_kind: str) -> str | None:
+    return None if source_kind == MESSAGE_SOURCE_KIND else source_kind
+
+
 def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the text dispatch event for one batch."""
-    if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
+    if (
+        len(batch.pending_events) == 1
+        and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent)
+        and not _batch_requires_thread_relation_normalization(batch.primary_event, batch)
+    ):
         if isinstance(batch.primary_event, PreparedTextEvent):
             return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
         return batch.primary_event
@@ -311,7 +353,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         body=batch.prompt,
         source=_merge_batch_source(batch),
         server_timestamp=batch.primary_event.server_timestamp,
-        source_kind_override=batch.source_kind,
+        source_kind_override=_prepared_source_kind_override(batch.source_kind),
     )
 
 
@@ -323,6 +365,7 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
         requester_user_id=batch.requester_user_id,
         ingress=DispatchIngressMetadata(
             source_kind=batch.source_kind,
+            coalescing_key=batch.coalescing_key,
             dispatch_policy_source_kind=batch.dispatch_policy_source_kind,
             hook_source=batch.hook_source,
             message_received_depth=batch.message_received_depth,

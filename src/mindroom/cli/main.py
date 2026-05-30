@@ -39,6 +39,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom config init[/cyan]   Create a starter config
   [cyan]mindroom run[/cyan]           Start the system\
 """
+_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,azure,codex,claude,llama.cpp,vertexai_claude}"
 
 app = typer.Typer(
     help=_HELP,
@@ -87,6 +88,12 @@ def run(
         case_sensitive=False,
         envvar="LOG_LEVEL",
     ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
     storage_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--storage-path",
@@ -120,6 +127,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
+            config_path=config_path,
             storage_path=storage_path,
             api=api,
             api_port=api_port,
@@ -154,6 +162,7 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
 async def _run(
     log_level: str,
+    config_path: Path | None,
     storage_path: Path | None,
     *,
     api: bool,
@@ -163,7 +172,7 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(storage_path=storage_path)
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
@@ -419,11 +428,15 @@ def _local_client_fingerprint(*, config_path: Path) -> str:
 
 
 def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
-    console.print("[red]Error:[/red] No config.yaml found.\n")
+    console.print("[red]Error:[/red] No config found.\n")
     console.print("MindRoom needs a configuration file to know which agents to run.\n")
     console.print("Quick start:")
-    console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
-    console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
+    console.print("  [cyan]mindroom config init[/cyan]    Create a hosted starter config")
+    console.print(
+        f"  [cyan]mindroom config init --provider {_CONFIG_INIT_PROVIDER_CHOICES}[/cyan]    Choose a model provider",
+        soft_wrap=True,
+    )
+    console.print("  [cyan]mindroom run[/cyan]            Start MindRoom after setup\n")
     print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 

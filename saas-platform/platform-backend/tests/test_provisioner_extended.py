@@ -134,7 +134,7 @@ class TestProvisionerExtended:
                         {
                             "subscription_id": "sub-123",
                             "account_id": "acc-123",
-                            "tier": "professional",
+                            "tier": "byok",
                             "instance_id": 123,
                         },
                         "Bearer test-api-key",  # authorization
@@ -165,7 +165,7 @@ class TestProvisionerExtended:
                     with pytest.raises(HTTPException) as exc_info:
                         await provision_instance(
                             None,  # request
-                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                             "Bearer test-api-key",  # authorization
                             None,  # background_tasks
                         )
@@ -189,7 +189,7 @@ class TestProvisionerExtended:
 
             response = client.post(
                 "/system/provision",
-                json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+                json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                 headers=valid_auth,
             )
 
@@ -219,7 +219,7 @@ class TestProvisionerExtended:
 
         response = client.post(
             "/system/provision",
-            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
             headers=valid_auth,
         )
 
@@ -251,7 +251,7 @@ class TestProvisionerExtended:
 
         response = client.post(
             "/system/provision",
-            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
             headers=valid_auth,
         )
 
@@ -285,7 +285,7 @@ class TestProvisionerExtended:
             with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
                 response = client.post(
                     "/system/provision",
-                    json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+                    json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                     headers=valid_auth,
                 )
 
@@ -318,7 +318,7 @@ class TestProvisionerExtended:
             with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
                 response = client.post(
                     "/system/provision",
-                    json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+                    json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                     headers=valid_auth,
                 )
 
@@ -346,7 +346,7 @@ class TestProvisionerExtended:
 
                 response_coro = provision_instance(
                     None,  # request
-                    {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
+                    {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                     "Bearer test-api-key",
                     mock_bg_tasks,
                 )

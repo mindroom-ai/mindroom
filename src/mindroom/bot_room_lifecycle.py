@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import nio
 
@@ -22,10 +22,10 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
+from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     import structlog
@@ -33,6 +33,20 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.users import AgentMatrixUser
+
+
+class _SendRoomResponse(Protocol):
+    """Send one room-lifecycle message to an explicit target."""
+
+    def __call__(
+        self,
+        *,
+        target: MessageTarget,
+        response_text: str,
+        skip_mentions: bool = False,
+    ) -> Awaitable[str | None]:
+        """Send text to the explicit Matrix target."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -45,7 +59,7 @@ class BotRoomLifecycleDeps:
     runtime_paths: RuntimePaths
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
-    send_response: Callable[..., Awaitable[str | None]]
+    send_response: _SendRoomResponse
     on_configured_room_joined: Callable[[str], Awaitable[None]]
 
 
@@ -196,11 +210,15 @@ class BotRoomLifecycle:
                     self._config(),
                     self.deps.runtime_paths,
                 )
-                event_id = await self.deps.send_response(
+                target = MessageTarget.resolve(
                     room_id=room_id,
-                    reply_to_event_id=None,
-                    response_text=welcome_msg,
                     thread_id=None,
+                    reply_to_event_id=None,
+                    room_mode=True,
+                )
+                event_id = await self.deps.send_response(
+                    target=target,
+                    response_text=welcome_msg,
                     skip_mentions=True,
                 )
                 if event_id is None:

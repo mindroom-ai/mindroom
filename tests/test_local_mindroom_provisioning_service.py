@@ -45,6 +45,21 @@ def _patch_matrix_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provisioning, "_matrix_whoami", _fake_matrix_whoami)
 
 
+def _managed_agent_username(entity_name: str, namespace: str) -> str:
+    return f"{provisioning.MANAGED_AGENT_USERNAME_PREFIX}{entity_name}_{namespace}"
+
+
+def _invalid_managed_agent_username(case: str, namespace: str) -> str:
+    if case == "missing_entity_between_prefix_and_namespace":
+        return _managed_agent_username("", namespace)
+    if case == "wrong_namespace_suffix":
+        return f"{_managed_agent_username('code', namespace)}x"
+    if case == "wrong_prefix_for_namespace":
+        return f"other_code_{namespace}"
+    msg = f"Unknown invalid username case: {case}"
+    raise ValueError(msg)
+
+
 def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end happy path: pair -> complete -> register agent -> revoke."""
     _patch_matrix_auth(monkeypatch)
@@ -68,12 +83,16 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             headers={"Authorization": "Bearer token-alice"},
         )
         assert start.status_code == 200
-        pair_code = start.json()["pair_code"]
+        start_payload = start.json()
+        pair_code = start_payload["pair_code"]
+        pair_session_id = start_payload["pair_session_id"]
 
         pending = client.get(
             "/v1/local-mindroom/pair/status",
-            params={"pair_code": pair_code},
-            headers={"Authorization": "Bearer token-alice"},
+            headers={
+                "Authorization": "Bearer token-alice",
+                provisioning.PAIR_STATUS_SESSION_HEADER: pair_session_id,
+            },
         )
         assert pending.status_code == 200
         assert pending.json()["status"] == "pending"
@@ -94,11 +113,14 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         assert isinstance(payload["namespace"], str)
         assert len(payload["namespace"]) == 8
         assert payload["namespace"] == payload["connection"]["namespace"]
+        agent_username = _managed_agent_username("code", payload["namespace"])
 
         connected = client.get(
             "/v1/local-mindroom/pair/status",
-            params={"pair_code": pair_code},
-            headers={"Authorization": "Bearer token-alice"},
+            headers={
+                "Authorization": "Bearer token-alice",
+                provisioning.PAIR_STATUS_SESSION_HEADER: pair_session_id,
+            },
         )
         assert connected.status_code == 200
         assert connected.json()["status"] == "connected"
@@ -107,7 +129,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             "/v1/local-mindroom/register-agent",
             json={
                 "homeserver": "https://mindroom.chat",
-                "username": "mindroom_code",
+                "username": agent_username,
                 "password": "agent-pass-123",
                 "display_name": "CodeAgent",
             },
@@ -118,7 +140,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
         )
         assert register.status_code == 200
         assert register.json()["status"] == "created"
-        assert register.json()["user_id"] == "@mindroom_code:mindroom.chat"
+        assert register.json()["user_id"] == f"@{agent_username}:mindroom.chat"
 
         revoke = client.delete(
             f"/v1/local-mindroom/connections/{client_id}",
@@ -131,7 +153,7 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             "/v1/local-mindroom/register-agent",
             json={
                 "homeserver": "https://mindroom.chat",
-                "username": "mindroom_other",
+                "username": _managed_agent_username("other", payload["namespace"]),
                 "password": "agent-pass-123",
                 "display_name": "OtherAgent",
             },
@@ -141,6 +163,141 @@ def test_pairing_and_register_agent_flow(tmp_path: Path, monkeypatch: pytest.Mon
             },
         )
         assert register_after_revoke.status_code == 403
+
+
+def test_pair_status_accepts_session_header_without_pair_code_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pair status polling should not require putting the pair code in the URL."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        start = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert start.status_code == 200
+        pair_session_id = start.json()["pair_session_id"]
+
+        pending = client.get(
+            "/v1/local-mindroom/pair/status",
+            headers={
+                "Authorization": "Bearer token-alice",
+                provisioning.PAIR_STATUS_SESSION_HEADER: pair_session_id,
+            },
+        )
+
+        assert pending.status_code == 200
+        assert pending.json()["status"] == "pending"
+
+
+def test_pair_status_rejects_pair_code_query_without_session_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pair status polling should not accept the short pair code in the URL."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        start = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        assert start.status_code == 200
+
+        pending = client.get(
+            "/v1/local-mindroom/pair/status",
+            params={"pair_code": start.json()["pair_code"]},
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+        assert pending.status_code == 400
+        assert pending.json()["detail"] == "Missing pair session id"
+
+
+def test_pair_status_rejects_missing_session_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pair status should require the opaque session header."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+
+    with TestClient(app) as client:
+        result = client.get(
+            "/v1/local-mindroom/pair/status",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+
+        assert result.status_code == 400
+        assert result.json()["detail"] == "Missing pair session id"
+
+
+@pytest.mark.parametrize(
+    "invalid_username_case",
+    [
+        "missing_entity_between_prefix_and_namespace",
+        "wrong_namespace_suffix",
+        "wrong_prefix_for_namespace",
+    ],
+)
+def test_register_agent_rejects_username_outside_connection_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_username_case: str,
+) -> None:
+    """A local client must not register Matrix users outside its assigned namespace."""
+    _patch_matrix_auth(monkeypatch)
+    app = provisioning.create_app(_service_config(tmp_path / "state.json"))
+    register_calls: list[str] = []
+
+    async def _fake_register(
+        config: provisioning.ServiceConfig,
+        payload: provisioning.RegisterAgentRequest,
+    ) -> provisioning.RegisterAgentResponse:
+        del config
+        register_calls.append(payload.username)
+        return provisioning.RegisterAgentResponse(
+            status="created",
+            user_id=f"@{payload.username}:mindroom.chat",
+        )
+
+    monkeypatch.setattr(provisioning, "_register_agent_with_matrix", _fake_register)
+
+    with TestClient(app) as client:
+        pair_code = client.post(
+            "/v1/local-mindroom/pair/start",
+            headers={"Authorization": "Bearer token-alice"},
+        ).json()["pair_code"]
+        complete = client.post(
+            "/v1/local-mindroom/pair/complete",
+            json={
+                "pair_code": pair_code,
+                "client_name": "alice-macbook",
+                "client_pubkey_or_fingerprint": "sha256:abc123",
+            },
+        ).json()
+        namespace = complete["namespace"]
+
+        register = client.post(
+            "/v1/local-mindroom/register-agent",
+            json={
+                "homeserver": "https://mindroom.chat",
+                "username": _invalid_managed_agent_username(invalid_username_case, namespace),
+                "password": "agent-pass-123",
+                "display_name": "CodeAgent",
+            },
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+
+        assert register.status_code == 403
+        assert register_calls == []
 
 
 def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

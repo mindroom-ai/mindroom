@@ -52,6 +52,7 @@ class ConfigUpdatePlan:
     matrix_room_access_changed: bool
     matrix_space_changed: bool
     authorization_changed: bool
+    room_metadata_changed: bool = False
     added_entities: set[str] = field(default_factory=set)
 
     @property
@@ -68,6 +69,7 @@ class ConfigUpdatePlan:
             or self.matrix_room_access_changed
             or self.matrix_space_changed
             or self.authorization_changed
+            or self.room_metadata_changed
         )
 
 
@@ -176,6 +178,11 @@ def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
     return old_rooms != new_rooms
 
 
+def _room_metadata_changed(config: Config, new_config: Config) -> bool:
+    """Return whether managed room metadata changed without implying bot reconstruction."""
+    return config.rooms != new_config.rooms
+
+
 def _changed_mcp_servers(
     config: Config | None,
     new_config: Config,
@@ -275,5 +282,6 @@ def build_config_update_plan(
         matrix_room_access_changed=current_config.matrix_room_access != new_config.matrix_room_access,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
+        room_metadata_changed=_room_metadata_changed(current_config, new_config),
         added_entities=added_entities,
     )

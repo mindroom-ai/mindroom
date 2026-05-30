@@ -101,6 +101,7 @@ class MCPServerState:
     last_error: MCPError | None = None
     refresh_task: asyncio.Task[None] | None = None
     refresh_revision: int = 0
+    oauth_access_token_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Initialize the per-server concurrency limiter."""
