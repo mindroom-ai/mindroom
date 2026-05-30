@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.agent_policy import (
@@ -27,8 +28,6 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -86,6 +85,73 @@ def _knowledge_refresh_enabled(
 ) -> bool:
     """Return whether a knowledge base has any refresh mechanism available."""
     return file_watch_enabled or has_git_sync
+
+
+def _relative_literal_path_parts(path_text: str | None) -> tuple[str, ...] | None:
+    """Return normalized relative path parts for non-env literal config paths."""
+    if path_text is None or "$" in path_text:
+        return None
+    path = Path(path_text).expanduser()
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return tuple(part for part in path.parts if part != ".")
+
+
+def _shared_knowledge_path_uses_agent_file_memory(
+    agent_name: str,
+    base_id: str,
+    config: Config,
+) -> bool:
+    """Return whether a shared base points at the configured file-memory folder."""
+    if base_id not in config.get_agent(agent_name).knowledge_bases:
+        return False
+    if config.get_agent_memory_backend(agent_name) != "file":
+        return False
+    knowledge_path_parts = _relative_literal_path_parts(config.get_knowledge_base_config(base_id).path)
+    file_memory_path_parts = _relative_literal_path_parts(config.memory.file.path)
+    return knowledge_path_parts is not None and knowledge_path_parts == file_memory_path_parts
+
+
+def _resolve_agent_file_memory_knowledge_path_from_runtime(
+    agent_runtime: ResolvedAgentRuntime,
+    base_id: str,
+    config: Config,
+) -> Path | None:
+    """Resolve a shared file-memory knowledge base against an already-resolved workspace."""
+    if not _shared_knowledge_path_uses_agent_file_memory(agent_runtime.agent_name, base_id, config):
+        return None
+    if agent_runtime.workspace is None:
+        return None
+    return resolve_workspace_relative_path(
+        agent_runtime.workspace.root,
+        config.get_knowledge_base_config(base_id).path,
+        field_name=f"knowledge base '{base_id}' path",
+    )
+
+
+def _resolve_agent_file_memory_knowledge_binding(
+    agent_name: str,
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    create: bool,
+) -> tuple[ResolvedAgentRuntime, Path] | None:
+    """Resolve a shared file-memory knowledge base against the active agent workspace."""
+    if not _shared_knowledge_path_uses_agent_file_memory(agent_name, base_id, config):
+        return None
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=create,
+    )
+    knowledge_path = _resolve_agent_file_memory_knowledge_path_from_runtime(agent_runtime, base_id, config)
+    if knowledge_path is None:
+        return None
+    return agent_runtime, knowledge_path
 
 
 def _resolve_private_scope_root(
@@ -228,7 +294,14 @@ def resolve_agent_runtime(
         for base_id in config.get_agent_knowledge_base_ids(agent_name):
             base_config = config.get_knowledge_base_config(base_id)
             if config.get_private_knowledge_base_agent(base_id) is None:
-                knowledge_paths[base_id] = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
+                if _shared_knowledge_path_uses_agent_file_memory(agent_name, base_id, config):
+                    knowledge_paths[base_id] = resolve_workspace_relative_path(
+                        workspace.root,
+                        base_config.path,
+                        field_name=f"knowledge base '{base_id}' path",
+                    )
+                else:
+                    knowledge_paths[base_id] = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
             else:
                 knowledge_paths[base_id] = resolve_workspace_relative_path(
                     workspace.root,
@@ -279,6 +352,23 @@ def resolve_knowledge_binding(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     if effective_agent_name is None:
+        if execution_identity is not None and execution_identity.agent_name in config.agents:
+            agent_memory_binding = _resolve_agent_file_memory_knowledge_binding(
+                execution_identity.agent_name,
+                base_id,
+                config,
+                runtime_paths,
+                execution_identity,
+                create=create,
+            )
+            if agent_memory_binding is not None:
+                agent_runtime, knowledge_path = agent_memory_binding
+                return ResolvedKnowledgeBinding(
+                    base_id=base_id,
+                    storage_root=agent_runtime.state_root,
+                    knowledge_path=knowledge_path,
+                    incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
+                )
         knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
         return ResolvedKnowledgeBinding(
             base_id=base_id,

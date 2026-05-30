@@ -258,10 +258,10 @@ def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
     )
 
 
-def _identity(requester_id: str) -> ToolExecutionIdentity:
+def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
-        agent_name="helper",
+        agent_name=agent_name,
         requester_id=requester_id,
         room_id="!room:localhost",
         thread_id=None,
@@ -4398,6 +4398,161 @@ def test_index_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
 
     assert key_a.base_id == key_b.base_id == "docs"
     assert key_a != key_b
+
+
+def test_shared_relative_knowledge_base_uses_requesting_agent_workspace(tmp_path: Path) -> None:
+    """Shared knowledge over the configured file-memory path should bind per agent workspace."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "openclaw": AgentConfig(
+                display_name="OpenClaw",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+            "mindroom_spouse": AgentConfig(
+                display_name="MindRoom Spouse",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+        memory={"backend": "file", "file": {"path": "./memory"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="openclaw"),
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="mindroom_spouse"),
+        create=True,
+    )
+
+    assert (
+        Path(openclaw_key.knowledge_path) == runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"
+    )
+    assert (
+        Path(spouse_key.knowledge_path)
+        == runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory"
+    )
+    assert openclaw_key != spouse_key
+
+
+def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tmp_path: Path) -> None:
+    """Ordinary shared relative knowledge paths should stay config-relative."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={"docs": KnowledgeBaseConfig(path="./knowledge_docs")},
+        memory={"backend": "file", "file": {"path": "./memory"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "knowledge_docs"
+
+
+@pytest.mark.asyncio
+async def test_file_memory_knowledge_search_uses_requesting_agent_workspace(tmp_path: Path) -> None:
+    """Search should query the file-memory workspace for the active agent binding."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+                "mindroom_spouse": AgentConfig(
+                    display_name="MindRoom Spouse",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    openclaw_identity = _identity("@alice:localhost", agent_name="openclaw")
+    spouse_identity = _identity("@alice:localhost", agent_name="mindroom_spouse")
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=openclaw_identity,
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=spouse_identity,
+        create=True,
+    )
+    Path(openclaw_key.knowledge_path).mkdir(parents=True, exist_ok=True)
+    Path(spouse_key.knowledge_path).mkdir(parents=True, exist_ok=True)
+    (Path(openclaw_key.knowledge_path) / "note.md").write_text("openclaw unique note", encoding="utf-8")
+    (Path(spouse_key.knowledge_path) / "note.md").write_text("spouse unique note", encoding="utf-8")
+
+    await refresh_knowledge_binding(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=openclaw_identity,
+    )
+    await refresh_knowledge_binding(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=spouse_identity,
+    )
+    openclaw_knowledge = resolve_agent_knowledge_access(
+        "openclaw",
+        config,
+        runtime_paths,
+        execution_identity=openclaw_identity,
+    ).knowledge
+    spouse_knowledge = resolve_agent_knowledge_access(
+        "mindroom_spouse",
+        config,
+        runtime_paths,
+        execution_identity=spouse_identity,
+    ).knowledge
+
+    assert openclaw_knowledge is not None
+    assert spouse_knowledge is not None
+    assert [document.content for document in openclaw_knowledge.search("unique", max_results=5)] == [
+        "openclaw unique note",
+    ]
+    assert [document.content for document in spouse_knowledge.search("unique", max_results=5)] == [
+        "spouse unique note",
+    ]
 
 
 @pytest.mark.asyncio
