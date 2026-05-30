@@ -34,7 +34,7 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.knowledge import KnowledgeRefreshScheduler
+from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -330,6 +330,44 @@ async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
     await source_watcher.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
 
 
+def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
+    try:
+        return config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return None
+
+
+def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[Config, constants.RuntimePaths] | None:
+    try:
+        return config_lifecycle.read_app_committed_runtime_config(api_app)
+    except HTTPException:
+        return None
+
+
+def _reconcile_knowledge_mode_transitions(
+    previous: tuple[Config, constants.RuntimePaths] | None,
+    api_app: FastAPI,
+) -> None:
+    if previous is None:
+        return
+    previous_config, previous_runtime_paths = previous
+    current_config, current_runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    if current_runtime_paths != previous_runtime_paths:
+        return
+    reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
+
+
+async def _reload_config_after_file_change(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    previous = _read_app_runtime_config_or_none(api_app)
+    loaded = config_lifecycle.load_config_into_app(runtime_paths, api_app)
+    if loaded:
+        _reconcile_knowledge_mode_transitions(previous, api_app)
+    await _sync_standalone_knowledge_watchers(api_app)
+
+
 async def _watch_config(
     stop_event: asyncio.Event,
     api_app: FastAPI,
@@ -370,8 +408,7 @@ async def _watch_config(
             if current_mtime != last_mtime:
                 last_mtime = current_mtime
                 logger.info("Config file changed", path=str(config_path))
-                config_lifecycle.load_config_into_app(runtime_paths, api_app)
-                await _sync_standalone_knowledge_watchers(api_app)
+                await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
             last_mtime = 0.0
         except Exception:
@@ -648,12 +685,14 @@ async def save_config(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
+    previous = _read_request_runtime_config_or_none(request)
     generation = config_lifecycle.replace_committed_config(
         request,
         new_config,
         error_prefix="Failed to save configuration",
         expected_generation=x_mindroom_config_generation,
     )
+    _reconcile_knowledge_mode_transitions(previous, request.app)
     _set_config_generation_header(response, generation)
     return {"success": True}
 
@@ -680,12 +719,14 @@ async def save_raw_config_source(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
+    previous = _read_request_runtime_config_or_none(request)
     generation = config_lifecycle.replace_raw_config_source(
         request,
         payload.source,
         error_prefix="Failed to save raw configuration",
         expected_generation=x_mindroom_config_generation,
     )
+    _reconcile_knowledge_mode_transitions(previous, request.app)
     _set_config_generation_header(response, generation)
     return {"success": True}
 

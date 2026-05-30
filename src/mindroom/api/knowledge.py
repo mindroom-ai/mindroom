@@ -14,13 +14,14 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import git_checkout_present, include_semantic_knowledge_relative_path
+from mindroom.knowledge.manager import git_checkout_present, include_knowledge_relative_path
 from mindroom.knowledge.manager import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.manager import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
+    publish_file_mode_source_metadata_for_base,
     refresh_knowledge_binding,
 )
 from mindroom.knowledge.status import (
@@ -169,6 +170,8 @@ def _schedule_refreshes(
     request: Request,
 ) -> None:
     for base_id in dict.fromkeys(base_ids):
+        if config.get_knowledge_base_config(base_id).mode != "semantic":
+            continue
         _schedule_refresh(config, base_id, runtime_paths, request=request)
 
 
@@ -208,6 +211,28 @@ async def _mark_source_changed_after_committed_mutation(
         return await source_changed_task, True
 
 
+async def _publish_file_mode_metadata_after_committed_mutation(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> bool:
+    base_config = config.get_knowledge_base_config(base_id)
+    if base_config.mode != "files" or base_config.git is not None:
+        return False
+
+    publish_task = asyncio.create_task(
+        publish_file_mode_source_metadata_for_base(base_id, config=config, runtime_paths=runtime_paths),
+    )
+    try:
+        await asyncio.shield(publish_task)
+    except asyncio.CancelledError:
+        await publish_task
+        return True
+    else:
+        return False
+
+
 async def _mark_committed_mutation_and_schedule_refresh(
     base_id: str,
     *,
@@ -217,14 +242,22 @@ async def _mark_committed_mutation_and_schedule_refresh(
     reason: str,
 ) -> bool:
     base_ids_to_refresh = _same_source_base_ids(config, base_id, runtime_paths)
+    semantic_base_ids = tuple(
+        candidate_id
+        for candidate_id in base_ids_to_refresh
+        if config.get_knowledge_base_config(candidate_id).mode == "semantic"
+    )
+    if not semantic_base_ids:
+        return False
+
     try:
         affected_base_ids, cancelled_after_source_changed = await _mark_source_changed_after_committed_mutation(
-            base_id,
+            semantic_base_ids[0],
             config=config,
             runtime_paths=runtime_paths,
             reason=reason,
         )
-        base_ids_to_refresh = (base_id, *affected_base_ids)
+        base_ids_to_refresh = (*semantic_base_ids, *affected_base_ids)
     finally:
         _schedule_refreshes(config, base_ids_to_refresh, runtime_paths, request=request)
     return cancelled_after_source_changed
@@ -235,6 +268,9 @@ def _index_status_sync(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeIndexStatus:
+    base_config = config.get_knowledge_base_config(base_id)
+    if base_config.mode == "files" and base_config.git is None:
+        return KnowledgeIndexStatus(availability=KnowledgeAvailability.READY)
     try:
         return get_knowledge_index_status(
             base_id,
@@ -403,7 +439,7 @@ def _reject_non_file_upload_destination(destination: Path, relative_path: str) -
 
 
 def _reject_unmanaged_knowledge_file_path(config: Config, base_id: str, relative_path: str) -> None:
-    if include_semantic_knowledge_relative_path(config, base_id, relative_path):
+    if include_knowledge_relative_path(config, base_id, relative_path):
         return
     raise HTTPException(
         status_code=415,
@@ -534,6 +570,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_entry: dict[str, Any] = {
             "name": base_id,
             "description": base_config.description,
+            "mode": base_config.mode,
             "path": str(root),
             "watch": base_config.watch,
             "file_count": len(file_info.files),
@@ -612,7 +649,12 @@ async def upload_knowledge_files(
                 "count": 0,
             }
 
-        if cancelled_after_source_changed:
+        cancelled_after_file_mode_publish = await _publish_file_mode_metadata_after_committed_mutation(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if cancelled_after_source_changed or cancelled_after_file_mode_publish:
             raise asyncio.CancelledError
 
     return {
@@ -645,7 +687,12 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
             request=request,
             reason="dashboard_delete",
         )
-        if cancelled_after_source_changed:
+        cancelled_after_file_mode_publish = await _publish_file_mode_metadata_after_committed_mutation(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if cancelled_after_source_changed or cancelled_after_file_mode_publish:
             raise asyncio.CancelledError
 
     return {
@@ -675,6 +722,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "base_id": base_id,
         "description": base_config.description,
+        "mode": base_config.mode,
         "folder_path": str(root),
         "watch": base_config.watch,
         "file_count": len(file_info.files),

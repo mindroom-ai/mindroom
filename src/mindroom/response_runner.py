@@ -11,6 +11,8 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
@@ -20,6 +22,7 @@ from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history import HistoryScope, has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.matrix.client_visible_messages import replace_visible_message
@@ -519,6 +522,14 @@ class ResponseRunner:
         """Return whether one canonical conversation target already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_target(target)
 
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
+        """Return canonical thread IDs with active response lifecycles in one room."""
+        return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
+
+    async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
+        """Wait until one canonical room/thread has no active response turn."""
+        await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
+
     def reserve_waiting_human_message(
         self,
         *,
@@ -653,6 +664,42 @@ class ResponseRunner:
             target=target,
             reply_to_event_id=reply_to_event_id,
         )
+
+    def _has_queued_forced_compaction(
+        self,
+        *,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
+        """Return whether this scope should compact before creating a reply placeholder."""
+        storage = None
+        try:
+            storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
+            session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
+            if not isinstance(session, AgentSession | TeamSession):
+                return False
+            state = read_scope_state(session, scope)
+            return state.force_compact_before_next_run or has_pending_force_compaction_scope(session, scope)
+        except Exception as error:
+            self.deps.logger.warning(
+                "forced_compaction_placeholder_check_failed",
+                session_id=session_id,
+                scope=scope.key,
+                exception_type=error.__class__.__name__,
+            )
+            return False
+        finally:
+            if storage is not None:
+                try:
+                    storage.close()
+                except Exception as error:
+                    self.deps.logger.warning(
+                        "forced_compaction_placeholder_storage_close_failed",
+                        session_id=session_id,
+                        scope=scope.key,
+                        exception_type=error.__class__.__name__,
+                    )
 
     async def _refresh_model_history_after_lock(
         self,
@@ -1169,7 +1216,11 @@ class ResponseRunner:
                     request.pipeline_timing.mark("response_complete")
 
         thinking_msg = None
-        if not request.existing_event_id:
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
+            session_id=session_id,
+            scope=session_scope,
+            execution_identity=tool_dispatch.execution_identity,
+        ):
             thinking_msg = "🤝 Team Response: Thinking..."
 
         run_message_id: str | None = None
@@ -2124,7 +2175,11 @@ class ResponseRunner:
                 )
 
         thinking_msg = None
-        if not request.existing_event_id:
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
+            session_id=session_id,
+            scope=self.deps.state_writer.history_scope(),
+            execution_identity=execution_identity,
+        ):
             thinking_msg = "Thinking..."
 
         run_message_id: str | None = None

@@ -387,6 +387,9 @@ memory:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and operating procedures
+    # Default: semantic.
+    # Use files to skip embeddings and expose workspace files.
+    mode: semantic
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)

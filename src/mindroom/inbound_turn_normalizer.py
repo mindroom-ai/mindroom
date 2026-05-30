@@ -384,6 +384,7 @@ class InboundTurnNormalizer:
                 scoped_attachment_ids,
                 room_id=request.room_id,
                 thread_id=request.media_thread_id,
+                current_attachment_ids=set(request.current_attachment_ids),
             )
         )
         if trusted_current_attachment_ids:
@@ -403,9 +404,7 @@ class InboundTurnNormalizer:
             attachment_files = [*trusted_files, *attachment_files]
             attachment_videos = [*trusted_videos, *attachment_videos]
         if request.fallback_images:
-            attachment_images = (
-                [*attachment_images, *request.fallback_images] if attachment_images else list(request.fallback_images)
-            )
+            attachment_images = [*attachment_images, *request.fallback_images]
         attachment_prompt = format_attachment_ids_prompt(resolved_attachment_ids)
         return DispatchPayload(
             prompt=request.prompt,

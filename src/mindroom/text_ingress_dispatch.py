@@ -387,7 +387,10 @@ async def _apply_turn_plan(
             DispatchPayloadWithAttachmentsRequest(
                 room_id=room.room_id,
                 prompt=prepared.event.body,
-                current_attachment_ids=merge_attachment_ids(message_attachment_ids, media_attachment_ids),
+                current_attachment_ids=merge_attachment_ids(
+                    message_attachment_ids,
+                    media_attachment_ids,
+                ),
                 trusted_current_attachment_ids=trusted_attachment_ids,
                 thread_id=context.thread_id,
                 media_thread_id=effective_thread_id,

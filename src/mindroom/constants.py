@@ -22,6 +22,8 @@ VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
+_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
+_PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
@@ -51,6 +53,15 @@ WORKER_RUNTIME_ENV_NAMES = frozenset(
     },
 )
 WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
+
+
+def prompt_roles_for_history_storage(system_message_role: str = "system") -> frozenset[str]:
+    """Return prompt roles that should be stripped before durable history storage."""
+    roles = set(_PROMPT_HISTORY_STORAGE_ROLES)
+    configured_role = system_message_role.strip()
+    if configured_role and configured_role not in _STANDARD_HISTORY_ROLES:
+        roles.add(configured_role)
+    return frozenset(roles)
 
 
 def workspace_home_identity_env(workspace: Path | str) -> dict[str, str]:

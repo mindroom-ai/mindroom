@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,7 @@ from agno.media import Image
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
@@ -41,7 +42,7 @@ from mindroom.attachments import _attachment_id_for_event, register_local_attach
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, IngressOrderReservation, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, active_follow_up_coalescing_key
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -76,7 +77,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
-from mindroom.history import CompactionLifecycleStart, CompactionOutcome
+from mindroom.history import CompactionLifecycleStart, CompactionOutcome, HistoryScopeState, write_scope_state
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -92,7 +93,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.manager import IndexingSettings, KnowledgeManager
 from mindroom.knowledge.utils import _KnowledgeResolution, _MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -493,6 +494,29 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bound_config
 
 
+def _fake_indexing_settings(base_id: str) -> IndexingSettings:
+    return IndexingSettings(
+        base_id=base_id,
+        storage_root="storage",
+        knowledge_path=f"knowledge/{base_id}",
+        mode="semantic",
+        embedder_provider="openai",
+        embedder_model="text-embedding-3-small",
+        embedder_host="",
+        embedder_dimensions="",
+        chunk_size="5000",
+        chunk_overlap="0",
+        repo_identity="",
+        git_branch="",
+        git_lfs="",
+        git_skip_hidden="",
+        git_include_patterns="",
+        git_exclude_patterns="",
+        include_extensions="",
+        exclude_extensions="()",
+    )
+
+
 def _configured_team_test_config(runtime_root: Path) -> Config:
     """Return a runtime-bound config with one configured team for TeamBot tests."""
     return _runtime_bound_config(
@@ -776,6 +800,75 @@ def _visible_message(
         event_id=event_id,
         timestamp=timestamp,
         content=content,
+    )
+
+
+_MediaKind = Literal["audio", "image", "file", "video"]
+_MEDIA_MIME_TYPES: dict[_MediaKind, str] = {
+    "audio": "audio/wav",
+    "image": "image/png",
+    "file": "text/plain",
+    "video": "video/mp4",
+}
+
+
+def _payload_media_for_kind(payload: DispatchPayload, kind: _MediaKind) -> Sequence[Any]:
+    return {
+        "audio": payload.media.audio,
+        "image": payload.media.images,
+        "file": payload.media.files,
+        "video": payload.media.videos,
+    }[kind]
+
+
+def _register_payload_media_attachment(
+    storage_path: Path,
+    *,
+    kind: _MediaKind = "image",
+    attachment_id: str,
+    filename: str,
+    content: bytes | None = None,
+    local_path: Path | None = None,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = "$thread",
+) -> str:
+    """Register one resolvable media attachment and return its local filepath."""
+    media_path = local_path or storage_path / filename
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    if local_path is None:
+        media_path.write_bytes(content or (b"media:" + attachment_id.encode("utf-8")))
+    record = register_local_attachment(
+        storage_path,
+        media_path,
+        kind=kind,
+        attachment_id=attachment_id,
+        filename=filename,
+        mime_type=_MEDIA_MIME_TYPES[kind],
+        room_id=room_id,
+        thread_id=thread_id,
+        source_event_id=f"${attachment_id}",
+        sender="@user:localhost",
+    )
+    assert record is not None
+    return str(record.local_path)
+
+
+def _register_payload_image_attachment(
+    storage_path: Path,
+    *,
+    attachment_id: str,
+    filename: str,
+    room_id: str = "!test:localhost",
+    thread_id: str | None = "$thread",
+) -> str:
+    return _register_payload_media_attachment(
+        storage_path,
+        kind="image",
+        attachment_id=attachment_id,
+        filename=filename,
+        content=b"\x89PNG\r\n\x1a\n" + attachment_id.encode("utf-8"),
+        room_id=room_id,
+        thread_id=thread_id,
     )
 
 
@@ -1146,7 +1239,7 @@ class TestAgentBot:
                 base_id="research",
                 storage_root=str(tmp_path),
                 knowledge_path=str(tmp_path / "kb"),
-                indexing_settings=(),
+                indexing_settings=_fake_indexing_settings("research"),
             ),
             index=SimpleNamespace(
                 knowledge=expected_knowledge,
@@ -1228,7 +1321,7 @@ class TestAgentBot:
                     base_id=base_id,
                     storage_root=str(tmp_path),
                     knowledge_path=str(tmp_path / f"kb_{base_id}"),
-                    indexing_settings=(),
+                    indexing_settings=_fake_indexing_settings(base_id),
                 ),
                 index=SimpleNamespace(
                     knowledge={"research": research_knowledge, "legal": legal_knowledge}[base_id],
@@ -6019,6 +6112,14 @@ class TestAgentBot:
             thread_id=None,
             reply_to_event_id=root_event_id,
         ).with_thread_root(root_event_id)
+        scope = HistoryScope(kind="agent", scope_id=bot.agent_name)
+        storage = bot._conversation_state_writer.create_storage(None, scope=scope)
+        try:
+            session = AgentSession(session_id=resolved_target.session_id, created_at=1, updated_at=1)
+            write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+            storage.upsert_session(session)
+        finally:
+            storage.close()
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
 
         with (
@@ -6071,7 +6172,7 @@ class TestAgentBot:
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
         assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
-        assert compaction_notice_kwargs["reply_to_event_id"] == "$response"
+        assert compaction_notice_kwargs["reply_to_event_id"] == root_event_id
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
 
     @pytest.mark.asyncio
@@ -7509,6 +7610,7 @@ class TestAgentBot:
                     event_source=voice_event.source,
                 ),
                 CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                False,
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
@@ -7811,20 +7913,21 @@ class TestAgentBot:
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_attachment_media",
-                return_value=(
-                    [current_attachment_id, history_attachment_id],
-                    [],
-                    [image],
-                    [],
-                    [],
-                ),
+                return_value=([current_attachment_id, history_attachment_id], [], [image], [], []),
             ) as mock_resolve_media,
         ):
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
 
-        mock_resolve_media.assert_called_once()
-        assert mock_resolve_media.call_args.args[1] == [current_attachment_id, history_attachment_id]
+        assert mock_resolve_media.call_args_list == [
+            call(
+                tmp_path,
+                [current_attachment_id, history_attachment_id],
+                room_id="!test:localhost",
+                thread_id="$thread_root",
+                current_attachment_ids={current_attachment_id},
+            ),
+        ]
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -7847,6 +7950,238 @@ class TestAgentBot:
             ),
         )
 
+    @pytest.mark.parametrize("kind", ["audio", "image", "file", "video"])
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_dedupes_same_content_across_history(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        kind: _MediaKind,
+    ) -> None:
+        """Inline media should keep one copy while IDs stay thread/history-scoped."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = f"att_current_{kind}"
+        thread_attachment_id = f"att_thread_{kind}"
+        history_attachment_id = f"att_history_{kind}"
+        same_content = b"same media bytes"
+        current_path = _register_payload_media_attachment(
+            tmp_path,
+            kind=kind,
+            attachment_id=current_attachment_id,
+            filename=f"current-{kind}.bin",
+            content=same_content,
+        )
+        _register_payload_media_attachment(
+            tmp_path,
+            kind=kind,
+            attachment_id=thread_attachment_id,
+            filename=f"thread-{kind}.bin",
+            content=same_content,
+        )
+        _register_payload_media_attachment(
+            tmp_path,
+            kind=kind,
+            attachment_id=history_attachment_id,
+            filename=f"history-{kind}.bin",
+            content=same_content,
+        )
+        thread_history = [
+            _visible_message(
+                sender="@user:localhost",
+                event_id="$history",
+                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+            ),
+        ]
+
+        with patch(
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=[thread_attachment_id],
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt="describe this",
+                    current_attachment_ids=[current_attachment_id],
+                    thread_id="$thread",
+                    media_thread_id="$thread",
+                    thread_history=thread_history,
+                ),
+            )
+
+        inline_media = _payload_media_for_kind(payload, kind)
+        assert len(inline_media) == 1
+        assert inline_media[0].id == current_attachment_id
+        assert inline_media[0].filepath == current_path
+        assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_distinct_content_all_kept(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Distinct images should each remain inline across current, thread, and history."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = "att_current_image"
+        thread_attachment_id = "att_thread_image"
+        history_attachment_id = "att_history_image"
+        current_path = _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=current_attachment_id,
+            filename="current.png",
+        )
+        thread_path = _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=thread_attachment_id,
+            filename="thread.png",
+        )
+        history_path = _register_payload_image_attachment(
+            tmp_path,
+            attachment_id=history_attachment_id,
+            filename="history.png",
+        )
+        thread_history = [
+            _visible_message(
+                sender="@user:localhost",
+                event_id="$history",
+                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+            ),
+        ]
+
+        with patch(
+            "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
+            new_callable=AsyncMock,
+            return_value=[thread_attachment_id],
+        ):
+            payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+                DispatchPayloadWithAttachmentsRequest(
+                    room_id="!test:localhost",
+                    prompt="describe these",
+                    current_attachment_ids=[current_attachment_id],
+                    thread_id="$thread",
+                    media_thread_id="$thread",
+                    thread_history=thread_history,
+                ),
+            )
+
+        inline_image_paths = [image.filepath for image in payload.media.images]
+        assert inline_image_paths == [current_path, thread_path, history_path]
+        assert payload.attachment_ids == [current_attachment_id, thread_attachment_id, history_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_current_event_wins_over_history_duplicate(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """The current event's media copy should be the inline representative for duplicates."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        current_attachment_id = "att_current_duplicate"
+        history_attachment_id = "att_history_duplicate"
+        same_content = b"\x89PNG\r\n\x1a\nsame"
+        current_path = _register_payload_media_attachment(
+            tmp_path,
+            kind="image",
+            attachment_id=current_attachment_id,
+            filename="current-wins.png",
+            content=same_content,
+        )
+        _register_payload_media_attachment(
+            tmp_path,
+            kind="image",
+            attachment_id=history_attachment_id,
+            filename="history-duplicate.png",
+            content=same_content,
+        )
+        thread_history = [
+            _visible_message(
+                sender="@user:localhost",
+                event_id="$history",
+                content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+            ),
+        ]
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="describe this",
+                current_attachment_ids=[current_attachment_id],
+                thread_id=None,
+                media_thread_id="$thread",
+                thread_history=thread_history,
+            ),
+        )
+
+        assert len(payload.media.images) == 1
+        assert payload.media.images[0].id == current_attachment_id
+        assert payload.media.images[0].filepath == current_path
+        assert payload.attachment_ids == [current_attachment_id, history_attachment_id]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inline_media_empty_when_no_attachments(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Payloads without attachments should have empty inline media and no tool-visible IDs."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="check in",
+                current_attachment_ids=[],
+                thread_id=None,
+                media_thread_id=None,
+                thread_history=[],
+            ),
+        )
+
+        assert payload.media.images == ()
+        assert payload.media.audio == ()
+        assert payload.media.files == ()
+        assert payload.media.videos == ()
+        assert payload.attachment_ids is None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_fallback_images_preserved(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Fallback images should still populate inline media when no current IDs resolve."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="describe fallback",
+                current_attachment_ids=[],
+                thread_id=None,
+                media_thread_id=None,
+                thread_history=[],
+                fallback_images=[fallback_image],
+            ),
+        )
+
+        assert list(payload.media.images) == [fallback_image]
+        assert payload.media.audio == ()
+        assert payload.media.files == ()
+        assert payload.media.videos == ()
+        assert payload.attachment_ids is None
+
     @pytest.mark.asyncio
     async def test_build_dispatch_payload_merges_fallback_images_with_registered_attachments(
         self,
@@ -7857,8 +8192,8 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        stored_image = MagicMock(spec=Image)
-        fallback_image = MagicMock(spec=Image)
+        stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
+        fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
 
         with (
             patch(
@@ -7900,7 +8235,7 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        stored_image = MagicMock(spec=Image)
+        stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
 
         with (
             patch(
@@ -11795,9 +12130,9 @@ class TestAgentBot:
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ) as mock_has_active_response,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
+            ) as mock_active_thread_ids,
             patch.object(
                 bot._response_runner,
                 "reserve_waiting_human_message",
@@ -11812,9 +12147,7 @@ class TestAgentBot:
         ):
             await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
-        mock_has_active_response.assert_called_once()
-        active_target = mock_has_active_response.call_args.args[0]
-        assert active_target.resolved_thread_id == target.resolved_thread_id
+        mock_active_thread_ids.assert_called_once_with(room.room_id)
         mock_reserve_waiting_human_message.assert_called_once()
         signal_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert signal_target.resolved_thread_id == target.resolved_thread_id
@@ -11825,9 +12158,10 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
+        assert pending_event.requester_user_id == "@user:localhost"
+        assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
         assert len(pending_event.dispatch_metadata) == 1
@@ -11941,8 +12275,8 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
                 bot._response_runner,
@@ -11966,7 +12300,7 @@ class TestAgentBot:
             )
             mock_admit.assert_awaited_once()
             key = mock_admit.await_args.args[0]
-            assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+            assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
             ready_event = await mock_admit.await_args.kwargs["ready_task"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
@@ -11978,6 +12312,7 @@ class TestAgentBot:
         assert reserved_envelope.source_kind == VOICE_SOURCE_KIND
         pending_event = ready_event.pending_event
         assert isinstance(pending_event, PendingEvent)
+        assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == VOICE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
@@ -12081,6 +12416,7 @@ class TestAgentBot:
         pending_event = ready_result.pending_event
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
+        assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
 
@@ -12160,8 +12496,8 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
+                "active_thread_ids_for_room",
+                return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
                 bot._response_runner,
@@ -12187,8 +12523,9 @@ class TestAgentBot:
         ready_result = mock_admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
-        assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
+        assert key == active_follow_up_coalescing_key(room.room_id, "$thread_root")
         assert isinstance(pending_event, PendingEvent)
+        assert pending_event.requester_user_id == "@user:localhost"
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
@@ -15228,7 +15565,11 @@ class TestMultiAgentOrchestrator:
             updated = await orchestrator.update_config()
 
         assert updated is False
-        mock_sync_runtime.assert_awaited_once_with(config, start_watcher=True)
+        mock_sync_runtime.assert_awaited_once_with(
+            config,
+            start_watcher=True,
+            previous_config=config,
+        )
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio

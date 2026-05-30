@@ -559,6 +559,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         prepare_started.set()
         await allow_prepare.wait()
 
+    turn_active = True
     queued_signal.begin_response_turn()
     task: asyncio.Task[None] | None = None
     try:
@@ -575,13 +576,16 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
             assert queued_signal.pending_human_messages == 1
             allow_prepare.set()
             await task
+            queued_signal.finish_response_turn()
+            turn_active = False
             await drain_coalescing(bot)
     finally:
         if task is not None and not task.done():
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        queued_signal.finish_response_turn()
+        if turn_active:
+            queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
@@ -641,6 +645,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         assert queued_signal.pending_human_messages == 1
         raise echo_error
 
+    turn_active = True
     queued_signal.begin_response_turn()
     try:
         with (
@@ -657,9 +662,12 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             await bot._on_media_message(room, voice_event)
+            queued_signal.finish_response_turn()
+            turn_active = False
             await drain_coalescing(bot)
     finally:
-        queued_signal.finish_response_turn()
+        if turn_active:
+            queued_signal.finish_response_turn()
 
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
@@ -769,16 +777,16 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
     lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
     pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
     alternate_signal = lifecycle._get_or_create_queued_signal(alternate_target)
-    captured_reservations: list[object] = []
+    dispatch_count = 0
 
-    async def capture_dispatch(*_args: object, **kwargs: object) -> None:
-        assert pre_stt_signal.pending_human_messages == 1
+    async def capture_dispatch(*_args: object, **_kwargs: object) -> None:
+        nonlocal dispatch_count
+        dispatch_count += 1
+        assert pre_stt_signal.pending_human_messages == 0
         assert alternate_signal.pending_human_messages == 0
-        reservation = kwargs["queued_notice_reservation"]
-        assert reservation is not None
-        captured_reservations.append(reservation)
-        reservation.consume()
 
+    pre_stt_turn_active = True
+    alternate_turn_active = True
     pre_stt_signal.begin_response_turn()
     alternate_signal.begin_response_turn()
     try:
@@ -798,12 +806,18 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             await bot._on_media_message(room, voice_event)
+            pre_stt_signal.finish_response_turn()
+            pre_stt_turn_active = False
+            alternate_signal.finish_response_turn()
+            alternate_turn_active = False
             await drain_coalescing(bot)
     finally:
-        pre_stt_signal.finish_response_turn()
-        alternate_signal.finish_response_turn()
+        if pre_stt_turn_active:
+            pre_stt_signal.finish_response_turn()
+        if alternate_turn_active:
+            alternate_signal.finish_response_turn()
 
-    assert len(captured_reservations) == 1
+    assert dispatch_count == 1
     assert pre_stt_signal.pending_human_messages == 0
     assert alternate_signal.pending_human_messages == 0
     assert not pre_stt_signal.is_set()
@@ -852,7 +866,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
-    captured_reservations: list[object] = []
+    dispatch_count = 0
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
 
@@ -864,13 +878,12 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         await allow_prepare.wait()
         return normalized_voice
 
-    async def capture_dispatch(*_args: object, **kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 1
-        reservation = kwargs["queued_notice_reservation"]
-        assert reservation is not None
-        captured_reservations.append(reservation)
-        reservation.consume()
+    async def capture_dispatch(*_args: object, **_kwargs: object) -> None:
+        nonlocal dispatch_count
+        dispatch_count += 1
+        assert queued_signal.pending_human_messages == 0
 
+    turn_active = True
     queued_signal.begin_response_turn()
     task: asyncio.Task[None] | None = None
     try:
@@ -889,15 +902,18 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             assert queued_signal.pending_human_messages == 1
             allow_prepare.set()
             await task
+            queued_signal.finish_response_turn()
+            turn_active = False
             await drain_coalescing(bot)
     finally:
         if task is not None and not task.done():
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        queued_signal.finish_response_turn()
+        if turn_active:
+            queued_signal.finish_response_turn()
 
-    assert len(captured_reservations) == 1
+    assert dispatch_count == 1
     assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
 

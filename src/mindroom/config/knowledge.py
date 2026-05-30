@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+KnowledgeBaseMode = Literal["semantic", "files"]
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -47,6 +51,13 @@ class KnowledgeGitConfig(BaseModel):
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
+    mode: KnowledgeBaseMode = Field(
+        default="semantic",
+        description=(
+            "Knowledge access mode. 'semantic' builds an embedding-backed search index; "
+            "'files' skips embeddings and exposes source files for agentic file-tool search."
+        ),
+    )
     description: str = Field(
         default="",
         description="Short description of what this knowledge base contains, shown to agents in knowledge-search tool metadata",

@@ -75,6 +75,7 @@ export interface KnowledgeGitConfig {
 }
 
 export interface KnowledgeBaseConfig {
+  mode?: "semantic" | "files";
   description?: string;
   path: string;
   watch: boolean;

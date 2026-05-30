@@ -19,7 +19,13 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     is_coalescing_exempt_source_kind,
 )
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescedBatch,
+    CoalescingKey,
+    PendingEvent,
+    active_follow_up_coalescing_key,
+    build_coalesced_batch,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -44,6 +50,7 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
@@ -82,6 +89,7 @@ from tests.conftest import (
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 
@@ -1348,6 +1356,34 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
     release_first_dispatch = asyncio.Event()
     calls: list[list[str]] = []
 
+    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+        assert room_id == room.room_id
+        assert thread_id == "$m1"
+        await release_first_dispatch.wait()
+
+    async def enqueue_active_follow_up(event: nio.RoomMessageText) -> None:
+        target = MessageTarget.resolve(room.room_id, "$m1", event.event_id)
+        envelope = bot._conversation_resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id="@user:localhost",
+            target=target,
+            source_kind=MESSAGE_SOURCE_KIND,
+        )
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+        try:
+            await bot._turn_controller._enqueue_active_thread_follow_up(
+                room=room,
+                event=event,
+                target=target,
+                envelope=envelope,
+                requester_user_id="@user:localhost",
+                reservation_owner=reservation_owner,
+                coalescing_key=active_follow_up_coalescing_key(room.room_id, "$m1"),
+            )
+        finally:
+            await reservation_owner.release()
+
     async def record_dispatch(
         _room: nio.MatrixRoom,
         _dispatched_event: nio.RoomMessageText,
@@ -1363,7 +1399,14 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
             entered_first_dispatch.set()
             await release_first_dispatch.wait()
 
-    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+    with (
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+        patch.object(
+            bot._response_runner,
+            "wait_for_thread_response_idle",
+            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+        ),
+    ):
         await _enqueue_for_dispatch(
             bot,
             first,
@@ -1374,21 +1417,9 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         await asyncio.sleep(0.03)
         await entered_first_dispatch.wait()
 
-        await _enqueue_for_dispatch(
-            bot,
-            second,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
+        await enqueue_active_follow_up(second)
         await asyncio.sleep(0.03)
-        await _enqueue_for_dispatch(
-            bot,
-            third,
-            room,
-            source_kind="message",
-            requester_user_id="@user:localhost",
-        )
+        await enqueue_active_follow_up(third)
         await asyncio.sleep(0.03)
 
         assert calls == [["$m1"]]
@@ -1397,6 +1428,363 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
+
+
+@pytest.mark.asyncio
+async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: Path) -> None:
+    """Active-response follow-ups should queue by target while preserving the actual requester."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    first = _text_event(event_id="$a", body="first", sender="@alice:localhost", thread_id="$thread")
+    second = _text_event(event_id="$b", body="second", sender="@bob:localhost", thread_id="$thread")
+    admitted: list[tuple[CoalescingKey, PendingEvent]] = []
+
+    async def record_admit(key: CoalescingKey, **kwargs: object) -> None:
+        ready_result = cast("ReadyPendingEvent", kwargs["ready_result"])
+        admitted.append((key, ready_result.pending_event))
+        bot._coalescing_gate.release_order_reservation(kwargs["order_reservation"])
+
+    with (
+        patch.object(bot._coalescing_gate, "admit", new=AsyncMock(side_effect=record_admit)),
+        patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
+    ):
+        for event, requester_user_id in ((first, "@alice:localhost"), (second, "@bob:localhost")):
+            target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
+            envelope = bot._conversation_resolver.build_ingress_envelope(
+                room_id=room.room_id,
+                event=event,
+                requester_user_id=requester_user_id,
+                target=target,
+                source_kind=MESSAGE_SOURCE_KIND,
+            )
+            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
+            try:
+                await bot._turn_controller._enqueue_active_thread_follow_up(
+                    room=room,
+                    event=event,
+                    target=target,
+                    envelope=envelope,
+                    requester_user_id=requester_user_id,
+                    reservation_owner=reservation_owner,
+                    coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
+                )
+            finally:
+                await reservation_owner.release()
+
+    assert len({key for key, _pending_event in admitted}) == 1
+    assert [pending_event.requester_user_id for _key, pending_event in admitted] == [
+        "@alice:localhost",
+        "@bob:localhost",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(tmp_path: Path) -> None:
+    """A slow older lookup received during an active turn must stay in the same active backlog."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    second = _text_event(
+        event_id="$m2",
+        body="second",
+        sender="@alice:localhost",
+        server_timestamp=1001,
+        thread_id="$thread",
+    )
+    third = _text_event(
+        event_id="$m3",
+        body="third",
+        sender="@bob:localhost",
+        server_timestamp=1002,
+        thread_id="$thread",
+    )
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    second_lookup_started = asyncio.Event()
+    release_second_lookup = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+        if event.event_id == "$m2":
+            second_lookup_started.set()
+            await release_second_lookup.wait()
+        return "$thread"
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        _ = media_events
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    second_task: asyncio.Task[None] | None = None
+    third_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        ):
+            second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
+            await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
+
+            third_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, third))
+            await asyncio.wait_for(third_task, timeout=0.5)
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await asyncio.sleep(0.05)
+            assert calls == []
+
+            release_second_lookup.set()
+            await asyncio.wait_for(second_task, timeout=0.5)
+            await _wait_for(lambda: calls == [["$m2", "$m3"]])
+    finally:
+        release_second_lookup.set()
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+        pending_tasks = [task for task in (second_task, third_task) if task is not None and not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert calls == [["$m2", "$m3"]]
+
+
+@pytest.mark.asyncio
+async def test_later_slow_thread_lookup_active_follow_up_joins_open_backlog(tmp_path: Path) -> None:
+    """A later lookup received during an active turn must not miss the active backlog freeze."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    first = _text_event(
+        event_id="$m1",
+        body="first",
+        sender="@alice:localhost",
+        server_timestamp=1001,
+        thread_id="$thread",
+    )
+    second = _text_event(
+        event_id="$m2",
+        body="second",
+        sender="@bob:localhost",
+        server_timestamp=1002,
+        thread_id="$thread",
+    )
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    second_lookup_started = asyncio.Event()
+    release_second_lookup = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event | PreparedTextEvent) -> str | None:
+        if event.event_id == "$m2":
+            second_lookup_started.set()
+            await release_second_lookup.wait()
+        return "$thread"
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
+    ) -> None:
+        _ = media_events
+        calls.append(_handled_turn_source_event_ids(handled_turn))
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    first_task: asyncio.Task[None] | None = None
+    second_task: asyncio.Task[None] | None = None
+    try:
+        with (
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(side_effect=coalescing_thread_id),
+            ),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        ):
+            first_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, first))
+            await asyncio.wait_for(first_task, timeout=0.5)
+
+            second_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, second))
+            await asyncio.wait_for(second_lookup_started.wait(), timeout=0.5)
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await asyncio.sleep(0.05)
+            assert calls == []
+
+            release_second_lookup.set()
+            await asyncio.wait_for(second_task, timeout=0.5)
+            await _wait_for(lambda: calls == [["$m1", "$m2"]])
+    finally:
+        release_second_lookup.set()
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+        pending_tasks = [task for task in (first_task, second_task) if task is not None and not task.done()]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert calls == [["$m1", "$m2"]]
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Path) -> None:
+    """The first queued follow-up owner should carry later media before skipping its duplicate run."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    text_event = _text_event(
+        event_id="$text",
+        body="text follow-up",
+        sender="@alice:localhost",
+        server_timestamp=1000,
+        thread_id="$thread",
+    )
+    image_event = _image_event(
+        event_id="$img",
+        sender="@bob:localhost",
+        server_timestamp=1001,
+        thread_id="$thread",
+    )
+    target = MessageTarget.resolve(room.room_id, "$thread", "$text")
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    captured_requests = []
+    payload_requests = []
+    registered_media_event_ids = []
+
+    async def fake_prepare_dispatch(
+        _room: nio.MatrixRoom,
+        event: DispatchEvent,
+        requester_user_id: str,
+        **_kwargs: object,
+    ) -> object:
+        dispatch = _prepared_dispatch(
+            event_id=event.event_id,
+            requester_user_id=requester_user_id,
+            body=event.body,
+            thread_id="$thread",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        )
+        dispatch.context.am_i_mentioned = True
+        return prepared_dispatch_result(dispatch)
+
+    async def fake_register_batch_media_attachments(
+        request: BatchMediaAttachmentRequest,
+    ) -> _BatchMediaAttachmentResult:
+        registered_media_event_ids.append([media_event.event_id for media_event in request.media_events])
+        return _BatchMediaAttachmentResult(attachment_ids=["img-attachment"])
+
+    async def fake_build_payload(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
+        payload_requests.append(request)
+        return DispatchPayload(
+            prompt=request.prompt,
+            model_prompt="attachment guidance",
+            attachment_ids=list(request.current_attachment_ids),
+        )
+
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
+        prepared_request = await response_runner._prepare_request_after_lock(request)
+        captured_requests.append(prepared_request)
+        return "$response"
+
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=fake_prepare_dispatch),
+            patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
+            patch.object(
+                bot._inbound_turn_normalizer,
+                "register_batch_media_attachments",
+                new=fake_register_batch_media_attachments,
+            ),
+            patch.object(
+                bot._inbound_turn_normalizer,
+                "build_dispatch_payload_with_attachments",
+                new=fake_build_payload,
+            ),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_controller, "_log_dispatch_latency"),
+            patch(
+                "mindroom.response_runner.ResponseRunner.generate_response_locked",
+                new=fake_generate_response_locked,
+            ),
+        ):
+            for event, requester_user_id in (
+                (text_event, "@alice:localhost"),
+                (image_event, "@bob:localhost"),
+            ):
+                event_target = MessageTarget.resolve(room.room_id, "$thread", event.event_id)
+                envelope = bot._conversation_resolver.build_ingress_envelope(
+                    room_id=room.room_id,
+                    event=event,
+                    requester_user_id=requester_user_id,
+                    target=event_target,
+                    source_kind=IMAGE_SOURCE_KIND if event.event_id == "$img" else MESSAGE_SOURCE_KIND,
+                )
+                reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, requester_user_id)
+                try:
+                    await bot._turn_controller._enqueue_active_thread_follow_up(
+                        room=room,
+                        event=event,
+                        target=event_target,
+                        envelope=envelope,
+                        requester_user_id=requester_user_id,
+                        reservation_owner=reservation_owner,
+                        coalescing_key=active_follow_up_coalescing_key(room.room_id, "$thread"),
+                    )
+                finally:
+                    await reservation_owner.release()
+
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await bot._coalescing_gate.drain_all()
+    finally:
+        queued_signal.finish_response_turn()
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+
+    assert registered_media_event_ids == [["$img"]]
+    assert payload_requests[0].current_attachment_ids == ["img-attachment"]
+    assert captured_requests[0].attachment_ids == ("img-attachment",)
+    assert captured_requests[0].model_prompt == "attachment guidance"
+    assert captured_requests[0].prompt == (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        "<queued_messages>\n"
+        '<msg event_id="$text" from="@alice:localhost"><![CDATA[text follow-up]]></msg>\n'
+        '<msg event_id="$img" from="@bob:localhost"><![CDATA[[Attached image]]]></msg>\n'
+        "</queued_messages>"
+    )
 
 
 @pytest.mark.asyncio
@@ -3559,6 +3947,9 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
         f"Available attachment IDs: {attachment_id}. Use tool calls to inspect or process them."
     )
     assert len(payload.media.images) == 1
+    assert payload.media.audio == ()
+    assert payload.media.files == ()
+    assert payload.media.videos == ()
     record = load_attachment(tmp_path, attachment_id)
     assert record is not None
     assert record.source_event_id == "$img-history"
@@ -4077,7 +4468,7 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
     """Mark every source event ID from a coalesced batch as responded."""
-    bot = _make_bot(tmp_path)
+    bot = _make_bot(tmp_path, debounce_ms=250)
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000, thread_id="$thread")
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$thread")
@@ -4115,7 +4506,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: bot._turn_store.is_handled("$m1"))
+        await _wait_for(lambda: bot._turn_store.is_handled("$m1"), deadline_seconds=1.0)
 
     assert bot._turn_store.is_handled("$m1")
     assert bot._turn_store.is_handled("$m2")

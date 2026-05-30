@@ -115,7 +115,7 @@ mindroom run
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
 | **Memory** | Mem0-inspired memory system with agent and team scopes |
-| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
+| **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
@@ -159,7 +159,7 @@ mindroom run
 - [Skills](https://docs.mindroom.chat/skills/) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/) - Extend with custom tools, OAuth providers, and skills
 - [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure RAG-backed document indexing
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure semantic indexing or files-only knowledge access
 - [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
@@ -588,12 +588,13 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 ### Knowledge
 
-Manage file-backed RAG knowledge bases:
+Manage file-backed semantic or files-only knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `description`, `path`, and refresh-on-access `watch` settings
+- **Create/edit/delete knowledge bases** with `description`, `mode`, `path`, and refresh-on-access `watch` settings
+- **Choose semantic search or files-only access** depending on whether a base should build embeddings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
-- **Reindex** a knowledge base on demand
+- **Reindex or sync** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
 
@@ -602,8 +603,8 @@ Git-backed knowledge bases are managed from the dashboard, but file mutations st
 - The dashboard hides upload, dropzone, and per-file delete controls for Git-backed bases.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
-- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
-- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and reindex instead.
+- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases, then rebuilds semantic indexes or publishes files-mode source metadata.
+- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and sync or reindex instead.
 - Chat/runtime requests use last successfully published indexes and do not wait for indexing or Git sync.
 
 ### Credentials
@@ -1177,6 +1178,9 @@ memory:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and operating procedures
+    # Default: semantic.
+    # Use files to skip embeddings and expose workspace files.
+    mode: semantic
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
@@ -1571,7 +1575,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
+| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -1588,6 +1592,7 @@ agents:
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
+See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
 Per-agent values override them.
@@ -4889,6 +4894,9 @@ read_url("https://docs.mindroom.chat")
 #### Notes
 
 - `website` is the simplest default when you just need to read one page.
+- Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
+- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
+- Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 
@@ -9230,6 +9238,7 @@ MindRoom adds important runtime behavior here by loading scoped credentials, enf
 | --- | --- | --- | --- | --- |
 | `HOMEASSISTANT_URL` | `url` | `yes` | `null` | Dashboard field label for the Home Assistant base URL. The dedicated integration flow stores the normalized value as `instance_url`. |
 | `HOMEASSISTANT_TOKEN` | `password` | `yes` | `null` | Dashboard field label for a long-lived access token. OAuth setup stores `access_token` and `refresh_token` instead. |
+| `HOMEASSISTANT_ALLOW_PRIVATE_URL` | `boolean` | `no` | `false` | Allows a trusted self-hosted Home Assistant URL on a private, local, or loopback network. The dedicated integration flow stores this as `allow_private_url`. |
 
 ### Example
 
@@ -9256,6 +9265,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 - `homeassistant`, `gmail`, `google_calendar`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
+- Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
 - The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.
 
 ## Related Docs
@@ -11468,15 +11478,15 @@ If the authorization server advertises dynamic client registration and no client
 
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
-Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
+Knowledge bases give your agents access to your own documents through semantic RAG or direct file-tool search.
+Drop files into a folder, point a knowledge base at it, and choose whether MindRoom should index it or let workspace-aware agents inspect the files themselves.
 
 ## How It Works
 
 1. You configure a knowledge base pointing to a folder of documents
-2. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
-3. Agents assigned to that knowledge base get a search tool that queries the indexed documents
-4. When the agent uses the tool, relevant document chunks are included in its context
+2. In `semantic` mode, MindRoom indexes the files into a vector database (ChromaDB) using an embedder
+3. Agents assigned to a semantic knowledge base get a search tool that queries the indexed documents
+4. In `files` mode, MindRoom skips embeddings and exposes the source under `knowledge/<base_id>` when that source is reachable from the agent workspace
 
 ```
 Indexing (scheduled refresh):
@@ -11504,6 +11514,7 @@ Add a knowledge base and assign it to an agent:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and internal operating procedures
+    mode: semantic
     path: ./knowledge_docs
     watch: false
     chunk_size: 5000
@@ -11523,6 +11534,34 @@ When `watch: false`, direct external file edits require explicit reindex, while 
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
 
+### Files-Only Knowledge Base
+
+Use `mode: files` when you want agents to search, grep, list, and read the source files directly without paying for embeddings.
+
+```yaml
+knowledge_bases:
+  source_docs:
+    description: Source documents the agent should inspect directly
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/assistant/workspace/source_docs
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful assistant with direct file access to source docs
+    memory_backend: file
+    tools: [file, shell]
+    knowledge_bases: [source_docs]
+```
+
+File mode does not create a ChromaDB collection.
+It does not call the embedder.
+It does not expose `search_knowledge_base` for that base.
+`memory_backend: file` creates the shared agent workspace at `${MINDROOM_STORAGE_PATH}/agents/assistant/workspace`.
+Because the example source path is inside that workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
+Targets outside the workspace are not advertised for direct file-tool access because the default tools enforce workspace containment after symlinks are resolved.
+Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refreshes publish only lightweight source metadata instead of a vector index.
+
 ## Configuration
 
 ### Basic Knowledge Base
@@ -11531,6 +11570,7 @@ Use a non-empty single path component such as `docs` or `company_docs`, not `""`
 knowledge_bases:
   my_docs:
     description: Product documentation, support notes, and internal operating procedures
+    mode: semantic                    # "semantic" builds a vector search index; "files" skips embeddings
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000                  # Max characters per chunk
@@ -11539,7 +11579,8 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `description` | string | `""` | Short description of what the knowledge base contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
+| `description` | string | `""` | Short description of what the knowledge base contains for semantic search metadata and file-mode workspace-path instructions |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
@@ -11547,7 +11588,8 @@ knowledge_bases:
 | `git` | object | `null` | Optional Git repository sync settings |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
-If chunking is too large, indexing retries will fail with embedder 500 errors.
+`chunk_size` and `chunk_overlap` only affect semantic mode.
+If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
 
 ### Private Agent Knowledge
 
@@ -11642,7 +11684,7 @@ agents:
     knowledge_bases: [legal]
 ```
 
-When an agent has multiple knowledge bases, results are interleaved fairly so no single base dominates the top results.
+When an agent has multiple semantic knowledge bases, results are interleaved fairly so no single base dominates the top results.
 
 ## Git-Backed Knowledge Bases
 
@@ -11689,10 +11731,11 @@ Bundled container images already include it.
 
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
-- Explicit dashboard/API reindex runs Git sync first for Git-backed bases and then rebuilds a candidate index.
+- Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
+- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
-- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
+- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
@@ -11769,7 +11812,8 @@ Accepted credential fields:
 
 ## Embedder Configuration
 
-Knowledge bases use the same embedder configured in the `memory` section:
+Semantic knowledge bases use the same embedder configured in the `memory` section.
+File-mode knowledge bases do not use an embedder.
 
 ```yaml
 memory:
@@ -11789,10 +11833,11 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
-Each successful refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
+Semantic knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
+Each successful semantic refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
 The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path.
 For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
+File-mode refreshes may write lightweight source metadata, but local file-only bases do not need a vector database.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -11801,10 +11846,11 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 The web dashboard provides a Knowledge tab for managing knowledge bases without editing YAML:
 
 - Create, edit, and delete knowledge bases
+- Choose semantic search or files-only access
 - Configure chunk size and overlap per knowledge base
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
-- Trigger a full reindex on demand
+- Trigger a full reindex or Git sync on demand
 - Monitor indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 
@@ -16107,6 +16153,7 @@ On Linux, MindRoom uses systemd user services.
 │ stop        Stop the installed MindRoom user service without removing it.              │
 │ restart     Restart the installed MindRoom user service.                               │
 │ status      Show MindRoom service status and recent logs.                              │
+│ logs        Follow MindRoom service logs.                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

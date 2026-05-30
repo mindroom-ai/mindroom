@@ -18,7 +18,13 @@ from mindroom.coalescing import (
     IngressAdmissionClosedError,
     ReadyPendingEvent,
 )
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, close_pending_event_metadata
+from mindroom.coalescing_batch import (
+    CoalescedBatch,
+    CoalescingKey,
+    PendingEvent,
+    active_follow_up_coalescing_key,
+    close_pending_event_metadata,
+)
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
@@ -178,24 +184,18 @@ def _queued_notice_dispatch_metadata(
     )
 
 
-def _queued_notice_reservation_from_metadata(
+def _consume_queued_notice_reservations_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
     *,
     target_key: tuple[str, str | None],
-) -> QueuedHumanNoticeReservation | None:
+) -> None:
     reservation_items = [item for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
-    if not reservation_items:
-        return None
-    selected_item = next(
-        (item for item in reversed(reservation_items) if item.target_key == target_key),
-        None,
-    )
     for item in reservation_items:
-        if item is not selected_item:
-            cast("QueuedHumanNoticeReservation", item.payload).consume()
-    if selected_item is None:
-        return None
-    return cast("QueuedHumanNoticeReservation", selected_item.payload)
+        reservation = cast("QueuedHumanNoticeReservation", item.payload)
+        if item.target_key == target_key:
+            reservation.consume()
+        else:
+            reservation.cancel()
 
 
 def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedTextEvent:
@@ -365,6 +365,7 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 receipt_time=receipt_time,
             ),
+            active_response_thread_ids_at_receipt=self.deps.response_runner.active_thread_ids_for_room(room.room_id),
         )
 
     def _sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
@@ -609,15 +610,26 @@ class TurnController:
 
     def _should_apply_active_thread_follow_up_policy(
         self,
-        *,
         envelope: MessageEnvelope,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> bool:
-        """Return whether one human thread follow-up should carry active-response policy."""
-        if envelope.target.resolved_thread_id is None:
-            return False
+        """Return whether one human follow-up should carry active-response policy."""
         if not envelope.origin.may_answer_interactive_prompt:
             return False
-        return self.deps.response_runner.has_active_response_for_target(envelope.target)
+        return envelope.target.resolved_thread_id in active_response_thread_ids_at_receipt
+
+    def _coalescing_key_for_ingress(
+        self,
+        room_id: str,
+        coalescing_thread_id: str | None,
+        requester_user_id: str,
+        envelope: MessageEnvelope,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
+    ) -> tuple[bool, CoalescingKey]:
+        """Return whether ingress is an active follow-up and its physical queue key."""
+        if self._should_apply_active_thread_follow_up_policy(envelope, active_response_thread_ids_at_receipt):
+            return True, active_follow_up_coalescing_key(room_id, coalescing_thread_id)
+        return False, CoalescingKey(room_id, coalescing_thread_id, requester_user_id)
 
     @staticmethod
     def _same_response_lifecycle_target(left: MessageTarget, right: MessageTarget) -> bool:
@@ -631,6 +643,7 @@ class TurnController:
         target: MessageTarget,
         envelope: MessageEnvelope,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> tuple[bool, QueuedHumanNoticeReservation | None]:
         """Return active-follow-up policy and the reservation for a voice target."""
         if queued_notice_reservation is not None and (
@@ -642,12 +655,15 @@ class TurnController:
         ):
             queued_notice_reservation.cancel()
             queued_notice_reservation = None
-        if queued_notice_reservation is not None:
-            return True, queued_notice_reservation
-        active_follow_up = (
-            envelope.origin.may_answer_interactive_prompt
-            and self.deps.response_runner.has_active_response_for_target(target)
+        active_follow_up = self._should_apply_active_thread_follow_up_policy(
+            envelope,
+            active_response_thread_ids_at_receipt,
         )
+        if queued_notice_reservation is not None:
+            if active_follow_up:
+                return True, queued_notice_reservation
+            queued_notice_reservation.cancel()
+            return False, None
         if not active_follow_up:
             return False, None
         return True, self.deps.response_runner.reserve_waiting_human_message(
@@ -662,18 +678,24 @@ class TurnController:
         event: DispatchEvent,
         target: MessageTarget,
         envelope: MessageEnvelope,
-        coalescing_thread_id: str | None,
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
+        coalescing_key: CoalescingKey,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
+        resolved_trust_internal_payload_metadata = (
+            self._should_trust_internal_payload_metadata(event)
+            if trust_internal_payload_metadata is None
+            else trust_internal_payload_metadata
+        )
         if queued_notice_reservation is None:
             queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
                 target=target,
                 response_envelope=envelope,
             )
+        reservation_owner.retarget(coalescing_key.requester_user_id)
         try:
             await self._enqueue_for_dispatch(
                 event,
@@ -684,10 +706,10 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=coalescing_key,
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
-                trust_internal_payload_metadata=trust_internal_payload_metadata,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             )
         except asyncio.CancelledError:
             if queued_notice_reservation is not None:
@@ -720,17 +742,22 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        if self._should_apply_active_thread_follow_up_policy(
-            envelope=envelope,
-        ):
+        active_follow_up, coalescing_key = self._coalescing_key_for_ingress(
+            room.room_id,
+            coalescing_thread_id,
+            requester_user_id,
+            envelope,
+            reservation_owner.active_response_thread_ids_at_receipt,
+        )
+        if active_follow_up:
             await self._enqueue_active_thread_follow_up(
                 room=room,
-                event=dispatch_event,
+                event=prepared_event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
+                coalescing_key=coalescing_key,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
                 queued_notice_reservation=queued_notice_reservation,
             )
@@ -745,7 +772,7 @@ class TurnController:
                 message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
-                coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+                coalescing_key=coalescing_key,
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
@@ -785,17 +812,22 @@ class TurnController:
             target=target,
             source_kind=source_kind,
         )
-        if self._should_apply_active_thread_follow_up_policy(
-            envelope=envelope,
-        ):
+        active_follow_up, coalescing_key = self._coalescing_key_for_ingress(
+            room.room_id,
+            coalescing_thread_id,
+            requester_user_id,
+            envelope,
+            reservation_owner.active_response_thread_ids_at_receipt,
+        )
+        if active_follow_up:
             await self._enqueue_active_thread_follow_up(
                 room=room,
                 event=event,
                 target=target,
                 envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 reservation_owner=reservation_owner,
+                coalescing_key=coalescing_key,
             )
             return _IngressAdmissionOutcome.ADMITTED
         await self._enqueue_for_dispatch(
@@ -804,7 +836,7 @@ class TurnController:
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
-            coalescing_key=CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
+            coalescing_key=coalescing_key,
         )
         return _IngressAdmissionOutcome.ADMITTED
 
@@ -1035,6 +1067,7 @@ class TurnController:
         pending_event = PendingEvent(
             event=event,
             room=room,
+            requester_user_id=requester_user_id,
             source_kind=source_kind,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
             hook_source=hook_source,
@@ -1895,42 +1928,35 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        reservation: QueuedHumanNoticeReservation | None = None
         try:
-            try:
-                handoff = build_dispatch_handoff(batch)
-            except BaseException:
-                close_pending_event_metadata(list(batch.pending_events))
-                raise
-            reservation = _queued_notice_reservation_from_metadata(
-                handoff.dispatch_metadata,
-                target_key=self._queued_notice_target_key_for_handoff(handoff),
+            handoff = build_dispatch_handoff(batch)
+        except BaseException:
+            close_pending_event_metadata(list(batch.pending_events))
+            raise
+        _consume_queued_notice_reservations_from_metadata(
+            handoff.dispatch_metadata,
+            target_key=self._queued_notice_target_key_for_handoff(handoff),
+        )
+        timing_scope = event_timing_scope(handoff.event.event_id)
+        dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_exit")
+        async with self.deps.resolver.turn_thread_cache_scope():
+            dispatch_start = time.monotonic()
+            handled_turn = HandledTurnState.create(
+                handoff.source_event_ids,
+                source_event_prompts=dict(handoff.source_event_prompts),
             )
-            timing_scope = event_timing_scope(handoff.event.event_id)
-            dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
-            if dispatch_timing is not None:
-                dispatch_timing.mark("gate_exit")
-            async with self.deps.resolver.turn_thread_cache_scope():
-                dispatch_start = time.monotonic()
-                handled_turn = HandledTurnState.create(
-                    handoff.source_event_ids,
-                    source_event_prompts=dict(handoff.source_event_prompts),
-                )
-                await self._dispatch_handoff(
-                    handoff,
-                    handled_turn=handled_turn,
-                    queued_notice_reservation=reservation,
-                )
-                reservation = None
-                emit_elapsed_timing(
-                    "coalescing.handle_batch.dispatch_text_message",
-                    dispatch_start,
-                    source_event_count=len(batch.source_event_ids),
-                    timing_scope=timing_scope,
-                )
-        finally:
-            if reservation is not None:
-                reservation.cancel()
+            await self._dispatch_handoff(
+                handoff,
+                handled_turn=handled_turn,
+            )
+            emit_elapsed_timing(
+                "coalescing.handle_batch.dispatch_text_message",
+                dispatch_start,
+                source_event_count=len(batch.source_event_ids),
+                timing_scope=timing_scope,
+            )
 
     def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
         coalescing_key = handoff.ingress.coalescing_key
@@ -1950,17 +1976,14 @@ class TurnController:
         handoff: DispatchHandoff,
         *,
         handled_turn: HandledTurnState,
-        queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> None:
         """Dispatch one coalesced handoff and own opaque metadata cleanup."""
-        reservation = queued_notice_reservation
         await self._dispatch_text_message(
             handoff.room,
             handoff.event,
             handoff.requester_user_id,
             media_events=list(handoff.media_events) or None,
             handled_turn=handled_turn,
-            queued_notice_reservation=reservation,
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
@@ -2247,12 +2270,13 @@ class TurnController:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
-        voice_target, admission_key = await self._resolve_ready_voice_target(
+        voice_target, admission_key, preliminary_active_follow_up = await self._resolve_ready_voice_target(
             room,
             event,
             event_info=event_info,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
+            active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
         )
 
         ready_task = asyncio.create_task(
@@ -2261,9 +2285,12 @@ class TurnController:
                 prechecked_event=prechecked_event,
                 voice_target=voice_target,
                 dispatch_timing=dispatch_timing,
+                preliminary_active_follow_up=preliminary_active_follow_up,
+                active_response_thread_ids_at_receipt=reservation_owner.active_response_thread_ids_at_receipt,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
+        reservation_owner.retarget(admission_key.requester_user_id)
         await reservation_owner.admit(
             admission_key,
             ready_task=ready_task,
@@ -2279,7 +2306,8 @@ class TurnController:
         event_info: EventInfo,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
-    ) -> tuple[MessageTarget, CoalescingKey]:
+        active_response_thread_ids_at_receipt: frozenset[str | None],
+    ) -> tuple[MessageTarget, CoalescingKey, bool]:
         await self._append_live_event_with_timing(
             room.room_id,
             event,
@@ -2293,8 +2321,21 @@ class TurnController:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        admission_key = CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id)
-        return voice_target, admission_key
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=cast("DispatchEvent", event),
+            requester_user_id=requester_user_id,
+            target=voice_target,
+            source_kind=VOICE_SOURCE_KIND,
+        )
+        active_follow_up, admission_key = self._coalescing_key_for_ingress(
+            room.room_id,
+            coalescing_thread_id,
+            requester_user_id,
+            envelope,
+            active_response_thread_ids_at_receipt,
+        )
+        return voice_target, admission_key, active_follow_up
 
     async def _ready_voice_event(
         self,
@@ -2303,6 +2344,8 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         voice_target: MessageTarget,
         dispatch_timing: DispatchPipelineTiming | None,
+        preliminary_active_follow_up: bool,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> ReadyPendingEvent | None:
         """Normalize a raw voice event after its conversation key is fixed."""
         event = prechecked_event.event
@@ -2316,10 +2359,11 @@ class TurnController:
                 target=voice_target,
                 source_kind=VOICE_SOURCE_KIND,
             )
-            queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-                target=voice_target,
-                response_envelope=envelope,
-            )
+            if preliminary_active_follow_up:
+                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                    target=voice_target,
+                    response_envelope=envelope,
+                )
             normalized_event, effective_thread_id = await self._normalize_voice_event_or_fallback(
                 room=room,
                 event=event,
@@ -2365,6 +2409,7 @@ class TurnController:
                 target=normalized_target,
                 envelope=envelope,
                 queued_notice_reservation=queued_notice_reservation,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
             )
             reservation_released_or_handed_off = True
             return ReadyPendingEvent(
@@ -2372,6 +2417,7 @@ class TurnController:
                     event=normalized_event,
                     room=room,
                     source_kind=envelope.source_kind,
+                    requester_user_id=prechecked_event.requester_user_id,
                     dispatch_policy_source_kind=(
                         ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
                         if active_follow_up
@@ -2396,6 +2442,7 @@ class TurnController:
                 thread_id=voice_target.resolved_thread_id,
                 dispatch_timing=dispatch_timing,
                 error=exc,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
             )
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
@@ -2438,6 +2485,7 @@ class TurnController:
         thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
         error: Exception,
+        active_response_thread_ids_at_receipt: frozenset[str | None],
     ) -> ReadyPendingEvent:
         """Return a raw-audio fallback when voice readiness fails before STT."""
         self.deps.logger.warning(
@@ -2473,6 +2521,7 @@ class TurnController:
                 target=target,
                 envelope=envelope,
                 queued_notice_reservation=None,
+                active_response_thread_ids_at_receipt=active_response_thread_ids_at_receipt,
             )
             dispatch_policy_source_kind = (
                 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND if active_follow_up else envelope.dispatch_policy_source_kind
@@ -2492,6 +2541,7 @@ class TurnController:
                 event=fallback_event,
                 room=room,
                 source_kind=VOICE_SOURCE_KIND,
+                requester_user_id=requester_user_id,
                 dispatch_policy_source_kind=dispatch_policy_source_kind,
                 hook_source=hook_source,
                 message_received_depth=message_received_depth,

@@ -34,7 +34,7 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.knowledge import KnowledgeRefreshScheduler
+from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
@@ -689,8 +689,16 @@ class _MultiAgentOrchestrator:
         config: Config,
         *,
         start_watcher: bool,
+        previous_config: Config | None = None,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
+        if previous_config is not None:
+            await asyncio.to_thread(
+                reconcile_knowledge_mode_transition_states,
+                previous_config,
+                config,
+                self.runtime_paths,
+            )
         await self._knowledge_source_watcher.sync(
             config=config if start_watcher else None,
             runtime_paths=self.runtime_paths,
@@ -1487,7 +1495,11 @@ class _MultiAgentOrchestrator:
         await self._update_unchanged_bots(plan)
 
         if plan.only_support_service_changes:
-            await self._sync_runtime_support_services(new_config, start_watcher=self.running)
+            await self._sync_runtime_support_services(
+                new_config,
+                start_watcher=self.running,
+                previous_config=current_config,
+            )
             await self._emit_config_reloaded(
                 new_config=new_config,
                 changed_entities=set(),
@@ -1512,7 +1524,11 @@ class _MultiAgentOrchestrator:
                 agent_names=permanently_failed_entities,
             )
 
-        await self._sync_runtime_support_services(new_config, start_watcher=self.running)
+        await self._sync_runtime_support_services(
+            new_config,
+            start_watcher=self.running,
+            previous_config=current_config,
+        )
         await self._emit_config_reloaded(
             new_config=new_config,
             changed_entities=changed_entities,

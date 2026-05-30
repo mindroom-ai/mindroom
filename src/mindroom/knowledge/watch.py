@@ -59,7 +59,7 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
     targets_by_key: dict[KnowledgeSourceRoot, list[str]] = {}
     for base_id in sorted(config.knowledge_bases):
         base_config = config.get_knowledge_base_config(base_id)
-        if not base_config.watch or base_config.git is not None:
+        if base_config.mode != "semantic" or not base_config.watch or base_config.git is not None:
             continue
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue

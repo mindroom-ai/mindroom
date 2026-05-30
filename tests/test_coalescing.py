@@ -17,7 +17,12 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     is_coalescing_exempt_source_kind,
 )
-from mindroom.coalescing_batch import CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.coalescing_batch import (
+    CoalescingKey,
+    PendingEvent,
+    active_follow_up_coalescing_key,
+    build_coalesced_batch,
+)
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -771,7 +776,7 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
 
     await _admit_ready(gate, key, _pending(_text_event("$first:localhost", "first", 1_000_000)))
-    await asyncio.sleep(0.04)
+    await asyncio.sleep(0.01)
     await _admit_ready(gate, key, _pending(_text_event("$second:localhost", "second", 1_000_040)))
     await asyncio.sleep(0.02)
 
@@ -783,7 +788,200 @@ async def test_threaded_debounce_uses_trailing_quiet_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unresolved_reservation_wait_does_not_mark_queued_events_as_in_flight_buffered() -> None:
+async def test_active_follow_up_backlog_ignores_debounce_gaps_after_idle() -> None:
+    """Same-target follow-ups queued behind one active response flush as one ordered backlog."""
+    calls: list[tuple[list[str], str]] = []
+    idle = asyncio.Event()
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append((list(batch.source_event_ids), batch.prompt))
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        if wait_key == key:
+            await idle.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+
+    for event_id, body, requester_user_id in (
+        ("$a1:localhost", "first follow-up", "@alice:localhost"),
+        ("$b1:localhost", "extra context", "@bob:localhost"),
+        ("$a2:localhost", "reply to bob", "@alice:localhost"),
+    ):
+        await _admit_ready(
+            gate,
+            key,
+            PendingEvent(
+                event=_text_event(event_id, body, 1_000_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=requester_user_id,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        )
+        await asyncio.sleep(0.03)
+
+    assert calls == []
+
+    idle.set()
+    await _wait_for(lambda: calls != [])
+
+    assert calls == [
+        (
+            ["$a1:localhost", "$b1:localhost", "$a2:localhost"],
+            "Messages arrived while the previous response was still running. "
+            "They are in chat timeline order. Respond once to the combined context:\n\n"
+            "<queued_messages>\n"
+            '<msg event_id="$a1:localhost" from="@alice:localhost"><![CDATA[first follow-up]]></msg>\n'
+            '<msg event_id="$b1:localhost" from="@bob:localhost"><![CDATA[extra context]]></msg>\n'
+            '<msg event_id="$a2:localhost" from="@alice:localhost"><![CDATA[reply to bob]]></msg>\n'
+            "</queued_messages>",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_same_target_normal_gate_waits_behind_older_active_backlog() -> None:
+    """A resolved later normal key must not overtake an older active backlog for that target."""
+    batches: list[list[str]] = []
+    first_active_wait = asyncio.Event()
+    release_first_active_wait = asyncio.Event()
+    second_active_wait = asyncio.Event()
+    release_second_active_wait = asyncio.Event()
+    active_wait_count = 0
+    active_key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    normal_key = CoalescingKey("!room:localhost", "$thread:localhost", "@bob:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(list(batch.source_event_ids))
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        nonlocal active_wait_count
+        if wait_key != active_key:
+            return
+        active_wait_count += 1
+        if active_wait_count == 1:
+            first_active_wait.set()
+            await release_first_active_wait.wait()
+            return
+        second_active_wait.set()
+        await release_second_active_wait.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+
+    await _admit_ready(
+        gate,
+        active_key,
+        PendingEvent(
+            event=_text_event("$active:localhost", "queued while active", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@alice:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    await first_active_wait.wait()
+
+    later_reservation = gate.reserve_order(room_id=normal_key.room_id, requester_user_id=normal_key.requester_user_id)
+    release_first_active_wait.set()
+    await asyncio.sleep(0)
+
+    await gate.admit(
+        normal_key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$normal:localhost", "later normal", 1_000_001)),
+        ),
+        order_reservation=later_reservation,
+    )
+    await _wait_for(lambda: second_active_wait.is_set() or batches)
+
+    assert batches == []
+
+    release_second_active_wait.set()
+    await gate.drain_all()
+
+    assert batches == [["$active:localhost"], ["$normal:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_different_thread_normal_gate_does_not_wait_behind_older_active_backlog() -> None:
+    """Resolved gates in other threads must not wait behind an active backlog for this target."""
+    batches: list[list[str]] = []
+    first_active_wait = asyncio.Event()
+    release_first_active_wait = asyncio.Event()
+    release_second_active_wait = asyncio.Event()
+    active_wait_count = 0
+    active_key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    normal_key = CoalescingKey("!room:localhost", "$other-thread:localhost", "@bob:localhost")
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(list(batch.source_event_ids))
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        nonlocal active_wait_count
+        if wait_key != active_key:
+            return
+        active_wait_count += 1
+        if active_wait_count == 1:
+            first_active_wait.set()
+            await release_first_active_wait.wait()
+            return
+        await release_second_active_wait.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+
+    await _admit_ready(
+        gate,
+        active_key,
+        PendingEvent(
+            event=_text_event("$active:localhost", "queued while active", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@alice:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    await first_active_wait.wait()
+
+    later_reservation = gate.reserve_order(room_id=normal_key.room_id, requester_user_id=normal_key.requester_user_id)
+    release_first_active_wait.set()
+    await asyncio.sleep(0)
+
+    await gate.admit(
+        normal_key,
+        ready_result=ReadyPendingEvent(
+            pending_event=_pending(_text_event("$normal:localhost", "later normal", 1_000_001)),
+        ),
+        order_reservation=later_reservation,
+    )
+    await _wait_for(lambda: batches == [["$normal:localhost"]])
+
+    release_second_active_wait.set()
+    await gate.drain_all()
+
+    assert batches == [["$normal:localhost"], ["$active:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_reservation_wait_keeps_debounce_gaps() -> None:
     """Events queued before dispatch starts must still obey debounce gaps after the blocker resolves."""
     batches: list[CoalescedBatch] = []
 
@@ -824,8 +1022,8 @@ async def test_unresolved_reservation_wait_does_not_mark_queued_events_as_in_fli
 
 
 @pytest.mark.asyncio
-async def test_in_flight_unresolved_reservations_stay_buffered_after_admission() -> None:
-    """Reservations created during dispatch should stay in the in-flight follow-up window."""
+async def test_in_flight_unresolved_reservations_obey_debounce_after_admission() -> None:
+    """Reservations created during dispatch should still obey their receive-time debounce gaps."""
     batches: list[CoalescedBatch] = []
     release_dispatch = asyncio.Event()
 
@@ -855,6 +1053,9 @@ async def test_in_flight_unresolved_reservations_stay_buffered_after_admission()
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$second:localhost", "second", 1_000_001))),
         order_reservation=second_reservation,
     )
+    await _wait_for(
+        lambda: [batch.source_event_ids for batch in batches] == [["$first:localhost"], ["$second:localhost"]],
+    )
     await gate.admit(
         key,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$third:localhost", "third", 1_000_002))),
@@ -864,7 +1065,8 @@ async def test_in_flight_unresolved_reservations_stay_buffered_after_admission()
 
     assert [batch.source_event_ids for batch in batches] == [
         ["$first:localhost"],
-        ["$second:localhost", "$third:localhost"],
+        ["$second:localhost"],
+        ["$third:localhost"],
     ]
 
 
@@ -1008,6 +1210,57 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
 
     assert result.completed is False
     assert result.dispatch_cancelled_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bounded_drain_does_not_wait_forever_on_external_dispatch_gate() -> None:
+    """A bounded drain must not wait indefinitely for an active-follow-up idle gate."""
+    calls: list[list[str]] = []
+    dispatch_wait_started = asyncio.Event()
+    release_dispatch_wait = asyncio.Event()
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+
+    async def wait_until_dispatch_allowed(wait_key: CoalescingKey) -> None:
+        if wait_key == key:
+            dispatch_wait_started.set()
+            await release_dispatch_wait.wait()
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_dispatch_allowed,
+    )
+    await _admit_ready(
+        gate,
+        key,
+        PendingEvent(
+            event=_text_event("$text:localhost", "typed", 1_000_000),
+            room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@user:localhost",
+            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        ),
+    )
+    await dispatch_wait_started.wait()
+
+    drain_task = asyncio.create_task(gate.drain_all(ready_timeout_seconds=0.01))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.2)
+    except TimeoutError:  # pragma: no cover - documents the failure mode on regression
+        pytest.fail("bounded drain hung behind external dispatch gate")
+    finally:
+        release_dispatch_wait.set()
+        if not drain_task.done():
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert result.completed is True
+    assert calls == [["$text:localhost"]]
 
 
 @pytest.mark.asyncio
@@ -1671,101 +1924,8 @@ async def test_multi_segment_claim_remains_visible_until_last_segment_finishes()
 
 
 @pytest.mark.asyncio
-async def test_root_in_flight_buffers_late_reservation_followups_for_child_key() -> None:
-    """Reservations made during a root response should buffer after resolving to that root's child key."""
-    first_dispatch_started = asyncio.Event()
-    release_first_dispatch = asyncio.Event()
-    batches: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
-        if batch.source_event_ids == ["$root:localhost"]:
-            first_dispatch_started.set()
-            await release_first_dispatch.wait()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.01,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    root_key = CoalescingKey("!room:localhost", None, "@user:localhost")
-    child_key = CoalescingKey("!room:localhost", "$root:localhost", "@user:localhost")
-
-    await _admit_ready(gate, root_key, _pending(_text_event("$root:localhost", "root", 1_000_000)))
-    await _wait_for(first_dispatch_started.is_set)
-    first_reservation = gate.reserve_order(room_id=root_key.room_id, requester_user_id=root_key.requester_user_id)
-    await asyncio.sleep(0.03)
-    second_reservation = gate.reserve_order(room_id=root_key.room_id, requester_user_id=root_key.requester_user_id)
-
-    release_first_dispatch.set()
-    await _wait_for(lambda: child_key in gate._in_flight_buffered_max_order)
-    await gate.admit(
-        child_key,
-        ready_result=ReadyPendingEvent(
-            pending_event=_pending(_text_event("$follow1:localhost", "follow 1", 1_000_001)),
-        ),
-        order_reservation=first_reservation,
-    )
-    await gate.admit(
-        child_key,
-        ready_result=ReadyPendingEvent(
-            pending_event=_pending(_text_event("$follow2:localhost", "follow 2", 1_000_002)),
-        ),
-        order_reservation=second_reservation,
-    )
-    await gate.drain_all()
-
-    assert batches == [["$root:localhost"], ["$follow1:localhost", "$follow2:localhost"]]
-
-
-@pytest.mark.asyncio
-async def test_root_in_flight_buffer_entries_clear_when_reservation_admits_elsewhere() -> None:
-    """Synthetic root-follow-up buffering should not leak after reservation admission elsewhere."""
-    first_dispatch_started = asyncio.Event()
-    release_first_dispatch = asyncio.Event()
-    batches: list[list[str]] = []
-
-    async def dispatch_batch(batch: CoalescedBatch) -> None:
-        batches.append(batch.source_event_ids)
-        if batch.source_event_ids == ["$root:localhost"]:
-            first_dispatch_started.set()
-            await release_first_dispatch.wait()
-
-    gate = CoalescingGate(
-        dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.01,
-        upload_grace_seconds=lambda: 0.0,
-        is_shutting_down=lambda: False,
-    )
-    root_key = CoalescingKey("!room:localhost", None, "@user:localhost")
-    child_key = CoalescingKey("!room:localhost", "$root:localhost", "@user:localhost")
-    other_key = CoalescingKey("!room:localhost", "$other:localhost", "@user:localhost")
-
-    await _admit_ready(gate, root_key, _pending(_text_event("$root:localhost", "root", 1_000_000)))
-    await _wait_for(first_dispatch_started.is_set)
-    reservation = gate.reserve_order(room_id=root_key.room_id, requester_user_id=root_key.requester_user_id)
-
-    release_first_dispatch.set()
-    await _wait_for(lambda: child_key in gate._in_flight_buffered_max_order)
-    await gate.admit(
-        other_key,
-        ready_result=ReadyPendingEvent(
-            pending_event=_pending(_text_event("$other:localhost", "other", 1_000_001)),
-        ),
-        order_reservation=reservation,
-    )
-    await gate.drain_all()
-
-    assert batches == [["$root:localhost"], ["$other:localhost"]]
-    assert root_key not in gate._in_flight_buffered_max_order
-    assert child_key not in gate._in_flight_buffered_max_order
-    assert gate._in_flight_buffered_max_order == {}
-
-
-@pytest.mark.asyncio
-async def test_in_flight_buffered_reservations_ignore_debounce_gap_after_partial_admit() -> None:
-    """Buffered reservations should still batch when only the first one admits before debounce expires."""
+async def test_root_in_flight_child_followup_reservations_obey_debounce() -> None:
+    """Reservations made during a root response should not get a special post-dispatch batch window."""
     first_dispatch_started = asyncio.Event()
     release_first_dispatch = asyncio.Event()
     batches: list[list[str]] = []
@@ -1800,10 +1960,7 @@ async def test_in_flight_buffered_reservations_ignore_debounce_gap_after_partial
         ),
         order_reservation=first_reservation,
     )
-    await asyncio.sleep(0.03)
-
-    assert batches == [["$root:localhost"]]
-
+    await _wait_for(lambda: batches == [["$root:localhost"], ["$follow1:localhost"]])
     await gate.admit(
         child_key,
         ready_result=ReadyPendingEvent(
@@ -1813,4 +1970,4 @@ async def test_in_flight_buffered_reservations_ignore_debounce_gap_after_partial
     )
     await gate.drain_all()
 
-    assert batches == [["$root:localhost"], ["$follow1:localhost", "$follow2:localhost"]]
+    assert batches == [["$root:localhost"], ["$follow1:localhost"], ["$follow2:localhost"]]

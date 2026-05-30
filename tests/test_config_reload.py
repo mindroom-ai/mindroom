@@ -196,8 +196,9 @@ async def _noop_sync_runtime_support_services(
     config: Config,
     *,
     start_watcher: bool,
+    previous_config: Config | None = None,
 ) -> None:
-    del self, config, start_watcher
+    del self, config, start_watcher, previous_config
 
 
 async def _noop_setup_rooms_and_memberships(

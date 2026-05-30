@@ -1,5 +1,6 @@
 """Persisted history compaction helpers."""
 
+from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     agent_tool_definition_payloads_for_logging,
     compute_prompt_token_breakdown,
@@ -33,6 +34,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import (
     add_pending_force_compaction_scope,
+    has_pending_force_compaction_scope,
     read_scope_seen_event_ids,
     read_scope_state,
     update_scope_seen_event_ids,
@@ -56,6 +58,8 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+
+agno_team_patch.apply_patch()
 
 __all__ = [
     "CompactionDecision",
@@ -87,6 +91,7 @@ __all__ = [
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
+    "has_pending_force_compaction_scope",
     "manual_compaction_unavailable_message",
     "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
