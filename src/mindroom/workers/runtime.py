@@ -69,7 +69,7 @@ def serialized_kubernetes_worker_validation_snapshot(
     if runtime_config is None:
         from mindroom.config.main import load_config  # noqa: PLC0415
 
-        config = load_config(runtime_paths)
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
     else:
         config = runtime_config
 
