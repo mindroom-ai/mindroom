@@ -23,6 +23,19 @@ _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
 
+__all__ = [
+    "THREAD_TAGS_EVENT_TYPE",
+    "ThreadTagRecord",
+    "ThreadTagsError",
+    "ThreadTagsListing",
+    "ThreadTagsState",
+    "get_thread_tags",
+    "list_tagged_threads",
+    "normalize_tag_name",
+    "remove_thread_tag",
+    "set_thread_tag",
+]
+
 # ARCHITECTURE DECISION: One State Event Per Thread Tag
 #
 # Each `(thread_root_id, tag)` pair is stored as its own
@@ -731,6 +744,15 @@ async def _get_thread_tags(
         room_id,
     )
     return states.get(normalized_thread_root_id)
+
+
+async def get_thread_tags(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_root_id: str,
+) -> ThreadTagsState | None:
+    """Fetch all valid tags for one thread root from Matrix state."""
+    return await _get_thread_tags(client, room_id, thread_root_id)
 
 
 async def set_thread_tag(
