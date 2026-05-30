@@ -7,6 +7,7 @@ import functools
 import inspect
 import os
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -26,6 +27,7 @@ _R = TypeVar("_R")
 # When set, log lines include the scope for grouping related timers.
 timing_scope: ContextVar[str | None] = ContextVar("timing_scope", default=None)
 _DISPATCH_PIPELINE_TIMING_KEY = "com.mindroom.dispatch_pipeline_timing"
+_ELAPSED_TIMING_RESERVED_KEYS = frozenset({"duration_ms", "event_name", "label", "start"})
 
 
 def _is_enabled() -> bool:
@@ -208,16 +210,35 @@ def emit_timing_event(event_name: str, **event_data: object) -> None:
     logger.debug(event_name, **filtered_event_data)
 
 
-def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
+def _safe_elapsed_timing_event_data(event_data: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in event_data.items() if key not in _ELAPSED_TIMING_RESERVED_KEYS}
+
+
+def emit_elapsed_timing(timing_label: str, started_at: float, **event_data: object) -> None:
     """Emit one elapsed timing event relative to a previously recorded start time."""
     if not _is_enabled():
         return
+    safe_event_data = _safe_elapsed_timing_event_data(event_data)
     emit_timing_event(
         "timing_elapsed",
-        label=label,
-        duration_ms=elapsed_ms_since(start),
-        **event_data,
+        label=timing_label,
+        duration_ms=elapsed_ms_since(started_at),
+        **safe_event_data,
     )
+
+
+@contextmanager
+def elapsed_timing(timing_label: str, **event_data: object) -> Iterator[dict[str, object]]:
+    """Emit one elapsed timing event for the enclosed block."""
+    start = time.monotonic()
+    try:
+        yield event_data
+    finally:
+        safe_event_data = _safe_elapsed_timing_event_data(event_data)
+        try:
+            emit_elapsed_timing(timing_label, start, **safe_event_data)
+        except Exception:
+            logger.debug("elapsed_timing_emit_failed", label=timing_label, exc_info=True)
 
 
 def timed(label: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:

@@ -556,7 +556,10 @@ def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> 
     recorder = TurnRecorder(user_message="Hello")
     recorder.mark_interrupted()
 
-    with patch("mindroom.response_runner.persist_interrupted_replay_snapshot") as mock_persist:
+    with (
+        patch("mindroom.response_runner.persist_interrupted_replay_snapshot") as mock_persist,
+        patch("mindroom.timing.emit_elapsed_timing") as mock_timing,
+    ):
         coordinator._persist_interrupted_turn(
             recorder=recorder,
             session_scope=HistoryScope(kind="agent", scope_id="general"),
@@ -568,6 +571,13 @@ def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> 
 
     mock_persist.assert_called_once()
     storage.close.assert_called_once_with()
+    assert [call.args[0] for call in mock_timing.call_args_list] == [
+        "response_runner.interrupted_replay.create_storage",
+        "response_runner.interrupted_replay.persist_snapshot",
+        "response_runner.interrupted_replay.close_storage",
+        "response_runner.interrupted_replay.total",
+    ]
+    assert mock_timing.call_args_list[-1].kwargs["outcome"] == "persisted"
 
 
 def test_persist_interrupted_turn_closes_storage_when_write_fails(tmp_path: Path) -> None:
@@ -603,6 +613,47 @@ def test_persist_interrupted_turn_closes_storage_when_write_fails(tmp_path: Path
             is_team=False,
         )
 
+    storage.close.assert_called_once_with()
+
+
+def test_persist_interrupted_turn_preserves_write_failure_when_close_fails(tmp_path: Path) -> None:
+    """Persistence failure should remain primary when storage cleanup also fails."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    close_error = RuntimeError("close failed")
+    storage = MagicMock()
+    storage.close.side_effect = close_error
+    coordinator.deps.state_writer.create_storage = MagicMock(return_value=storage)
+    recorder = TurnRecorder(user_message="Hello")
+    recorder.mark_interrupted()
+    persistence_error = ValueError("persist failed")
+
+    with (
+        patch(
+            "mindroom.response_runner.persist_interrupted_replay_snapshot",
+            side_effect=persistence_error,
+        ),
+        pytest.raises(ValueError, match="persist failed") as exc_info,
+    ):
+        coordinator._persist_interrupted_turn(
+            recorder=recorder,
+            session_scope=HistoryScope(kind="agent", scope_id="general"),
+            session_id="session1",
+            execution_identity=None,
+            run_id="run-1",
+            is_team=False,
+        )
+
+    assert exc_info.value is persistence_error
+    assert exc_info.value.__cause__ is close_error
     storage.close.assert_called_once_with()
 
 
@@ -730,6 +781,7 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.timing.emit_elapsed_timing") as mock_timing,
     ):
         coordinator = _build_response_runner(
             bot,
@@ -788,6 +840,11 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
         ]
         == "cancelled_by_user"
     )
+    timing_labels = [call.args[0] for call in mock_timing.call_args_list]
+    assert "response_runner.streaming_error.record" in timing_labels
+    assert "response_runner.streaming_error.persist_interrupted" in timing_labels
+    assert "response_runner.streaming_error.finalize" in timing_labels
+    assert "response_runner.streaming_error.total" in timing_labels
 
 
 def test_session_started_event_is_registered() -> None:
