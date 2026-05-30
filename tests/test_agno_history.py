@@ -85,8 +85,10 @@ from mindroom.history.runtime import (
     prepare_scope_history,
 )
 from mindroom.history.storage import (
+    compacted_run_ids_with,
     read_scope_seen_event_ids,
     read_scope_state,
+    remove_runs_by_id,
     set_force_compaction_state,
     update_scope_seen_event_ids,
     write_scope_state,
@@ -5915,6 +5917,57 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
 
     assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
+
+
+def test_compacted_run_ids_with_caps_tombstones_to_newest_ids() -> None:
+    existing_ids = tuple(f"old-{index}" for index in range(1_024))
+
+    compacted_run_ids = compacted_run_ids_with(
+        HistoryScopeState(compacted_run_ids=existing_ids),
+        ["new-1", "new-2"],
+    )
+
+    assert len(compacted_run_ids) == 1_024
+    assert compacted_run_ids[:2] == ("old-2", "old-3")
+    assert compacted_run_ids[-2:] == ("new-1", "new-2")
+    assert "old-0" not in compacted_run_ids
+
+
+def test_write_scope_state_caps_compacted_run_id_metadata() -> None:
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session("session-1")
+
+    write_scope_state(
+        session,
+        scope,
+        HistoryScopeState(compacted_run_ids=tuple(f"run-{index}" for index in range(1_026))),
+    )
+
+    metadata = session.metadata or {}
+    raw_compaction = metadata[MINDROOM_COMPACTION_METADATA_KEY]
+    assert isinstance(raw_compaction, dict)
+    raw_states = raw_compaction["states"]
+    assert isinstance(raw_states, dict)
+    raw_state = raw_states[scope.key]
+    assert isinstance(raw_state, dict)
+    compacted_run_ids = raw_state["compacted_run_ids"]
+    assert isinstance(compacted_run_ids, list)
+    assert len(compacted_run_ids) == 1_024
+    assert compacted_run_ids[:2] == ["run-2", "run-3"]
+    assert compacted_run_ids[-2:] == ["run-1024", "run-1025"]
+
+
+def test_remove_runs_by_id_removes_descendants() -> None:
+    runs = [
+        RunOutput(run_id="unrelated", status=RunStatus.completed),
+        RunOutput(run_id="child", parent_run_id="root", status=RunStatus.completed),
+        RunOutput(run_id="grandchild", parent_run_id="child", status=RunStatus.completed),
+        RunOutput(run_id="root", status=RunStatus.completed),
+    ]
+
+    pruned_runs = remove_runs_by_id(runs, ["root"])
+
+    assert [run.run_id for run in pruned_runs] == ["unrelated"]
 
 
 def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> None:

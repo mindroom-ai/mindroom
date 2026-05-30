@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -428,7 +428,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
-    all_compacted_run_ids: set[str] = set()
+    all_compacted_run_ids: list[str] = []
+    all_compacted_run_id_set: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
 
@@ -509,7 +510,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         if before_persist_callback is not None:
             await before_persist_callback(included_runs)
         final_summary_text = generated_summary.summary
-        compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
+        compacted_run_ids = tuple(run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id)
         compacted_seen_event_ids = sorted(seen_event_ids_for_runs(included_runs))
         working_session.summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
         working_state = read_scope_state(working_session, scope)
@@ -522,7 +523,10 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
         working_session.runs = remove_runs_by_id(working_session.runs or [], compacted_run_ids)
         total_compacted_run_count += len(included_runs)
-        all_compacted_run_ids.update(compacted_run_ids)
+        for run_id in compacted_run_ids:
+            if run_id not in all_compacted_run_id_set:
+                all_compacted_run_id_set.add(run_id)
+                all_compacted_run_ids.append(run_id)
         if collect_compaction_hook_messages:
             compacted_messages.extend(_messages_for_runs(included_runs, history_settings))
         if pending_selected_run_ids is not None:
@@ -632,7 +636,7 @@ def _persist_compaction_progress(
     storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
     working_session: AgentSession | TeamSession,
-    compacted_run_ids: set[str],
+    compacted_run_ids: Iterable[str],
     sync_remaining_runs: bool = False,
 ) -> None:
     """Save one successful compaction chunk before attempting the next chunk."""

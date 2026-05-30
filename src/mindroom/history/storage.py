@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
+_COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
 
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
@@ -237,9 +238,7 @@ def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
         last_summary_model=summary_model if isinstance(summary_model, str) else None,
         last_compacted_run_count=compacted_run_count if isinstance(compacted_run_count, int) else None,
         compacted_run_ids=(
-            tuple(sorted({run_id for run_id in compacted_run_ids if isinstance(run_id, str) and run_id}))
-            if isinstance(compacted_run_ids, list)
-            else ()
+            _normalize_compacted_run_ids(compacted_run_ids) if isinstance(compacted_run_ids, list) else ()
         ),
         force_compact_before_next_run=bool(force_flag),
     )
@@ -256,7 +255,7 @@ def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
     if state.last_compacted_run_count is not None:
         payload["last_compacted_run_count"] = state.last_compacted_run_count
     if state.compacted_run_ids:
-        payload["compacted_run_ids"] = list(state.compacted_run_ids)
+        payload["compacted_run_ids"] = list(_normalize_compacted_run_ids(state.compacted_run_ids))
     return payload
 
 
@@ -272,9 +271,7 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
 
 def compacted_run_ids_with(state: HistoryScopeState, run_ids: Iterable[str]) -> tuple[str, ...]:
     """Return the state tombstone set with additional compacted run ids."""
-    merged = set(state.compacted_run_ids)
-    merged.update(run_id for run_id in run_ids if run_id)
-    return tuple(sorted(merged))
+    return _normalize_compacted_run_ids([*state.compacted_run_ids, *run_ids])
 
 
 def remove_runs_by_id(
@@ -287,17 +284,20 @@ def remove_runs_by_id(
         return list(runs)
 
     run_list = list(runs)
-    changed = True
-    while changed:
-        changed = False
-        for run in run_list:
-            parent_run_id = run.parent_run_id
-            run_id = run.run_id
-            if not isinstance(parent_run_id, str) or not isinstance(run_id, str):
-                continue
-            if parent_run_id in remove_ids and run_id not in remove_ids:
-                remove_ids.add(run_id)
-                changed = True
+    children_by_parent: dict[str, list[str]] = {}
+    for run in run_list:
+        parent_run_id = run.parent_run_id
+        run_id = run.run_id
+        if isinstance(parent_run_id, str) and parent_run_id and isinstance(run_id, str) and run_id:
+            children_by_parent.setdefault(parent_run_id, []).append(run_id)
+
+    stack = list(remove_ids)
+    while stack:
+        run_id = stack.pop()
+        for child_run_id in children_by_parent.get(run_id, []):
+            if child_run_id not in remove_ids:
+                remove_ids.add(child_run_id)
+                stack.append(child_run_id)
 
     return [
         run
@@ -307,6 +307,17 @@ def remove_runs_by_id(
             or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
         )
     ]
+
+
+def _normalize_compacted_run_ids(run_ids: Iterable[object]) -> tuple[str, ...]:
+    compacted_run_ids: list[str] = []
+    seen_run_ids: set[str] = set()
+    for run_id in run_ids:
+        if not isinstance(run_id, str) or not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        compacted_run_ids.append(run_id)
+    return tuple(compacted_run_ids[-_COMPACTED_RUN_ID_RETENTION_LIMIT:])
 
 
 def prune_compacted_runs_from_session(
