@@ -77,7 +77,10 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
-_SHELL_ARGS_ERROR = '\'args\' must be a flat list of strings. Send args like ["bash", "-lc", "ls"].'
+_SHELL_ARGS_ERROR = (
+    '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
+)
+_SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 
 # Module-level process registry shared across all MindRoomShellTools instances.
 # This ensures handles survive toolkit re-creation (e.g. in sandbox runner mode
@@ -85,9 +88,29 @@ _SHELL_ARGS_ERROR = '\'args\' must be a flat list of strings. Send args like ["b
 _process_registry: dict[str, _ProcessRecord] = {}
 
 
+def _normalize_shell_command_line(command: str) -> list[str]:
+    """Run natural shell command strings through bash."""
+    stripped = command.strip()
+    if not stripped:
+        raise ValueError(_SHELL_ARGS_ERROR)
+    return ["bash", "-lc", command]
+
+
+def _looks_like_shell_command_line(command: str) -> bool:
+    """Return whether a single argv item is probably a shell command line."""
+    if any(char.isspace() for char in command):
+        return True
+    return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
+
+
 def _normalize_shell_args(args: object) -> list[str]:
-    """Normalize stringified shell args while keeping the public schema as list[str]."""
+    """Normalize natural shell command strings and explicit argv lists."""
     if isinstance(args, str):
+        stripped = args.strip()
+        if not stripped:
+            raise ValueError(_SHELL_ARGS_ERROR)
+        if stripped[0] not in "[{":
+            return _normalize_shell_command_line(args)
         try:
             args = json.loads(args)
         except json.JSONDecodeError as exc:
@@ -99,7 +122,10 @@ def _normalize_shell_args(args: object) -> list[str]:
     if any(not isinstance(item, str) for item in args):
         raise ValueError(_SHELL_ARGS_ERROR)
 
-    return cast("list[str]", args)
+    normalized_args = cast("list[str]", args)
+    if len(normalized_args) == 1 and _looks_like_shell_command_line(normalized_args[0]):
+        return _normalize_shell_command_line(normalized_args[0])
+    return normalized_args
 
 
 def _shell_path_prepend_entries(shell_path_prepend: str | None) -> tuple[str, ...]:
@@ -416,7 +442,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
         async def run_shell_command(
             self,
-            args: Annotated[list[str], BeforeValidator(_normalize_shell_args)],
+            args: Annotated[list[str] | str, BeforeValidator(_normalize_shell_args)],
             tail: int = 100,
             timeout: int = 120,  # noqa: ASYNC109
         ) -> str:
@@ -429,7 +455,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             ``check_shell_command`` or stopped with ``kill_shell_command``.
 
             Args:
-                args: The command to run as a list of strings.
+                args: The command to run as a shell command string or a list of argv strings.
                 tail: The number of lines to return from the output.
                 timeout: Maximum seconds to wait before backgrounding the command.
 
@@ -438,6 +464,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             """
             self._sweep_stale_records()
+            command_args = _normalize_shell_args(args)
 
             try:
                 subprocess_env = _shell_subprocess_env(
@@ -446,7 +473,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     shell_path_prepend=self._shell_path_prepend,
                 )
                 process = await asyncio.create_subprocess_exec(
-                    *_shell_subprocess_args(args, subprocess_env),
+                    *_shell_subprocess_args(command_args, subprocess_env),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(self.base_dir) if self.base_dir else None,
@@ -482,7 +509,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                         namespace=self._handle_namespace,
                         handle=handle,
                         pid=process.pid,
-                        args=args,
+                        args=command_args,
                         process=process,
                         stdout_buf=stdout_buf,
                         stderr_buf=stderr_buf,

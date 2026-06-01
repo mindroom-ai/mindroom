@@ -143,14 +143,38 @@ async def test_run_shell_command_bash_echo_returns_output(tmp_path: Path) -> Non
     assert result == "hello"
 
 
-def test_run_shell_command_schema_keeps_args_as_string_array(tmp_path: Path) -> None:
-    """The tool schema should expose args as array<string>, not anyOf."""
+@pytest.mark.asyncio
+async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) -> None:
+    """Natural shell command strings should execute through bash."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint("echo $HOME")
+    assert result
+    assert not result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_accepts_single_item_shell_command_line(tmp_path: Path) -> None:
+    """LLMs often send one shell command line inside the argv array."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["printf '%s' ok"])
+    assert result == "ok"
+
+
+def test_run_shell_command_schema_accepts_string_or_string_array(tmp_path: Path) -> None:
+    """The tool schema should expose both natural command strings and argv lists."""
     tool = _get_toolkit(tmp_path)
     args_schema = _get_run_shell_command_function(tool).parameters["properties"]["args"]
 
-    assert args_schema["type"] == "array"
-    assert args_schema["items"] == {"type": "string"}
-    assert "anyOf" not in args_schema
+    assert args_schema["anyOf"] == [
+        {"type": "array", "items": {"type": "string"}},
+        {"type": "string"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -182,7 +206,6 @@ async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) ->
     [
         '["echo",',
         '{"cmd": "ls"}',
-        '"echo"',
         "",
         '["echo", 42]',
         '["bash", ["-c", "ls"]]',
@@ -196,7 +219,7 @@ async def test_run_shell_command_rejects_invalid_stringified_args(tmp_path: Path
 
     assert result.status == "failure"
     assert result.error is not None
-    assert "'args' must be a flat list of strings" in result.error
+    assert "'args' must be a shell command string or a flat list of strings" in result.error
 
 
 @pytest.mark.asyncio
