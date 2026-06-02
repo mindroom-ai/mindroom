@@ -5,6 +5,33 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.6.10</title>
+            <pubDate>Tue, 02 Jun 2026 06:46:58 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>643</sparkle:version>
+            <sparkle:shortVersionString>2026.6.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.6.10
+
+## 📊 Statistics
+- 📦 **2** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Use PAT for macOS release metadata PRs (#1128)](https://github.com/mindroom-ai/mindroom/commit/15feb4d7) by @basnijholt
+- [Update MindRoom release metadata to v2026.6.9 (#1127)](https://github.com/mindroom-ai/mindroom/commit/dd75495d) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.6.10/MindRoom.zip" length="23511011" type="application/octet-stream" sparkle:edSignature="3rpM78HhxoEoAa3h5FAUsPXRlJqSaM3EWpR/mIkT1CVFweKqg1JrDaMo47sZT3AqNGyLoLNdwFLSZ7AKCAheCQ=="/>
+        </item>
+        <item>
             <title>2026.6.9</title>
             <pubDate>Tue, 02 Jun 2026 06:32:43 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
