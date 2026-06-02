@@ -30,6 +30,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
+from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1008,7 +1009,10 @@ class TestRoutingRegression:
                 "mindroom.turn_policy.decide_team_formation",
                 new=AsyncMock(return_value=TeamResolution.none()),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_agent_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(True),
+            ) as mock_decide_agent_response,
         ):
             action = await alpha_bot._turn_policy.resolve_response_action(
                 _policy_dispatch(
@@ -1027,7 +1031,7 @@ class TestRoutingRegression:
         assert action.kind == "individual"
         candidate_names = [
             entity_name_for_id(candidate, test_config, runtime_paths)
-            for candidate in mock_should_agent_respond.call_args.kwargs["available_responders_in_room"]
+            for candidate in mock_decide_agent_response.call_args.kwargs["available_responders_in_room"]
         ]
         assert candidate_names == ["alpha"]
 

@@ -133,6 +133,7 @@ from mindroom.startup_errors import PermanentStartupError
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_utils import AgentResponseDecision
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -7366,7 +7367,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=image),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
@@ -7905,7 +7906,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=image),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
@@ -8363,7 +8364,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_media_message(room, event)
@@ -8433,7 +8434,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
@@ -8526,7 +8527,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
@@ -9353,7 +9354,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -9473,7 +9474,10 @@ class TestAgentBot:
                     ),
                 ),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(True),
+            ) as mock_decide_agent_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
@@ -9485,7 +9489,7 @@ class TestAgentBot:
 
         assert action.kind == "reject"
         assert "private agents cannot participate in teams yet" in action.rejection_message
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_rejects_when_explicit_mentions_include_hidden_agent(
@@ -9530,7 +9534,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
@@ -9543,7 +9550,7 @@ class TestAgentBot:
         assert action.rejection_message == (
             "Team request includes agent 'general' that is not available to you in this room."
         )
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_rejects_when_only_unrequested_visible_bot_can_surface_reject(
@@ -9586,7 +9593,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
@@ -9599,7 +9609,7 @@ class TestAgentBot:
         assert action.rejection_message == (
             "Team request includes agents 'general', 'research' that could not be materialized for this request."
         )
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_rejects_non_running_requested_member(
@@ -9643,7 +9653,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
@@ -9656,7 +9669,7 @@ class TestAgentBot:
         assert action.rejection_message == (
             "Team request includes agent 'alpha' that could not be materialized for this request."
         )
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_skips_when_explicit_mentions_are_all_hidden(
@@ -9701,7 +9714,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
@@ -9711,7 +9727,7 @@ class TestAgentBot:
             )
 
         assert action.kind == "skip"
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_keeps_configured_room_boundary_for_direct_reply(
@@ -9936,7 +9952,10 @@ class TestAgentBot:
                     ),
                 ),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(True),
+            ) as mock_decide_agent_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
@@ -9948,7 +9967,7 @@ class TestAgentBot:
 
         assert action.kind == "reject"
         assert action.rejection_message == "Team request includes agent 'alpha' that is not available right now."
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_ignores_unsupported_non_responders_for_reject_ownership(
@@ -10014,7 +10033,10 @@ class TestAgentBot:
                     ),
                 ),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(True),
+            ) as mock_decide_agent_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
@@ -10026,7 +10048,7 @@ class TestAgentBot:
 
         assert action.kind == "reject"
         assert "private agents cannot participate in teams yet" in action.rejection_message
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_uses_actual_team_resolution_for_private_member_reject_ownership(
@@ -10070,7 +10092,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
@@ -10083,7 +10108,7 @@ class TestAgentBot:
         assert action.rejection_message == (
             "Team request includes private agent 'alpha'; private agents cannot participate in teams yet"
         )
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_honors_single_agent_team_fallback(
@@ -10091,7 +10116,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Team formation may degrade to one responder without falling back through should_agent_respond."""
+        """Team formation may degrade to one responder without falling back through decide_agent_response."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -10123,7 +10148,10 @@ class TestAgentBot:
                     ),
                 ),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(False),
+            ) as mock_decide_agent_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
@@ -10134,7 +10162,7 @@ class TestAgentBot:
             )
 
         assert action.kind == "individual"
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_keeps_human_follow_up_in_active_thread(
@@ -10213,7 +10241,10 @@ class TestAgentBot:
                 "mindroom.turn_policy.decide_team_formation",
                 new=AsyncMock(return_value=TeamResolution.none()),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(False),
+            ) as mock_decide_agent_response,
             patch.object(
                 bot._response_runner,
                 "has_active_response_for_target",
@@ -10235,7 +10266,7 @@ class TestAgentBot:
             )
 
         assert action.kind == "individual"
-        mock_should_respond.assert_called_once()
+        mock_decide_agent_response.assert_called_once()
         mock_has_active_response.assert_called_once_with(target)
 
     @pytest.mark.asyncio
@@ -10448,7 +10479,10 @@ class TestAgentBot:
                 "mindroom.turn_policy.decide_team_formation",
                 new=AsyncMock(return_value=TeamResolution.none()),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(False),
+            ) as mock_decide_agent_response,
             patch.object(
                 bot._response_runner,
                 "has_active_response_for_target",
@@ -10470,7 +10504,7 @@ class TestAgentBot:
             )
 
         assert action.kind == "individual"
-        mock_should_respond.assert_called_once()
+        mock_decide_agent_response.assert_called_once()
         mock_has_active_response.assert_not_called()
 
     @pytest.mark.asyncio
@@ -10533,7 +10567,10 @@ class TestAgentBot:
                 "mindroom.turn_policy.decide_team_formation",
                 new=AsyncMock(return_value=TeamResolution.none()),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(False),
+            ) as mock_decide_agent_response,
             patch.object(
                 bot._response_runner,
                 "has_active_response_for_target",
@@ -10556,7 +10593,7 @@ class TestAgentBot:
 
         assert action.kind == "individual"
         assert envelope.source_kind == VOICE_SOURCE_KIND
-        mock_should_respond.assert_called_once()
+        mock_decide_agent_response.assert_called_once()
         mock_has_active_response.assert_not_called()
 
     @pytest.mark.asyncio
@@ -10799,7 +10836,10 @@ class TestAgentBot:
                 "mindroom.turn_policy.decide_team_formation",
                 new=AsyncMock(side_effect=AssertionError("team formation should be skipped")),
             ) as mock_decide_team_formation,
-            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch(
+                "mindroom.turn_policy.decide_agent_response",
+                return_value=AgentResponseDecision(False),
+            ) as mock_decide_agent_response,
         ):
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
@@ -10811,7 +10851,7 @@ class TestAgentBot:
 
         assert action.kind == "skip"
         mock_decide_team_formation.assert_not_awaited()
-        mock_should_respond.assert_called_once()
+        mock_decide_agent_response.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_continues_single_agent_thread_when_policy_history_partial(
@@ -10932,7 +10972,10 @@ class TestAgentBot:
             requires_model_history_refresh=True,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
@@ -10942,7 +10985,7 @@ class TestAgentBot:
             )
 
         assert action.kind == "skip"
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_allows_sole_responder_when_policy_history_degraded(
@@ -10997,7 +11040,10 @@ class TestAgentBot:
             has_non_agent_mentions=False,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+        with patch(
+            "mindroom.turn_policy.decide_agent_response",
+            return_value=AgentResponseDecision(True),
+        ) as mock_decide_agent_response:
             action = await bot._turn_policy.resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
@@ -11007,7 +11053,7 @@ class TestAgentBot:
             )
 
         assert action.kind == "individual"
-        mock_should_respond.assert_not_called()
+        mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_skips_unmentioned_thread_when_policy_history_degraded(
@@ -12771,7 +12817,7 @@ class TestAgentBot:
                 new_callable=AsyncMock,
                 return_value=TeamResolution.none(),
             ),
-            patch("mindroom.turn_policy.should_agent_respond", return_value=True),
+            patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
             patch.object(bot._turn_controller, "_log_dispatch_latency"),
         ):

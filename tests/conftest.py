@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -38,10 +38,12 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
+from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
@@ -55,6 +57,7 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "agent_response_should_respond",
     "aioresponse",
     "bind_mock_config_cache",
     "bind_runtime_paths",
@@ -123,6 +126,38 @@ def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation
             thread_id=dispatch.target.resolved_thread_id,
         ),
     )
+
+
+def agent_response_should_respond(
+    agent_name: str,
+    am_i_mentioned: bool,
+    is_thread: bool,
+    room: nio.MatrixRoom,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    mentioned_agents: list[MatrixID] | None = None,
+    has_non_agent_mentions: bool = False,
+    *,
+    sender_id: str,
+    available_responders_in_room: list[MatrixID] | None = None,
+    agents_in_thread: Sequence[MatrixID] | None = None,
+) -> bool:
+    """Return the boolean projection of the agent response decision for tests."""
+    return decide_agent_response(
+        agent_name,
+        am_i_mentioned,
+        is_thread,
+        room,
+        thread_history,
+        config,
+        runtime_paths,
+        mentioned_agents,
+        has_non_agent_mentions,
+        sender_id=sender_id,
+        available_responders_in_room=available_responders_in_room,
+        agents_in_thread=agents_in_thread,
+    ).should_respond
 
 
 def message_origin(

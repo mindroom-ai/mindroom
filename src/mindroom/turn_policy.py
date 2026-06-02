@@ -41,11 +41,12 @@ from mindroom.teams import (
     resolve_configured_team,
 )
 from mindroom.thread_utils import (
+    AgentResponseDecision,
+    decide_agent_response,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
     is_router_only_agent_mention,
-    should_agent_respond,
     thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import emit_elapsed_timing, timed
@@ -683,7 +684,7 @@ class TurnPolicy:
         if team_action is not None:
             return team_action
 
-        if not should_agent_respond(
+        agent_response_decision = decide_agent_response(
             agent_name=self.deps.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
@@ -695,7 +696,9 @@ class TurnPolicy:
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
             available_responders_in_room=available_responders_in_room,
-        ):
+            agents_in_thread=agents_in_thread,
+        )
+        if not agent_response_decision.should_respond:
             if agent_is_responder_candidate and self._should_queue_follow_up_in_active_response_thread(
                 context=context,
                 target=dispatch.target,
@@ -703,9 +706,34 @@ class TurnPolicy:
                 has_active_response_for_target=has_active_response_for_target,
             ):
                 return ResponseAction(kind="individual")
+            if agent_is_responder_candidate:
+                self._log_multi_agent_thread_skip(
+                    context,
+                    agent_response_decision,
+                )
             return ResponseAction(kind="skip")
 
         return ResponseAction(kind="individual")
+
+    def _log_multi_agent_thread_skip(
+        self,
+        context: MessageContext,
+        agent_response_decision: AgentResponseDecision,
+    ) -> None:
+        """Log the multi-agent thread branch selected by individual response policy."""
+        if agent_response_decision.skip_reason != "multiple_agents_in_thread":
+            return
+
+        agents_in_thread = agent_response_decision.sender_visible_thread_agents
+        if len(agents_in_thread) < 2:
+            return
+
+        self.deps.logger.info(
+            "Skipping response: multiple agents in thread require explicit mention",
+            agent_name=self.deps.agent_name,
+            thread_id=context.thread_id,
+            agents_in_thread=[agent.full_id for agent in agents_in_thread],
+        )
 
     def _should_queue_follow_up_in_active_response_thread(
         self,

@@ -40,7 +40,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
-from mindroom.thread_utils import get_agents_in_thread
+from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -1353,8 +1353,13 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     caller_label="schedule_existing_thread",
                 ),
             )
-            thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
-            available_responders = [agent for agent in thread_agents if agent in sender_visible_room_responders]
+            available_responders = filter_thread_agents_for_sender(
+                get_agents_in_thread(thread_history, config, runtime_paths),
+                scheduled_by,
+                config,
+                runtime_paths,
+                available_responders_in_room=sender_visible_room_responders,
+            )
 
         if mentioned_agents:
             for mid in mentioned_agents:

@@ -16,9 +16,9 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
     TEST_PASSWORD,
+    agent_response_should_respond,
     bind_runtime_paths,
     drain_coalescing,
     install_generate_response_mock,
@@ -62,7 +62,7 @@ class TestDMResponseLogic:
         room.users = {agent_matrix_id: None}
 
         # In DM mode, agent should respond when no one else has
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,  # Not mentioned
             is_thread=False,
@@ -93,7 +93,7 @@ class TestDMResponseLogic:
         room.users = {agent_matrix_id: None}
 
         # When mentioned, always respond
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=True,  # Mentioned
             is_thread=False,
@@ -126,7 +126,7 @@ class TestDMResponseLogic:
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # Another agent is mentioned, not this one
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -162,7 +162,7 @@ class TestDMResponseLogic:
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
-        should_respond_test = should_agent_respond(
+        should_respond_test = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -174,7 +174,7 @@ class TestDMResponseLogic:
             sender_id="@user:localhost",
         )
 
-        should_respond_other = should_agent_respond(
+        should_respond_other = agent_response_should_respond(
             agent_name="other_agent",
             am_i_mentioned=False,
             is_thread=False,

@@ -24,12 +24,13 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.thread_utils import should_agent_respond
+from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
+    agent_response_should_respond,
     bind_runtime_paths,
     create_mock_room,
     dispatch_context_result,
@@ -922,8 +923,8 @@ class TestCommandHandling:
             return_value=dispatch_context_result(mock_context),
         )
 
-        # Mock should_agent_respond to return True
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True):
+        # Mock decide_agent_response to return a positive decision
+        with patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)):
             # Create a room and event with a regular message
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             event = nio.RoomMessageText.from_dict(
@@ -1035,11 +1036,11 @@ class TestCommandHandling:
         ]
 
         # NOTE: In reality, when router sends an error without mentions,
-        # bot.py returns early and never calls should_agent_respond.
+        # bot.py returns early and never reaches individual response policy.
         # But we test what WOULD happen if it were called:
 
         # Test with single agent (finance only, router excluded from available_agents)
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
@@ -1054,7 +1055,7 @@ class TestCommandHandling:
         assert should_respond, "Single agent takes ownership after router error"
 
         # Test with multiple agents - nobody responds
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
