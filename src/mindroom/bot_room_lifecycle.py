@@ -182,17 +182,7 @@ class BotRoomLifecycle:
             if root_space_id is not None:
                 configured_rooms.add(root_space_id)
 
-        rooms_to_leave = current_rooms - configured_rooms
-        if self.should_persist_invited_rooms() and rooms_to_leave:
-            self.invited_rooms.update(rooms_to_leave)
-            self.save_invited_rooms()
-            self._logger().info(
-                "backfilled_joined_invited_rooms",
-                room_count=len(rooms_to_leave),
-            )
-            return []
-
-        return list(rooms_to_leave)
+        return list(current_rooms - configured_rooms)
 
     async def send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
         """Send the router welcome message only when the room has no other history."""
