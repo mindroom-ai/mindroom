@@ -143,12 +143,16 @@ def test_config_rejects_invalid_lazy_flag_locations(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
         _validated_config(tmp_path, raw)
 
+
+@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "self_config"])
+def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
+    """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
     raw = _base_config_data()
-    raw["agents"]["code"]["tools"] = [{"dynamic_tools": {"defer": True}}]  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [{tool_name: {"defer": True}}]  # type: ignore[index]
     with pytest.raises(
         ValueError,
         match=(
-            r"agents\.code\.tools: 'dynamic_tools' is a control-plane tool and cannot be deferred; "
+            rf"agents\.code\.tools: '{tool_name}' is a control-plane tool and cannot be deferred; "
             r"defer/initial are only valid on runtime tools\."
         ),
     ):
@@ -491,78 +495,6 @@ def test_runtime_selection_hides_unloaded_deferred_tools(tmp_path: Path) -> None
 
     assert unloaded_names == ["sleep", "dynamic_tools"]
     assert loaded_names == ["sleep", "shell", "dynamic_tools"]
-
-
-def test_deferred_delegate_schema_is_absent_until_loaded(tmp_path: Path) -> None:
-    """Special delegate injection should respect authored deferred ownership."""
-    raw = _base_config_data()
-    raw["agents"]["code"].update(  # type: ignore[union-attr]
-        {
-            "delegate_to": ["worker"],
-            "tools": [{"delegate": {"defer": True}}],
-        },
-    )
-    raw["agents"]["worker"] = {
-        "display_name": "Worker",
-        "role": "Handle delegated tasks",
-    }
-    config = _validated_config(tmp_path, raw)
-
-    unloaded_names = [
-        entry.name
-        for entry in _runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_tools=[],
-            enable_dynamic_tools_manager=False,
-        )
-    ]
-    loaded_names = [
-        entry.name
-        for entry in _runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_tools=["delegate"],
-            enable_dynamic_tools_manager=False,
-        )
-    ]
-
-    assert "delegate" not in unloaded_names
-    assert "delegate" in loaded_names
-
-
-def test_deferred_self_config_schema_is_absent_until_loaded(tmp_path: Path) -> None:
-    """Special self_config injection should respect authored deferred ownership."""
-    raw = _base_config_data()
-    raw["agents"]["code"].update(  # type: ignore[union-attr]
-        {
-            "allow_self_config": True,
-            "tools": [{"self_config": {"defer": True}}],
-        },
-    )
-    config = _validated_config(tmp_path, raw)
-
-    unloaded_names = [
-        entry.name
-        for entry in _runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_tools=[],
-            enable_dynamic_tools_manager=False,
-        )
-    ]
-    loaded_names = [
-        entry.name
-        for entry in _runtime_tool_configs(
-            agent_name="code",
-            config=config,
-            loaded_tools=["self_config"],
-            enable_dynamic_tools_manager=False,
-        )
-    ]
-
-    assert "self_config" not in unloaded_names
-    assert "self_config" in loaded_names
 
 
 def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initial(tmp_path: Path) -> None:
