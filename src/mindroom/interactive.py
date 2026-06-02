@@ -166,7 +166,7 @@ def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
         if not isinstance(raw_options, dict):
             msg = "Interactive question options must be an object"
             raise TypeError(msg)
-        raw_option_labels = question_data.get("option_labels", {})
+        raw_option_labels = question_data.get("option_labels") or {}
         if not isinstance(raw_option_labels, dict):
             msg = "Interactive question option labels must be an object"
             raise TypeError(msg)
@@ -180,7 +180,7 @@ def _load_active_questions(payload: object) -> dict[str, _InteractiveQuestion]:
             thread_id=None if raw_thread_id is None else str(raw_thread_id),
             options={str(key): str(value) for key, value in cast("dict[object, object]", raw_options).items()},
             creator_agent=str(question_data["creator_agent"]),
-            question_text=str(question_data.get("question_text", "")),
+            question_text=str(question_data.get("question_text") or ""),
             option_labels={
                 str(key): str(value) for key, value in cast("dict[object, object]", raw_option_labels).items()
             },
@@ -669,7 +669,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         return _InteractiveResponse(response_text)
 
     interactive_payload = cast("dict[str, object]", interactive_data)
-    question = str(interactive_payload.get("question", _DEFAULT_QUESTION))
+    question = str(interactive_payload.get("question") or _DEFAULT_QUESTION)
     options = cast("list[dict[str, str]]", interactive_payload.get("options", []))
 
     if not options:

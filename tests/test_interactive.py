@@ -176,6 +176,23 @@ class TestInteractiveFunctions:
         assert response.interactive_metadata.question_text == "Which option?"
         assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
 
+    def test_parse_and_format_interactive_defaults_null_question_text(self) -> None:
+        """Explicit JSON null question text should use the default prompt."""
+        response_text = """```interactive
+{
+    "question": null,
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.question_text == interactive._DEFAULT_QUESTION
+        assert interactive._DEFAULT_QUESTION in response.formatted_text
+
     def test_parse_and_format_interactive_logs_warning_when_block_does_not_match(self) -> None:
         """Malformed interactive-looking blocks should log a warning."""
         response_text = 'Malformed block: ```interactive {"question": "test"}```'
@@ -351,6 +368,26 @@ Based on your choice, I'll proceed accordingly."""
                 },
             },
         ]
+
+    def test_load_active_questions_defaults_null_context_fields(self) -> None:
+        """Persisted explicit null context fields should load as absent metadata."""
+        payload = {
+            "$question": {
+                "room_id": "!room:localhost",
+                "thread_id": "$thread",
+                "options": {"1": "approve"},
+                "creator_agent": "test_agent",
+                "question_text": None,
+                "option_labels": None,
+                "created_at": time.time(),
+            },
+        }
+
+        questions = interactive._load_active_questions(payload)
+
+        question = questions["$question"]
+        assert question.question_text == ""
+        assert question.option_labels == {}
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:  # noqa: ARG002
