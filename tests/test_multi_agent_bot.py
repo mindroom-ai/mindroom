@@ -4556,7 +4556,9 @@ class TestAgentBot:
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         selection = interactive.InteractiveSelection(
             question_event_id="$question",
+            question_text="Choose one",
             selection_key="1",
+            selected_label="Selected",
             selected_value="Selected",
             thread_id="$thread-root",
         )
@@ -4593,7 +4595,9 @@ class TestAgentBot:
         event.key = "✅"
         selection = interactive.InteractiveSelection(
             question_event_id="$question",
+            question_text="Approve?",
             selection_key="✅",
+            selected_label="Approved",
             selected_value="Approved",
             thread_id="$thread-root",
         )
