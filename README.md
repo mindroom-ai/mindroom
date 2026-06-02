@@ -294,6 +294,7 @@ defaults:
 Add the `thread_summary` tool to an agent when you want it to write or refresh the one-line summary shown for a Matrix thread.
 `set_thread_summary` uses the current resolved thread context by default.
 Outside a resolved thread context, pass `thread_id` explicitly.
+Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 
 `compress_tool_results` now defaults to `false`.
 On Anthropic and Vertex Claude models, enabling it can mutate replayed tool messages and invalidate prompt-cache prefixes.

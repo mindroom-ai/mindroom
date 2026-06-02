@@ -312,6 +312,8 @@ defaults:
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
+Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
@@ -451,6 +453,11 @@ rooms:
 # Keys are room aliases, values are model names from the models section.
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
+
+# Room-specific automatic thread summary model overrides (optional)
+# Keys are room aliases or raw Matrix room IDs, values are model names from the models section.
+# Example: room_thread_summary_models: {lobby: haiku}
+room_thread_summary_models: {}
 
 # Non-MindRoom bot accounts to exclude from multi-human detection (optional)
 # These accounts won't trigger the mention requirement in threads

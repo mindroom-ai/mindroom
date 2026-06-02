@@ -273,6 +273,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 
