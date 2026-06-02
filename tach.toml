@@ -931,6 +931,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
@@ -1189,6 +1190,7 @@ path = "mindroom.mcp.manager"
 depends_on = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
 ]
 
 [[modules]]
@@ -1684,6 +1686,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.scheduling",
     "mindroom.teams",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_approval",
@@ -3133,13 +3136,15 @@ from = ["mindroom.tool_system.skills"]
 
 [[interfaces]]
 expose = [
-    "DynamicToolkitConflictError",
-    "DynamicToolkitSelection",
-    "get_loaded_toolkits_for_session",
-    "merge_runtime_tool_configs",
-    "resolve_dynamic_toolkit_selection",
-    "resolve_special_tool_names",
-    "save_loaded_toolkits_for_session",
+    "VisibleToolSurface",
+    "deferred_tool_catalog_entries",
+    "get_loaded_tools_for_session",
+    "has_deferred_tools",
+    "load_tool_for_session",
+    "resolve_dynamic_tool_selection",
+    "save_loaded_tools_for_session",
+    "unload_tool_for_session",
+    "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]
 

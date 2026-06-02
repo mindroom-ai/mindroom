@@ -36,9 +36,11 @@ from mindroom.timing import timed
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
 from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import (
-    DynamicToolkitSelection,
-    resolve_dynamic_toolkit_selection,
-    resolve_special_tool_names,
+    VisibleToolSurface,
+    deferred_tool_catalog_entries,
+    has_deferred_tools,
+    resolve_dynamic_tool_selection,
+    visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
@@ -643,9 +645,9 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     if tool_name == "dynamic_tools":
         from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
 
-        if not agent_config.allowed_toolkits:
+        if not has_deferred_tools(config, agent_name):
             logger.warning(
-                "Skipping 'dynamic_tools' tool for agent '%s': allowed_toolkits is empty",
+                "Skipping 'dynamic_tools' tool for agent '%s': no deferred tools are configured",
                 agent_name,
             )
             return None
@@ -690,18 +692,17 @@ def get_agent_toolkit_names(
     *,
     delegation_depth: int = 0,
 ) -> list[str]:
-    """Return the complete ordered toolkit list for an agent runtime."""
-    tool_names = list(config.get_agent_tools(agent_name))
-    for tool_name in resolve_special_tool_names(
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=True,
-    ):
-        if tool_name not in tool_names:
-            tool_names.append(tool_name)
-
-    return tool_names
+    """Return the provider-visible toolkit list for a new agent runtime."""
+    return [
+        entry.name
+        for entry in visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            loaded_tools=[],
+            delegation_depth=delegation_depth,
+            enable_dynamic_tools_manager=True,
+        ).runtime_tool_configs
+    ]
 
 
 def _resolve_runtime_worker_tools(
@@ -753,30 +754,47 @@ def _build_dynamic_tooling_instruction_block(
     config: Config,
     agent_name: str,
     *,
-    loaded_toolkits: tuple[str, ...],
     enable_dynamic_tools_manager: bool,
 ) -> str | None:
-    """Return compact prompt guidance for dynamic toolkit loading."""
-    agent_config = config.get_agent(agent_name)
-    if not enable_dynamic_tools_manager or not agent_config.allowed_toolkits:
+    """Return static prompt guidance for per-tool dynamic loading."""
+    if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
         return None
 
-    toolkit_lines: list[str] = []
-    for toolkit_name in agent_config.allowed_toolkits:
-        description = config.get_toolkit(toolkit_name).description.strip()
+    catalog_lines: list[str] = []
+    for entry in deferred_tool_catalog_entries(agent_name=agent_name, config=config, loaded_tools=[]):
+        description = entry.description.strip()
         if description:
-            toolkit_lines.append(f"- {toolkit_name}: {description}")
+            catalog_lines.append(f"{entry.name} - {description}")
         else:
-            toolkit_lines.append(f"- {toolkit_name}")
+            catalog_lines.append(entry.name)
 
-    current_toolkits = ", ".join(loaded_toolkits) if loaded_toolkits else "(none)"
-    sticky_toolkits = ", ".join(agent_config.initial_toolkits) if agent_config.initial_toolkits else "(none)"
-    toolkit_catalog = "\n".join(toolkit_lines)
     return config.render_prompt(
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
-        toolkit_catalog=toolkit_catalog,
-        current_toolkits=current_toolkits,
-        sticky_toolkits=sticky_toolkits,
+        tool_catalog="\n".join(catalog_lines),
+    )
+
+
+def _build_dynamic_tooling_state_suffix(
+    config: Config,
+    agent_name: str,
+    *,
+    loaded_tools: tuple[str, ...],
+    enable_dynamic_tools_manager: bool,
+) -> str | None:
+    """Return the small volatile dynamic-tool state suffix for the final instruction slot."""
+    if not enable_dynamic_tools_manager or not has_deferred_tools(config, agent_name):
+        return None
+
+    initial_tools = [
+        entry.name for entry in config.get_agent_authored_deferred_tool_configs(agent_name) if entry.initial
+    ]
+    current_tools = ", ".join(loaded_tools) if loaded_tools else "(none)"
+    sticky_tools = ", ".join(initial_tools) if initial_tools else "(none)"
+    return "\n".join(
+        (
+            "Dynamic tools currently loaded for this session: " + current_tools,
+            "Sticky initial dynamic tools that cannot be unloaded: " + sticky_tools,
+        ),
     )
 
 
@@ -968,8 +986,8 @@ def _resolve_agent_dynamic_tool_selection(
     config: Config,
     session_id: str | None,
     delegation_depth: int,
-) -> DynamicToolkitSelection:
-    return resolve_dynamic_toolkit_selection(
+) -> VisibleToolSurface:
+    return resolve_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
         session_id=session_id,
@@ -1077,7 +1095,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
         session_id: Stable Agno session id used to resolve session-scoped
-            dynamic toolkit state.
+            dynamic tool state.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
@@ -1138,9 +1156,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             session_table=f"{agent_name}_sessions",
         )
     )
-    # Dynamic toolkit state remains per-agent in V1 because each agent keeps its
-    # own session DB. Team members may share one conversation session_id, but
-    # toolkit loads do not cross agent boundaries yet.
+    # Dynamic tool state is keyed by agent and session scope, so team members
+    # sharing one Matrix thread do not leak loaded tools across agents.
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
@@ -1264,7 +1281,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
         config,
         agent_name,
-        loaded_toolkits=dynamic_tool_selection.loaded_toolkits,
         enable_dynamic_tools_manager=session_id is not None,
     )
     if dynamic_tooling_block is not None:
@@ -1283,6 +1299,15 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
+
+    dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
+        config,
+        agent_name,
+        loaded_tools=dynamic_tool_selection.loaded_tools,
+        enable_dynamic_tools_manager=session_id is not None,
+    )
+    if dynamic_tooling_state_suffix is not None:
+        instructions.append(dynamic_tooling_state_suffix)
 
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
@@ -1389,7 +1414,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent=agent_name,
         display_name=agent_config.display_name,
         tool_count=len(tools),
-        loaded_dynamic_toolkits=list(dynamic_tool_selection.loaded_toolkits),
+        loaded_dynamic_tools=list(dynamic_tool_selection.loaded_tools),
     )
 
     return agent

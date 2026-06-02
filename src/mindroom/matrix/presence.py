@@ -88,7 +88,7 @@ def build_agent_status_message(
         if agent_config.role:
             status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
         # Add tool count
-        effective_tools = config.get_agent_tools(agent_name)
+        effective_tools = config.get_agent_available_tools(agent_name)
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
 

@@ -51,6 +51,7 @@ See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and nami
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 

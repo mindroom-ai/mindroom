@@ -17,7 +17,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="dynamic_tools",
         display_name="Dynamic Tools",
-        description="Load and unload allowed toolkits for the current session",
+        description="Load and unload deferred tools for the current session",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

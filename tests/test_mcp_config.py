@@ -192,8 +192,8 @@ def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> 
     assert "mcp_demo" in config.get_agent_tools("code")
 
 
-def test_config_tracks_mcp_toolkit_dependencies_for_agents_and_teams(tmp_path: Path) -> None:
-    """Treat toolkit-contained MCP tools as dependencies for restart planning."""
+def test_config_tracks_initial_deferred_mcp_dependencies_for_agents_and_teams(tmp_path: Path) -> None:
+    """Treat initial deferred MCP tools as dependencies for restart planning."""
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {
@@ -202,17 +202,11 @@ def test_config_tracks_mcp_toolkit_dependencies_for_agents_and_teams(tmp_path: P
                     "command": "npx",
                 },
             },
-            "toolkits": {
-                "browser": {
-                    "tools": ["mcp_demo"],
-                },
-            },
             "agents": {
                 "code": {
                     "display_name": "Code",
                     "role": "Write code",
-                    "allowed_toolkits": ["browser"],
-                    "initial_toolkits": ["browser"],
+                    "tools": [{"mcp_demo": {"defer": True, "initial": True}}],
                 },
                 "plain": {
                     "display_name": "Plain",
@@ -233,8 +227,8 @@ def test_config_tracks_mcp_toolkit_dependencies_for_agents_and_teams(tmp_path: P
     assert config.get_entities_referencing_tools({"mcp_demo"}) == {"code", "dev_team"}
 
 
-def test_config_does_not_treat_allowed_only_mcp_toolkits_as_hard_dependencies(tmp_path: Path) -> None:
-    """Allowed-only toolkits should stay optional for restart and startup dependency tracking."""
+def test_config_does_not_treat_deferred_only_mcp_tools_as_hard_dependencies(tmp_path: Path) -> None:
+    """Deferred-only tools should stay optional for restart and startup dependency tracking."""
     config = Config.validate_with_runtime(
         {
             "mcp_servers": {
@@ -243,16 +237,11 @@ def test_config_does_not_treat_allowed_only_mcp_toolkits_as_hard_dependencies(tm
                     "command": "npx",
                 },
             },
-            "toolkits": {
-                "browser": {
-                    "tools": ["mcp_demo"],
-                },
-            },
             "agents": {
                 "code": {
                     "display_name": "Code",
                     "role": "Write code",
-                    "allowed_toolkits": ["browser"],
+                    "tools": [{"mcp_demo": {"defer": True}}],
                 },
             },
             "teams": {

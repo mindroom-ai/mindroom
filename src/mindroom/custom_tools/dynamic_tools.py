@@ -1,25 +1,37 @@
-"""Session-scoped dynamic toolkit management tools."""
+"""Session-scoped dynamic tool management tools."""
 
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.tool_system.dynamic_toolkits import (
-    DynamicToolkitConflictError,
-    get_loaded_toolkits_for_session,
-    merge_runtime_tool_configs,
-    save_loaded_toolkits_for_session,
+    LoadToolResult,
+    LoadToolValidationFailure,
+    deferred_tool_catalog_entries,
+    get_loaded_tools_for_session,
+    load_tool_for_session,
+    unload_tool_for_session,
 )
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.tool_system.dynamic_toolkits import DeferredToolCatalogEntry
+
+
+_WORD_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _tokens(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower()))
 
 
 class DynamicToolsToolkit(Toolkit):
-    """Manage which configured toolkits are loaded for the active session."""
+    """Manage which configured deferred tools are loaded for the active session."""
 
     def __init__(
         self,
@@ -34,7 +46,7 @@ class DynamicToolsToolkit(Toolkit):
         super().__init__(
             name="dynamic_tools",
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
-            tools=[self.list_toolkits, self.load_tools, self.unload_tools],
+            tools=[self.list_tools, self.load_tool, self.unload_tool, self.tool_search],
         )
 
     @staticmethod
@@ -43,202 +55,246 @@ class DynamicToolsToolkit(Toolkit):
         payload.update(kwargs)
         return json.dumps(payload, sort_keys=True)
 
-    def _loaded_toolkits(self) -> list[str]:
-        return get_loaded_toolkits_for_session(
+    def _loaded_tools(self) -> list[str]:
+        return get_loaded_tools_for_session(
             agent_name=self._agent_name,
             config=self._config,
             session_id=self._session_id,
         )
 
-    def _allowed_toolkits(self) -> list[str]:
-        return list(self._config.get_agent(self._agent_name).allowed_toolkits)
-
-    def _initial_toolkits(self) -> set[str]:
-        return set(self._config.get_agent(self._agent_name).initial_toolkits)
-
-    def _scope_incompatible_tools(self, toolkit_name: str) -> list[str]:
-        return self._config.get_toolkit_scope_incompatible_tools(self._agent_name, toolkit_name)
-
-    def _toolkit_entry(self, toolkit_name: str, *, loaded_toolkits: set[str]) -> dict[str, object]:
-        toolkit = self._config.get_toolkit(toolkit_name)
-        return {
-            "name": toolkit_name,
-            "description": toolkit.description,
-            "tool_names": [entry.name for entry in self._config.get_toolkit_tool_configs(toolkit_name)],
-            "loaded": toolkit_name in loaded_toolkits,
-            "sticky": toolkit_name in self._initial_toolkits(),
-        }
-
-    def _session_error(self, *, toolkit: str | None = None, loaded_toolkits: list[str] | None = None) -> str:
-        payload: dict[str, object] = {
-            "message": "Dynamic toolkit changes require a stable session_id.",
-        }
-        if toolkit is not None:
-            payload["toolkit"] = toolkit
-        if loaded_toolkits is not None:
-            payload["loaded_toolkits"] = loaded_toolkits
-        return self._payload("error", **payload)
-
-    def list_toolkits(self) -> str:
-        """List the agent's allowed dynamic toolkits and current loaded state."""
-        loaded_toolkits = self._loaded_toolkits()
-        loaded_set = set(loaded_toolkits)
-        allowed_toolkits = self._allowed_toolkits()
-        return self._payload(
-            "ok",
-            loaded_toolkits=loaded_toolkits,
-            toolkits=[
-                self._toolkit_entry(toolkit_name, loaded_toolkits=loaded_set) for toolkit_name in allowed_toolkits
-            ],
+    def _deferred_entries(self) -> list[DeferredToolCatalogEntry]:
+        return deferred_tool_catalog_entries(
+            agent_name=self._agent_name,
+            config=self._config,
+            loaded_tools=self._loaded_tools(),
         )
 
-    def _load_tools_precheck(self, toolkit: str, loaded_toolkits: list[str], allowed_toolkits: list[str]) -> str | None:
-        """Return an early load_tools response when the request is invalid."""
-        if toolkit not in self._config.toolkits:
-            return self._payload(
-                "unknown",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                message=f"Unknown toolkit '{toolkit}'.",
-                allowed_toolkits=allowed_toolkits,
+    def _deferred_tool_names(self) -> list[str]:
+        return [entry.name for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)]
+
+    def _initial_tools(self) -> set[str]:
+        return {
+            entry.name
+            for entry in self._config.get_agent_authored_deferred_tool_configs(self._agent_name)
+            if entry.initial
+        }
+
+    def _mcp_load_validation_failure(self, loaded_tools: list[str]) -> LoadToolValidationFailure | None:
+        manager = require_mcp_server_manager()
+        if manager is None:
+            return None
+
+        unavailable_messages = manager.mcp_tool_unavailable_messages_for_loaded_tools(self._agent_name, loaded_tools)
+        if unavailable_messages:
+            return LoadToolValidationFailure(
+                status="tool_unavailable",
+                messages=tuple(unavailable_messages),
             )
 
-        if toolkit not in allowed_toolkits:
-            return self._payload(
-                "not_allowed",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                message=f"Toolkit '{toolkit}' is not allowed for agent '{self._agent_name}'.",
-                allowed_toolkits=allowed_toolkits,
+        collision_messages = manager.function_name_collision_messages_for_loaded_tools(self._agent_name, loaded_tools)
+        if collision_messages:
+            return LoadToolValidationFailure(
+                status="function_name_collision",
+                messages=tuple(collision_messages),
             )
-
-        incompatible_tools = self._scope_incompatible_tools(toolkit)
-        if incompatible_tools:
-            scope_label = self._config.get_agent_scope_label(self._agent_name)
-            return self._payload(
-                "scope_incompatible",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                scope_label=scope_label,
-                unsupported_tools=incompatible_tools,
-                message=(
-                    f"Toolkit '{toolkit}' cannot be loaded for agent '{self._agent_name}' because it includes "
-                    f"shared-only integrations not supported for {scope_label}: {', '.join(incompatible_tools)}."
-                ),
-            )
-
-        if toolkit in loaded_toolkits:
-            return self._payload(
-                "already_loaded",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                takes_effect="next_request",
-                message=f"Toolkit '{toolkit}' is already loaded for this session.",
-            )
-
-        if self._session_id is None:
-            return self._session_error(toolkit=toolkit, loaded_toolkits=loaded_toolkits)
-
         return None
 
-    def load_tools(self, toolkit: str) -> str:
-        """Load one allowed toolkit for the current session.
+    @staticmethod
+    def _tool_entry(entry: DeferredToolCatalogEntry) -> dict[str, object]:
+        return {
+            "name": entry.name,
+            "description": entry.description,
+            "loaded": entry.loaded,
+            "sticky": entry.sticky,
+        }
 
-        The requested toolkit becomes available on the next request in the same
-        session, not later in the current model run.
-        """
-        loaded_toolkits = self._loaded_toolkits()
-        allowed_toolkits = self._allowed_toolkits()
-        precheck = self._load_tools_precheck(toolkit, loaded_toolkits, allowed_toolkits)
-        if precheck is not None:
-            return precheck
+    def _session_error(self, *, tool_name: str | None = None, loaded_tools: list[str] | None = None) -> str:
+        payload: dict[str, object] = {
+            "message": "Dynamic tool changes require a stable session_id.",
+        }
+        if tool_name is not None:
+            payload["tool_name"] = tool_name
+        if loaded_tools is not None:
+            payload["loaded_tools"] = loaded_tools
+        return self._payload("error", **payload)
 
-        candidate_loaded_toolkits = [*loaded_toolkits, toolkit]
-        try:
-            merge_runtime_tool_configs(
-                agent_name=self._agent_name,
-                config=self._config,
-                loaded_toolkits=candidate_loaded_toolkits,
+    def _load_tool_response(self, tool_name: str, result: LoadToolResult) -> str:
+        loaded_tools = list(result.loaded_tools)
+        if result.status == "unknown":
+            response = self._payload(
+                "unknown",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                message=f"Unknown deferred tool '{tool_name}'.",
+                available_tools=list(result.available_tools),
             )
-        except DynamicToolkitConflictError as exc:
-            return self._payload(
-                "conflict",
-                toolkit=toolkit,
-                conflicting_tool=exc.tool_name,
-                loaded_toolkits=loaded_toolkits,
-                message=str(exc),
-                existing_overrides=exc.existing_overrides,
-                candidate_overrides=exc.candidate_overrides,
+        elif result.status == "scope_incompatible":
+            scope_label = self._config.get_agent_scope_label(self._agent_name)
+            unsupported_tools = list(result.unsupported_tools)
+            response = self._payload(
+                "scope_incompatible",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                scope_label=scope_label,
+                unsupported_tools=unsupported_tools,
+                message=(
+                    f"Tool '{tool_name}' cannot be loaded for agent '{self._agent_name}' because its expanded "
+                    f"tool set includes shared-only integrations not supported for {scope_label}: "
+                    f"{', '.join(unsupported_tools)}."
+                ),
             )
+        elif result.status == "already_loaded":
+            response = self._payload(
+                "already_loaded",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                takes_effect="next_request",
+                message=f"Tool '{tool_name}' is already loaded for this session.",
+            )
+        elif result.status == "error":
+            response = self._session_error(tool_name=tool_name, loaded_tools=loaded_tools)
+        elif result.status == "function_name_collision":
+            response = self._payload(
+                "function_name_collision",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                collision_messages=list(result.collision_messages),
+                message=(
+                    f"Tool '{tool_name}' cannot be loaded because its provider-visible function names "
+                    "collide with an MCP server visible to this agent."
+                ),
+            )
+        elif result.status == "tool_unavailable":
+            response = self._payload(
+                "tool_unavailable",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                unavailable_messages=list(result.unavailable_messages),
+                message=f"Tool '{tool_name}' cannot be loaded because its MCP server is unavailable.",
+            )
+        else:
+            response = self._payload(
+                "loaded",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                takes_effect="next_request",
+                message=f"Tool '{tool_name}' will be available on the next request in this session.",
+            )
+        return response
 
-        save_loaded_toolkits_for_session(
-            session_id=self._session_id,
-            loaded_toolkits=candidate_loaded_toolkits,
-        )
-        saved_loaded_toolkits = self._loaded_toolkits()
+    def list_tools(self) -> str:
+        """List deferred tools for this agent and the current loaded state."""
+        loaded_tools = self._loaded_tools()
         return self._payload(
-            "loaded",
-            toolkit=toolkit,
-            loaded_toolkits=saved_loaded_toolkits,
-            takes_effect="next_request",
-            message=f"Toolkit '{toolkit}' will be available on the next request in this session.",
+            "ok",
+            loaded_tools=loaded_tools,
+            total_deferred=len(self._deferred_entries()),
+            tools=[self._tool_entry(entry) for entry in self._deferred_entries()],
         )
 
-    def unload_tools(self, toolkit: str) -> str:
-        """Unload one toolkit from the current session.
+    def load_tool(self, tool_name: str) -> str:
+        """Load one deferred tool for the current session.
 
-        The toolkit stops being available on the next request in the same
+        The requested tool becomes available on the next request in the same
         session, not later in the current model run.
         """
-        loaded_toolkits = self._loaded_toolkits()
-        allowed_toolkits = self._allowed_toolkits()
-        if toolkit not in self._config.toolkits:
+        result = load_tool_for_session(
+            agent_name=self._agent_name,
+            config=self._config,
+            session_id=self._session_id,
+            tool_name=tool_name,
+            validate_loaded_tools=self._mcp_load_validation_failure,
+        )
+        return self._load_tool_response(tool_name, result)
+
+    def unload_tool(self, tool_name: str) -> str:
+        """Unload one deferred tool from the current session.
+
+        The tool stops being available on the next request in the same session,
+        not later in the current model run.
+        """
+        loaded_tools = self._loaded_tools()
+        deferred_tools = self._deferred_tool_names()
+        if tool_name not in deferred_tools:
             return self._payload(
                 "unknown",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                message=f"Unknown toolkit '{toolkit}'.",
-                allowed_toolkits=allowed_toolkits,
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                message=f"Unknown deferred tool '{tool_name}'.",
+                available_tools=deferred_tools,
             )
 
-        if toolkit not in allowed_toolkits:
-            return self._payload(
-                "not_allowed",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                message=f"Toolkit '{toolkit}' is not allowed for agent '{self._agent_name}'.",
-                allowed_toolkits=allowed_toolkits,
-            )
-
-        if toolkit in self._initial_toolkits():
+        if tool_name in self._initial_tools():
             return self._payload(
                 "sticky",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
-                message=f"Toolkit '{toolkit}' is sticky because it is configured in initial_toolkits.",
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
+                message=f"Tool '{tool_name}' is sticky because it is configured with initial=true.",
             )
 
-        if toolkit not in loaded_toolkits:
+        if tool_name not in loaded_tools:
             return self._payload(
                 "not_loaded",
-                toolkit=toolkit,
-                loaded_toolkits=loaded_toolkits,
+                tool_name=tool_name,
+                loaded_tools=loaded_tools,
                 takes_effect="next_request",
-                message=f"Toolkit '{toolkit}' is not currently loaded for this session.",
+                message=f"Tool '{tool_name}' is not currently loaded for this session.",
             )
 
         if self._session_id is None:
-            return self._session_error(toolkit=toolkit, loaded_toolkits=loaded_toolkits)
+            return self._session_error(tool_name=tool_name, loaded_tools=loaded_tools)
 
-        save_loaded_toolkits_for_session(
+        saved_loaded_tools = unload_tool_for_session(
+            agent_name=self._agent_name,
+            config=self._config,
             session_id=self._session_id,
-            loaded_toolkits=[name for name in loaded_toolkits if name != toolkit],
+            tool_name=tool_name,
         )
-        saved_loaded_toolkits = self._loaded_toolkits()
         return self._payload(
             "unloaded",
-            toolkit=toolkit,
-            loaded_toolkits=saved_loaded_toolkits,
+            tool_name=tool_name,
+            loaded_tools=saved_loaded_tools,
             takes_effect="next_request",
-            message=f"Toolkit '{toolkit}' will be removed on the next request in this session.",
+            message=f"Tool '{tool_name}' will be removed on the next request in this session.",
+        )
+
+    @staticmethod
+    def _search_score(entry: DeferredToolCatalogEntry, query_tokens: set[str], raw_query: str) -> int:
+        if not query_tokens:
+            return 0
+        name = entry.name.lower()
+        score = 0
+        if raw_query == name:
+            score = 100
+        elif query_tokens & _tokens(name):
+            score = 80
+        else:
+            display_function_tokens = _tokens(entry.display_name)
+            for function_name in entry.function_names:
+                display_function_tokens.update(_tokens(function_name))
+            if query_tokens & display_function_tokens:
+                score = 60
+            elif query_tokens & _tokens(entry.description):
+                score = 40
+            elif query_tokens & _tokens(entry.category):
+                score = 20
+        return score
+
+    def tool_search(self, query: str, max_results: int = 5) -> str:
+        """Search deferred tools by exact name and plain keywords without loading schemas."""
+        raw_query = query.strip().lower()
+        query_tokens = _tokens(raw_query)
+        max_count = max(1, min(max_results, 20))
+        scored_entries = [
+            (self._search_score(entry, query_tokens, raw_query), index, entry)
+            for index, entry in enumerate(self._deferred_entries())
+        ]
+        matches = [
+            entry for score, _index, entry in sorted(scored_entries, key=lambda item: (-item[0], item[1])) if score > 0
+        ][:max_count]
+        return self._payload(
+            "ok",
+            matches=[self._tool_entry(entry) for entry in matches],
+            loaded_tools=self._loaded_tools(),
+            total_deferred=len(self._deferred_entries()),
         )

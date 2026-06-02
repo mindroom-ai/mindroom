@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, ClassVar, Self
+from unittest.mock import patch
 
 import mcp.types as mcp_types
 import pytest
+from agno.models.openai import OpenAIChat
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
+from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
+from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -42,7 +50,7 @@ class _ConfigStub:
     def get_agent_tools(self, _agent_name: str) -> list[str]:
         return []
 
-    def get_toolkit_tool_configs(self, _toolkit_name: str) -> list[object]:
+    def get_agent_available_tools(self, _agent_name: str) -> list[str]:
         return []
 
 
@@ -834,6 +842,7 @@ async def test_mcp_manager_marks_cross_server_function_name_collisions_as_failed
     manager = MCPServerManager(runtime_paths)
     config = Config.validate_with_runtime(
         {
+            "defaults": {"tools": []},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -1004,6 +1013,221 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
     assert isinstance(error, MCPProtocolError)
     assert "run_shell_command" in str(error)
     assert "existing MindRoom tool function" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Deferred-unloaded local tools should not collide with MCP functions until load time."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "run",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", {"shell": {"defer": True}}],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == {"demo"}
+    assert manager.failed_server_ids() == set()
+    assert manager.function_name_collision_messages_for_loaded_tools("code", ["shell"]) == [
+        "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
+    ]
+
+    bind_mcp_server_manager(manager)
+    try:
+        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+        payload = json.loads(dynamic_manager.load_tool("shell"))
+    finally:
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "function_name_collision"
+    assert payload["collision_messages"] == [
+        "MCP function name 'run_shell_command' collides with an existing MindRoom tool function",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_uses_deferred_tool_overrides_for_load_time_collision_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Deferred local tool overrides should shape the load-time function collision surface."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command")]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "run",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["mcp_demo", {"shell": {"defer": True, "enable_run_shell_command": False}}],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == {"demo"}
+    assert manager.failed_server_ids() == set()
+    assert manager.function_name_collision_messages_for_loaded_tools("code", ["shell"]) == []
+
+    bind_mcp_server_manager(manager)
+    try:
+        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+        payload = json.loads(dynamic_manager.load_tool("shell"))
+    finally:
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "loaded"
+    assert payload["loaded_tools"] == ["shell"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_uses_deferred_mcp_filters_for_load_time_collision_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Deferred MCP filters should shape the load-time remote function collision surface."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("shell_command"), _tool("safe")]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "run",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["shell", {"mcp_demo": {"defer": True, "include_tools": ["safe"]}}],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == {"demo"}
+    assert manager.failed_server_ids() == set()
+    assert manager.function_name_collision_messages_for_loaded_tools("code", ["mcp_demo"]) == []
+
+    bind_mcp_server_manager(manager)
+    try:
+        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+        payload = json.loads(dynamic_manager.load_tool("mcp_demo"))
+    finally:
+        bind_mcp_server_manager(None)
+
+    assert payload["status"] == "loaded"
+    assert payload["loaded_tools"] == ["mcp_demo"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_load_rejects_failed_deferred_non_oauth_mcp_server_before_agent_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Failed deferred-only non-OAuth MCP servers should not be persisted into the next runtime surface."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("x" * 60)]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-4o-mini",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": [{"mcp_demo": {"defer": True}}],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == set()
+    assert manager.failed_server_ids() == {"demo"}
+
+    bind_mcp_server_manager(manager)
+    try:
+        session_id = "failed-mcp-thread"
+        dynamic_manager = DynamicToolsToolkit(agent_name="code", config=config, session_id=session_id)
+        payload = json.loads(dynamic_manager.load_tool("mcp_demo"))
+
+        assert payload["status"] == "tool_unavailable"
+        assert payload["loaded_tools"] == []
+        assert "MCP server 'demo' is unavailable" in payload["unavailable_messages"][0]
+        assert get_loaded_tools_for_session(agent_name="code", config=config, session_id=session_id) == []
+
+        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
+        with patch("mindroom.model_loading.get_model_instance", return_value=model):
+            agent = create_agent(
+                "code",
+                config,
+                runtime_paths,
+                execution_identity=None,
+                session_id=session_id,
+                include_interactive_questions=False,
+            )
+    finally:
+        bind_mcp_server_manager(None)
+
+    tool_names = [tool.name for tool in agent.tools]
+    assert "mcp_demo" not in tool_names
+    assert "dynamic_tools" in tool_names
 
 
 @pytest.mark.asyncio

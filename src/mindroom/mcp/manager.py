@@ -30,6 +30,7 @@ from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerSta
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url, oauth_credentials_usable
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -37,8 +38,8 @@ if TYPE_CHECKING:
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
 
-    from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
+    from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -734,7 +735,37 @@ class MCPServerManager:
                 server_ids.add(key.server_id)
         return server_ids
 
-    def _server_visible_function_surface(self, server_id: str) -> tuple[set[str], set[str]]:
+    @staticmethod
+    def _normalized_tool_filter(value: object) -> set[str]:
+        """Normalize MCP per-assignment remote tool filters."""
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
+        if isinstance(value, list):
+            return {part.strip() for part in value if isinstance(part, str) and part.strip()}
+        return set()
+
+    def _catalog_function_names_for_tool_config(
+        self,
+        catalog: MCPServerCatalog,
+        tool_config: EffectiveToolConfig,
+    ) -> set[str]:
+        """Return catalog function names after one agent MCP assignment's filters."""
+        include_tools = self._normalized_tool_filter(tool_config.tool_config_overrides.get("include_tools"))
+        exclude_tools = self._normalized_tool_filter(tool_config.tool_config_overrides.get("exclude_tools"))
+        return {
+            tool.function_name
+            for tool in catalog.tools
+            if (not exclude_tools or tool.remote_name not in exclude_tools)
+            and (not include_tools or tool.remote_name in include_tools)
+        }
+
+    def _server_visible_function_surface(
+        self,
+        server_id: str,
+        tool_config: EffectiveToolConfig,
+    ) -> tuple[set[str], set[str]]:
         """Return visible function names and real same-server collisions for one MCP server."""
         state = self._states.get(server_id)
         if state is None or state.last_error is not None:
@@ -744,14 +775,14 @@ class MCPServerManager:
         if state.config.auth is not None:
             base_function_names.update(mcp_oauth_bridge_function_names(server_id, state.config))
         if state.catalog is not None:
-            catalog_function_names = {tool.function_name for tool in state.catalog.tools}
+            catalog_function_names = self._catalog_function_names_for_tool_config(state.catalog, tool_config)
             duplicate_function_names.update(base_function_names & catalog_function_names)
             base_function_names.update(catalog_function_names)
         scoped_function_names: set[str] = set()
         for key, scoped_state in self._scoped_states.items():
             if key.server_id != server_id or scoped_state.catalog is None or scoped_state.last_error is not None:
                 continue
-            catalog_function_names = {tool.function_name for tool in scoped_state.catalog.tools}
+            catalog_function_names = self._catalog_function_names_for_tool_config(scoped_state.catalog, tool_config)
             duplicate_function_names.update(base_function_names & catalog_function_names)
             scoped_function_names.update(catalog_function_names)
         return base_function_names | scoped_function_names, duplicate_function_names
@@ -760,23 +791,32 @@ class MCPServerManager:
         self,
         agent_name: str,
         visible_function_server_ids: set[str],
+        *,
+        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> dict[str, list[str]]:
         """Return one agent's MCP function-name collisions against its visible surface."""
-        configured_local_function_names, configured_mcp_server_ids = self._configured_function_surface(agent_name)
-        visible_server_ids = configured_mcp_server_ids & visible_function_server_ids
+        configured_local_function_names, configured_mcp_tool_configs = self._configured_function_surface(
+            agent_name,
+            loaded_tools=loaded_tools,
+        )
+        visible_server_ids = set(configured_mcp_tool_configs) & visible_function_server_ids
         if not visible_server_ids:
             return {}
 
         server_ids_by_function_name: dict[str, set[str]] = {}
         errors_by_server: dict[str, list[str]] = {}
         for server_id in visible_server_ids:
-            visible_function_names, duplicate_function_names = self._server_visible_function_surface(server_id)
-            for function_name in sorted(visible_function_names):
-                server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
-            for function_name in duplicate_function_names:
-                errors_by_server.setdefault(server_id, []).append(
-                    f"MCP function name '{function_name}' collides within server '{server_id}'",
+            for tool_config in configured_mcp_tool_configs[server_id]:
+                visible_function_names, duplicate_function_names = self._server_visible_function_surface(
+                    server_id,
+                    tool_config,
                 )
+                for function_name in sorted(visible_function_names):
+                    server_ids_by_function_name.setdefault(function_name, set()).add(server_id)
+                for function_name in duplicate_function_names:
+                    errors_by_server.setdefault(server_id, []).append(
+                        f"MCP function name '{function_name}' collides within server '{server_id}'",
+                    )
         if not server_ids_by_function_name:
             return errors_by_server
         for server_id, messages in self._function_name_collision_messages(
@@ -820,6 +860,7 @@ class MCPServerManager:
                 for server_id, messages in self._agent_collision_messages(
                     agent_name,
                     visible_function_server_ids,
+                    loaded_tools=[],
                 ).items():
                     errors_by_server.setdefault(server_id, set()).update(messages)
             if not errors_by_server:
@@ -828,89 +869,157 @@ class MCPServerManager:
             await self._apply_function_name_collision_errors(errors_by_server)
             return set(errors_by_server)
 
-    def _configured_agent_tool_names(self, agent_name: str) -> list[str]:
-        """Return direct and toolkit-derived tool names that one agent can expose."""
-        config = cast("Config", self._config)
-        agent_config = config.get_agent(agent_name)
-        tool_names = list(config.get_agent_tools(agent_name))
-        for toolkit_name in set(agent_config.allowed_toolkits) | set(agent_config.initial_toolkits):
-            tool_names.extend(toolkit_entry.name for toolkit_entry in config.get_toolkit_tool_configs(toolkit_name))
-        return tool_names
-
-    @staticmethod
-    def _partition_tool_names(
-        tool_names: list[str],
-    ) -> tuple[set[str], set[str]]:
-        """Split tool names into local tool names and visible MCP server ids."""
-        local_tool_names: set[str] = set()
-        mcp_server_ids: set[str] = set()
-        for tool_name in tool_names:
-            if server_id := mcp_server_id_from_tool_name(tool_name):
-                mcp_server_ids.add(server_id)
-                continue
-            local_tool_names.add(tool_name)
-        return local_tool_names, mcp_server_ids
-
-    @staticmethod
-    def _agent_special_function_names(
-        agent_config: AgentConfig,
+    def _configured_tool_configs(
+        self,
+        agent_name: str,
         *,
-        default_allow_self_config: bool,
-    ) -> set[str]:
-        """Return provider-visible special functions injected by agent configuration."""
+        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None,
+    ) -> tuple[EffectiveToolConfig, ...]:
+        """Return provider-visible tool configs for one agent surface."""
+        config = cast("Config", self._config)
+        return visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            loaded_tools=loaded_tools,
+            enable_dynamic_tools_manager=True,
+        ).runtime_tool_configs
+
+    def _mcp_server_id_from_tool_config_name(self, tool_name: str) -> str | None:
+        """Return the MCP server id for a tool name visible in this manager's active config."""
+        config = self._config
+        if config is not None:
+            for server_id in config.mcp_servers:
+                if tool_name == mcp_tool_name(server_id):
+                    return server_id
+        return mcp_server_id_from_tool_name(tool_name)
+
+    def _partition_tool_configs(
+        self,
+        tool_configs: tuple[EffectiveToolConfig, ...],
+    ) -> tuple[list[EffectiveToolConfig], dict[str, tuple[EffectiveToolConfig, ...]]]:
+        """Split tool configs into local tool configs and visible MCP server ids."""
+        local_tool_configs: list[EffectiveToolConfig] = []
+        mcp_tool_configs: dict[str, list[EffectiveToolConfig]] = {}
+        for tool_config in tool_configs:
+            if server_id := self._mcp_server_id_from_tool_config_name(tool_config.name):
+                mcp_tool_configs.setdefault(server_id, []).append(tool_config)
+                continue
+            local_tool_configs.append(tool_config)
+        return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
+
+    @staticmethod
+    def _special_tool_function_names(tool_names: set[str]) -> set[str]:
+        """Return provider-visible function names for special control-plane tools."""
         function_names: set[str] = set()
-        if agent_config.delegate_to:
+        if "delegate" in tool_names:
             function_names.add("delegate_task")
-        allow_self_config = agent_config.allow_self_config
-        if allow_self_config if allow_self_config is not None else default_allow_self_config:
+        if "self_config" in tool_names:
             function_names.update({"get_own_config", "update_own_config"})
-        if agent_config.allowed_toolkits:
-            function_names.update({"list_toolkits", "load_tools", "unload_tools"})
+        if "dynamic_tools" in tool_names:
+            function_names.update({"list_tools", "load_tool", "unload_tool", "tool_search"})
         return function_names
 
     def _tool_function_names_for_local_tools(
         self,
-        tool_names: set[str],
+        tool_configs: list[EffectiveToolConfig],
         *,
         get_tool_by_name: Callable[..., object],
     ) -> set[str]:
         """Return provider-visible function names exposed by one set of local tools."""
         function_names: set[str] = set()
-        for tool_name in sorted(tool_names):
+        for tool_config in sorted(tool_configs, key=lambda entry: entry.name):
             try:
-                toolkit = get_tool_by_name(tool_name, self.runtime_paths, worker_target=None)
+                toolkit = get_tool_by_name(
+                    tool_config.name,
+                    self.runtime_paths,
+                    worker_target=None,
+                    tool_config_overrides=dict(tool_config.tool_config_overrides),
+                )
             except Exception as exc:
                 logger.debug(
                     "Skipping local tool during MCP function-name validation",
-                    tool_name=tool_name,
+                    tool_name=tool_config.name,
                     error=str(exc),
                 )
                 continue
             function_names.update(self._toolkit_function_names(toolkit))
         return function_names
 
-    def _configured_function_surface(self, agent_name: str) -> tuple[set[str], set[str]]:
+    def _configured_function_surface(
+        self,
+        agent_name: str,
+        *,
+        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None,
+    ) -> tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]]:
         """Return one agent's provider-visible local functions and MCP servers."""
         config = self._config
         if config is None:
-            return set(), set()
+            return set(), {}
 
         ensure_tool_registry_loaded(self.runtime_paths, config)
-        agent_config = config.get_agent(agent_name)
-        local_tool_names, mcp_server_ids = self._partition_tool_names(
-            self._configured_agent_tool_names(agent_name),
+        local_tool_configs, mcp_tool_configs = self._partition_tool_configs(
+            self._configured_tool_configs(agent_name, loaded_tools=loaded_tools),
         )
-        function_names = self._agent_special_function_names(
-            agent_config,
-            default_allow_self_config=config.defaults.allow_self_config,
-        )
+        local_tool_names = {entry.name for entry in local_tool_configs}
+        function_names = self._special_tool_function_names(local_tool_names)
         function_names.update(
             self._tool_function_names_for_local_tools(
-                local_tool_names,
+                [
+                    entry
+                    for entry in local_tool_configs
+                    if entry.name not in {"delegate", "self_config", "dynamic_tools"}
+                ],
                 get_tool_by_name=get_tool_by_name,
             ),
         )
-        return function_names, mcp_server_ids
+        return function_names, mcp_tool_configs
+
+    def mcp_tool_unavailable_messages_for_loaded_tools(
+        self,
+        agent_name: str,
+        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+    ) -> list[str]:
+        """Return unavailable non-OAuth MCP server messages for a candidate loaded dynamic-tool state."""
+        config = self._config
+        if config is None:
+            return []
+
+        _local_tool_configs, mcp_tool_configs = self._partition_tool_configs(
+            self._configured_tool_configs(agent_name, loaded_tools=loaded_tools),
+        )
+        messages: list[str] = []
+        for server_id in sorted(mcp_tool_configs):
+            server_config = config.mcp_servers.get(server_id)
+            state = self._states.get(server_id)
+            if server_config is not None and server_config.auth is not None:
+                continue
+            if state is not None and state.config.auth is not None:
+                continue
+            if state is None:
+                messages.append(f"MCP server '{server_id}' is not configured or has not been synchronized.")
+                continue
+            if state.last_error is not None:
+                messages.append(f"MCP server '{server_id}' is unavailable: {state.last_error}")
+                continue
+            if state.catalog is None or state.session is None or not state.connected:
+                messages.append(f"MCP server '{server_id}' is not connected.")
+        return messages
+
+    def function_name_collision_messages_for_loaded_tools(
+        self,
+        agent_name: str,
+        loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+    ) -> list[str]:
+        """Return collision messages for a candidate loaded dynamic-tool state."""
+        visible_function_server_ids = self._visible_function_server_ids()
+        if not visible_function_server_ids:
+            return []
+        errors_by_server = self._agent_collision_messages(
+            agent_name,
+            visible_function_server_ids,
+            loaded_tools=loaded_tools,
+        )
+        return sorted({message for messages in errors_by_server.values() for message in messages})
 
     @staticmethod
     def _toolkit_function_names(toolkit: object) -> set[str]:

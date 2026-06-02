@@ -293,7 +293,8 @@ This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom 
 
 ### Configuration
 
-This preset has no inline configuration fields.
+This preset has no inline configuration fields and cannot use `defer` or `initial`.
+Configure individual member tools directly when they need lazy loading.
 
 ### Example
 

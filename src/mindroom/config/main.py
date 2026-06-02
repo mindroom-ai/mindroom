@@ -45,11 +45,10 @@ from mindroom.config.models import (
     CompactionConfig,
     DebugConfig,
     DefaultsConfig,
+    EffectiveToolConfig,
     ModelConfig,
-    ResolvedToolConfig,
     RouterConfig,
     ToolConfigEntry,
-    ToolkitDefinition,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
@@ -85,6 +84,7 @@ if TYPE_CHECKING:
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"dynamic_tools"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -128,7 +128,6 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "rooms",
     "room_models",
     "room_thread_summary_models",
-    "toolkits",
     "knowledge_bases",
     "mcp_servers",
     "prompts",
@@ -183,9 +182,6 @@ def format_invalid_config_message(
     if footer:
         response = f"{response}\n\n{footer}"
     return response
-
-
-_RESERVED_DYNAMIC_TOOLKIT_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
 
 
 @dataclass(frozen=True)
@@ -333,6 +329,50 @@ def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) ->
     )
 
 
+def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
+    """Return whether one normalized tool entry authored a lazy-loading field."""
+    return bool(entry.model_fields_set & {"defer", "initial"})
+
+
+def _raw_tool_entry_name_and_lazy_flag_fields(entry: object) -> tuple[str | None, bool, bool]:
+    """Return the authored tool name and lazy flag field presence from one raw config entry."""
+    name: str | None = None
+    defer = False
+    initial = False
+
+    if isinstance(entry, ToolConfigEntry):
+        name = entry.name
+        defer = "defer" in entry.model_fields_set
+        initial = "initial" in entry.model_fields_set
+    elif isinstance(entry, str):
+        name = entry
+    elif isinstance(entry, dict):
+        raw_entry = cast("dict[object, object]", entry)
+        if "name" in raw_entry or "overrides" in raw_entry:
+            raw_name = raw_entry.get("name")
+            name = raw_name if isinstance(raw_name, str) else None
+            defer = "defer" in raw_entry
+            initial = "initial" in raw_entry
+        elif len(raw_entry) == 1:
+            raw_name, overrides = next(iter(raw_entry.items()))
+            name = raw_name if isinstance(raw_name, str) else None
+            if isinstance(overrides, dict):
+                override_map = cast("dict[object, object]", overrides)
+                defer = "defer" in override_map
+                initial = "initial" in override_map
+
+    return name, defer, initial
+
+
+def _raw_tools_entries(data: dict[object, object], section: str) -> list[object]:
+    raw_section = data.get(section)
+    if not isinstance(raw_section, dict):
+        return []
+    section_data = cast("dict[object, object]", raw_section)
+    tools = section_data.get("tools")
+    return list(tools) if isinstance(tools, list) else []
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -355,10 +395,6 @@ class Config(BaseModel):
     room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
         description="Room-specific model overrides for automatic thread summaries",
-    )
-    toolkits: dict[str, ToolkitDefinition] = Field(
-        default_factory=dict,
-        description="Dynamically loadable tool bundles keyed by public toolkit name",
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
@@ -413,11 +449,76 @@ class Config(BaseModel):
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
 
+    @classmethod
+    def _lazy_flag_prohibited_message(cls, *, tool_name: str, config_path: str) -> str | None:
+        if cls.is_tool_preset(tool_name):
+            return (
+                f"{config_path}: '{tool_name}' is a preset and cannot be deferred; "
+                "defer/initial are only valid on individual tools."
+            )
+        if tool_name in _DEFER_PROHIBITED_CONTROL_TOOLS:
+            return (
+                f"{config_path}: '{tool_name}' is a control-plane tool and cannot be deferred; "
+                "defer/initial are only valid on runtime tools."
+            )
+        return None
+
+    @classmethod
+    def _validate_raw_tool_lazy_flag_boundary(cls, entry: object, *, config_path: str) -> None:
+        name, defer, initial = _raw_tool_entry_name_and_lazy_flag_fields(entry)
+        if name is None or not (defer or initial):
+            return
+        if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
+            raise ValueError(msg)
+
     @model_validator(mode="before")
     @classmethod
     def validate_raw_root_config(cls, data: object) -> object:
-        """Normalize optional root sections before nested model validation."""
-        return normalized_config_data(data)
+        """Normalize optional root sections and reject preset lazy flags before nested validation."""
+        normalized = normalized_config_data(data)
+        if not isinstance(normalized, dict):
+            return normalized
+
+        raw_data = cast("dict[object, object]", normalized)
+        for entry in _raw_tools_entries(raw_data, "defaults"):
+            cls._validate_raw_tool_lazy_flag_boundary(entry, config_path="defaults.tools")
+
+        raw_agents = raw_data.get("agents")
+        if not isinstance(raw_agents, dict):
+            return normalized
+
+        for agent_name, raw_agent in raw_agents.items():
+            if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
+                continue
+            agent_data = cast("dict[object, object]", raw_agent)
+            tools = agent_data.get("tools")
+            if not isinstance(tools, list):
+                continue
+            for entry in tools:
+                cls._validate_raw_tool_lazy_flag_boundary(entry, config_path=f"agents.{agent_name}.tools")
+
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_tool_presets_do_not_use_lazy_flags(self) -> Config:
+        """Reject lazy-loading control fields on presets after tool-entry coercion."""
+        for entry in self.defaults.tools:
+            if _tool_entry_has_lazy_flag_field(entry) and (
+                msg := self._lazy_flag_prohibited_message(tool_name=entry.name, config_path="defaults.tools")
+            ):
+                raise ValueError(msg)
+
+        for agent_name, agent_config in self.agents.items():
+            for entry in agent_config.tools:
+                if _tool_entry_has_lazy_flag_field(entry) and (
+                    msg := self._lazy_flag_prohibited_message(
+                        tool_name=entry.name,
+                        config_path=f"agents.{agent_name}.tools",
+                    )
+                ):
+                    raise ValueError(msg)
+
+        return self
 
     @field_validator("plugins", mode="before")
     @classmethod
@@ -506,23 +607,6 @@ class Config(BaseModel):
                 if target not in self.agents:
                     msg = f"Agent '{agent_name}' delegates to unknown agent '{target}'"
                     raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def validate_toolkit_references(self) -> Config:
-        """Ensure agent dynamic toolkit references point at configured toolkits."""
-        for agent_name, agent_config in self.agents.items():
-            for field_name, toolkit_names in (
-                ("allowed_toolkits", agent_config.allowed_toolkits),
-                ("initial_toolkits", agent_config.initial_toolkits),
-            ):
-                for index, toolkit_name in enumerate(toolkit_names):
-                    if toolkit_name not in self.toolkits:
-                        msg = f"agents.{agent_name}.{field_name}[{index}]: Unknown toolkit '{toolkit_name}'."
-                        raise ValueError(msg)
-            if not set(agent_config.initial_toolkits).issubset(agent_config.allowed_toolkits):
-                msg = f"agents.{agent_name}.initial_toolkits: initial_toolkits must be a subset of allowed_toolkits."
-                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -643,9 +727,11 @@ class Config(BaseModel):
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
             )
-            for toolkit_name, incompatible_tools in self.get_agent_scope_incompatible_toolkits(agent_name).items():
+            for authored_name, incompatible_tools in self.get_agent_scope_incompatible_deferred_tools(
+                agent_name,
+            ).items():
                 invalid_assignments.extend(
-                    f"{agent_name} -> toolkit '{toolkit_name}' -> {tool_name} ({scope_label})"
+                    f"{agent_name} -> deferred tool '{authored_name}' -> {tool_name} ({scope_label})"
                     for tool_name in incompatible_tools
                 )
         if invalid_assignments:
@@ -1100,24 +1186,18 @@ class Config(BaseModel):
         model_config = self.models.get(model_name)
         return model_config.context_window if model_config and model_config.context_window else None
 
-    def get_toolkit(self, toolkit_name: str) -> ToolkitDefinition:
-        """Get one dynamic toolkit definition by name."""
-        toolkit = self.toolkits.get(toolkit_name)
-        if toolkit is None:
-            available = ", ".join(sorted(self.toolkits)) or "(none)"
-            msg = f"Unknown toolkit: {toolkit_name}. Available toolkits: {available}"
-            raise ValueError(msg)
-        return toolkit
-
-    def get_toolkit_scope_incompatible_tools(
+    def get_deferred_tool_scope_incompatible_tools(
         self,
         agent_name: str,
-        toolkit_name: str,
+        authored_tool_name: str,
     ) -> list[str]:
-        """Return toolkit tools that are invalid for one agent's effective execution scope."""
+        """Return expanded deferred tools invalid for one agent's effective execution scope."""
+        authored_config = self.get_agent_authored_deferred_tool_config(agent_name, authored_tool_name)
+        if authored_config is None:
+            return []
         execution_scope = self.get_agent_execution_scope(agent_name)
         return unsupported_shared_only_integration_names(
-            [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
+            self.expand_tool_names([authored_tool_name]),
             execution_scope,
             configured_mcp_server_ids=self.mcp_servers,
             oauth_mcp_server_ids=self.oauth_mcp_server_ids(),
@@ -1129,12 +1209,12 @@ class Config(BaseModel):
             server_id for server_id, server_config in self.mcp_servers.items() if server_config.auth is not None
         )
 
-    def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:
-        """Return allowed toolkits whose contents are invalid for one agent's execution scope."""
+    def get_agent_scope_incompatible_deferred_tools(self, agent_name: str) -> dict[str, list[str]]:
+        """Return deferred authored tools whose expanded contents are invalid for one agent scope."""
         return {
-            toolkit_name: incompatible_tools
-            for toolkit_name in self.get_agent(agent_name).allowed_toolkits
-            if (incompatible_tools := self.get_toolkit_scope_incompatible_tools(agent_name, toolkit_name))
+            entry.name: incompatible_tools
+            for entry in self.get_agent_authored_deferred_tool_configs(agent_name)
+            if (incompatible_tools := self.get_deferred_tool_scope_incompatible_tools(agent_name, entry.name))
         }
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:
@@ -1316,74 +1396,115 @@ class Config(BaseModel):
                     config_path_prefix=f"agents.{agent_name}.tools[{index}]",
                     tool_validation_snapshot=tool_validation_snapshot,
                 )
-        for toolkit_name, toolkit in self.toolkits.items():
-            for index, entry in enumerate(toolkit.tools):
-                config_path_prefix = f"toolkits.{toolkit_name}.tools[{index}]"
-                if entry.name in _RESERVED_DYNAMIC_TOOLKIT_TOOLS:
-                    msg = (
-                        f"{config_path_prefix}.{entry.name}: Toolkit definitions cannot include reserved "
-                        f"control-plane tool '{entry.name}'."
-                    )
-                    raise ValueError(msg)
-                validation_info = tool_validation_snapshot.get(entry.name)
-                if validation_info is None or (
-                    not validation_info.runtime_loadable and not validation_info.unavailable_due_to_plugin_load_error
-                ):
-                    msg = (
-                        f"{config_path_prefix}.{entry.name}: Toolkit tools must resolve through the normal "
-                        f"tool registry; '{entry.name}' is not supported."
-                    )
-                    raise ValueError(msg)
-                self._validate_authored_tool_entry(
-                    entry,
-                    config_path_prefix=config_path_prefix,
-                    tool_validation_snapshot=tool_validation_snapshot,
-                )
 
-    def get_toolkit_tool_configs(self, toolkit_name: str) -> list[ResolvedToolConfig]:
-        """Return effective authored tool config entries for one dynamic toolkit."""
-        from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
-
-        toolkit = self.get_toolkit(toolkit_name)
-        merged_overrides = {entry.name: apply_authored_overrides({}, entry.overrides) for entry in toolkit.tools}
-        return [
-            ResolvedToolConfig(
-                name=tool_name,
-                tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
-            )
-            for tool_name in self.expand_tool_names(toolkit.tool_names)
-            if tool_name not in self._unavailable_plugin_tool_names
-        ]
-
-    def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
-        """Return effective authored tool config entries for one agent."""
+    def _get_agent_authored_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+        """Return effective authored tool config entries before preset/implied expansion."""
         from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)
-        merged_overrides: dict[str, dict[str, object]] = {}
-        explicit_names = list(agent_config.tool_names)
+        default_entries_by_name = {entry.name: entry for entry in self.defaults.tools}
+        agent_entry_names = {entry.name for entry in agent_config.tools}
+        effective_authored_entries: list[EffectiveToolConfig] = []
 
         if agent_config.include_default_tools:
-            explicit_names.extend(self.defaults.tool_names)
+            for entry in agent_config.tools:
+                base_overrides: dict[str, object] = {}
+                if default_entry := default_entries_by_name.get(entry.name):
+                    base_overrides = apply_authored_overrides({}, default_entry.overrides)
+                effective_authored_entries.append(
+                    EffectiveToolConfig(
+                        name=entry.name,
+                        tool_config_overrides=apply_authored_overrides(base_overrides, entry.overrides),
+                        defer=entry.defer,
+                        initial=entry.initial,
+                        authored_order=len(effective_authored_entries),
+                        authored_name=entry.name,
+                    ),
+                )
             for entry in self.defaults.tools:
-                merged_overrides[entry.name] = apply_authored_overrides({}, entry.overrides)
+                if entry.name in agent_entry_names:
+                    continue
+                effective_authored_entries.append(
+                    EffectiveToolConfig(
+                        name=entry.name,
+                        tool_config_overrides=apply_authored_overrides({}, entry.overrides),
+                        authored_order=len(effective_authored_entries),
+                        authored_name=entry.name,
+                    ),
+                )
+        else:
+            for entry in agent_config.tools:
+                effective_authored_entries.append(
+                    EffectiveToolConfig(
+                        name=entry.name,
+                        tool_config_overrides=apply_authored_overrides({}, entry.overrides),
+                        defer=entry.defer,
+                        initial=entry.initial,
+                        authored_order=len(effective_authored_entries),
+                        authored_name=entry.name,
+                    ),
+                )
 
-        for entry in agent_config.tools:
-            base_overrides = merged_overrides.get(entry.name, {})
-            merged_overrides[entry.name] = apply_authored_overrides(base_overrides, entry.overrides)
+        return effective_authored_entries
 
-        return [
-            ResolvedToolConfig(
-                name=tool_name,
-                tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
+    def get_agent_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+        """Return effective runtime tool config entries for each authored owner."""
+        effective_entries = []
+        for authored_entry in self._get_agent_authored_tool_configs(agent_name):
+            effective_entries.extend(
+                (
+                    EffectiveToolConfig(
+                        name=tool_name,
+                        tool_config_overrides=(
+                            dict(authored_entry.tool_config_overrides) if tool_name == authored_entry.name else {}
+                        ),
+                        defer=authored_entry.defer,
+                        initial=authored_entry.initial,
+                        authored_order=authored_entry.authored_order,
+                        authored_name=authored_entry.name,
+                    )
+                )
+                for tool_name in self.expand_tool_names([authored_entry.name])
             )
-            for tool_name in self.expand_tool_names(explicit_names)
-            if tool_name not in self._unavailable_plugin_tool_names
-        ]
+        return effective_entries
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
-        """Get effective tool names for an agent."""
-        return [entry.name for entry in self.get_agent_tool_configs(agent_name)]
+        """Get all authored-available tool names for an agent."""
+        return self.get_agent_available_tools(agent_name)
+
+    def get_agent_available_tools(self, agent_name: str) -> list[str]:
+        """Get all tools the agent may use after dynamic loading."""
+        agent_config = self.get_agent(agent_name)
+        explicit_names = list(agent_config.tool_names)
+        if agent_config.include_default_tools:
+            explicit_names.extend(self.defaults.tool_names)
+        return self.expand_tool_names(explicit_names)
+
+    def get_agent_authored_deferred_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+        """Return one entry per authored deferred tool in effective order."""
+        return [
+            EffectiveToolConfig(
+                name=entry.name,
+                tool_config_overrides=dict(entry.tool_config_overrides),
+                defer=entry.defer,
+                initial=entry.initial,
+                authored_order=entry.authored_order,
+                authored_name=entry.name,
+            )
+            for entry in self._get_agent_authored_tool_configs(agent_name)
+            if entry.defer
+        ]
+
+    def get_agent_authored_deferred_tool_config(
+        self,
+        agent_name: str,
+        authored_tool_name: str,
+    ) -> EffectiveToolConfig | None:
+        """Return one authored deferred tool config by authored name."""
+        for entry in self.get_agent_authored_deferred_tool_configs(agent_name):
+            if entry.name == authored_tool_name:
+                return entry
+        return None
 
     def get_agent_tool_runtime_overrides(
         self,
@@ -1410,10 +1531,10 @@ class Config(BaseModel):
 
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""
-        agent_config = self.get_agent(agent_name)
-        referenced_tool_names = set(self.get_agent_tools(agent_name))
-        for toolkit_name in agent_config.initial_toolkits:
-            referenced_tool_names.update(entry.name for entry in self.get_toolkit_tool_configs(toolkit_name))
+        referenced_tool_names: set[str] = set()
+        for entry in self.get_agent_tool_configs(agent_name):
+            if not entry.defer or entry.initial:
+                referenced_tool_names.add(entry.name)
         return referenced_tool_names
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:

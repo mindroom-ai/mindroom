@@ -611,9 +611,9 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Agents](agents.md) - Configure individual AI agents
 - [Models](models.md) - Configure AI model providers
 - [Teams](teams.md) - Configure multi-agent collaboration
-- [Toolkits](toolkits.md) - Configure dynamic tool bundles that agents load on demand
 - [Cultures](cultures.md) - Configure shared agent cultures
 - [Router](router.md) - Configure message routing
+- [Dynamic Tools](../tools/dynamic-tools.md) - Configure optional tools that agents load on demand
 - [Memory](../memory.md) - Configure memory providers and behavior
 - [Knowledge Bases](../knowledge.md) - Configure file-backed knowledge bases
 - [Voice](../voice.md) - Configure speech-to-text voice processing

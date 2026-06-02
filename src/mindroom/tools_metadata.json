@@ -2530,7 +2530,7 @@
       "config_fields": [],
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Load and unload allowed toolkits for the current session",
+      "description": "Load and unload deferred tools for the current session",
       "display_name": "Dynamic Tools",
       "docs_url": null,
       "function_names": [],

@@ -58,6 +58,7 @@ from mindroom.streaming import (
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
 
@@ -172,13 +173,18 @@ def _materialize_matrix_run_metadata(
     return dict(matrix_run_metadata)
 
 
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
+def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
     """Return whether one agent can issue Matrix message actions."""
     try:
-        tool_names = config.get_agent_tools(agent_name)
+        surface = visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            session_id=session_id,
+            enable_dynamic_tools_manager=False,
+        )
     except ValueError:
         return False
-    return "matrix_message" in tool_names
+    return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
 def _append_matrix_prompt_context(
@@ -902,7 +908,8 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
         )
         include_matrix_prompt_context = any(
-            _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
+            _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
+            for name in agent_names
         )
         model_message = _append_matrix_prompt_context(
             prepared_prompt,
@@ -1410,7 +1417,11 @@ class ResponseRunner:
         resolved_model_prompt = _append_matrix_prompt_context(
             request.model_prompt or request.prompt,
             target=resolved_target,
-            include_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, self.deps.agent_name),
+            include_context=_agent_has_matrix_messaging_tool(
+                self.deps.runtime.config,
+                self.deps.agent_name,
+                session_id,
+            ),
         )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,

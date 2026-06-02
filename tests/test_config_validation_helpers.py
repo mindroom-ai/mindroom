@@ -6,7 +6,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.models import DefaultsConfig, ToolkitDefinition
+from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 
 
@@ -25,22 +25,8 @@ def test_history_limit_choice_rejects_both_limits_with_existing_message() -> Non
     ("factory", "match"),
     [
         (
-            lambda: ToolkitDefinition(tools=["shell", "file", "shell", "file"]),
-            "Duplicate toolkit tools are not allowed: shell, file",
-        ),
-        (
-            lambda: AgentConfig(
-                display_name="Code",
-                allowed_toolkits=["dev", "research", "dev", "research"],
-            ),
-            "Duplicate allowed_toolkits are not allowed: dev, research",
-        ),
-        (
-            lambda: AgentConfig(
-                display_name="Code",
-                initial_toolkits=["dev", "research", "dev", "research"],
-            ),
-            "Duplicate initial_toolkits are not allowed: dev, research",
+            lambda: ToolConfigEntry(name="shell", initial=True),
+            "Tool entry initial=true requires defer=true",
         ),
         (
             lambda: AgentConfig(
