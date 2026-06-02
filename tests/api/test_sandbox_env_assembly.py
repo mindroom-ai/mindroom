@@ -15,12 +15,33 @@ import pytest
 import mindroom.api.sandbox_env_assembly as assembly
 from mindroom import constants
 from mindroom.api.sandbox_exec import WorkspaceEnvHookError
+from mindroom.api.sandbox_worker_prep import PreparedWorkerRequest
+from mindroom.workers.backends.local import local_worker_state_paths_for_root
+from mindroom.workers.models import WorkerHandle
 
 
 def _write_hook(workspace: Path, body: str) -> None:
     hook_dir = workspace / ".mindroom"
     hook_dir.mkdir(parents=True, exist_ok=True)
     (hook_dir / "worker-env.sh").write_text(body, encoding="utf-8")
+
+
+def _prepared_worker(tmp_path: Path) -> PreparedWorkerRequest:
+    worker_key = "v1:tenant:shared:general"
+    return PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=None,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=local_worker_state_paths_for_root(tmp_path / "worker-root"),
+        runtime_overrides={},
+    )
 
 
 def test_request_workspace_none_is_noop() -> None:
@@ -96,6 +117,24 @@ def test_hook_cannot_override_home_contract(tmp_path: Path) -> None:
     # Non-protected hook exports survive in the trusted overlay.
     assert result.trusted_overlay["WORKSPACE_TOOLCHAIN_PATH"] == "/hook/bin"
     assert execution_env["WORKSPACE_TOOLCHAIN_PATH"] == "/hook/bin"
+
+
+def test_prepared_worker_contract_does_not_blank_explicit_github_token(tmp_path: Path) -> None:
+    """Prepared-worker path ownership must not erase explicit user credentials."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    expected_env = "github-env-value"
+    execution_env = {"GITHUB_TOKEN": expected_env}
+
+    assembly.build_request_execution_env(
+        request_workspace=workspace,
+        prepared=_prepared_worker(tmp_path),
+        execution_env=execution_env,
+        apply_workspace_env_hook=False,
+    )
+
+    assert "GITHUB_TOKEN" not in constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
+    assert execution_env["GITHUB_TOKEN"] == expected_env
 
 
 def test_hook_failure_raises_workspace_env_hook_error(tmp_path: Path) -> None:

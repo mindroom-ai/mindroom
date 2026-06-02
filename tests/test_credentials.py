@@ -407,7 +407,7 @@ class TestCredentialsManager:
             },
         )
 
-        isolated_runtime_paths = constants_mod._isolated_runtime_paths(runtime_paths)
+        isolated_runtime_paths = constants_mod.isolated_runtime_paths(runtime_paths)
 
         loaded_credentials = (
             get_runtime_credentials_manager(isolated_runtime_paths)

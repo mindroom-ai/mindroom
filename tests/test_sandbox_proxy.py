@@ -35,7 +35,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     RuntimePaths,
-    _isolated_runtime_paths,
+    isolated_runtime_paths,
     resolve_runtime_paths,
     sandbox_shell_execution_runtime_env_values,
     shell_execution_runtime_env_values,
@@ -1775,7 +1775,7 @@ def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
         },
     )
 
-    worker_paths = _isolated_runtime_paths(runtime_paths)
+    worker_paths = isolated_runtime_paths(runtime_paths)
     shell_env = sandbox_shell_execution_runtime_env_values(
         worker_paths,
         extra_env_passthrough="OPENAI_API_KEY",
@@ -1798,7 +1798,7 @@ def test_worker_env_includes_extra_env_passthrough(tmp_path: Path) -> None:
         },
     )
 
-    worker_paths = _isolated_runtime_paths(runtime_paths)
+    worker_paths = isolated_runtime_paths(runtime_paths)
     shell_env = sandbox_shell_execution_runtime_env_values(
         worker_paths,
         extra_env_passthrough="MY_VAR",

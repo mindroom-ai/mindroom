@@ -93,7 +93,7 @@ def protected_execution_env_names(
     if workspace_home is not None:
         return constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
     if prepared is not None:
-        return constants.WORKER_RUNTIME_ENV_NAMES
+        return constants.WORKER_RUNTIME_PATH_ENV_NAMES
     return frozenset()
 
 
@@ -138,7 +138,7 @@ def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None
             "PYTHONPYCACHEPREFIX": str(prepared.paths.cache_dir / "pycache"),
             "VIRTUAL_ENV": str(prepared.paths.venv_dir),
         }
-        for name in constants.WORKER_RUNTIME_ENV_NAMES:
+        for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES:
             worker_env.setdefault(name, "")
         return worker_env
     return {}
@@ -153,9 +153,9 @@ def _existing_worker_runtime_env(
     env: dict[str, str] = {}
     if subprocess_env is not None:
         env.update(
-            {name: subprocess_env[name] for name in constants.WORKER_RUNTIME_ENV_NAMES if name in subprocess_env},
+            {name: subprocess_env[name] for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES if name in subprocess_env},
         )
-    env.update({name: execution_env[name] for name in constants.WORKER_RUNTIME_ENV_NAMES if name in execution_env})
+    env.update({name: execution_env[name] for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES if name in execution_env})
     return env
 
 

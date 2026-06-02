@@ -43,21 +43,16 @@ _WORKSPACE_HOME_IDENTITY_ENV_NAMES = frozenset(
         "XDG_STATE_HOME",
     },
 )
-WORKER_RUNTIME_ENV_NAMES = frozenset(
+WORKER_RUNTIME_PATH_ENV_NAMES = frozenset(
     {
         "XDG_CACHE_HOME",
         "PIP_CACHE_DIR",
         "UV_CACHE_DIR",
         "PYTHONPYCACHEPREFIX",
         "VIRTUAL_ENV",
-        "GITHUB_TOKEN",
-        "MINDROOM_API_KEY",
-        "MINDROOM_LOCAL_CLIENT_ID",
-        "MINDROOM_LOCAL_CLIENT_SECRET",
-        runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
-WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
+WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_PATH_ENV_NAMES
 
 
 def prompt_roles_for_history_storage(system_message_role: str = "system") -> frozenset[str]:
@@ -302,7 +297,7 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
-def _serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
+def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = runtime_env_policy.public_worker_startup_env(runtime_paths.process_env)
     env_file_values = runtime_env_policy.public_worker_startup_env(runtime_paths.env_file_values)
@@ -314,11 +309,6 @@ def _serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ob
     }
 
 
-def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
-    """Return a JSON payload for pod-visible worker startup without secrets."""
-    return _serialize_public_runtime_paths(runtime_paths)
-
-
 def _serialize_startup_manifest(
     runtime_paths: RuntimePaths,
     *,
@@ -327,7 +317,7 @@ def _serialize_startup_manifest(
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners."""
     return {
-        "runtime_paths": _serialize_public_runtime_paths(runtime_paths)
+        "runtime_paths": serialize_public_runtime_paths(runtime_paths)
         if public_runtime
         else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
@@ -610,7 +600,7 @@ def execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[st
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def _isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
     process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     return RuntimePaths(
@@ -621,11 +611,6 @@ def _isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
         process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
-
-
-def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
-    """Return one runtime view filtered for isolated worker execution."""
-    return _isolated_runtime_paths(runtime_paths)
 
 
 def shell_execution_runtime_env_values(
