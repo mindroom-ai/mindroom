@@ -23,11 +23,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
     serialize_runtime_paths,
 )
-from mindroom.credentials import (
-    CredentialsManager,
-    get_runtime_credentials_manager,
-    sync_shared_credentials_to_worker,
-)
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import worker_dir_name
@@ -59,10 +55,7 @@ from mindroom.workers.backends.docker_config import (
     normalize_docker_name_prefix,
     resolve_docker_storage_path,
 )
-from mindroom.workers.backends.docker_projection import (
-    PROJECTED_CONFIGS_DIRNAME,
-    DockerProjectionManager,
-)
+from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.models import (
     ProgressSink,
