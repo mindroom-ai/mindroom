@@ -62,11 +62,11 @@ class DynamicToolsToolkit(Toolkit):
             session_id=self._session_id,
         )
 
-    def _deferred_entries(self) -> list[DeferredToolCatalogEntry]:
+    def _deferred_entries(self, loaded_tools: list[str] | None = None) -> list[DeferredToolCatalogEntry]:
         return deferred_tool_catalog_entries(
             agent_name=self._agent_name,
             config=self._config,
-            loaded_tools=self._loaded_tools(),
+            loaded_tools=loaded_tools if loaded_tools is not None else self._loaded_tools(),
         )
 
     def _deferred_tool_names(self) -> list[str]:
@@ -185,11 +185,12 @@ class DynamicToolsToolkit(Toolkit):
     def list_tools(self) -> str:
         """List deferred tools for this agent and the current loaded state."""
         loaded_tools = self._loaded_tools()
+        deferred_entries = self._deferred_entries(loaded_tools)
         return self._payload(
             "ok",
             loaded_tools=loaded_tools,
-            total_deferred=len(self._deferred_entries()),
-            tools=[self._tool_entry(entry) for entry in self._deferred_entries()],
+            total_deferred=len(deferred_entries),
+            tools=[self._tool_entry(entry) for entry in deferred_entries],
         )
 
     def load_tool(self, tool_name: str) -> str:
@@ -285,9 +286,11 @@ class DynamicToolsToolkit(Toolkit):
         raw_query = query.strip().lower()
         query_tokens = _tokens(raw_query)
         max_count = max(1, min(max_results, 20))
+        loaded_tools = self._loaded_tools()
+        deferred_entries = self._deferred_entries(loaded_tools)
         scored_entries = [
             (self._search_score(entry, query_tokens, raw_query), index, entry)
-            for index, entry in enumerate(self._deferred_entries())
+            for index, entry in enumerate(deferred_entries)
         ]
         matches = [
             entry for score, _index, entry in sorted(scored_entries, key=lambda item: (-item[0], item[1])) if score > 0
@@ -295,6 +298,6 @@ class DynamicToolsToolkit(Toolkit):
         return self._payload(
             "ok",
             matches=[self._tool_entry(entry) for entry in matches],
-            loaded_tools=self._loaded_tools(),
-            total_deferred=len(self._deferred_entries()),
+            loaded_tools=loaded_tools,
+            total_deferred=len(deferred_entries),
         )

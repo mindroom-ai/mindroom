@@ -602,6 +602,46 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
 
 
+def test_dynamic_tools_manager_catalog_responses_use_one_loaded_state_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manager catalog payloads should not mix loaded state from multiple reads."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"shell": {"defer": True}},
+        {"sleep": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="thread-a")
+    loaded_snapshots = iter([["shell"], ["sleep"]])
+
+    monkeypatch.setattr(manager, "_loaded_tools", lambda: next(loaded_snapshots))
+
+    payload = _tool_payload(manager.list_tools())
+
+    assert payload["loaded_tools"] == ["shell"]
+    assert {entry["name"]: entry["loaded"] for entry in payload["tools"]} == {
+        "shell": True,
+        "sleep": False,
+    }
+
+    loaded_snapshots = iter([["shell"], ["sleep"]])
+    monkeypatch.setattr(manager, "_loaded_tools", lambda: next(loaded_snapshots))
+
+    search_payload = _tool_payload(manager.tool_search("sleep"))
+
+    assert search_payload["loaded_tools"] == ["shell"]
+    assert search_payload["matches"] == [
+        {
+            "description": "Sleep utility for introducing delays and pauses in execution",
+            "loaded": False,
+            "name": "sleep",
+            "sticky": False,
+        },
+    ]
+
+
 def test_dynamic_tools_manager_concurrent_loads_do_not_drop_updates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -690,8 +730,14 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
             "tools": [{"homeassistant": {"defer": True}}],
         },
     )
-    with pytest.raises(ValueError, match=r"code -> homeassistant \(worker_scope=user\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"code -> deferred tool 'homeassistant' -> homeassistant \(worker_scope=user\)",
+    ) as exc_info:
         _validated_config(tmp_path, raw)
+    error_message = str(exc_info.value)
+    assert "code -> deferred tool 'homeassistant' -> homeassistant (worker_scope=user)" in error_message
+    assert "code -> homeassistant (worker_scope=user)" not in error_message
 
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"homeassistant": {"defer": True}}]  # type: ignore[index]

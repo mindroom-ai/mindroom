@@ -719,7 +719,7 @@ class Config(BaseModel):
             scope_label = self.get_agent_scope_label(agent_name)
             execution_scope = self.get_agent_execution_scope(agent_name)
             unsupported_tools = unsupported_shared_only_integration_names(
-                self.get_agent_tools(agent_name),
+                self._get_agent_eager_tools(agent_name),
                 execution_scope,
                 configured_mcp_server_ids=self.mcp_servers,
                 oauth_mcp_server_ids=oauth_mcp_server_ids,
@@ -1254,6 +1254,15 @@ class Config(BaseModel):
         )
         return policy.scope_label
 
+    def _get_agent_eager_tools(self, agent_name: str) -> list[str]:
+        """Return expanded non-deferred tools visible without a dynamic load."""
+        tool_names: list[str] = []
+        for entry in self._get_agent_authored_tool_configs(agent_name):
+            if entry.defer:
+                continue
+            tool_names.extend(self.expand_tool_names([entry.name]))
+        return tool_names
+
     def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
         """Return the synthetic knowledge base ID for one agent's private knowledge."""
         policy = resolve_agent_policy_from_data(
@@ -1479,10 +1488,6 @@ class Config(BaseModel):
                 for tool_name in self.expand_tool_names([authored_entry.name])
             )
         return effective_entries
-
-    def get_agent_tools(self, agent_name: str) -> list[str]:
-        """Get all authored-available tool names for an agent."""
-        return self.get_agent_available_tools(agent_name)
 
     def get_agent_available_tools(self, agent_name: str) -> list[str]:
         """Get all tools the agent may use after dynamic loading."""

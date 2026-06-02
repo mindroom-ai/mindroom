@@ -108,10 +108,11 @@ def _sanitize_loaded_tools(
     loaded_tools: list[str],
 ) -> tuple[list[str], list[str]]:
     deferred_tool_names = _deferred_tool_names(config, agent_name)
+    deferred_tool_name_set = set(deferred_tool_names)
     invalid_tools: list[str] = []
     valid: list[str] = []
     for tool_name in loaded_tools:
-        if tool_name not in deferred_tool_names:
+        if tool_name not in deferred_tool_name_set:
             invalid_tools.append(tool_name)
             continue
         if config.get_deferred_tool_scope_incompatible_tools(agent_name, tool_name):
@@ -205,19 +206,14 @@ def _visible_authored_tool_configs(
         is_visible_owner = not authored_entry.defer or is_loaded_deferred
         for tool_name in config.expand_tool_names([authored_entry.name]):
             expanded = _expanded_authored_entry_config(authored_entry, tool_name)
+            expanded_precedence = _tool_config_owner_precedence(config, expanded)
             if is_visible_owner:
                 current = visible_by_name.get(tool_name)
-                if current is None or _tool_config_owner_precedence(config, expanded) > _tool_config_owner_precedence(
-                    config,
-                    current,
-                ):
+                if current is None or expanded_precedence > _tool_config_owner_precedence(config, current):
                     visible_by_name[tool_name] = expanded
                 continue
             current_hidden = hidden_deferred_by_name.get(tool_name)
-            if current_hidden is None or _tool_config_owner_precedence(
-                config,
-                expanded,
-            ) > _tool_config_owner_precedence(config, current_hidden):
+            if current_hidden is None or expanded_precedence > _tool_config_owner_precedence(config, current_hidden):
                 hidden_deferred_by_name[tool_name] = expanded
 
     resolved: list[EffectiveToolConfig] = []

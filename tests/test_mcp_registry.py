@@ -324,7 +324,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
         _runtime_paths(tmp_path),
     )
 
-    assert "mcp_custom_plugin" in config.get_agent_tools("code")
+    assert "mcp_custom_plugin" in config.get_agent_available_tools("code")
 
 
 def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path: Path) -> None:
