@@ -690,6 +690,7 @@ def get_agent_toolkit_names(
     agent_name: str,
     config: Config,
     *,
+    session_id: str | None = None,
     delegation_depth: int = 0,
 ) -> list[str]:
     """Return the provider-visible toolkit list for a new agent runtime."""
@@ -698,9 +699,9 @@ def get_agent_toolkit_names(
         for entry in visible_tool_surface(
             agent_name=agent_name,
             config=config,
-            loaded_tools=[],
+            session_id=session_id,
             delegation_depth=delegation_depth,
-            enable_dynamic_tools_manager=True,
+            enable_dynamic_tools_manager=session_id is not None,
         ).runtime_tool_configs
     ]
 

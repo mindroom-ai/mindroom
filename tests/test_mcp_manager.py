@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, ClassVar, Self
 from unittest.mock import patch
@@ -24,6 +24,7 @@ from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallEr
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
+from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.identity_helpers import persist_entity_accounts
@@ -144,7 +145,8 @@ class _FakeClientSession:
 
 
 @pytest.fixture(autouse=True)
-def _reset_fake_session_state() -> None:
+def _reset_fake_session_state() -> Generator[None, None, None]:
+    dynamic_toolkits_module._loaded_tools.clear()
     _FakeClientSession.sessions = []
     _FakeClientSession.planned_tool_results = []
     _FakeClientSession.planned_tool_pages = []
@@ -159,6 +161,8 @@ def _reset_fake_session_state() -> None:
     _FakeClientSession.call_started_event = None
     _FakeClientSession.call_continue_event = None
     _FakeClientSession.transport_extra_headers = []
+    yield
+    dynamic_toolkits_module._loaded_tools.clear()
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:

@@ -102,6 +102,10 @@ def _initial_loaded_tools(config: Config, agent_name: str) -> list[str]:
     return [entry.name for entry in config.get_agent_authored_deferred_tool_configs(agent_name) if entry.initial]
 
 
+def _default_loaded_tools(config: Config, agent_name: str) -> list[str]:
+    return _sanitize_loaded_tools(config, agent_name, _initial_loaded_tools(config, agent_name))[0]
+
+
 def _sanitize_loaded_tools(
     config: Config,
     agent_name: str,
@@ -333,11 +337,11 @@ def get_loaded_tools_for_session(
 
     key = _state_key(agent_name, session_id)
     with _loaded_tools_lock:
-        raw_loaded_tools = _loaded_tools.get(key)
-        if raw_loaded_tools is None:
-            raw_loaded_tools = _initial_loaded_tools(config, agent_name)
+        state_present = key in _loaded_tools
+        if state_present:
+            raw_loaded_tools = _coerce_loaded_tools(_loaded_tools[key])
         else:
-            raw_loaded_tools = _coerce_loaded_tools(raw_loaded_tools)
+            raw_loaded_tools = _initial_loaded_tools(config, agent_name)
 
         loaded_tools, invalid_tools = _sanitize_loaded_tools_with_current_initials(config, agent_name, raw_loaded_tools)
         if invalid_tools:
@@ -349,11 +353,12 @@ def get_loaded_tools_for_session(
                 invalid_tools=invalid_tools,
             )
 
-        if key not in _loaded_tools or _loaded_tools[key] != loaded_tools:
+        if state_present:
             save_loaded_tools_for_session(
                 agent_name=agent_name,
                 session_id=session_id,
                 loaded_tools=loaded_tools,
+                config=config,
             )
 
         return list(loaded_tools)
@@ -390,7 +395,12 @@ def load_tool_for_session(
                 scope_key=key[1],
                 invalid_tools=invalid_tools,
             )
-            _loaded_tools[key] = list(loaded_tools)
+            save_loaded_tools_for_session(
+                agent_name=agent_name,
+                session_id=session_id,
+                loaded_tools=loaded_tools,
+                config=config,
+            )
 
         if tool_name not in deferred_tool_names:
             result = LoadToolResult(
@@ -424,7 +434,12 @@ def load_tool_for_session(
                     unavailable_messages=tuple(sorted(validation_failure.messages)),
                 )
             else:
-                _loaded_tools[key] = list(candidate_loaded_tools)
+                save_loaded_tools_for_session(
+                    agent_name=agent_name,
+                    session_id=session_id,
+                    loaded_tools=candidate_loaded_tools,
+                    config=config,
+                )
                 result = LoadToolResult(status="loaded", loaded_tools=tuple(candidate_loaded_tools))
         return result
 
@@ -463,6 +478,7 @@ def unload_tool_for_session(
             agent_name=agent_name,
             session_id=session_id,
             loaded_tools=loaded_tools,
+            config=config,
         )
         return list(loaded_tools)
 
@@ -472,6 +488,7 @@ def save_loaded_tools_for_session(
     agent_name: str,
     session_id: str | None,
     loaded_tools: list[str],
+    config: Config | None = None,
 ) -> None:
     """Persist one agent/session's loaded tool set in memory."""
     if session_id is None:
@@ -479,7 +496,11 @@ def save_loaded_tools_for_session(
 
     key = _state_key(agent_name, session_id)
     with _loaded_tools_lock:
-        _loaded_tools[key] = _coerce_loaded_tools(loaded_tools)
+        coerced_loaded_tools = _coerce_loaded_tools(loaded_tools)
+        if config is not None and coerced_loaded_tools == _default_loaded_tools(config, agent_name):
+            _loaded_tools.pop(key, None)
+            return
+        _loaded_tools[key] = coerced_loaded_tools
 
 
 def deferred_tool_catalog_entries(

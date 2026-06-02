@@ -101,10 +101,17 @@ def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
     if extra_keys:
         msg = "Tool entries with a name key may only include name, overrides, defer, and initial"
         raise ValueError(msg)
-    normalized["overrides"] = _normalize_tool_entry_overrides(
+    overrides = _normalize_tool_entry_overrides(
         normalized.get("overrides"),
         error_message="Tool entry overrides must be a mapping",
     )
+    misplaced_flags = sorted(set(overrides) & _TOOL_CONFIG_CONTROL_KEYS)
+    if misplaced_flags:
+        msg = "Tool control flags must be declared at the tool-entry level, not inside overrides: " + ", ".join(
+            misplaced_flags,
+        )
+        raise ValueError(msg)
+    normalized["overrides"] = overrides
     return normalized
 
 

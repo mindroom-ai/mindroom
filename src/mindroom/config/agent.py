@@ -339,10 +339,16 @@ class AgentConfig(BaseModel):
                 msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
                 raise ValueError(msg)
             if "allowed_toolkits" in data:
-                msg = "Agent field 'allowed_toolkits' was removed. Use per-tool defer flags in tools instead."
+                msg = (
+                    "Agent field 'allowed_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+                    "tools before applying per-tool defer flags in tools."
+                )
                 raise ValueError(msg)
             if "initial_toolkits" in data:
-                msg = "Agent field 'initial_toolkits' was removed. Use per-tool initial flags in tools instead."
+                msg = (
+                    "Agent field 'initial_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+                    "tools before applying per-tool initial flags in tools."
+                )
                 raise ValueError(msg)
         return data
 

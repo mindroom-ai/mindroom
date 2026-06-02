@@ -2831,6 +2831,41 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
         )
 
 
+def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:
+    """Removed agent toolkit knobs should point users to expand presets before lazy flags."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Agent field 'allowed_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+            "tools before applying per-tool defer flags in tools.",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "allowed_toolkits": ["shell"],
+                },
+            },
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Agent field 'initial_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+            "tools before applying per-tool initial flags in tools.",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "initial_toolkits": ["shell"],
+                },
+            },
+        )
+
+
 def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
     """Each agent knowledge base assignment should be unique."""
     with pytest.raises(ValidationError, match="Duplicate knowledge bases are not allowed: research"):

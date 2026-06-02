@@ -3136,6 +3136,8 @@ from = ["mindroom.tool_system.skills"]
 
 [[interfaces]]
 expose = [
+    "LoadToolResult",
+    "LoadToolValidationFailure",
     "VisibleToolSurface",
     "deferred_tool_catalog_entries",
     "get_loaded_tools_for_session",

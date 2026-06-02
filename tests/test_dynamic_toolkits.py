@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agents import _build_dynamic_tooling_instruction_block, _build_dynamic_tooling_state_suffix
+from mindroom.agents import (
+    _build_dynamic_tooling_instruction_block,
+    _build_dynamic_tooling_state_suffix,
+    get_agent_toolkit_names,
+)
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -141,6 +145,19 @@ def test_config_rejects_invalid_lazy_flag_locations(tmp_path: Path) -> None:
     raw = _base_config_data()
     raw["defaults"] = {"tools": [{"shell": {"initial": False}}]}
     with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
+        _validated_config(tmp_path, raw)
+
+
+@pytest.mark.parametrize("lazy_flag", ["defer", "initial"])
+def test_config_rejects_lazy_flags_inside_named_tool_overrides(tmp_path: Path, lazy_flag: str) -> None:
+    """Lazy-loading control flags belong at tool-entry level, not inside overrides."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"name": "shell", "overrides": {lazy_flag: True}}]  # type: ignore[index]
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Tool control flags must be declared at the tool-entry level, not inside overrides: {lazy_flag}",
+    ):
         _validated_config(tmp_path, raw)
 
 
@@ -302,6 +319,7 @@ def test_initial_deferred_tools_seed_loaded_state_and_expand_implied_runtime_too
 
     assert loaded == ["matrix_message"]
     assert runtime_names == ["matrix_message", "attachments", "matrix_room"]
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
 def test_new_initial_deferred_tool_is_loaded_for_existing_session_after_reload(tmp_path: Path) -> None:
@@ -310,6 +328,7 @@ def test_new_initial_deferred_tool_is_loaded_for_existing_session_after_reload(t
     raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
     assert get_loaded_tools_for_session(agent_name="code", config=config, session_id="thread-a") == []
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
     reloaded_raw = _base_config_data()
     reloaded_raw["agents"]["code"]["tools"] = [{"shell": {"defer": True, "initial": True}}]  # type: ignore[index]
@@ -317,10 +336,21 @@ def test_new_initial_deferred_tool_is_loaded_for_existing_session_after_reload(t
     manager = DynamicToolsToolkit(agent_name="code", config=reloaded_config, session_id="thread-a")
 
     assert get_loaded_tools_for_session(agent_name="code", config=reloaded_config, session_id="thread-a") == ["shell"]
-    assert dynamic_toolkits_module._loaded_tools[("code", "thread-a")] == ["shell"]
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
     assert _tool_payload(manager.load_tool("shell"))["status"] == "already_loaded"
     assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
     assert get_loaded_tools_for_session(agent_name="code", config=reloaded_config, session_id="thread-a") == ["shell"]
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
+
+
+def test_get_agent_toolkit_names_matches_sessionless_dynamic_tool_manager_visibility(tmp_path: Path) -> None:
+    """Sessionless toolkit-name introspection should not advertise unavailable mutation tools."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"shell": {"defer": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    assert "dynamic_tools" not in get_agent_toolkit_names("code", config)
+    assert "dynamic_tools" in get_agent_toolkit_names("code", config, session_id="thread-a")
 
 
 def test_sessionless_initial_deferred_tools_are_runtime_visible_without_manager(tmp_path: Path) -> None:
@@ -531,6 +561,7 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     assert _tool_payload(manager.load_tool("sleep"))["status"] == "already_loaded"
     assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "unloaded"
+    assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
 
 
