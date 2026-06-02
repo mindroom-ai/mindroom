@@ -1600,6 +1600,8 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            # Live callbacks are armed only after startup sync; prev_content may be absent.
+            require_previous_membership=False,
         )
         if join is None:
             return

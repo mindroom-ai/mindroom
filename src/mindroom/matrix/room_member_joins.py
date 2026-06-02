@@ -211,6 +211,8 @@ def room_member_joins_from_sync_timeline(
                 config=config,
                 runtime_paths=runtime_paths,
                 storage_root=storage_root,
+                # Timeline events are a live event stream, not a full-state snapshot.
+                require_previous_membership=False,
             )
             if join is not None:
                 joins.append(join)

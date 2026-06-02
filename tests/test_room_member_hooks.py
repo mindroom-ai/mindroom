@@ -213,20 +213,22 @@ async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_router_ignores_live_room_member_join_without_previous_membership(tmp_path: Path) -> None:
-    """Live member events without previous membership are ambiguous snapshots."""
-    seen: list[str] = []
+async def test_router_emits_live_room_member_join_without_previous_membership(tmp_path: Path) -> None:
+    """Live member joins can omit unsigned previous membership."""
+    seen: list[RoomMemberJoinedContext] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
     async def joined(ctx: RoomMemberJoinedContext) -> None:
-        seen.append(ctx.event_id)
+        seen.append(ctx)
 
     bot = _router_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
-    await bot._on_room_member(_room(), _room_member_event(event_id="$profile-update", prev_membership=None))
+    await bot._on_room_member(_room(), _room_member_event(event_id="$sso-autojoin", prev_membership=None))
 
-    assert seen == []
+    assert len(seen) == 1
+    assert seen[0].event_id == "$sso-autojoin"
+    assert seen[0].prev_membership is None
 
 
 @pytest.mark.asyncio
@@ -289,7 +291,7 @@ async def test_router_emits_room_member_joined_from_first_restored_token_sync_ti
         _sync_response_with_state(
             room.room_id,
             [],
-            timeline_events=[_room_member_event(event_id="$catchup-join")],
+            timeline_events=[_room_member_event(event_id="$catchup-join", prev_membership=None)],
         ),
     )
 
