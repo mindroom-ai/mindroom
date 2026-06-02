@@ -51,10 +51,7 @@ final class MindRoomCommandRunner: ObservableObject {
     }
 
     private func runRuntimeAction(_ action: MindRoomRuntimeAction, updateStatusFromOutput: Bool = false) {
-        guard !isRunningCommand else {
-            lastOutput = "Another MindRoom command is already running."
-            return
-        }
+        guard !isRunningCommand else { return }
         isRunningCommand = true
         let invocation = runtime.command(for: action)
         let processRunner = processRunner
@@ -62,11 +59,13 @@ final class MindRoomCommandRunner: ObservableObject {
             let result = processRunner(invocation)
             DispatchQueue.main.async {
                 self.isRunningCommand = false
-                self.lastOutput = result.output
                 if updateStatusFromOutput {
                     self.serviceStatus = MindRoomServiceStatus.parse(result.output)
-                } else if result.exitCode == 0 {
-                    self.refreshStatus()
+                } else {
+                    self.lastOutput = result.output
+                    if result.exitCode == 0 {
+                        self.refreshStatus()
+                    }
                 }
             }
         }
