@@ -79,6 +79,11 @@ class TurnOrigin:
             TurnIntent.TRUSTED_INTERNAL_RELAY,
         }
 
+    @property
+    def may_be_superseded_by_newer_requester_turn(self) -> bool:
+        """Return whether replay guards may skip this turn when a newer requester prompt exists."""
+        return self.may_answer_interactive_prompt
+
 
 def classify_turn_origin(
     *,

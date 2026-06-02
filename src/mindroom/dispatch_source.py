@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast, runtime_checkable
 
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 
 MESSAGE_SOURCE_KIND = "message"
 VOICE_SOURCE_KIND = "voice"
@@ -35,6 +35,27 @@ _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
+    },
+)
+_COALESCING_BYPASS_SOURCE_KINDS: frozenset[str] = _AUTOMATION_SOURCE_KINDS | frozenset(
+    {
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    },
+)
+_TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        HOOK_DISPATCH_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        VOICE_SOURCE_KIND,
+    },
+)
+_INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        "",
+        MESSAGE_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
 
@@ -69,6 +90,21 @@ def is_automation_source_kind(source_kind: str) -> bool:
     return source_kind in _AUTOMATION_SOURCE_KINDS
 
 
+def source_kind_bypasses_coalescing(source_kind: str | None) -> bool:
+    """Return whether one source kind must dispatch as a FIFO barrier."""
+    return source_kind in _COALESCING_BYPASS_SOURCE_KINDS
+
+
+def source_kind_allows_trusted_original_sender(source_kind: str | None) -> bool:
+    """Return whether trusted senders may promote original-sender metadata for this source kind."""
+    return source_kind in _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS
+
+
+def source_kind_allows_internal_relay_detection(source_kind: str | None) -> bool:
+    """Return whether content metadata may promote this event to a trusted internal relay."""
+    return source_kind in _INTERNAL_RELAY_DETECTION_SOURCE_KINDS
+
+
 def _source_kind_from_value(value: object) -> str | None:
     """Return a canonical source kind from arbitrary metadata."""
     return value if isinstance(value, str) and value in _KNOWN_SOURCE_KINDS else None
@@ -78,6 +114,13 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     """Return canonical source-kind metadata from Matrix content."""
     source_kind = content.get(SOURCE_KIND_KEY)
     return _source_kind_from_value(source_kind)
+
+
+def is_visible_router_voice_echo_content(content: object) -> bool:
+    """Return whether Matrix content is a visible router voice transcript echo."""
+    if not isinstance(content, Mapping):
+        return False
+    return cast("Mapping[str, object]", content).get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
 
 
 def _trusted_source_kind_from_event_content(

@@ -221,6 +221,71 @@ def test_human_requested_messages_answer_interactive_prompts() -> None:
     assert origin.may_answer_interactive_prompt
 
 
+def test_replay_guard_supersedable_policy_tracks_interactive_requester_turns() -> None:
+    """Only interactive requester turns should be skipped by newer requester prompts."""
+    human_message = classify_turn_origin(
+        transport_sender_id="@human:localhost",
+        requester_id="@human:localhost",
+        sender_entity_name=None,
+        requester_entity_name=None,
+        source_kind="message",
+        original_sender=None,
+        trusted_user_relay=False,
+    )
+    router_handoff = classify_turn_origin(
+        transport_sender_id="@mindroom_router:localhost",
+        requester_id="@human:localhost",
+        sender_entity_name="router",
+        requester_entity_name=None,
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        original_sender="@human:localhost",
+        trusted_user_relay=True,
+    )
+    trusted_relay = classify_turn_origin(
+        transport_sender_id="@mindroom_helper:localhost",
+        requester_id="@human:localhost",
+        sender_entity_name="helper",
+        requester_entity_name=None,
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        original_sender="@human:localhost",
+        trusted_user_relay=True,
+    )
+    scheduled_fire = classify_turn_origin(
+        transport_sender_id="@mindroom_general:localhost",
+        requester_id="@mindroom_router:localhost",
+        sender_entity_name="general",
+        requester_entity_name="router",
+        source_kind=SCHEDULED_SOURCE_KIND,
+        original_sender="@mindroom_router:localhost",
+        trusted_user_relay=False,
+    )
+    hook_dispatch = classify_turn_origin(
+        transport_sender_id="@mindroom_general:localhost",
+        requester_id="@human:localhost",
+        sender_entity_name="general",
+        requester_entity_name=None,
+        source_kind=HOOK_DISPATCH_SOURCE_KIND,
+        original_sender="@human:localhost",
+        trusted_user_relay=False,
+    )
+    managed_chatter = classify_turn_origin(
+        transport_sender_id="@mindroom_general:localhost",
+        requester_id="@mindroom_general:localhost",
+        sender_entity_name="general",
+        requester_entity_name="general",
+        source_kind="message",
+        original_sender=None,
+        trusted_user_relay=False,
+    )
+
+    assert human_message.may_be_superseded_by_newer_requester_turn
+    assert router_handoff.may_be_superseded_by_newer_requester_turn
+    assert trusted_relay.may_be_superseded_by_newer_requester_turn
+    assert not scheduled_fire.may_be_superseded_by_newer_requester_turn
+    assert not hook_dispatch.may_be_superseded_by_newer_requester_turn
+    assert not managed_chatter.may_be_superseded_by_newer_requester_turn
+
+
 def test_router_handoff_original_sender_only_for_human_targeted_handoff() -> None:
     """Router handoff metadata is stamped only on real targeted human requests."""
     assert (

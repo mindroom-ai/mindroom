@@ -10,14 +10,11 @@ import nio
 from .commands.parsing import command_parser
 from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
-    HOOK_DISPATCH_SOURCE_KIND,
-    HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
-    SCHEDULED_SOURCE_KIND,
-    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     is_voice_event,
+    source_kind_bypasses_coalescing,
 )
 
 if TYPE_CHECKING:
@@ -32,14 +29,6 @@ class QueueKind(enum.Enum):
     BYPASS = "bypass"
 
 
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
-    {
-        HOOK_SOURCE_KIND,
-        HOOK_DISPATCH_SOURCE_KIND,
-        SCHEDULED_SOURCE_KIND,
-        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    },
-)
 _ROOM_SCOPE_BATCHING_SOURCE_KINDS: frozenset[str] = frozenset(
     {VOICE_SOURCE_KIND, IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND},
 )
@@ -61,7 +50,7 @@ def is_coalescing_exempt_source_kind(
     fallback_source_kind: str | None = None,
 ) -> bool:
     """Return True when coalescing should be skipped for this event."""
-    return _effective_source_kind(event, fallback_source_kind) in _COALESCING_EXEMPT_SOURCE_KINDS
+    return source_kind_bypasses_coalescing(_effective_source_kind(event, fallback_source_kind))
 
 
 def _is_command_event(

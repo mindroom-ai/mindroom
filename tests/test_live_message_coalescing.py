@@ -36,6 +36,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
@@ -48,6 +49,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
+from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -4844,6 +4846,97 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
 
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
+
+
+def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
+    """Replay suppression is gated by turn-origin policy, not just sender/timestamp matching."""
+    older_event = PreparedTextEvent(
+        sender="@mindroom_general:localhost",
+        event_id="$managed",
+        body="internal status",
+        source={"content": {"msgtype": "m.text", "body": "internal status"}},
+        server_timestamp=1000,
+    )
+    newer_msg = ResolvedVisibleMessage(
+        sender="@mindroom_general:localhost",
+        body="newer internal status",
+        timestamp=2000,
+        event_id="$managed-newer",
+        content={"body": "newer internal status"},
+        thread_id="$thread",
+        latest_event_id="$managed-newer",
+    )
+
+    should_skip = has_newer_unresponded_in_thread(
+        older_event,
+        "@mindroom_general:localhost",
+        [newer_msg],
+        may_be_superseded_by_newer_requester_turn=False,
+        requester_user_id_for_event=lambda sender, _source: sender,
+        sender_is_trusted_for_ingress_metadata=lambda _sender: True,
+        is_handled=lambda _event_id: False,
+        logger=MagicMock(),
+    )
+
+    assert not should_skip
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voice_echo(tmp_path: Path) -> None:
+    """Router transcript echoes must not suppress the canonical voice turn they represent."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice",
+        body="check my calendar",
+        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$voice", body="check my calendar", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    visible_echo_source = {
+        "event_id": "$visible_echo",
+        "sender": bot.agent_user.user_id,
+        "origin_server_ts": 2000,
+        "room_id": room.room_id,
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.text",
+            "body": "check my calendar",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    bot.event_cache.get_recent_room_events.return_value = [visible_echo_source]
+
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+
+    action_mock.assert_awaited_once()
+    assert not bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio

@@ -58,13 +58,14 @@ from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_e
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
-    HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
-    SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    is_visible_router_voice_echo_content,
+    source_kind_allows_internal_relay_detection,
+    source_kind_allows_trusted_original_sender,
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
@@ -393,13 +394,7 @@ class TurnController:
         sender_agent_name = self._managed_entity_name_for_sender(sender)
         if sender_agent_name is None and not sender_is_own_entity:
             return False
-        return source_kind in {
-            HOOK_DISPATCH_SOURCE_KIND,
-            HOOK_SOURCE_KIND,
-            SCHEDULED_SOURCE_KIND,
-            TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            VOICE_SOURCE_KIND,
-        }
+        return source_kind_allows_trusted_original_sender(source_kind)
 
     @staticmethod
     def _event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
@@ -549,14 +544,14 @@ class TurnController:
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
-        source_kind: str | None = None,
+        may_be_superseded_by_newer_requester_turn: bool,
     ) -> bool:
         """Return True when a newer unresponded message from the same requester exists."""
         return has_newer_unresponded_in_thread(
             event,
             requester_user_id,
             thread_history,
-            source_kind=source_kind,
+            may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             requester_user_id_for_event=lambda sender, source: self._requester_user_id(
                 sender=sender,
                 source=source,
@@ -573,7 +568,7 @@ class TurnController:
         event: TextDispatchEvent,
         requester_user_id: str,
         thread_id: str | None,
-        source_kind: str | None = None,
+        may_be_superseded_by_newer_requester_turn: bool,
     ) -> bool:
         """Return positive replay proof from raw cached room events when thread history degraded."""
         event_cache = self.deps.runtime.event_cache
@@ -582,7 +577,7 @@ class TurnController:
             event=event,
             requester_user_id=requester_user_id,
             thread_id=thread_id,
-            source_kind=source_kind,
+            may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
             get_thread_id_for_event=self.deps.conversation_cache.get_thread_id_for_event,
             requester_user_id_for_event=lambda sender, source: self._requester_user_id(
@@ -974,11 +969,7 @@ class TurnController:
         original_sender = self._trusted_human_original_sender_for_event(prepared_event)
         content = prepared_event.source.get("content") if isinstance(prepared_event.source, dict) else None
         prepared_source_kind = self._event_source_kind(prepared_event, content) if isinstance(content, dict) else None
-        if (
-            isinstance(content, dict)
-            and content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
-            and self._is_trusted_router_relay_event(prepared_event)
-        ):
+        if is_visible_router_voice_echo_content(content) and self._is_trusted_router_relay_event(prepared_event):
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(prepared_event.event_id))
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
@@ -1046,12 +1037,7 @@ class TurnController:
             dispatch_timing.mark("gate_enter")
         enqueue_start = time.monotonic()
         timing_scope = event_timing_scope(event.event_id)
-        source_kind_allows_relay_detection = source_kind in {
-            "",
-            MESSAGE_SOURCE_KIND,
-            TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-        }
-        if source_kind_allows_relay_detection and self._is_trusted_internal_relay_event(event):
+        if source_kind_allows_internal_relay_detection(source_kind) and self._is_trusted_internal_relay_event(event):
             if dispatch_timing is not None:
                 dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
             source_kind = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
