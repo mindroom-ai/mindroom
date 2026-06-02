@@ -51,6 +51,10 @@ final class MindRoomCommandRunner: ObservableObject {
     }
 
     private func runRuntimeAction(_ action: MindRoomRuntimeAction, updateStatusFromOutput: Bool = false) {
+        guard !isRunningCommand else {
+            lastOutput = "Another MindRoom command is already running."
+            return
+        }
         isRunningCommand = true
         let invocation = runtime.command(for: action)
         let processRunner = processRunner
@@ -80,12 +84,12 @@ final class MindRoomCommandRunner: ObservableObject {
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return CommandResult(exitCode: 127, output: error.localizedDescription)
         }
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         let output = String(data: data, encoding: .utf8) ?? ""
         return CommandResult(exitCode: process.terminationStatus, output: output)
     }

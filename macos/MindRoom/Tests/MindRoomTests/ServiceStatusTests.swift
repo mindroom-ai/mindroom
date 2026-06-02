@@ -36,6 +36,16 @@ final class ServiceStatusTests: XCTestCase {
         XCTAssertEqual(status.state, .unknown)
         XCTAssertEqual(status.message, "Unexpected output")
     }
+
+    func testParsesUnknownStatusWithCollapsedAndTruncatedOutput() {
+        let status = MindRoomServiceStatus.parse(
+            String(repeating: "Unexpected output line\n", count: 20)
+        )
+
+        XCTAssertEqual(status.state, .unknown)
+        XCTAssertLessThanOrEqual(status.message.count, 200)
+        XCTAssertFalse(status.message.contains("\n"))
+    }
 }
 
 final class MindRoomCommandTests: XCTestCase {

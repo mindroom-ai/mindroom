@@ -8,7 +8,14 @@ final class LoginItemController {
     private init() {}
 
     var canToggle: Bool {
-        true
+        switch SMAppService.mainApp.status {
+        case .enabled, .notRegistered:
+            return true
+        case .requiresApproval, .notFound:
+            return false
+        @unknown default:
+            return false
+        }
     }
 
     var isEnabled: Bool {
@@ -16,7 +23,18 @@ final class LoginItemController {
     }
 
     var menuTitle: String {
-        isEnabled ? "Start at Login: On" : "Start at Login: Off"
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            return "Start at Login: On"
+        case .notRegistered:
+            return "Start at Login: Off"
+        case .requiresApproval:
+            return "Start at Login: Needs Approval"
+        case .notFound:
+            return "Start at Login: Unavailable"
+        @unknown default:
+            return "Start at Login: Unknown"
+        }
     }
 
     func toggle() {

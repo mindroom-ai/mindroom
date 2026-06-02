@@ -34,8 +34,15 @@ def update_cask_text(text: str, *, version: str, sha256: str) -> str:
     sha256_count = 0
     lines: list[str] = []
     for source_line in text.splitlines(keepends=True):
-        newline = "\n" if source_line.endswith("\n") else ""
-        content = source_line.removesuffix("\n")
+        if source_line.endswith("\r\n"):
+            newline = "\r\n"
+            content = source_line.removesuffix("\r\n")
+        elif source_line.endswith("\n"):
+            newline = "\n"
+            content = source_line.removesuffix("\n")
+        else:
+            newline = ""
+            content = source_line
 
         if match := VERSION_RE.match(content):
             output_line = f'{match.group("indent")}version "{version}"{newline}'

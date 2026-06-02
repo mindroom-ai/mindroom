@@ -31,6 +31,18 @@ struct MindRoomServiceStatus: Equatable {
         if normalized.isEmpty {
             return MindRoomServiceStatus(state: .unknown, message: "MindRoom status is unknown")
         }
-        return MindRoomServiceStatus(state: .unknown, message: normalized)
+        return MindRoomServiceStatus(state: .unknown, message: sanitizedUnknownMessage(normalized))
+    }
+
+    private static func sanitizedUnknownMessage(_ output: String) -> String {
+        let collapsed = output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if collapsed.count <= 200 {
+            return collapsed
+        }
+        return String(collapsed.prefix(197)) + "..."
     }
 }

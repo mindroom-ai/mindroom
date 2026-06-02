@@ -1,6 +1,17 @@
 import Foundation
 import Sparkle
 
+enum AppUpdaterError: LocalizedError {
+    case updatesNotConfigured
+
+    var errorDescription: String? {
+        switch self {
+        case .updatesNotConfigured:
+            return "App updates are not configured for this build"
+        }
+    }
+}
+
 @MainActor
 final class AppUpdater: ObservableObject {
     static let shared = AppUpdater()
@@ -23,10 +34,9 @@ final class AppUpdater: ObservableObject {
         )
     }
 
-    func checkForUpdates() {
+    func checkForUpdates() throws {
         guard let updaterController else {
-            MindRoomCommandRunner.shared.lastOutputForDisplay = "App updates are not configured for this build"
-            return
+            throw AppUpdaterError.updatesNotConfigured
         }
         updaterController.checkForUpdates(nil)
     }

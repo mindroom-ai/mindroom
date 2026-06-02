@@ -23,6 +23,7 @@ jobs:
           ref: ${{ inputs.release_ref }}
           fetch-depth: 0
           lfs: true
+          persist-credentials: false
       - name: Fetch Git LFS assets
         run: git lfs pull
       - name: Install uv
@@ -46,6 +47,7 @@ jobs:
           ref: ${{ inputs.release_ref }}
           fetch-depth: 0
           lfs: true
+          persist-credentials: false
       - name: Fetch Git LFS assets
         run: git lfs pull
       - name: Install uv
@@ -129,6 +131,7 @@ jobs:
           cp "$APPCAST_DIR/appcast.xml" macos/appcast.xml
       - name: Update Homebrew cask and Sparkle appcast
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
           VERSION="${TAG_NAME#v}"
@@ -148,5 +151,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/mindroom.rb macos/appcast.xml
           git commit -m "Update MindRoom release metadata to ${TAG_NAME}"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          git pull --rebase "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main

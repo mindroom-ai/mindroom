@@ -62,6 +62,6 @@ final class MindRoomRuntimeTests: XCTestCase {
         )
 
         let command = runtime.command(for: .initializeHostedConfig)
-        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--profile", "public"])
+        XCTAssertEqual(command.arguments, ["mindroom", "config", "init", "--matrix-server", "mindroom.chat"])
     }
 }

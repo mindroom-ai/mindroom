@@ -12,7 +12,7 @@ MindRoom config, secrets, and runtime state stay in `~/.mindroom`, so the app an
 
 ## Install
 
-Install the signed app release with Homebrew:
+Install the signed app release with Homebrew.
 
 ```bash
 brew install --cask mindroom
@@ -45,7 +45,7 @@ Configuration is available through **Open Config Folder** at `~/.mindroom`.
 
 Use **Update MindRoom Runtime** to run `uv tool install --managed-python --python 3.13 --force mindroom`.
 Use **Check for App Updates...** to update the signed macOS app through Sparkle.
-Homebrew users can also update with:
+Homebrew users can also update with Homebrew.
 
 ```bash
 brew update
@@ -58,7 +58,7 @@ brew upgrade --cask mindroom
 brew uninstall --cask mindroom
 ```
 
-To remove app preferences and logs:
+Use Homebrew zap to remove app preferences and logs.
 
 ```bash
 brew uninstall --zap --cask mindroom

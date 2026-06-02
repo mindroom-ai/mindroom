@@ -10,9 +10,11 @@
 
 ---
 
+## Implementation Tasks
+
 ### Task 1: Swift Package Skeleton And Runtime Tests
 
-**Files:**
+**Files.**
 - Create: `macos/MindRoom/Package.swift`
 - Create: `macos/MindRoom/Sources/MindRoom/AppMetadata.swift`
 - Create: `macos/MindRoom/Sources/MindRoom/MindRoomRuntime.swift`
@@ -27,8 +29,8 @@ Add tests that assert the app uses `~/.mindroom`, constructs `uv tool install` f
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `swift test --package-path macos/MindRoom`
-Expected: FAIL because the Swift package and runtime types do not exist.
+Run `swift test --package-path macos/MindRoom`.
+Expected result is FAIL because the Swift package and runtime types do not exist.
 
 - [ ] **Step 3: Add minimal package and runtime types**
 
@@ -36,16 +38,16 @@ Add a Swift package with Sparkle dependency, a `CommandResult` struct, and a `Mi
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `swift test --package-path macos/MindRoom`
-Expected: PASS.
+Run `swift test --package-path macos/MindRoom`.
+Expected result is PASS.
 
 - [ ] **Step 5: Commit**
 
-Run: `git add macos/MindRoom/Package.swift macos/MindRoom/Sources/MindRoom/AppMetadata.swift macos/MindRoom/Sources/MindRoom/MindRoomRuntime.swift macos/MindRoom/Sources/MindRoom/CommandResult.swift macos/MindRoom/Tests/MindRoomTests/MindRoomRuntimeTests.swift macos/MindRoom/Resources/Info.plist macos/MindRoom/Resources/MindRoom.entitlements && git commit -m "Add MindRoom macOS runtime package"`
+Run `git add macos/MindRoom/Package.swift macos/MindRoom/Sources/MindRoom/AppMetadata.swift macos/MindRoom/Sources/MindRoom/MindRoomRuntime.swift macos/MindRoom/Sources/MindRoom/CommandResult.swift macos/MindRoom/Tests/MindRoomTests/MindRoomRuntimeTests.swift macos/MindRoom/Resources/Info.plist macos/MindRoom/Resources/MindRoom.entitlements && git commit -m "Add MindRoom macOS runtime package"`.
 
 ### Task 2: Command Runner And Service Status Tests
 
-**Files:**
+**Files.**
 - Create: `macos/MindRoom/Sources/MindRoom/MindRoomCommand.swift`
 - Create: `macos/MindRoom/Sources/MindRoom/MindRoomCommandRunner.swift`
 - Create: `macos/MindRoom/Sources/MindRoom/ServiceStatus.swift`
@@ -57,8 +59,8 @@ Add tests for `running`, `installed but not running`, `not installed`, and missi
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `swift test --package-path macos/MindRoom`
-Expected: FAIL because status parser types do not exist.
+Run `swift test --package-path macos/MindRoom`.
+Expected result is FAIL because status parser types do not exist.
 
 - [ ] **Step 3: Add command and status code**
 
@@ -68,16 +70,16 @@ Add a service status parser that maps CLI output to menu status.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `swift test --package-path macos/MindRoom`
-Expected: PASS.
+Run `swift test --package-path macos/MindRoom`.
+Expected result is PASS.
 
 - [ ] **Step 5: Commit**
 
-Run: `git add macos/MindRoom/Sources/MindRoom/MindRoomCommand.swift macos/MindRoom/Sources/MindRoom/MindRoomCommandRunner.swift macos/MindRoom/Sources/MindRoom/ServiceStatus.swift macos/MindRoom/Tests/MindRoomTests/ServiceStatusTests.swift && git commit -m "Add MindRoom macOS command runner"`
+Run `git add macos/MindRoom/Sources/MindRoom/MindRoomCommand.swift macos/MindRoom/Sources/MindRoom/MindRoomCommandRunner.swift macos/MindRoom/Sources/MindRoom/ServiceStatus.swift macos/MindRoom/Tests/MindRoomTests/ServiceStatusTests.swift && git commit -m "Add MindRoom macOS command runner"`.
 
 ### Task 3: Menu Bar App UI
 
-**Files:**
+**Files.**
 - Create: `macos/MindRoom/Sources/MindRoom/MindRoomApp.swift`
 - Create: `macos/MindRoom/Sources/MindRoom/AppDelegate.swift`
 - Create: `macos/MindRoom/Sources/MindRoom/StatusMenuController.swift`
@@ -91,16 +93,16 @@ The menu includes Install or Update Runtime, Ensure Service, Start, Stop, Restar
 
 - [ ] **Step 2: Run Swift tests and build**
 
-Run: `swift test --package-path macos/MindRoom && swift build -c release --package-path macos/MindRoom`
-Expected: PASS.
+Run `swift test --package-path macos/MindRoom && swift build -c release --package-path macos/MindRoom`.
+Expected result is PASS.
 
 - [ ] **Step 3: Commit**
 
-Run: `git add macos/MindRoom/Sources/MindRoom/MindRoomApp.swift macos/MindRoom/Sources/MindRoom/AppDelegate.swift macos/MindRoom/Sources/MindRoom/StatusMenuController.swift macos/MindRoom/Sources/MindRoom/AppUpdater.swift macos/MindRoom/Sources/MindRoom/LoginItemController.swift && git commit -m "Add MindRoom macOS menu app"`
+Run `git add macos/MindRoom/Sources/MindRoom/MindRoomApp.swift macos/MindRoom/Sources/MindRoom/AppDelegate.swift macos/MindRoom/Sources/MindRoom/StatusMenuController.swift macos/MindRoom/Sources/MindRoom/AppUpdater.swift macos/MindRoom/Sources/MindRoom/LoginItemController.swift && git commit -m "Add MindRoom macOS menu app"`.
 
 ### Task 4: Build Script, Appcast, Cask, And Release Workflow
 
-**Files:**
+**Files.**
 - Create: `macos/build-macos-app.sh`
 - Create: `macos/appcast.xml`
 - Create: `Casks/mindroom.rb`
@@ -121,18 +123,18 @@ Update the CalVer dispatcher so macOS app publishing runs with the existing rele
 
 - [ ] **Step 3: Run script self-test and metadata checks**
 
-Run: `SPARKLE_PUBLIC_ED_KEY=test macos/build-macos-app.sh`
-Expected: PASS on macOS and produce `dist/macos/MindRoom.app`.
-Run: `swift test --package-path macos/MindRoom`
-Expected: PASS.
+Run `SPARKLE_PUBLIC_ED_KEY=test macos/build-macos-app.sh`.
+Expected result is PASS on macOS and produce `dist/macos/MindRoom.app`.
+Run `swift test --package-path macos/MindRoom`.
+Expected result is PASS.
 
 - [ ] **Step 4: Commit**
 
-Run: `git add macos/build-macos-app.sh macos/appcast.xml Casks/mindroom.rb .github/scripts/update_mindroom_cask.py .github/scripts/normalize_appcast.py .github/workflows/release.yml .github/workflows/calver-auto-release.yml && git commit -m "Add MindRoom macOS release packaging"`
+Run `git add macos/build-macos-app.sh macos/appcast.xml Casks/mindroom.rb .github/scripts/update_mindroom_cask.py .github/scripts/normalize_appcast.py .github/workflows/release.yml .github/workflows/calver-auto-release.yml && git commit -m "Add MindRoom macOS release packaging"`.
 
 ### Task 5: Documentation And Final Verification
 
-**Files:**
+**Files.**
 - Modify: `README.md`
 - Create: `docs/installation/macos-app.md`
 
@@ -142,13 +144,13 @@ Document installing the cask, opening the app, installing runtime, initializing 
 
 - [ ] **Step 2: Run final verification**
 
-Run: `swift test --package-path macos/MindRoom`
-Expected: PASS.
-Run: `macos/build-macos-app.sh`
-Expected: PASS.
-Run: `uv run pytest tests/test_services.py -q`
-Expected: PASS.
+Run `swift test --package-path macos/MindRoom`.
+Expected result is PASS.
+Run `macos/build-macos-app.sh`.
+Expected result is PASS.
+Run `uv run pytest tests/test_services.py -q`.
+Expected result is PASS.
 
 - [ ] **Step 3: Commit**
 
-Run: `git add README.md docs/installation/macos-app.md && git commit -m "Document MindRoom macOS app"`
+Run `git add README.md docs/installation/macos-app.md && git commit -m "Document MindRoom macOS app"`.

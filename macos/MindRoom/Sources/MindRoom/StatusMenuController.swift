@@ -89,10 +89,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     private func startStatusRefreshTimer() {
         guard statusRefreshTimer == nil else { return }
-        let timer = Timer(timeInterval: 5, repeats: true) { _ in
+        let runner = runner
+        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                MindRoomCommandRunner.shared.refreshStatus()
-                self.refreshStatusIcon()
+                runner.refreshStatus()
+                self?.refreshStatusIcon()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -183,7 +184,12 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        runner.run(.pairHosted(pairCode: textField.stringValue))
+        let pairCode = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pairCode.isEmpty else {
+            runner.lastOutputForDisplay = "Pair code cannot be empty."
+            return
+        }
+        runner.run(.pairHosted(pairCode: pairCode))
     }
 
     @objc private func openDashboard() {
@@ -213,7 +219,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     @objc private func checkForUpdates() {
-        appUpdater.checkForUpdates()
+        do {
+            try appUpdater.checkForUpdates()
+        } catch {
+            runner.lastOutputForDisplay = error.localizedDescription
+        }
     }
 
     @objc private func quit() {

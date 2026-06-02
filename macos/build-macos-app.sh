@@ -144,7 +144,16 @@ sign_app() {
 resolve_app_version() {
     local raw_version="$APP_VERSION"
     if [[ -z "$raw_version" ]]; then
-        raw_version=$(uv version --short 2>/dev/null || true)
+        raw_version=$(
+            PYPROJECT_PATH="$ROOT_DIR/pyproject.toml" python3 <<'PY' 2>/dev/null || true
+import os
+import pathlib
+import tomllib
+
+pyproject = pathlib.Path(os.environ["PYPROJECT_PATH"])
+print(tomllib.loads(pyproject.read_text())["project"]["version"])
+PY
+        )
     fi
     if [[ -z "$raw_version" ]]; then
         raw_version="0.1.0"
@@ -221,12 +230,15 @@ require_notarization_env() {
 
 notarize_dmg() {
     local dmg_path="$1"
+    local app_path="$2"
     require_notarization_env
     xcrun notarytool submit "$dmg_path" \
         --apple-id "$APPLE_ID" \
         --password "$APPLE_APP_SPECIFIC_PASSWORD" \
         --team-id "$APPLE_TEAM_ID" \
         --wait
+    xcrun stapler staple "$app_path"
+    xcrun stapler validate "$app_path"
     xcrun stapler staple "$dmg_path"
     xcrun stapler validate "$dmg_path"
 }
@@ -269,7 +281,6 @@ quit_running_app() {
 }
 
 echo "Building $DISPLAY_NAME..."
-swift build -c release --package-path "$PACKAGE_DIR"
 BIN_DIR=$(swift build -c release --package-path "$PACKAGE_DIR" --show-bin-path)
 BINARY="$BIN_DIR/$APP_NAME"
 
@@ -314,7 +325,7 @@ if [[ "$CREATE_DMG" == true ]]; then
         codesign --force --sign "$CODESIGN_IDENTITY" --timestamp "$DMG_PATH"
     fi
     if [[ "$NOTARIZE" == "1" ]]; then
-        notarize_dmg "$DMG_PATH"
+        notarize_dmg "$DMG_PATH" "$APP_DIR"
     fi
     echo "Built $DMG_PATH"
 fi

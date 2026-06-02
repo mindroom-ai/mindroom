@@ -76,7 +76,7 @@ struct MindRoomRuntime {
         case .serviceStatus:
             return mindroomCommand(arguments: ["service", "status", "--logs", "0"])
         case .initializeHostedConfig:
-            return mindroomCommand(arguments: ["config", "init", "--profile", "public"])
+            return mindroomCommand(arguments: ["config", "init", "--matrix-server", "mindroom.chat"])
         case .initializeSelfHostedConfig:
             return mindroomCommand(arguments: ["config", "init", "--matrix-server", "self-hosted"])
         case .localStackSetup:
