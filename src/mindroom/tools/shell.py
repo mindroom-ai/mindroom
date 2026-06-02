@@ -15,10 +15,9 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, cast
+from typing import cast
 
 from agno.tools.toolkit import Toolkit
-from pydantic import BeforeValidator
 
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
@@ -114,6 +113,8 @@ def _normalize_shell_args(args: object) -> list[str]:
         try:
             args = json.loads(args)
         except json.JSONDecodeError as exc:
+            if any(char.isspace() for char in stripped):
+                return _normalize_shell_command_line(args)
             raise ValueError(_SHELL_ARGS_ERROR) from exc
 
     if not isinstance(args, list):
@@ -442,7 +443,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
         async def run_shell_command(
             self,
-            args: Annotated[list[str] | str, BeforeValidator(_normalize_shell_args)],
+            args: list[str] | str,
             tail: int = 100,
             timeout: int = 120,  # noqa: ASYNC109
         ) -> str:
@@ -464,9 +465,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 
             """
             self._sweep_stale_records()
-            command_args = _normalize_shell_args(args)
 
             try:
+                command_args = _normalize_shell_args(args)
                 subprocess_env = _shell_subprocess_env(
                     self._runtime_env,
                     base_process_env=self._base_process_env,

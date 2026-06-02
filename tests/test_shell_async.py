@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
+from agno.tools.function import Function
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -112,10 +112,6 @@ def _get_run_shell_command_function(tool: Toolkit) -> Function:
     return tool.async_functions["run_shell_command"]
 
 
-async def _aexecute_run_shell_command(tool: Toolkit, args: object) -> FunctionExecutionResult:
-    return await FunctionCall(function=_get_run_shell_command_function(tool), arguments={"args": args}).aexecute()
-
-
 # ---------------------------------------------------------------------------
 # run_shell_command
 # ---------------------------------------------------------------------------
@@ -153,6 +149,26 @@ async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) ->
     result = await entrypoint("echo $HOME")
     assert result
     assert not result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("[ 1 -eq 1 ] && echo ok", "ok"),
+        ("{ echo ok; }", "ok"),
+    ],
+)
+async def test_run_shell_command_accepts_bracketed_shell_command_strings(
+    tmp_path: Path, command: str, expected: str
+) -> None:
+    """Shell grammar that starts with JSON-like characters should still execute through bash."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(command)
+    assert result == expected
 
 
 @pytest.mark.asyncio
@@ -215,11 +231,12 @@ async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) ->
 async def test_run_shell_command_rejects_invalid_stringified_args(tmp_path: Path, args: str) -> None:
     """Malformed or non-flat stringified args should fail validation."""
     tool = _get_toolkit(tmp_path)
-    result = await _aexecute_run_shell_command(tool, args)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
 
-    assert result.status == "failure"
-    assert result.error is not None
-    assert "'args' must be a shell command string or a flat list of strings" in result.error
+    result = await entrypoint(args)
+    assert result.startswith("Error:")
+    assert "'args' must be a shell command string or a flat list of strings" in result
 
 
 @pytest.mark.asyncio
@@ -231,6 +248,19 @@ async def test_run_shell_command_empty_json_list_uses_existing_empty_behavior(tm
 
     result = await entrypoint("[]")
     assert result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", ["", "   "])
+async def test_run_shell_command_entrypoint_returns_error_for_empty_string_args(tmp_path: Path, args: str) -> None:
+    """Direct entrypoint calls should return validation errors instead of raising."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(args)
+    assert result.startswith("Error:")
+    assert "'args' must be a shell command string or a flat list of strings" in result
 
 
 @pytest.mark.asyncio
