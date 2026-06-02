@@ -167,6 +167,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --base main \
               --state open \
+              --search '"Update MindRoom release metadata" in:title' \
               --limit 100 \
               --json number,title,headRefName,updatedAt \
               --jq 'map(select(.title | startswith("Update MindRoom release metadata"))) | sort_by(.updatedAt) | reverse | first | if . == null then "" else "\(.number) \(.headRefName)" end'
@@ -184,7 +185,12 @@ jobs:
 
           git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "+refs/heads/${RELEASE_METADATA_BRANCH}:refs/remotes/origin/${RELEASE_METADATA_BRANCH}" || true
-          git push --force-with-lease \
+          if REMOTE_RELEASE_METADATA_SHA=$(git rev-parse --verify --quiet "refs/remotes/origin/${RELEASE_METADATA_BRANCH}"); then
+            FORCE_WITH_LEASE=(--force-with-lease="refs/heads/${RELEASE_METADATA_BRANCH}:${REMOTE_RELEASE_METADATA_SHA}")
+          else
+            FORCE_WITH_LEASE=(--force-with-lease="refs/heads/${RELEASE_METADATA_BRANCH}:")
+          fi
+          git push "${FORCE_WITH_LEASE[@]}" \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "HEAD:${RELEASE_METADATA_BRANCH}"
 
