@@ -93,6 +93,7 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.room_member_joins import (
     RoomMemberJoin,
+    record_room_member_joins_from_sync_state_seen,
     room_member_join_from_event,
     room_member_joins_from_sync_state,
     room_member_joins_from_sync_timeline,
@@ -148,6 +149,7 @@ class _RoomMemberJoinSyncHookPlan:
     arm_after_response: bool = True
     emit_state: bool = False
     emit_timeline: bool = False
+    record_state_seen: bool = False
 
 
 def _create_task_wrapper(
@@ -1117,6 +1119,7 @@ class AgentBot:
             arm_after_response=True,
             emit_state=emit_certified_state,
             emit_timeline=restored_token_first_sync_response,
+            record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
         )
 
     async def _run_sync_response_side_effects(
@@ -1131,6 +1134,16 @@ class AgentBot:
             await self._emit_room_member_joined_sync_timeline_hooks(response)
         if room_member_join_hook_plan.emit_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
+        if room_member_join_hook_plan.record_state_seen:
+            client = self.client
+            if client is not None:
+                record_room_member_joins_from_sync_state_seen(
+                    response,
+                    rooms=client.rooms,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    storage_root=self.runtime_paths.storage_root,
+                )
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()

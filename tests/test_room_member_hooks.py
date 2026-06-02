@@ -336,6 +336,13 @@ async def test_router_ignores_restored_token_first_sync_full_state_member_snapsh
 
     assert seen == []
 
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", prev_membership=None),
+    )
+
+    assert seen == []
+
 
 @pytest.mark.asyncio
 async def test_router_ignores_sync_state_member_snapshot_without_previous_membership(
@@ -364,6 +371,13 @@ async def test_router_ignores_sync_state_member_snapshot_without_previous_member
             room.room_id,
             [_room_member_event(event_id="$snapshot-join", prev_membership=None)],
         ),
+    )
+
+    assert seen == []
+
+    await bot._on_room_member(
+        room,
+        _room_member_event(event_id="$profile-update", prev_membership=None),
     )
 
     assert seen == []

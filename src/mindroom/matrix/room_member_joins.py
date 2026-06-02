@@ -120,6 +120,34 @@ def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: st
         return _save_room_member_joins(path, seen)
 
 
+def _is_ignored_room_member_user(user_id: str, *, config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a membership event belongs to a managed/bot user."""
+    return (
+        entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
+        or user_id in config.bot_accounts
+        or user_id == mindroom_user_id(config, runtime_paths)
+    )
+
+
+def _mark_room_member_join_seen_from_event(
+    room: nio.MatrixRoom,
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage_root: Path,
+) -> bool:
+    """Record one human room-member join event without emitting hook payload data."""
+    if event.membership != "join":
+        return False
+
+    user_id = event.state_key
+    if _is_ignored_room_member_user(user_id, config=config, runtime_paths=runtime_paths):
+        return False
+
+    return _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id)
+
+
 def room_member_join_from_event(
     room: nio.MatrixRoom,
     event: nio.RoomMemberEvent,
@@ -136,14 +164,16 @@ def room_member_join_from_event(
         return None
 
     user_id = event.state_key
-    if (
-        entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
-        or user_id in config.bot_accounts
-        or user_id == mindroom_user_id(config, runtime_paths)
-    ):
+    if _is_ignored_room_member_user(user_id, config=config, runtime_paths=runtime_paths):
         return None
 
-    if not _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id):
+    if not _mark_room_member_join_seen_from_event(
+        room,
+        event,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_root=storage_root,
+    ):
         return None
 
     return RoomMemberJoin(
@@ -185,7 +215,40 @@ def room_member_joins_from_sync_state(
             )
             if join is not None:
                 joins.append(join)
+            elif event.membership == "join" and event.prev_membership in {None, "join"}:
+                _mark_room_member_join_seen_from_event(
+                    room,
+                    event,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    storage_root=storage_root,
+                )
     return tuple(joins)
+
+
+def record_room_member_joins_from_sync_state_seen(
+    response: nio.SyncResponse,
+    *,
+    rooms: Mapping[str, nio.MatrixRoom],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage_root: Path,
+) -> None:
+    """Record human join state snapshots so later profile updates do not emit join hooks."""
+    for room_id, join_info in response.rooms.join.items():
+        room = rooms.get(room_id)
+        if room is None:
+            continue
+        for event in join_info.state:
+            if not isinstance(event, nio.RoomMemberEvent):
+                continue
+            _mark_room_member_join_seen_from_event(
+                room,
+                event,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_root=storage_root,
+            )
 
 
 def room_member_joins_from_sync_timeline(
