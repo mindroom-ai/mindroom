@@ -43,7 +43,6 @@ from mindroom.ai import (
     _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
-    should_retry_without_inline_media,
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import _serialize_metrics
@@ -91,7 +90,11 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.media_fallback import append_inline_media_fallback_prompt, reset_model_media_capability_cache
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    reset_model_media_capability_cache,
+    retry_media_inputs_after_failure,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -5835,19 +5838,21 @@ class TestUserIdPassthrough:
             ("Rate limit exceeded", False),
         ],
     )
-    def test_should_retry_without_inline_media_error_matching(self, error_text: str, expected: bool) -> None:
-        """Retry matcher should target inline-media validation and unsupported-input failures."""
+    def test_retry_media_inputs_after_failure_error_matching(self, error_text: str, expected: bool) -> None:
+        """Retry decision should target inline-media validation and unsupported-input failures."""
         media_inputs = MediaInputs(
             audio=(object(),),
             images=(object(),),
             files=(object(),),
             videos=(object(),),
         )
-        assert should_retry_without_inline_media(error_text, media_inputs) is expected
+        assert retry_media_inputs_after_failure(None, error_text, media_inputs).should_retry is expected
 
-    def test_should_retry_without_inline_media_ignores_media_errors_without_media(self) -> None:
+    def test_retry_media_inputs_after_failure_ignores_media_errors_without_media(self) -> None:
         """Media-shaped errors should not trigger retry when no media was sent."""
-        assert should_retry_without_inline_media("audio input is not supported", MediaInputs()) is False
+        assert (
+            retry_media_inputs_after_failure(None, "audio input is not supported", MediaInputs()).should_retry is False
+        )
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""

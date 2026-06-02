@@ -1671,7 +1671,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             )
             attempt_media_inputs = media_filter.media_inputs
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     response = None
                     cleaned_response = None
                     try:
@@ -1682,7 +1682,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             e,
                             attempt_media_inputs,
                         )
-                        if not retried_without_inline_media and retry_decision.should_retry:
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
                                 "Retrying team response after inline media validation error",
                                 agents=agent_list,
@@ -1713,7 +1713,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             error_text,
                             attempt_media_inputs,
                         )
-                        if not retried_without_inline_media and retry_decision.should_retry:
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
                                 "Retrying team response after inline media errored run output",
                                 agents=agent_list,
@@ -2201,7 +2201,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 )
 
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     canonical_per_member = dict.fromkeys(display_names, "")
                     visible_per_member = dict.fromkeys(display_names, "")
                     canonical_consensus = ""
@@ -2212,7 +2212,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     next_tool_index = 1
                     pending_tools = tool_tracker.pending_tools
                     emitted_output = False
-                    retry_requested = False
+                    media_fallback_retry_requested = False
 
                     ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
 
@@ -2274,7 +2274,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     attempt_media_inputs,
                                 )
                                 if (
-                                    not retried_without_inline_media
+                                    not retried_after_media_fallback
                                     and not (emitted_output or pending_tools or completed_tools)
                                     and retry_decision.should_retry
                                 ):
@@ -2294,7 +2294,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     )
                                     attempt_media_inputs = retry_decision.media_inputs
                                     attempt_run_id = ai_runtime.next_retry_run_id(run_id)
-                                    retry_requested = True
+                                    media_fallback_retry_requested = True
                                     break
                                 yield get_user_friendly_error_message(Exception(error_text), team_label)
                                 return
@@ -2325,7 +2325,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 attempt_media_inputs,
                             )
                             if (
-                                not retried_without_inline_media
+                                not retried_after_media_fallback
                                 and not (emitted_output or pending_tools or completed_tools)
                                 and retry_decision.should_retry
                             ):
@@ -2345,7 +2345,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 )
                                 attempt_media_inputs = retry_decision.media_inputs
                                 attempt_run_id = ai_runtime.next_retry_run_id(run_id)
-                                retry_requested = True
+                                media_fallback_retry_requested = True
                                 break
                             yield get_user_friendly_error_message(Exception(error_text), team_label)
                             return
@@ -2414,7 +2414,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                             chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
                             yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)
 
-                    if retry_requested:
+                    if media_fallback_retry_requested:
                         continue
                     if emitted_output and reply_to_event_id:
                         _persist_bound_seen_event_ids(

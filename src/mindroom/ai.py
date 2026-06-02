@@ -70,7 +70,6 @@ from mindroom.media_fallback import (
     build_model_media_route,
     filter_media_inputs_for_route,
     retry_media_inputs_after_failure,
-    should_retry_without_inline_media,
 )
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
@@ -99,7 +98,6 @@ __all__ = [
     "ai_response",
     "build_matrix_run_metadata",
     "resolve_run_correlation_id",
-    "should_retry_without_inline_media",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -219,8 +217,8 @@ class _StreamingAttemptState:
     request_metric_totals: dict[str, int] = field(default_factory=empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
-    retry_requested: bool = False
-    retry_media_inputs: MediaInputs | None = None
+    media_fallback_retry_requested: bool = False
+    media_fallback_retry_inputs: MediaInputs | None = None
     user_error: Exception | None = None
     stream_exception: Exception | None = None
 
@@ -409,7 +407,7 @@ def resolve_run_correlation_id(
 def _request_stream_retry(
     state: _StreamingAttemptState,
     *,
-    retried_without_inline_media: bool,
+    retried_after_media_fallback: bool,
     media_route: ModelMediaRoute | None,
     media_inputs: MediaInputs,
     error: Exception | str,
@@ -417,14 +415,14 @@ def _request_stream_retry(
     agent_name: str,
 ) -> bool:
     """Set retry flag when inline-media fallback should be attempted."""
-    if retried_without_inline_media or _stream_attempt_has_progress(state):
+    if retried_after_media_fallback or _stream_attempt_has_progress(state):
         # Once any stream content is emitted, retrying would duplicate partial output.
         return False
     retry_decision = retry_media_inputs_after_failure(media_route, error, media_inputs)
     if not retry_decision.should_retry:
         return False
-    state.retry_requested = True
-    state.retry_media_inputs = retry_decision.media_inputs
+    state.media_fallback_retry_requested = True
+    state.media_fallback_retry_inputs = retry_decision.media_inputs
     logger.warning(
         log_message,
         agent=agent_name,
@@ -1000,7 +998,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             attempt_media_inputs = media_filter.media_inputs
 
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     response = None
                     try:
                         if pipeline_timing is not None:
@@ -1037,7 +1035,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             e,
                             attempt_media_inputs,
                         )
-                        if not retried_without_inline_media and retry_decision.should_retry:
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
                                 "Retrying AI response after inline media validation error",
                                 agent=agent_name,
@@ -1062,7 +1060,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             error_text,
                             attempt_media_inputs,
                         )
-                        if not retried_without_inline_media and retry_decision.should_retry:
+                        if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
                                 "Retrying AI response after inline media errored run output",
                                 agent=agent_name,
@@ -1211,7 +1209,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     show_tool_calls: bool,
     agent_name: str,
     media_inputs: MediaInputs,
-    retried_without_inline_media: bool,
+    retried_after_media_fallback: bool,
     timing_scope: str,
     media_route: ModelMediaRoute | None = None,
     state_updated: Callable[[], None] | None = None,
@@ -1290,7 +1288,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 error_text = event.content or "Unknown agent error"
                 if _request_stream_retry(
                     state,
-                    retried_without_inline_media=retried_without_inline_media,
+                    retried_after_media_fallback=retried_after_media_fallback,
                     media_route=media_route,
                     media_inputs=media_inputs,
                     error=error_text,
@@ -1306,7 +1304,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     except Exception as e:
         if _request_stream_retry(
             state,
-            retried_without_inline_media=retried_without_inline_media,
+            retried_after_media_fallback=retried_after_media_fallback,
             media_route=media_route,
             media_inputs=media_inputs,
             error=e,
@@ -1533,7 +1531,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 )
 
             try:
-                for retried_without_inline_media in (False, True):
+                for retried_after_media_fallback in (False, True):
                     state = _StreamingAttemptState()
 
                     try:
@@ -1578,7 +1576,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             agent_name=agent_name,
                             media_route=media_route,
                             media_inputs=attempt_media_inputs,
-                            retried_without_inline_media=retried_without_inline_media,
+                            retried_after_media_fallback=retried_after_media_fallback,
                             timing_scope=timing_scope,
                             state_updated=_sync_live_turn_recorder,
                             pipeline_timing=pipeline_timing,
@@ -1587,7 +1585,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     except Exception as e:
                         if _request_stream_retry(
                             state,
-                            retried_without_inline_media=retried_without_inline_media,
+                            retried_after_media_fallback=retried_after_media_fallback,
                             media_route=media_route,
                             media_inputs=attempt_media_inputs,
                             error=e,
@@ -1598,19 +1596,19 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 run_input,
                                 fallback_prompt=inline_media_fallback_prompt,
                             )
-                            attempt_media_inputs = state.retry_media_inputs or MediaInputs()
+                            attempt_media_inputs = state.media_fallback_retry_inputs or MediaInputs()
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
                         logger.exception("Error starting streaming AI response")
                         yield get_user_friendly_error_message(e, agent_name)
                         return
 
-                    if state.retry_requested:
+                    if state.media_fallback_retry_requested:
                         attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
                             run_input,
                             fallback_prompt=inline_media_fallback_prompt,
                         )
-                        attempt_media_inputs = state.retry_media_inputs or MediaInputs()
+                        attempt_media_inputs = state.media_fallback_retry_inputs or MediaInputs()
                         attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                         continue
 

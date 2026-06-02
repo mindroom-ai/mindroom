@@ -16,7 +16,6 @@ __all__ = [
     "filter_media_inputs_for_route",
     "reset_model_media_capability_cache",
     "retry_media_inputs_after_failure",
-    "should_retry_without_inline_media",
 ]
 
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
@@ -138,11 +137,6 @@ def retry_media_inputs_after_failure(
         )
 
     return _no_media_retry_decision(media_inputs)
-
-
-def should_retry_without_inline_media(error: Exception | str, media_inputs: MediaInputs) -> bool:
-    """Return whether this run should retry once after dropping some inline media."""
-    return retry_media_inputs_after_failure(None, error, media_inputs).should_retry
 
 
 def reset_model_media_capability_cache() -> None:
