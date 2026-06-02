@@ -97,8 +97,8 @@ jobs:
           TAG_NAME: ${{ inputs.release_ref }}
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
-          git fetch origin main
-          git switch --force-create release-metadata origin/main
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+          git switch --force-create release-metadata FETCH_HEAD
 
           if [[ -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
             echo "SPARKLE_PRIVATE_ED_KEY is required to sign Sparkle updates." >&2
