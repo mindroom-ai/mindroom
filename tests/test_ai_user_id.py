@@ -91,7 +91,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.media_fallback import append_inline_media_fallback_prompt
+from mindroom.media_fallback import append_inline_media_fallback_prompt, reset_model_media_capability_cache
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -5210,6 +5210,71 @@ class TestUserIdPassthrough:
         assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
 
     @pytest.mark.asyncio
+    async def test_ai_response_learns_audio_unsupported_for_same_model_route(self, tmp_path: Path) -> None:
+        """Audio-only capability failure should omit audio on later calls to the same concrete route."""
+        reset_model_media_capability_cache()
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.id = "qwen-local"
+        mock_agent.model.provider = "OpenAI"
+        mock_agent.model.base_url = "http://localhost:9292/v1"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        first_success = MagicMock()
+        first_success.content = "Recovered response"
+        first_success.tools = None
+        second_success = MagicMock()
+        second_success.content = "Cached response"
+        second_success.tools = None
+        mock_agent.arun = AsyncMock(
+            side_effect=[
+                Exception("audio input is not supported - hint: you may need to provide the mmproj"),
+                first_success,
+                second_success,
+            ],
+        )
+
+        audio_input = MagicMock(name="audio_input")
+        image_input = MagicMock(name="image_input")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            first_response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(audio=[audio_input], images=[image_input]),
+            )
+            second_response = await ai_response(
+                agent_name="general",
+                prompt="test again",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(audio=[audio_input], images=[image_input]),
+            )
+
+        assert first_response == "Recovered response"
+        assert second_response == "Cached response"
+        assert mock_agent.arun.await_count == 3
+        first_prompt = mock_agent.arun.await_args_list[0].args[0]
+        retry_prompt = mock_agent.arun.await_args_list[1].args[0]
+        cached_prompt = mock_agent.arun.await_args_list[2].args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(retry_prompt, list)
+        assert isinstance(cached_prompt, list)
+        assert first_prompt[-1].audio == [audio_input]
+        assert first_prompt[-1].images == [image_input]
+        assert retry_prompt[-1].audio == ()
+        assert retry_prompt[-1].images == [image_input]
+        assert cached_prompt[-1].audio == ()
+        assert cached_prompt[-1].images == [image_input]
+        reset_model_media_capability_cache()
+
+    @pytest.mark.asyncio
     async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
         """Non-streaming retries should log the actual prompt sent on each attempt."""
         mock_agent = MagicMock()
@@ -5768,7 +5833,13 @@ class TestUserIdPassthrough:
     )
     def test_should_retry_without_inline_media_error_matching(self, error_text: str, expected: bool) -> None:
         """Retry matcher should target inline-media validation and unsupported-input failures."""
-        assert should_retry_without_inline_media(error_text, MediaInputs(images=(object(),))) is expected
+        media_inputs = MediaInputs(
+            audio=(object(),),
+            images=(object(),),
+            files=(object(),),
+            videos=(object(),),
+        )
+        assert should_retry_without_inline_media(error_text, media_inputs) is expected
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""

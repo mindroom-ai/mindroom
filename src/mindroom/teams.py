@@ -63,7 +63,12 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import get_room_alias_from_id
-from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    build_model_media_route,
+    filter_media_inputs_for_route,
+    retry_media_inputs_after_failure,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.team_exact_members import (
@@ -1653,9 +1658,18 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
 
             response: object | None = None
             cleaned_response: RunOutput | TeamRunOutput | None = None
-            attempt_prompt = prompt
-            attempt_media_inputs = media_inputs
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
+            media_route = build_model_media_route(team.model)
+            media_filter = filter_media_inputs_for_route(media_route, media_inputs)
+            attempt_prompt = (
+                append_inline_media_fallback_prompt(
+                    prompt,
+                    fallback_prompt=inline_media_fallback_prompt,
+                )
+                if media_filter.removed_kinds
+                else prompt
+            )
+            attempt_media_inputs = media_filter.media_inputs
             try:
                 for retried_without_inline_media in (False, True):
                     response = None
@@ -1663,14 +1677,17 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                     try:
                         response = await _run(attempt_prompt, attempt_media_inputs, attempt_run_id)
                     except Exception as e:
-                        if not retried_without_inline_media and should_retry_without_inline_media(
+                        retry_decision = retry_media_inputs_after_failure(
+                            media_route,
                             e,
                             attempt_media_inputs,
-                        ):
+                        )
+                        if not retried_without_inline_media and retry_decision.should_retry:
                             logger.warning(
-                                "Retrying team response without inline media after validation error",
+                                "Retrying team response after inline media validation error",
                                 agents=agent_list,
                                 error=str(e),
+                                removed_media_kinds=sorted(retry_decision.removed_kinds),
                             )
                             _scrub_team_retry_notice_state(
                                 scope_context=scope_context,
@@ -1680,7 +1697,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 prompt,
                                 fallback_prompt=inline_media_fallback_prompt,
                             )
-                            attempt_media_inputs = MediaInputs()
+                            attempt_media_inputs = retry_decision.media_inputs
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
@@ -1691,14 +1708,17 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                         cleaned_response = response
                     if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                         error_text = str(response.content or "Unknown team error")
-                        if not retried_without_inline_media and should_retry_without_inline_media(
+                        retry_decision = retry_media_inputs_after_failure(
+                            media_route,
                             error_text,
                             attempt_media_inputs,
-                        ):
+                        )
+                        if not retried_without_inline_media and retry_decision.should_retry:
                             logger.warning(
-                                "Retrying team response without inline media after errored run output",
+                                "Retrying team response after inline media errored run output",
                                 agents=agent_list,
                                 error=error_text,
+                                removed_media_kinds=sorted(retry_decision.removed_kinds),
                             )
                             _cleanup_team_notice_state(
                                 run_output=response,
@@ -1714,7 +1734,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 prompt,
                                 fallback_prompt=inline_media_fallback_prompt,
                             )
-                            attempt_media_inputs = MediaInputs()
+                            attempt_media_inputs = retry_decision.media_inputs
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
                         logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
@@ -2024,9 +2044,18 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             turn_recorder.set_run_metadata(run_metadata)
             logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
             media_inputs = media or MediaInputs()
-            attempt_prompt = prepared_prompt
-            attempt_media_inputs = media_inputs
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
+            media_route = build_model_media_route(team.model)
+            media_filter = filter_media_inputs_for_route(media_route, media_inputs)
+            attempt_prompt = (
+                append_inline_media_fallback_prompt(
+                    prepared_prompt,
+                    fallback_prompt=inline_media_fallback_prompt,
+                )
+                if media_filter.removed_kinds
+                else prepared_prompt
+            )
+            attempt_media_inputs = media_filter.media_inputs
 
             visible_per_member: dict[str, str] = {}
             visible_consensus: str = ""
@@ -2239,15 +2268,21 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
                             if is_errored_run_output(event):
                                 error_text = str(event.content or "Unknown team error")
+                                retry_decision = retry_media_inputs_after_failure(
+                                    media_route,
+                                    error_text,
+                                    attempt_media_inputs,
+                                )
                                 if (
                                     not retried_without_inline_media
                                     and not (emitted_output or pending_tools or completed_tools)
-                                    and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                                    and retry_decision.should_retry
                                 ):
                                     logger.warning(
-                                        "Retrying team streaming without inline media after errored run output",
+                                        "Retrying team streaming after inline media errored run output",
                                         agents=", ".join(agent_names),
                                         error=error_text,
+                                        removed_media_kinds=sorted(retry_decision.removed_kinds),
                                     )
                                     _scrub_team_retry_notice_state(
                                         scope_context=scope_context,
@@ -2257,7 +2292,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                         prepared_prompt,
                                         fallback_prompt=inline_media_fallback_prompt,
                                     )
-                                    attempt_media_inputs = MediaInputs()
+                                    attempt_media_inputs = retry_decision.media_inputs
                                     attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                                     retry_requested = True
                                     break
@@ -2284,15 +2319,21 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
                         if isinstance(event, TeamRunErrorEvent):
                             error_text = event.content or "Unknown team error"
+                            retry_decision = retry_media_inputs_after_failure(
+                                media_route,
+                                error_text,
+                                attempt_media_inputs,
+                            )
                             if (
                                 not retried_without_inline_media
                                 and not (emitted_output or pending_tools or completed_tools)
-                                and should_retry_without_inline_media(error_text, attempt_media_inputs)
+                                and retry_decision.should_retry
                             ):
                                 logger.warning(
-                                    "Retrying team streaming without inline media after team error",
+                                    "Retrying team streaming after inline media team error",
                                     agents=", ".join(agent_names),
                                     error=error_text,
+                                    removed_media_kinds=sorted(retry_decision.removed_kinds),
                                 )
                                 _scrub_team_retry_notice_state(
                                     scope_context=scope_context,
@@ -2302,7 +2343,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     prepared_prompt,
                                     fallback_prompt=inline_media_fallback_prompt,
                                 )
-                                attempt_media_inputs = MediaInputs()
+                                attempt_media_inputs = retry_decision.media_inputs
                                 attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                                 retry_requested = True
                                 break
