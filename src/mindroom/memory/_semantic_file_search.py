@@ -9,7 +9,7 @@ import os
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
@@ -23,6 +23,7 @@ from mindroom.logging_config import get_logger
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
+    from agno.knowledge.document.base import Document
     from agno.knowledge.reader.base import Reader
 
     from mindroom.config.main import Config
@@ -33,46 +34,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _COLLECTION_PREFIX = "mindroom_memory"
 _SOURCE_PATH_KEY = "source_path"
-_SOURCE_MTIME_NS_KEY = "source_mtime_ns"
-_SOURCE_SIZE_KEY = "source_size"
-_SOURCE_DIGEST_KEY = "source_digest"
 _CHUNK_SIZE = 5000
 _CHUNK_OVERLAP = 0
-
-
-class _VectorDb(Protocol):
-    collection_name: str
-
-    def exists(self) -> bool:
-        """Return whether the collection exists."""
-        ...
-
-    def delete(self) -> None:
-        """Delete the collection."""
-        ...
-
-    def create(self) -> None:
-        """Create the collection."""
-        ...
-
-
-class _KnowledgeIndex(Protocol):
-    vector_db: _VectorDb
-
-    def remove_vectors_by_metadata(self, filters: dict[str, str]) -> None:
-        """Remove vectors matching metadata."""
-        ...
-
-    def insert(
-        self,
-        *,
-        path: str,
-        metadata: dict[str, object],
-        upsert: bool,
-        reader: Reader,
-    ) -> None:
-        """Insert one file into the vector index."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -81,20 +44,11 @@ class _IndexedFile:
     relative_path: str
     mtime_ns: int
     size: int
-    digest: str
 
 
 def _safe_identifier(value: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
     return sanitized or "default"
-
-
-def _file_digest(file_path: Path) -> str:
-    digest = hashlib.sha256()
-    with file_path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
@@ -141,26 +95,11 @@ def _list_indexed_files(root: Path, search_config: MemorySearchConfig) -> list[_
                         relative_path=relative_path,
                         mtime_ns=stat.st_mtime_ns,
                         size=stat.st_size,
-                        digest=_file_digest(resolved_path),
                     ),
                 )
             except (OSError, ValueError):
                 continue
     return sorted(files, key=lambda item: item.relative_path)
-
-
-def _source_signature(files: list[_IndexedFile]) -> str:
-    digest = hashlib.sha256()
-    for file in files:
-        digest.update(file.relative_path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(file.mtime_ns).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(file.size).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(file.digest.encode("ascii"))
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def _settings_signature(config: Config, search_config: MemorySearchConfig, root: Path) -> str:
@@ -174,36 +113,30 @@ def _settings_signature(config: Config, search_config: MemorySearchConfig, root:
             embedder_config.dimensions,
             tuple(search_config.include),
             search_config.include_entrypoint,
-            _CHUNK_SIZE,
-            _CHUNK_OVERLAP,
         ),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _scope_digest(root: Path, scope_user_id: str) -> str:
+    return hashlib.sha256(f"{scope_user_id}:{root.resolve()}".encode()).hexdigest()[:16]
+
+
 def _index_storage_path(runtime_paths: RuntimePaths, root: Path, scope_user_id: str) -> Path:
-    digest = hashlib.sha256(f"{scope_user_id}:{root.resolve()}".encode()).hexdigest()[:16]
-    return runtime_paths.storage_root / "memory_search_db" / f"{_safe_identifier(scope_user_id)}_{digest}"
+    name = f"{_safe_identifier(scope_user_id)}_{_scope_digest(root, scope_user_id)}"
+    return runtime_paths.storage_root / "memory_search_db" / name
 
 
 def _collection_name(root: Path, scope_user_id: str) -> str:
-    digest = hashlib.sha256(f"{scope_user_id}:{root.resolve()}".encode()).hexdigest()[:16]
-    return f"{_COLLECTION_PREFIX}_{_safe_identifier(scope_user_id)}_{digest}"
+    return f"{_COLLECTION_PREFIX}_{_safe_identifier(scope_user_id)}_{_scope_digest(root, scope_user_id)}"
 
 
 def _state_path(index_path: Path) -> Path:
     return index_path / "index_state.json"
 
 
-def _file_state(files: list[_IndexedFile]) -> dict[str, dict[str, int | str]]:
-    return {
-        file.relative_path: {
-            "mtime_ns": file.mtime_ns,
-            "size": file.size,
-            "digest": file.digest,
-        }
-        for file in files
-    }
+def _file_state(files: list[_IndexedFile]) -> dict[str, dict[str, int]]:
+    return {file.relative_path: {"mtime_ns": file.mtime_ns, "size": file.size} for file in files}
 
 
 def _load_state(index_path: Path) -> dict[str, object] | None:
@@ -218,7 +151,6 @@ def _write_state(
     index_path: Path,
     *,
     settings_signature: str,
-    source_signature: str,
     collection_name: str,
     files: list[_IndexedFile],
 ) -> None:
@@ -226,7 +158,6 @@ def _write_state(
         json.dumps(
             {
                 "settings_signature": settings_signature,
-                "source_signature": source_signature,
                 "collection": collection_name,
                 "files": _file_state(files),
             },
@@ -245,10 +176,7 @@ def _build_reader(file_path: Path) -> Reader:
     configured_reader = deepcopy(reader)
     configured_reader.chunk = True
     configured_reader.chunk_size = _CHUNK_SIZE
-    configured_reader.chunking_strategy = SafeFixedSizeChunking(
-        chunk_size=_CHUNK_SIZE,
-        overlap=_CHUNK_OVERLAP,
-    )
+    configured_reader.chunking_strategy = SafeFixedSizeChunking(chunk_size=_CHUNK_SIZE, overlap=_CHUNK_OVERLAP)
     return configured_reader
 
 
@@ -256,48 +184,40 @@ def _indexed_file_changed(saved: object, current: _IndexedFile) -> bool:
     if not isinstance(saved, dict):
         return True
     saved_file = cast("dict[str, object]", saved)
-    return (
-        saved_file.get("mtime_ns") != current.mtime_ns
-        or saved_file.get("size") != current.size
-        or saved_file.get("digest") != current.digest
-    )
+    return saved_file.get("mtime_ns") != current.mtime_ns or saved_file.get("size") != current.size
 
 
-def _reset_collection(knowledge: _KnowledgeIndex) -> None:
-    vector_db = knowledge.vector_db
+def _vector_db(knowledge: Knowledge) -> ChromaDb:
+    return cast("ChromaDb", knowledge.vector_db)
+
+
+def _reset_collection(knowledge: Knowledge) -> None:
+    vector_db = _vector_db(knowledge)
     if vector_db.exists():
         vector_db.delete()
     vector_db.create()
 
 
-def _insert_file(knowledge: _KnowledgeIndex, indexed_file: _IndexedFile) -> None:
-    metadata: dict[str, object] = {
-        _SOURCE_PATH_KEY: indexed_file.relative_path,
-        _SOURCE_MTIME_NS_KEY: indexed_file.mtime_ns,
-        _SOURCE_SIZE_KEY: indexed_file.size,
-        _SOURCE_DIGEST_KEY: indexed_file.digest,
-    }
+def _insert_file(knowledge: Knowledge, indexed_file: _IndexedFile) -> None:
     knowledge.insert(
         path=str(indexed_file.path),
-        metadata=metadata,
+        metadata={_SOURCE_PATH_KEY: indexed_file.relative_path},
         upsert=True,
         reader=_build_reader(indexed_file.path),
     )
 
 
 def _ensure_index_current(
-    knowledge: _KnowledgeIndex,
+    knowledge: Knowledge,
     files: list[_IndexedFile],
     index_path: Path,
     collection_name: str,
     settings_signature: str,
-    source_signature: str,
 ) -> None:
     state = _load_state(index_path)
     saved_files = state.get("files") if isinstance(state, dict) else None
-    collection_missing = not knowledge.vector_db.exists()
     needs_reset = (
-        collection_missing
+        not _vector_db(knowledge).exists()
         or state is None
         or state.get("settings_signature") != settings_signature
         or state.get("collection") != collection_name
@@ -318,13 +238,7 @@ def _ensure_index_current(
                 knowledge.remove_vectors_by_metadata({_SOURCE_PATH_KEY: relative_path})
                 _insert_file(knowledge, indexed_file)
 
-    _write_state(
-        index_path,
-        settings_signature=settings_signature,
-        source_signature=source_signature,
-        collection_name=collection_name,
-        files=files,
-    )
+    _write_state(index_path, settings_signature=settings_signature, collection_name=collection_name, files=files)
 
 
 async def search_semantic_file_memories(
@@ -355,24 +269,23 @@ async def search_semantic_file_memories(
     )
     await asyncio.to_thread(
         _ensure_index_current,
-        cast("_KnowledgeIndex", knowledge),
+        knowledge,
         files,
         index_path,
         collection_name,
         _settings_signature(config, search_config, root),
-        _source_signature(files),
     )
-    documents = await asyncio.to_thread(knowledge.search, query=query, max_results=limit)
+    documents: list[Document] = await asyncio.to_thread(knowledge.search, query=query, max_results=limit)
     results: list[MemoryResult] = []
     for rank, document in enumerate(documents, start=1):
-        metadata = dict(getattr(document, "meta_data", {}) or {})
+        metadata = dict(document.meta_data)
         source_file = metadata.get(_SOURCE_PATH_KEY)
         if not isinstance(source_file, str):
             source_file = "memory"
-        content = " ".join(getattr(document, "content", "").split())
+        content = " ".join(document.content.split())
         if not content:
             continue
-        score = getattr(document, "reranking_score", None)
+        score = document.reranking_score
         results.append(
             cast(
                 "MemoryResult",
@@ -380,7 +293,7 @@ async def search_semantic_file_memories(
                     "id": f"semantic:{source_file}:{rank}",
                     "memory": content,
                     "user_id": scope_user_id,
-                    "score": float(score) if isinstance(score, (int, float)) else 1.0 - (rank * 0.000001),
+                    "score": float(score) if score is not None else 1.0 - (rank * 0.000001),
                     "metadata": {"source_file": source_file, "semantic": True, "search_mode": "semantic"},
                 },
             ),

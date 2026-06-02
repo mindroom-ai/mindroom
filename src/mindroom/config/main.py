@@ -1692,18 +1692,12 @@ class Config(BaseModel):
 
     def get_agent_memory_search(self, agent_name: str) -> MemorySearchConfig:
         """Get effective file-memory search settings for one agent."""
-        inherited = self.memory.search
         agent_config = self.agents.get(agent_name)
         override = agent_config.memory_search if agent_config is not None else None
         if override is None:
-            return inherited
-        return MemorySearchConfig(
-            mode=override.mode if override.mode is not None else inherited.mode,
-            include=override.include if override.include is not None else list(inherited.include),
-            include_entrypoint=(
-                override.include_entrypoint if override.include_entrypoint is not None else inherited.include_entrypoint
-            ),
-        )
+            return self.memory.search
+        # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
+        return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
 
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""

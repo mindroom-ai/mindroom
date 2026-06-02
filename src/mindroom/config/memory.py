@@ -13,6 +13,15 @@ MemoryBackend = Literal["mem0", "file", "none"]
 _MemorySearchMode = Literal["keyword", "semantic"]
 
 
+def _validate_memory_search_includes(value: list[str]) -> list[str]:
+    """Validate include patterns stay inside the memory root."""
+    normalized = [validate_safe_relative_pattern(pattern, field_name="memory.search.include") for pattern in value]
+    if not normalized:
+        msg = "memory.search.include must contain at least one pattern"
+        raise ValueError(msg)
+    return normalized
+
+
 class MemorySearchConfig(BaseModel):
     """Search behavior for file-backed memory."""
 
@@ -33,11 +42,7 @@ class MemorySearchConfig(BaseModel):
     @classmethod
     def validate_include_patterns(cls, value: list[str]) -> list[str]:
         """Validate include patterns stay inside the memory root."""
-        normalized = [validate_safe_relative_pattern(pattern, field_name="memory.search.include") for pattern in value]
-        if not normalized:
-            msg = "memory.search.include must contain at least one pattern"
-            raise ValueError(msg)
-        return normalized
+        return _validate_memory_search_includes(value)
 
 
 class AgentMemorySearchConfig(BaseModel):
@@ -51,13 +56,7 @@ class AgentMemorySearchConfig(BaseModel):
     @classmethod
     def validate_include_patterns(cls, value: list[str] | None) -> list[str] | None:
         """Validate include patterns stay inside the memory root."""
-        if value is None:
-            return None
-        normalized = [validate_safe_relative_pattern(pattern, field_name="memory.search.include") for pattern in value]
-        if not normalized:
-            msg = "memory.search.include must contain at least one pattern"
-            raise ValueError(msg)
-        return normalized
+        return None if value is None else _validate_memory_search_includes(value)
 
 
 class _MemoryEmbedderConfig(BaseModel):

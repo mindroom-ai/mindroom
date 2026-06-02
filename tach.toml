@@ -2244,10 +2244,6 @@ path = "mindroom.knowledge.availability"
 depends_on = []
 
 [[modules]]
-path = "mindroom.knowledge.chunking"
-depends_on = ["mindroom.chunking"]
-
-[[modules]]
 path = "mindroom.knowledge.index_metadata"
 depends_on = []
 visibility = [

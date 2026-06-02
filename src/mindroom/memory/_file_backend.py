@@ -44,16 +44,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _results_with_search_mode(results: list[MemoryResult], mode: str) -> list[MemoryResult]:
-    enriched_results: list[MemoryResult] = []
-    for result in results:
-        enriched = dict(result)
-        metadata = enriched.get("metadata")
-        enriched_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-        enriched_metadata["search_mode"] = mode
-        enriched["metadata"] = enriched_metadata
-        enriched_results.append(cast("MemoryResult", enriched))
-    return enriched_results
+def _tag_keyword_mode(result: MemoryResult) -> None:
+    metadata = result.get("metadata")
+    result["metadata"] = (
+        {**metadata, "search_mode": "keyword"} if isinstance(metadata, dict) else {"search_mode": "keyword"}
+    )
 
 
 def _file_memory_root(
@@ -651,10 +646,17 @@ async def search_file_agent_memories(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
+
+    def keyword_results() -> list[MemoryResult]:
+        results = _search_agent_file_scope_memories(query, agent_name, agent_resolution, config, limit, timing_scope)
+        for result in results:
+            _tag_keyword_mode(result)
+        return results
+
     search_config = config.get_agent_memory_search(agent_name)
     if search_config.mode == "semantic":
+        scope_user_id = agent_scope_user_id(agent_name)
         try:
-            scope_user_id = agent_scope_user_id(agent_name)
             results = await search_semantic_file_memories(
                 query,
                 scope_user_id=scope_user_id,
@@ -666,29 +668,10 @@ async def search_file_agent_memories(
             )
         except Exception:
             logger.exception("File-memory semantic search failed; falling back to keyword search", agent=agent_name)
-            results = _results_with_search_mode(
-                _search_agent_file_scope_memories(
-                    query,
-                    agent_name,
-                    agent_resolution,
-                    config,
-                    limit,
-                    timing_scope,
-                ),
-                "keyword",
-            )
+            results = keyword_results()
     else:
-        results = _results_with_search_mode(
-            _search_agent_file_scope_memories(
-                query,
-                agent_name,
-                agent_resolution,
-                config,
-                limit,
-                timing_scope,
-            ),
-            "keyword",
-        )
+        results = keyword_results()
+
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
         for target_storage_path in storage_paths_for_scope_user_id(
@@ -705,20 +688,20 @@ async def search_file_agent_memories(
                 original_storage_path=storage_path,
                 execution_identity=execution_identity,
             )
-            team_results = _search_team_file_scope_memories(
+            for memory in _search_team_file_scope_memories(
                 team_id,
                 query,
                 team_resolution,
                 config,
                 limit,
                 timing_scope,
-            )
-            for memory in team_results:
+            ):
                 memory_text = memory.get("memory", "")
                 if memory_text in existing_memories:
                     continue
                 existing_memories.add(memory_text)
-                results.extend(_results_with_search_mode([memory], "keyword"))
+                _tag_keyword_mode(memory)
+                results.append(memory)
     results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     return results[:limit]
 

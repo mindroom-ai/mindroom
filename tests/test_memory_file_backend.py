@@ -595,7 +595,6 @@ def test_semantic_memory_index_updates_changed_files_incrementally(tmp_path: Pat
         relative_path="memory/2026-06-02.md",
         mtime_ns=2,
         size=7,
-        digest="new-digest",
     )
     index_path = tmp_path / "index"
     index_path.mkdir()
@@ -603,11 +602,10 @@ def test_semantic_memory_index_updates_changed_files_incrementally(tmp_path: Pat
         json.dumps(
             {
                 "settings_signature": "same-settings",
-                "source_signature": "old-source",
                 "collection": "memory_collection",
                 "files": {
-                    "memory/2026-06-02.md": {"mtime_ns": 1, "size": 3, "digest": "old-digest"},
-                    "memory/deleted.md": {"mtime_ns": 1, "size": 3, "digest": "deleted-digest"},
+                    "memory/2026-06-02.md": {"mtime_ns": 1, "size": 3},
+                    "memory/deleted.md": {"mtime_ns": 1, "size": 3},
                 },
             },
         ),
@@ -621,7 +619,6 @@ def test_semantic_memory_index_updates_changed_files_incrementally(tmp_path: Pat
         index_path,
         "memory_collection",
         "same-settings",
-        "new-source",
     )
 
     assert knowledge.vector_db.deleted is False

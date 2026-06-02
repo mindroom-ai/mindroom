@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _split_posix_parts(value: str) -> tuple[str, ...]:
@@ -27,34 +26,8 @@ def validate_safe_relative_pattern(value: str, *, field_name: str) -> str:
 
 def matches_root_glob(relative_path: str, pattern: str) -> bool:
     """Return whether a root-relative POSIX path matches a root-anchored glob."""
-    path_parts = _split_posix_parts(relative_path)
-    pattern_parts = _split_posix_parts(pattern)
-    if not path_parts or not pattern_parts:
+    normalized_path = "/".join(_split_posix_parts(relative_path))
+    normalized_pattern = "/".join(_split_posix_parts(pattern))
+    if not normalized_path or not normalized_pattern:
         return False
-
-    cache: dict[tuple[int, int], bool] = {}
-
-    def _match(path_index: int, pattern_index: int) -> bool:
-        key = (path_index, pattern_index)
-        if key in cache:
-            return cache[key]
-        if pattern_index == len(pattern_parts):
-            result = path_index == len(path_parts)
-        else:
-            pattern_part = pattern_parts[pattern_index]
-            if pattern_part == "**":
-                next_index = pattern_index
-                while next_index < len(pattern_parts) and pattern_parts[next_index] == "**":
-                    next_index += 1
-                if next_index == len(pattern_parts):
-                    result = True
-                else:
-                    result = any(_match(next_path, next_index) for next_path in range(path_index, len(path_parts) + 1))
-            elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], pattern_part):
-                result = _match(path_index + 1, pattern_index + 1)
-            else:
-                result = False
-        cache[key] = result
-        return result
-
-    return _match(0, 0)
+    return PurePosixPath(normalized_path).full_match(normalized_pattern)
