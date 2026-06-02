@@ -17,6 +17,7 @@ from agno.db.base import SessionType
 from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
+from agno.models.openai import OpenAIChat
 from agno.models.response import ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
@@ -4773,7 +4774,11 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch(
+                "mindroom.ai_runtime.cached_agent_run",
+                new_callable=AsyncMock,
+                return_value=mock_run_output,
+            ) as run_mock,
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -4785,6 +4790,7 @@ class TestUserIdPassthrough:
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
                 )
+            run_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_ai_response_persists_interrupted_replay_for_cancelled_runs(self, tmp_path: Path) -> None:
@@ -5216,13 +5222,16 @@ class TestUserIdPassthrough:
     async def test_ai_response_learns_audio_unsupported_for_same_model_route(self, tmp_path: Path) -> None:
         """Audio-only capability failure should omit audio on later calls to the same concrete route."""
         reset_model_media_capability_cache()
-        mock_agent = MagicMock()
-        mock_agent.model = MagicMock()
-        mock_agent.model.id = "qwen-local"
-        mock_agent.model.provider = "OpenAI"
-        mock_agent.model.base_url = "http://localhost:9292/v1"
-        mock_agent.name = "GeneralAgent"
-        mock_agent.add_history_to_context = False
+
+        def build_agent() -> MagicMock:
+            agent = MagicMock()
+            agent.model = OpenAIChat(id="qwen-local", base_url="http://localhost:9292/v1")
+            agent.name = "GeneralAgent"
+            agent.add_history_to_context = False
+            return agent
+
+        first_agent = build_agent()
+        second_agent = build_agent()
 
         first_success = MagicMock()
         first_success.content = "Recovered response"
@@ -5230,19 +5239,22 @@ class TestUserIdPassthrough:
         second_success = MagicMock()
         second_success.content = "Cached response"
         second_success.tools = None
-        mock_agent.arun = AsyncMock(
+        first_agent.arun = AsyncMock(
             side_effect=[
                 Exception("audio input is not supported - hint: you may need to provide the mmproj"),
                 first_success,
-                second_success,
             ],
         )
+        second_agent.arun = AsyncMock(return_value=second_success)
 
         audio_input = MagicMock(name="audio_input")
         image_input = MagicMock(name="image_input")
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent),
+                _prepared_prompt_result(second_agent),
+            ]
             first_response = await ai_response(
                 agent_name="general",
                 prompt="test",
@@ -5262,10 +5274,11 @@ class TestUserIdPassthrough:
 
         assert first_response == "Recovered response"
         assert second_response == "Cached response"
-        assert mock_agent.arun.await_count == 3
-        first_prompt = mock_agent.arun.await_args_list[0].args[0]
-        retry_prompt = mock_agent.arun.await_args_list[1].args[0]
-        cached_prompt = mock_agent.arun.await_args_list[2].args[0]
+        assert first_agent.arun.await_count == 2
+        assert second_agent.arun.await_count == 1
+        first_prompt = first_agent.arun.await_args_list[0].args[0]
+        retry_prompt = first_agent.arun.await_args_list[1].args[0]
+        cached_prompt = second_agent.arun.await_args_list[0].args[0]
         assert isinstance(first_prompt, list)
         assert isinstance(retry_prompt, list)
         assert isinstance(cached_prompt, list)

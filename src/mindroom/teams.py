@@ -1681,6 +1681,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             media_route,
                             e,
                             attempt_media_inputs,
+                            learn_route_capability=True,
                         )
                         if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
@@ -1712,6 +1713,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             media_route,
                             error_text,
                             attempt_media_inputs,
+                            learn_route_capability=True,
                         )
                         if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
@@ -2252,7 +2254,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 run_output=event,
                                 scope_context=scope_context,
                                 session_id=session_id,
-                                entity_name=team_label,
+                                entity_name=configured_team_name or team_label,
                             )
 
                             if is_cancelled_run_output(event):
@@ -2272,6 +2274,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     media_route,
                                     error_text,
                                     attempt_media_inputs,
+                                    learn_route_capability=True,
                                 )
                                 if (
                                     not retried_after_media_fallback
@@ -2286,7 +2289,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     )
                                     _scrub_team_retry_notice_state(
                                         scope_context=scope_context,
-                                        entity_name=team_label,
+                                        entity_name=configured_team_name or team_label,
                                     )
                                     attempt_prompt = append_inline_media_fallback_prompt(
                                         prepared_prompt,
@@ -2323,6 +2326,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 media_route,
                                 error_text,
                                 attempt_media_inputs,
+                                learn_route_capability=True,
                             )
                             if (
                                 not retried_after_media_fallback
@@ -2337,7 +2341,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 )
                                 _scrub_team_retry_notice_state(
                                     scope_context=scope_context,
-                                    entity_name=team_label,
+                                    entity_name=configured_team_name or team_label,
                                 )
                                 attempt_prompt = append_inline_media_fallback_prompt(
                                     prepared_prompt,
@@ -2439,7 +2443,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     run_output=None,
                     scope_context=scope_context,
                     session_id=session_id,
-                    entity_name=team_label,
+                    entity_name=configured_team_name or team_label,
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(

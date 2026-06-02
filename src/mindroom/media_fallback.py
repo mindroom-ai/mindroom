@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal
+
+from agno.models.anthropic import Claude
+from agno.models.azure.openai_chat import AzureOpenAI
+from agno.models.base import Model
+from agno.models.cerebras import Cerebras
+from agno.models.deepseek import DeepSeek
+from agno.models.google import Gemini
+from agno.models.groq import Groq
+from agno.models.ollama import Ollama
+from agno.models.openai import OpenAIChat, OpenAIResponses
+from agno.models.openrouter import OpenRouter
+from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 from mindroom.media_inputs import MediaInputs
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__ = [
     "ModelMediaRoute",
@@ -66,7 +80,7 @@ class _MediaRetryDecision:
 _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[ModelMediaRoute, set[_MediaKind]] = {}
 
 
-def build_model_media_route(model: object | str | None) -> ModelMediaRoute | None:
+def build_model_media_route(model: Model | str | None) -> ModelMediaRoute | None:
     """Return a process-cache key for one effective model route."""
     if model is None:
         return None
@@ -77,11 +91,11 @@ def build_model_media_route(model: object | str | None) -> ModelMediaRoute | Non
             model_id=model_id or provider,
             base_url=None,
         )
+    if not isinstance(model, Model):
+        return None
 
-    provider = (
-        _route_text(_route_value(model, "provider")) or _model_provider_method_text(model) or model.__class__.__name__
-    )
-    model_id = _route_text(_route_value(model, "id")) or model.__class__.__name__
+    provider = _route_text(model.provider) or model.__class__.__name__
+    model_id = _route_text(model.id) or model.__class__.__name__
     return ModelMediaRoute(
         provider=provider.lower(),
         model_id=model_id,
@@ -110,8 +124,15 @@ def retry_media_inputs_after_failure(
     route: ModelMediaRoute | None,
     error: Exception | str,
     media_inputs: MediaInputs,
+    *,
+    learn_route_capability: bool = False,
 ) -> _MediaRetryDecision:
-    """Decide whether and how one media-bearing request should retry."""
+    """Decide whether and how one media-bearing request should retry.
+
+    Only callers that just sent inline media to a model should set
+    ``learn_route_capability``; otherwise explicit media-kind errors retry once
+    without poisoning the process-local route cache.
+    """
     if not media_inputs.has_any():
         return _no_media_retry_decision(media_inputs)
 
@@ -121,7 +142,7 @@ def retry_media_inputs_after_failure(
         return _media_retry_decision_for_kinds(
             media_inputs,
             unsupported_kinds,
-            cache_route=route,
+            cache_route=route if learn_route_capability else None,
         )
 
     validation_kinds = _media_validation_kinds_from_error(error_text)
@@ -245,36 +266,64 @@ def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[_MediaKind]
     )
 
 
-def _route_endpoint(model: object) -> str | None:
-    for field_name in ("base_url", "host", "azure_endpoint"):
-        endpoint = _route_text(_route_value(model, field_name))
-        if endpoint:
-            return endpoint.rstrip("/")
+def _route_endpoint(model: Model) -> str | None:
+    if isinstance(model, AzureOpenAI):
+        return _route_endpoint_text(
+            model.azure_endpoint,
+            model.base_url,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(model, Ollama):
+        return _route_endpoint_text(
+            model.host,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(model, VertexAIClaude):
+        return _route_endpoint_text(
+            str(model.base_url) if model.base_url is not None else None,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(
+        model,
+        (
+            Cerebras,
+            DeepSeek,
+            Groq,
+            OpenAIChat,
+            OpenAIResponses,
+            OpenRouter,
+        ),
+    ):
+        return _route_endpoint_text(
+            str(model.base_url) if model.base_url is not None else None,
+            _client_params_endpoint(model.client_params),
+        )
+    if isinstance(model, (Claude, Gemini)):
+        return _client_params_endpoint(model.client_params)
+    return None
 
-    client_params = _route_value(model, "client_params")
-    if not isinstance(client_params, Mapping):
+
+def _client_params_endpoint(client_params: Mapping[str, object] | None) -> str | None:
+    if client_params is None:
         return None
-    client_params_by_name = cast("Mapping[str, object]", client_params)
     for field_name in ("base_url", "host", "azure_endpoint"):
-        endpoint = _route_text(client_params_by_name.get(field_name))
+        candidate = client_params.get(field_name)
+        endpoint = _route_text(candidate) if isinstance(candidate, str) else None
         if endpoint:
             return endpoint.rstrip("/")
     return None
 
 
-def _model_provider_method_text(model: object) -> str | None:
-    method = getattr(model, "get_provider", None)
-    if not callable(method):
-        return None
-    return _route_text(method())
+def _route_endpoint_text(*values: str | None) -> str | None:
+    for value in values:
+        endpoint = _route_text(value)
+        if endpoint:
+            return endpoint.rstrip("/")
+    return None
 
 
-def _route_text(value: object) -> str | None:
-    if not isinstance(value, str):
+def _route_text(value: str | None) -> str | None:
+    if value is None:
         return None
     text = value.strip()
     return text or None
-
-
-def _route_value(model: object, field_name: str) -> object:
-    return getattr(model, field_name, None)

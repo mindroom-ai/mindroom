@@ -418,7 +418,12 @@ def _request_stream_retry(
     if retried_after_media_fallback or _stream_attempt_has_progress(state):
         # Once any stream content is emitted, retrying would duplicate partial output.
         return False
-    retry_decision = retry_media_inputs_after_failure(media_route, error, media_inputs)
+    retry_decision = retry_media_inputs_after_failure(
+        media_route,
+        error,
+        media_inputs,
+        learn_route_capability=True,
+    )
     if not retry_decision.should_retry:
         return False
     state.media_fallback_retry_requested = True
@@ -1034,6 +1039,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             media_route,
                             e,
                             attempt_media_inputs,
+                            learn_route_capability=True,
                         )
                         if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
@@ -1059,6 +1065,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             media_route,
                             error_text,
                             attempt_media_inputs,
+                            learn_route_capability=True,
                         )
                         if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
@@ -1077,8 +1084,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
 
                         logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
 
-                    if response.status is not RunStatus.cancelled:
-                        break
+                    break
 
                 assert response is not None
             finally:
