@@ -100,6 +100,7 @@ _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MATRIX_HOMESERVER", "https://mindroom.chat"),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
     ("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
+    ("MINDROOM_NAMESPACE", ""),
     ("MATRIX_REGISTRATION_TOKEN", ""),
 )
 _MATRIX_SERVER_CHOICES_TEXT = "self-hosted or mindroom.chat"
@@ -981,6 +982,8 @@ def _env_template(
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
             "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
+            "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
+            "MINDROOM_NAMESPACE=\n\n"
             "# Required for homeservers that gate bot registration (recommended for mindroom.chat)\n"
             "# Keep this secret; do not commit real values.\n"
             "MATRIX_REGISTRATION_TOKEN="

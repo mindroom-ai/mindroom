@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
@@ -89,7 +88,7 @@ def complete_local_pairing(
     parsed_namespace = _parse_namespace(raw_namespace)
     namespace_invalid = isinstance(raw_namespace, str) and bool(raw_namespace.strip()) and parsed_namespace is None
     if parsed_namespace is None:
-        parsed_namespace = _derive_namespace(client_id)
+        parsed_namespace = ""
 
     return _PairCompleteResult(
         client_id=client_id,
@@ -160,11 +159,6 @@ def _parse_namespace(raw_value: object) -> str | None:
     if _NAMESPACE_RE.fullmatch(namespace):
         return namespace
     return None
-
-
-def _derive_namespace(seed: str) -> str:
-    """Derive a deterministic namespace from an identifier."""
-    return sha256(seed.encode("utf-8")).hexdigest()[:8]
 
 
 def _extract_error_detail(response: httpx.Response) -> str:

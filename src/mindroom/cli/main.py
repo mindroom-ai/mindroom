@@ -352,7 +352,7 @@ def connect(
         )
     if credentials.namespace_invalid:
         console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; derived a fallback namespace.",
+            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; leaving MINDROOM_NAMESPACE empty.",
         )
 
     if persist_env:

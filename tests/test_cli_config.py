@@ -435,6 +435,7 @@ class TestConfigInit:
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
         assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
+        assert "MINDROOM_NAMESPACE=" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
         assert "Env file updated" in normalize_console_output(result.output)
 
