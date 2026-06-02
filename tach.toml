@@ -2235,6 +2235,7 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -2380,6 +2381,7 @@ expose = [
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_knowledge_binding",
+    "resolve_knowledge_owner_bindings",
 ]
 from = ["mindroom.runtime_resolution"]
 

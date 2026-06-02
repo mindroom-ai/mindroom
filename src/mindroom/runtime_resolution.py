@@ -15,6 +15,7 @@ from mindroom.agent_policy import (
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path, resolve_config_relative_path_preserving_leaf
 from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
     resolve_worker_execution_scope,
@@ -30,7 +31,7 @@ from mindroom.workspaces import (
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 _PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{[A-Z0-9_]+\}|[A-Z0-9_]+)")
 
@@ -79,6 +80,15 @@ class ResolvedKnowledgeBinding:
     storage_root: Path
     knowledge_path: Path
     incremental_sync_on_access: bool
+
+
+@dataclass(frozen=True)
+class ResolvedKnowledgeOwnerBinding:
+    """One query-time binding for a shared knowledge base."""
+
+    owner_agent: str | None
+    execution_identity: ToolExecutionIdentity | None
+    binding: ResolvedKnowledgeBinding
 
 
 def _knowledge_refresh_enabled(
@@ -155,6 +165,230 @@ def _resolve_agent_file_memory_knowledge_binding(
     return agent_runtime, knowledge_path
 
 
+def _background_refresh_identity(agent_name: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+
+def _shared_config_knowledge_binding(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    start_watchers: bool,
+) -> ResolvedKnowledgeBinding:
+    base_config = config.get_knowledge_base_config(base_id)
+    knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
+    return ResolvedKnowledgeBinding(
+        base_id=base_id,
+        storage_root=runtime_paths.storage_root.expanduser().resolve(),
+        knowledge_path=knowledge_path,
+        # Shared Git bases poll through STALE scheduling after their interval, not READY access scheduling.
+        incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
+    )
+
+
+def _private_knowledge_binding(
+    base_id: str,
+    effective_agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    start_watchers: bool,
+    create: bool,
+) -> ResolvedKnowledgeBinding:
+    base_config = config.get_knowledge_base_config(base_id)
+    refresh_enabled = _knowledge_refresh_enabled(
+        file_watch_enabled=base_config.watch,
+        has_git_sync=base_config.git is not None,
+    )
+    agent_runtime = resolve_agent_runtime(
+        effective_agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=create,
+    )
+    if agent_runtime.workspace is None:
+        msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
+        raise ValueError(msg)
+
+    return ResolvedKnowledgeBinding(
+        base_id=base_id,
+        storage_root=agent_runtime.state_root,
+        knowledge_path=resolve_workspace_relative_path(
+            agent_runtime.workspace.root,
+            base_config.path,
+            field_name=f"knowledge base '{base_id}' path",
+        ),
+        incremental_sync_on_access=(
+            refresh_enabled and (agent_runtime.policy.private_agent_knowledge_enabled or not start_watchers)
+        ),
+    )
+
+
+def _file_memory_owner_binding(
+    agent_name: str,
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    *,
+    start_watchers: bool,
+    create: bool,
+) -> ResolvedKnowledgeOwnerBinding | None:
+    base_config = config.get_knowledge_base_config(base_id)
+    agent_memory_binding = _resolve_agent_file_memory_knowledge_binding(
+        agent_name,
+        base_id,
+        config,
+        runtime_paths,
+        execution_identity,
+        create=create,
+    )
+    if agent_memory_binding is None:
+        return None
+    agent_runtime, knowledge_path = agent_memory_binding
+    return ResolvedKnowledgeOwnerBinding(
+        owner_agent=agent_name,
+        execution_identity=execution_identity,
+        binding=ResolvedKnowledgeBinding(
+            base_id=base_id,
+            storage_root=agent_runtime.state_root,
+            knowledge_path=knowledge_path,
+            incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
+        ),
+    )
+
+
+def _dedupe_knowledge_owner_bindings(
+    bindings: list[ResolvedKnowledgeOwnerBinding],
+) -> tuple[ResolvedKnowledgeOwnerBinding, ...]:
+    deduped: dict[tuple[str, str], ResolvedKnowledgeOwnerBinding] = {}
+    for owner_binding in bindings:
+        binding = owner_binding.binding
+        key = (
+            str(binding.storage_root.expanduser().resolve()),
+            str(binding.knowledge_path.resolve()),
+        )
+        deduped.setdefault(key, owner_binding)
+    return tuple(deduped.values())
+
+
+def _shared_knowledge_base_agent_names(base_id: str, config: Config) -> tuple[str, ...]:
+    return tuple(
+        agent_name for agent_name in sorted(config.agents) if base_id in config.get_agent_knowledge_base_ids(agent_name)
+    )
+
+
+def resolve_knowledge_owner_bindings(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    start_watchers: bool = True,
+    create: bool = False,
+) -> tuple[ResolvedKnowledgeOwnerBinding, ...]:
+    """Return every distinct query-time binding for a knowledge base.
+
+    Shared file-memory bases materialize once per non-private file-memory owner
+    and once for the ordinary shared config path when any non-file owner uses
+    the same base.
+    """
+    effective_agent_name = resolve_private_knowledge_base_agent(
+        base_id,
+        build_agent_policy_seeds(
+            config.agents,
+            default_worker_scope=config.defaults.worker_scope,
+        ),
+        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    )
+    if effective_agent_name is not None:
+        return (
+            ResolvedKnowledgeOwnerBinding(
+                owner_agent=effective_agent_name,
+                execution_identity=execution_identity,
+                binding=_private_knowledge_binding(
+                    base_id,
+                    effective_agent_name,
+                    config,
+                    runtime_paths,
+                    execution_identity,
+                    start_watchers=start_watchers,
+                    create=create,
+                ),
+            ),
+        )
+
+    if execution_identity is not None and execution_identity.agent_name in config.agents:
+        file_memory_binding = _file_memory_owner_binding(
+            execution_identity.agent_name,
+            base_id,
+            config,
+            runtime_paths,
+            execution_identity,
+            start_watchers=start_watchers,
+            create=create,
+        )
+        if file_memory_binding is not None:
+            return (file_memory_binding,)
+        return (
+            ResolvedKnowledgeOwnerBinding(
+                owner_agent=None,
+                execution_identity=execution_identity,
+                binding=_shared_config_knowledge_binding(
+                    base_id,
+                    config,
+                    runtime_paths,
+                    start_watchers=start_watchers,
+                ),
+            ),
+        )
+
+    bindings: list[ResolvedKnowledgeOwnerBinding] = []
+    ordinary_shared_binding_needed = not _shared_knowledge_base_agent_names(base_id, config)
+    for agent_name in _shared_knowledge_base_agent_names(base_id, config):
+        if not _shared_knowledge_path_uses_agent_file_memory(agent_name, base_id, config):
+            ordinary_shared_binding_needed = True
+            continue
+        if config.get_agent(agent_name).private is not None:
+            continue
+        file_memory_binding = _file_memory_owner_binding(
+            agent_name,
+            base_id,
+            config,
+            runtime_paths,
+            _background_refresh_identity(agent_name),
+            start_watchers=start_watchers,
+            create=create,
+        )
+        if file_memory_binding is not None:
+            bindings.append(file_memory_binding)
+    if ordinary_shared_binding_needed:
+        bindings.append(
+            ResolvedKnowledgeOwnerBinding(
+                owner_agent=None,
+                execution_identity=None,
+                binding=_shared_config_knowledge_binding(
+                    base_id,
+                    config,
+                    runtime_paths,
+                    start_watchers=start_watchers,
+                ),
+            ),
+        )
+    return _dedupe_knowledge_owner_bindings(bindings)
+
+
 def _resolve_private_scope_root(
     *,
     runtime_paths: RuntimePaths,
@@ -179,12 +413,15 @@ def resolve_private_requester_scope_root(
     worker_key: str,
 ) -> Path:
     """Return the requester-scoped private root shared across same-requester agents."""
-    requester_worker_key = worker_key
+    requester_worker_key: str | None = worker_key
     if execution_scope == "user_agent":
         requester_worker_key = resolve_worker_key("user", execution_identity, agent_name=None)
         if requester_worker_key is None:
             msg = "Requester-scoped private root requires a requester identity"
             raise ValueError(msg)
+    if requester_worker_key is None:
+        msg = "Requester-scoped private root requires a worker key"
+        raise ValueError(msg)
     return _resolve_private_scope_root(
         runtime_paths=runtime_paths,
         worker_key=requester_worker_key,
@@ -339,77 +576,38 @@ def resolve_knowledge_binding(
     create: bool = False,
 ) -> ResolvedKnowledgeBinding:
     """Resolve one knowledge base to its effective storage and workspace-derived path."""
-    base_config = config.get_knowledge_base_config(base_id)
-    refresh_enabled = _knowledge_refresh_enabled(
-        file_watch_enabled=base_config.watch,
-        has_git_sync=base_config.git is not None,
-    )
-    effective_agent_name = resolve_private_knowledge_base_agent(
+    bindings = resolve_knowledge_owner_bindings(
         base_id,
-        build_agent_policy_seeds(
-            config.agents,
-            default_worker_scope=config.defaults.worker_scope,
-        ),
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-    )
-    if effective_agent_name is None:
-        if execution_identity is not None and execution_identity.agent_name in config.agents:
-            agent_memory_binding = _resolve_agent_file_memory_knowledge_binding(
-                execution_identity.agent_name,
-                base_id,
-                config,
-                runtime_paths,
-                execution_identity,
-                create=create,
-            )
-            if agent_memory_binding is not None:
-                agent_runtime, knowledge_path = agent_memory_binding
-                return ResolvedKnowledgeBinding(
-                    base_id=base_id,
-                    storage_root=agent_runtime.state_root,
-                    knowledge_path=knowledge_path,
-                    incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
-                )
-        knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
-        return ResolvedKnowledgeBinding(
-            base_id=base_id,
-            storage_root=runtime_paths.storage_root.expanduser().resolve(),
-            knowledge_path=knowledge_path,
-            # Shared Git bases poll through STALE scheduling after their interval, not READY access scheduling.
-            incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
-        )
-
-    agent_runtime = resolve_agent_runtime(
-        effective_agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        start_watchers=start_watchers,
         create=create,
     )
-    if agent_runtime.workspace is None:
-        msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
+    if len(bindings) == 1:
+        return bindings[0].binding
+    if not bindings:
+        msg = (
+            f"Knowledge base '{base_id}' has no background-safe file-memory owner binding; "
+            "a private file-memory owner requires an active execution identity"
+        )
         raise ValueError(msg)
-
-    return ResolvedKnowledgeBinding(
-        base_id=base_id,
-        storage_root=agent_runtime.state_root,
-        knowledge_path=resolve_workspace_relative_path(
-            agent_runtime.workspace.root,
-            base_config.path,
-            field_name=f"knowledge base '{base_id}' path",
-        ),
-        incremental_sync_on_access=(
-            refresh_enabled and (agent_runtime.policy.private_agent_knowledge_enabled or not start_watchers)
-        ),
+    owners = ", ".join(binding.owner_agent or "<shared>" for binding in bindings)
+    msg = (
+        f"Shared file-memory knowledge base '{base_id}' has multiple owners/bindings ({owners}); "
+        "resolve it through a fan-out refresh/status path"
     )
+    raise ValueError(msg)
 
 
 __all__ = [
     "ResolvedAgentExecution",
     "ResolvedAgentRuntime",
     "ResolvedKnowledgeBinding",
+    "ResolvedKnowledgeOwnerBinding",
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_knowledge_binding",
+    "resolve_knowledge_owner_bindings",
     "resolve_private_requester_scope_root",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -13,10 +14,11 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.knowledge.document.base import Document
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from watchfiles import Change
 
@@ -25,7 +27,9 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
+import mindroom.knowledge.watch as knowledge_watch
 from mindroom.api import config_lifecycle, main
+from mindroom.api import knowledge as knowledge_api
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
@@ -47,15 +51,20 @@ from mindroom.knowledge.registry import (
     load_published_index_state,
     published_index_metadata_path,
     published_index_refresh_state,
+    refresh_target_for_published_index_key,
     resolve_published_index_key,
 )
+from mindroom.knowledge.status import get_knowledge_index_status, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator
+
+    from mindroom.constants import RuntimePaths
 
 
 class _Collection:
@@ -4881,6 +4890,650 @@ def test_shared_relative_knowledge_base_uses_requesting_agent_workspace(tmp_path
         == runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory"
     )
     assert openclaw_key != spouse_key
+
+
+def _daily_memory_multi_owner_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+                "mindroom_spouse": AgentConfig(
+                    display_name="MindRoom Spouse",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    return config, runtime_paths
+
+
+def test_identityless_resolve_fails_closed_for_multi_owner_file_memory_base_without_stem(tmp_path: Path) -> None:
+    """Identityless resolution must not fall back to config-dir memory for ambiguous file-memory bases."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    config_memory_path = runtime_paths.config_dir / "memory"
+    config_memory_path.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="multiple owners"):
+        resolve_knowledge_binding(
+            "daily_memory",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            start_watchers=False,
+            create=True,
+        )
+
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="openclaw"),
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="mindroom_spouse"),
+        create=True,
+    )
+
+    assert Path(openclaw_key.knowledge_path) == (
+        runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"
+    )
+    assert Path(spouse_key.knowledge_path) == (
+        runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory"
+    )
+    assert Path(openclaw_key.knowledge_path) != config_memory_path
+    assert Path(spouse_key.knowledge_path) != config_memory_path
+    assert openclaw_key != spouse_key
+
+
+def test_central_bindings_include_file_memory_and_shared_backends(tmp_path: Path) -> None:
+    """Mixed-backend shared bases expose both query-time bindings from one authority."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+                "archivist": AgentConfig(
+                    display_name="Archivist",
+                    memory_backend="mem0",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+
+    bindings = knowledge_registry.resolve_published_index_bindings(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        create=True,
+    )
+
+    assert [
+        (binding.owner_agent, binding.execution_identity.agent_name if binding.execution_identity else None)
+        for binding in bindings
+    ] == [
+        ("openclaw", "openclaw"),
+        (None, None),
+    ]
+    assert {Path(binding.key.knowledge_path) for binding in bindings} == {
+        runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory",
+        runtime_paths.config_dir / "memory",
+    }
+
+
+def test_dashboard_upload_fails_closed_for_mixed_owner_roots(tmp_path: Path) -> None:
+    """Dashboard writes must not silently pick one root for mixed owner-scoped/shared bindings."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+                "archivist": AgentConfig(
+                    display_name="Archivist",
+                    memory_backend="mem0",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+
+    response = TestClient(main.app).post(
+        "/api/knowledge/bases/daily_memory/upload",
+        files=[("files", ("note.md", b"dashboard note", "text/markdown"))],
+    )
+
+    assert response.status_code == 409
+    assert "multiple owner roots" in response.json()["detail"]
+    assert not (runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory" / "note.md").exists()
+    assert not (runtime_paths.config_dir / "memory" / "note.md").exists()
+
+
+def test_dashboard_root_fails_closed_for_multi_owner_file_memory_bindings(tmp_path: Path) -> None:
+    """Dashboard operations must not silently pick one root for multi-owner file-memory bases."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        knowledge_api._knowledge_root(config, "daily_memory", runtime_paths, create=True)
+
+    assert exc_info.value.status_code == 409
+    assert "multiple owner roots" in exc_info.value.detail
+    assert not (runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory").exists()
+    assert not (runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory").exists()
+    assert not (runtime_paths.config_dir / "memory").exists()
+
+
+def test_dashboard_reindex_fails_closed_for_multi_owner_file_memory_bindings(tmp_path: Path) -> None:
+    """Dashboard reindex must reject ambiguous owner roots before refresh fan-out."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    scheduler = MagicMock()
+    scheduler.refresh_now = AsyncMock()
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
+
+    try:
+        response = TestClient(main.app).post("/api/knowledge/bases/daily_memory/reindex")
+    finally:
+        config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
+
+    assert response.status_code == 409
+    assert "multiple owner roots" in response.json()["detail"]
+    scheduler.refresh_now.assert_not_awaited()
+
+
+def test_dashboard_reindex_succeeds_for_single_owner_file_memory_binding(tmp_path: Path) -> None:
+    """Dashboard reindex should still run for an unambiguous file-memory owner root."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    key = resolve_published_index_key("daily_memory", config=config, runtime_paths=runtime_paths, create=True)
+    scheduler = MagicMock()
+    scheduler.refresh_now = AsyncMock(
+        return_value=knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=key,
+            indexed_count=7,
+            index_published=True,
+            availability=KnowledgeAvailability.READY,
+        ),
+    )
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = scheduler
+
+    try:
+        response = TestClient(main.app).post("/api/knowledge/bases/daily_memory/reindex")
+    finally:
+        config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "base_id": "daily_memory",
+        "indexed_count": 7,
+    }
+    scheduler.refresh_now.assert_awaited_once()
+
+
+def test_dashboard_root_uses_central_file_memory_binding(tmp_path: Path) -> None:
+    """Dashboard mutations target the same file-memory root used by search/index resolution."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+
+    dashboard_root = knowledge_api._knowledge_root(config, "daily_memory", runtime_paths, create=True)
+    key = resolve_published_index_key("daily_memory", config=config, runtime_paths=runtime_paths, create=True)
+
+    assert dashboard_root == Path(key.knowledge_path)
+    assert dashboard_root == runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"
+    assert dashboard_root != runtime_paths.config_dir / "memory"
+
+
+def test_mode_transition_reconcile_fans_out_multi_owner_file_memory_base(tmp_path: Path) -> None:
+    """Semantic/file mode transitions must mark each owner binding without identity-less crashes."""
+    previous_config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    current_config = previous_config.model_copy(deep=True)
+    current_config.knowledge_bases["daily_memory"].mode = "files"
+    keys = [
+        resolve_published_index_key(
+            "daily_memory",
+            config=previous_config,
+            runtime_paths=runtime_paths,
+            execution_identity=_identity("@alice:localhost", agent_name=agent_name),
+            create=True,
+        )
+        for agent_name in ("openclaw", "mindroom_spouse")
+    ]
+    for key in keys:
+        knowledge_registry.save_published_index_state(
+            published_index_metadata_path(key),
+            knowledge_registry.PublishedIndexState(
+                settings=key.indexing_settings,
+                status="complete",
+                collection="collection",
+                indexed_count=1,
+            ),
+        )
+
+    changed_base_ids = reconcile_knowledge_mode_transition_states(previous_config, current_config, runtime_paths)
+
+    assert changed_base_ids == ("daily_memory",)
+    assert [
+        knowledge_registry.published_index_refresh_state(load_published_index_state(published_index_metadata_path(key)))
+        for key in keys
+    ] == ["stale", "stale"]
+
+
+@pytest.mark.asyncio
+async def test_identityless_refresh_resolves_single_file_memory_owner_workspace(tmp_path: Path) -> None:
+    """Background refresh without request identity should index the owning file-memory workspace."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["openclaw_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"openclaw_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    expected_path = runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"
+    expected_path.mkdir(parents=True, exist_ok=True)
+    (expected_path / "school.md").write_text("Oranjeschool exact memory", encoding="utf-8")
+    (runtime_paths.config_dir / "memory").mkdir(parents=True, exist_ok=True)
+
+    binding = resolve_knowledge_binding(
+        "openclaw_memory",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        start_watchers=False,
+        create=True,
+    )
+    result = await refresh_knowledge_binding("openclaw_memory", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("openclaw_memory", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+
+    assert binding.knowledge_path == expected_path
+    assert Path(key.knowledge_path) == expected_path
+    assert Path(key.knowledge_path) != runtime_paths.config_dir / "memory"
+    assert result.indexed_count == 1
+    assert state is not None
+    assert state.source_signature != hashlib.sha256().hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_identityless_background_refresh_fans_out_shared_file_memory_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background scheduling should refresh each owner workspace for a multi-agent file-memory base."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["openclaw_memory"],
+                ),
+                "mindroom_spouse": AgentConfig(
+                    display_name="MindRoom Spouse",
+                    memory_backend="file",
+                    knowledge_bases=["openclaw_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"openclaw_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    openclaw_identity = _identity("@alice:localhost", agent_name="openclaw")
+    spouse_identity = _identity("@alice:localhost", agent_name="mindroom_spouse")
+    openclaw_key = resolve_published_index_key(
+        "openclaw_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=openclaw_identity,
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "openclaw_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=spouse_identity,
+        create=True,
+    )
+    captured: list[tuple[str, Path]] = []
+
+    async def _capture_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+        force_reindex: bool = False,
+    ) -> None:
+        _ = force_reindex
+        assert execution_identity is not None
+        key = resolve_published_index_key(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            create=True,
+        )
+        captured.append((execution_identity.agent_name, Path(key.knowledge_path)))
+
+    monkeypatch.setattr(knowledge_refresh_scheduler, "refresh_knowledge_binding_in_subprocess", _capture_refresh)
+    scheduler = KnowledgeRefreshScheduler()
+    scheduler.schedule_refresh("openclaw_memory", config=config, runtime_paths=runtime_paths)
+    for _ in range(50):
+        if len(captured) == 2:
+            break
+        await asyncio.sleep(0)
+    await scheduler.shutdown()
+
+    assert Path(openclaw_key.knowledge_path) == (
+        runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"
+    )
+    assert Path(spouse_key.knowledge_path) == (
+        runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory"
+    )
+    assert openclaw_key != spouse_key
+    assert sorted(captured) == [
+        ("mindroom_spouse", Path(spouse_key.knowledge_path)),
+        ("openclaw", Path(openclaw_key.knowledge_path)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_identityless_direct_refresh_paths_fan_out_nonstem_file_memory_base(tmp_path: Path) -> None:
+    """Forced identityless refreshes should publish every owner workspace, never config-dir memory."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    openclaw_identity = _identity("@alice:localhost", agent_name="openclaw")
+    spouse_identity = _identity("@alice:localhost", agent_name="mindroom_spouse")
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=openclaw_identity,
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=spouse_identity,
+        create=True,
+    )
+    Path(openclaw_key.knowledge_path).mkdir(parents=True, exist_ok=True)
+    Path(spouse_key.knowledge_path).mkdir(parents=True, exist_ok=True)
+    (Path(openclaw_key.knowledge_path) / "openclaw.md").write_text("openclaw daily memory", encoding="utf-8")
+    (Path(spouse_key.knowledge_path) / "spouse.md").write_text("spouse daily memory", encoding="utf-8")
+    config_memory_path = runtime_paths.config_dir / "memory"
+    config_memory_path.mkdir(parents=True, exist_ok=True)
+
+    direct_result = await refresh_knowledge_binding(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+    scheduler_result = await KnowledgeRefreshScheduler().refresh_now(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+    openclaw_state = load_published_index_state(published_index_metadata_path(openclaw_key))
+    spouse_state = load_published_index_state(published_index_metadata_path(spouse_key))
+    index_status = get_knowledge_index_status("daily_memory", config=config, runtime_paths=runtime_paths)
+
+    assert direct_result.indexed_count == 2
+    assert scheduler_result.indexed_count == 2
+    assert openclaw_state is not None
+    assert spouse_state is not None
+    assert openclaw_state.source_signature != hashlib.sha256().hexdigest()
+    assert spouse_state.source_signature != hashlib.sha256().hexdigest()
+    assert index_status.indexed_count == 2
+    assert index_status.availability is KnowledgeAvailability.READY
+    assert Path(openclaw_key.knowledge_path) != config_memory_path
+    assert Path(spouse_key.knowledge_path) != config_memory_path
+
+
+def test_identityless_refreshing_status_aggregates_multi_owner_file_memory_base(tmp_path: Path) -> None:
+    """Identityless active-refresh checks should report any owner workspace refresh."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="openclaw"),
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="mindroom_spouse"),
+        create=True,
+    )
+    openclaw_refresh_target = refresh_target_for_published_index_key(openclaw_key)
+    spouse_refresh_target = refresh_target_for_published_index_key(spouse_key)
+    scheduler = KnowledgeRefreshScheduler()
+
+    knowledge_refresh_runner.mark_refresh_active(spouse_refresh_target)
+    try:
+        assert scheduler.is_refreshing("daily_memory", config=config, runtime_paths=runtime_paths) is True
+        assert (
+            knowledge_refresh_runner.is_refresh_active_for_binding(
+                "daily_memory",
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            is True
+        )
+        assert knowledge_refresh_runner.is_refresh_active(openclaw_refresh_target) is False
+        assert knowledge_refresh_runner.is_refresh_active(spouse_refresh_target) is True
+    finally:
+        knowledge_refresh_runner.mark_refresh_inactive(spouse_refresh_target)
+
+
+@pytest.mark.asyncio
+async def test_identityless_background_skips_private_file_memory_owner_without_config_fallback(tmp_path: Path) -> None:
+    """No-requester background refresh setup should skip private file-memory owners without config-dir fallback."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    memory_backend="file",
+                    knowledge_bases=["helper_memory"],
+                    private=AgentPrivateConfig(per="user", root="helper_data"),
+                ),
+            },
+            models={},
+            knowledge_bases={"helper_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    config_memory_path = runtime_paths.config_dir / "memory"
+    scheduler = KnowledgeRefreshScheduler()
+
+    with pytest.raises(ValueError, match="requires an active execution identity"):
+        resolve_knowledge_binding(
+            "helper_memory",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            start_watchers=False,
+            create=True,
+        )
+
+    assert (
+        knowledge_registry.resolve_refresh_targets(
+            "helper_memory",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        == ()
+    )
+    assert knowledge_watch._shared_local_watch_targets(config, runtime_paths) == {}
+    scheduler.schedule_refresh("helper_memory", config=config, runtime_paths=runtime_paths)
+    assert scheduler.is_refreshing("helper_memory", config=config, runtime_paths=runtime_paths) is False
+    status = get_knowledge_index_status("helper_memory", config=config, runtime_paths=runtime_paths)
+    refresh_result = await scheduler.refresh_now("helper_memory", config=config, runtime_paths=runtime_paths)
+
+    assert status.metadata_exists is False
+    assert status.availability is KnowledgeAvailability.INITIALIZING
+    assert refresh_result.index_published is False
+    assert Path(refresh_result.key.knowledge_path) != config_memory_path
+    assert not published_index_metadata_path(refresh_result.key).exists()
+
+
+@pytest.mark.asyncio
+async def test_same_source_alias_watcher_preserves_per_base_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watcher grouping must keep each base's resolved owner identity for same-source aliases."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["alias_memory", "daily_memory"],
+                ),
+                "mindroom_spouse": AgentConfig(
+                    display_name="MindRoom Spouse",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={
+                "alias_memory": KnowledgeBaseConfig(path="./memory"),
+                "daily_memory": KnowledgeBaseConfig(path="./memory"),
+            },
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+    targets = knowledge_watch._shared_local_watch_targets(config, runtime_paths)
+    openclaw_path = runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"
+    openclaw_target = next(target for target in targets.values() if target.path == openclaw_path)
+    marked: list[tuple[str, str | None]] = []
+    scheduled: list[tuple[str, str | None]] = []
+
+    async def _record_mark(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+        reason: str = "source_mutated",
+    ) -> tuple[str, ...]:
+        _ = config, runtime_paths, reason
+        marked.append((base_id, execution_identity.agent_name if execution_identity is not None else None))
+        return (base_id,)
+
+    scheduler = KnowledgeRefreshScheduler()
+
+    def _record_schedule(
+        self: KnowledgeRefreshScheduler,
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        _ = self, config, runtime_paths
+        scheduled.append((base_id, execution_identity.agent_name if execution_identity is not None else None))
+
+    monkeypatch.setattr(knowledge_watch, "mark_knowledge_source_changed_async", _record_mark)
+    monkeypatch.setattr(KnowledgeRefreshScheduler, "schedule_refresh", _record_schedule)
+    watcher = KnowledgeSourceWatcher(scheduler)
+
+    await watcher._schedule_refresh_for_target(openclaw_target, config=config, runtime_paths=runtime_paths)
+
+    assert sorted(
+        (base.base_id, base.execution_identity.agent_name if base.execution_identity else None)
+        for base in openclaw_target.bases
+    ) == [
+        ("alias_memory", "openclaw"),
+        ("daily_memory", "openclaw"),
+    ]
+    assert sorted(marked) == [("alias_memory", "openclaw"), ("daily_memory", "openclaw")]
+    assert sorted(scheduled) == [("alias_memory", "openclaw"), ("daily_memory", "openclaw")]
 
 
 def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tmp_path: Path) -> None:

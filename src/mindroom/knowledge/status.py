@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.knowledge import registry
@@ -36,6 +37,14 @@ class KnowledgeIndexStatus:
         return self.persisted_index_status == "complete" and self.published_revision is not None
 
 
+@dataclass(frozen=True)
+class KnowledgeSourceRootBinding:
+    """One dashboard-visible source root and the owner binding that produced it."""
+
+    root: Path
+    owner_agent: str | None
+
+
 def _indexed_count_for_state(
     key: registry.PublishedIndexKey,
     state: registry.PublishedIndexState | None,
@@ -49,6 +58,47 @@ def _indexed_count_for_state(
     return state.indexed_count or 0
 
 
+def get_knowledge_source_roots(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    create: bool = False,
+) -> tuple[Path, ...]:
+    """Return every source root used by the base's query-time bindings."""
+    return tuple(
+        root_binding.root
+        for root_binding in get_knowledge_source_root_bindings(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            create=create,
+        )
+    )
+
+
+def get_knowledge_source_root_bindings(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    create: bool = False,
+) -> tuple[KnowledgeSourceRootBinding, ...]:
+    """Return every source root with the owner binding that produced it."""
+    return tuple(
+        KnowledgeSourceRootBinding(
+            root=Path(resolved_binding.key.knowledge_path),
+            owner_agent=resolved_binding.owner_agent,
+        )
+        for resolved_binding in registry.resolve_published_index_bindings(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            create=create,
+        )
+    )
+
+
 def get_knowledge_index_status(
     base_id: str,
     *,
@@ -58,13 +108,23 @@ def get_knowledge_index_status(
     create: bool = False,
 ) -> KnowledgeIndexStatus:
     """Resolve persisted published index metadata into the small status shape callers need."""
-    key = registry.resolve_published_index_key(
+    resolved_bindings = registry.resolve_published_index_bindings(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=create,
     )
+    if not resolved_bindings:
+        return KnowledgeIndexStatus()
+    if len(resolved_bindings) > 1:
+        return _aggregate_knowledge_index_statuses(
+            [_knowledge_index_status_for_key(resolved_binding.key) for resolved_binding in resolved_bindings],
+        )
+    return _knowledge_index_status_for_key(resolved_bindings[0].key)
+
+
+def _knowledge_index_status_for_key(key: registry.PublishedIndexKey) -> KnowledgeIndexStatus:
     metadata_path = registry.published_index_metadata_path(key)
     metadata_exists = metadata_path.exists()
     state = registry.load_published_index_state(metadata_path)
@@ -84,6 +144,59 @@ def get_knowledge_index_status(
     )
 
 
+def _aggregate_knowledge_index_statuses(statuses: list[KnowledgeIndexStatus]) -> KnowledgeIndexStatus:
+    if not statuses:
+        return KnowledgeIndexStatus()
+    return KnowledgeIndexStatus(
+        indexed_count=sum(status.indexed_count for status in statuses),
+        refresh_state=_aggregate_refresh_state(statuses),
+        availability=_aggregate_availability(statuses),
+        persisted_index_status=_aggregate_persisted_index_status(statuses),
+        last_error=next((status.last_error for status in statuses if status.last_error is not None), None),
+        last_published_at=max(
+            (status.last_published_at for status in statuses if status.last_published_at is not None),
+            default=None,
+        ),
+        published_revision=None,
+        metadata_exists=any(status.metadata_exists for status in statuses),
+    )
+
+
+def _aggregate_refresh_state(statuses: list[KnowledgeIndexStatus]) -> _KnowledgeRefreshState:
+    for refresh_state in ("refreshing", "refresh_failed", "stale"):
+        if any(status.refresh_state == refresh_state for status in statuses):
+            return refresh_state
+    if all(status.refresh_state == "none" for status in statuses):
+        return "none"
+    return "stale"
+
+
+def _aggregate_availability(statuses: list[KnowledgeIndexStatus]) -> KnowledgeAvailability:
+    if all(status.availability is KnowledgeAvailability.READY for status in statuses):
+        return KnowledgeAvailability.READY
+    for availability in (
+        KnowledgeAvailability.REFRESH_FAILED,
+        KnowledgeAvailability.CONFIG_MISMATCH,
+        KnowledgeAvailability.STALE,
+        KnowledgeAvailability.INITIALIZING,
+    ):
+        if any(status.availability is availability for status in statuses):
+            return availability
+    return KnowledgeAvailability.INITIALIZING
+
+
+def _aggregate_persisted_index_status(statuses: list[KnowledgeIndexStatus]) -> _PersistedIndexStatus | None:
+    persisted_statuses = [status.persisted_index_status for status in statuses if status.persisted_index_status]
+    if not persisted_statuses:
+        return None
+    if all(status == "complete" for status in persisted_statuses) and len(persisted_statuses) == len(statuses):
+        return "complete"
+    for persisted_status in ("failed", "indexing", "resetting"):
+        if persisted_status in persisted_statuses:
+            return persisted_status
+    return None
+
+
 def _mark_existing_semantic_state_stale(
     base_id: str,
     *,
@@ -91,15 +204,18 @@ def _mark_existing_semantic_state_stale(
     runtime_paths: RuntimePaths,
     reason: str,
 ) -> bool:
-    key = registry.resolve_published_index_key(
+    marked = False
+    for resolved_binding in registry.resolve_published_index_bindings(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         create=False,
-    )
-    if not registry.published_index_metadata_path(key).exists():
-        return False
-    return registry.mark_published_index_stale_and_evict(key, reason=reason)
+    ):
+        key = resolved_binding.key
+        if not registry.published_index_metadata_path(key).exists():
+            continue
+        marked = registry.mark_published_index_stale_and_evict(key, reason=reason) or marked
+    return marked
 
 
 def reconcile_knowledge_mode_transition_states(

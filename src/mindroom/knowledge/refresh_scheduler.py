@@ -14,7 +14,12 @@ from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding,
     refresh_knowledge_binding_in_subprocess,
 )
-from mindroom.knowledge.registry import KnowledgeRefreshTarget, resolve_refresh_target
+from mindroom.knowledge.registry import (
+    KnowledgeRefreshTarget,
+    ResolvedRefreshTarget,
+    resolve_refresh_target,
+    resolve_refresh_targets,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -68,6 +73,13 @@ class KnowledgeRefreshScheduler:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> bool:
         """Return whether one resolved knowledge binding is refreshing."""
+        if execution_identity is None:
+            refresh_targets = resolve_refresh_targets(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            return any(is_refresh_active(refresh_target.key) for refresh_target in refresh_targets)
         try:
             key = resolve_refresh_target(
                 base_id,
@@ -90,15 +102,14 @@ class KnowledgeRefreshScheduler:
         force_reindex: bool = False,
     ) -> KnowledgeRefreshResult:
         """Run a refresh immediately and wait for it."""
-        with suppress(ValueError):
-            key = resolve_refresh_target(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                create=False,
-            )
-            self._pending.pop(key, None)
+        for refresh_target in resolve_refresh_targets(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            create=False,
+        ):
+            self._pending.pop(refresh_target.key, None)
         return await refresh_knowledge_binding(
             base_id,
             config=config,
@@ -130,6 +141,24 @@ class KnowledgeRefreshScheduler:
         if self._shutting_down:
             logger.debug("Skipping knowledge refresh schedule after shutdown", base_id=base_id)
             return
+        if execution_identity is None:
+            refresh_targets = resolve_refresh_targets(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                create=False,
+            )
+            if not refresh_targets:
+                logger.debug("Skipping identityless knowledge refresh with no background-safe owners", base_id=base_id)
+                return
+            for refresh_target in refresh_targets:
+                self._schedule_resolved(
+                    refresh_target,
+                    base_id=base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
+            return
         try:
             key = resolve_refresh_target(
                 base_id,
@@ -142,16 +171,31 @@ class KnowledgeRefreshScheduler:
             logger.exception("Could not resolve knowledge binding for refresh", base_id=base_id)
             return
 
+        self._schedule_resolved(
+            ResolvedRefreshTarget(key=key, execution_identity=execution_identity),
+            base_id=base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    def _schedule_resolved(
+        self,
+        refresh_target: ResolvedRefreshTarget,
+        *,
+        base_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> None:
         request = _ScheduledRefresh(
             base_id=base_id,
             config=config.model_copy(deep=True),
             runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
+            execution_identity=refresh_target.execution_identity,
         )
-        if key in self._tasks:
-            self._pending[key] = request
+        if refresh_target.key in self._tasks:
+            self._pending[refresh_target.key] = request
             return
-        self._start_task(key, request)
+        self._start_task(refresh_target.key, request)
 
     def _start_task(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
         loop = _running_loop_for_schedule(key.base_id)
@@ -160,7 +204,11 @@ class KnowledgeRefreshScheduler:
         mark_refresh_active(key)
         task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{key.base_id}")
         self._tasks[key] = task
-        task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
+
+        def handle_completed(completed: asyncio.Task[None], *, scheduled_key: KnowledgeRefreshTarget = key) -> None:
+            self._handle_done(scheduled_key, completed)
+
+        task.add_done_callback(handle_completed)
 
     def _handle_done(self, key: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:
         mark_refresh_inactive(key)
