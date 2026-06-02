@@ -2562,6 +2562,7 @@ from = ["mindroom.matrix.event_info"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "MatrixExpectedDeliveryPolicyError",
     "PermanentMatrixStartupError",
     "ResolvedVisibleMessage",
     "RoomThreadsPageError",
@@ -2575,6 +2576,7 @@ expose = [
     "get_room_name",
     "get_room_threads_page",
     "invite_to_room",
+    "is_expected_matrix_delivery_policy_error",
     "join_room",
     "leave_room",
     "login",
@@ -2625,11 +2627,13 @@ from = ["mindroom.matrix.client_session"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "MatrixExpectedDeliveryPolicyError",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "is_expected_matrix_delivery_policy_error",
     "send_file_message",
     "send_message_result",
 ]
