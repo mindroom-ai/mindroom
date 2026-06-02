@@ -1486,6 +1486,7 @@ class Config(BaseModel):
                     )
                 )
                 for tool_name in self.expand_tool_names([authored_entry.name])
+                if tool_name not in self._unavailable_plugin_tool_names
             )
         return effective_entries
 
