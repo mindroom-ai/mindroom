@@ -31,7 +31,12 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
-from mindroom.thread_utils import should_agent_respond
+from mindroom.thread_utils import (
+    check_agent_mentioned,
+    get_agents_in_thread,
+    is_router_only_agent_mention,
+    should_agent_respond,
+)
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
 from tests.conftest import bind_runtime_paths, create_mock_room, request_envelope, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -263,6 +268,162 @@ class TestAgentResponseLogic:
             )
 
         assert single_visible_action.kind == "individual"
+
+    @pytest.mark.asyncio
+    async def test_response_policy_logs_multi_agent_thread_skip(self) -> None:
+        """A multi-agent thread skip should leave a useful policy diagnostic."""
+        room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
+        runtime = MagicMock()
+        runtime.client = None
+        runtime.config = self.config
+        runtime.orchestrator = None
+        logger = MagicMock()
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=logger,
+                runtime_paths=self.runtime_paths,
+                agent_name="calculator",
+                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
+            ),
+        )
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread-root:localhost",
+            thread_history=thread_history_result(
+                [
+                    _message(sender=self.agent_id("general"), body="I can help."),
+                    _message(sender=self.agent_id("calculator"), body="I can also help."),
+                    _message(sender=self.sender, body="What next?"),
+                ],
+                is_full_history=True,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        target = MessageTarget.resolve(room.room_id, context.thread_id, "$event")
+        dispatch = PreparedDispatch(
+            requester_user_id=self.sender,
+            context=context,
+            target=target,
+            correlation_id="$event",
+            envelope=request_envelope(
+                room_id=room.room_id,
+                reply_to_event_id="$event",
+                thread_id=context.thread_id,
+                prompt="continue",
+                user_id=self.sender,
+                target=target,
+                agent_name="calculator",
+            ),
+        )
+        candidate_ids = entity_ids(self.config, self.runtime_paths)
+
+        with (
+            patch(
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
+                new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            ),
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new=AsyncMock(return_value=TeamResolution.none()),
+            ),
+        ):
+            action = await policy.resolve_response_action(
+                dispatch,
+                room,
+                "continue",
+                False,
+                has_active_response_for_target=lambda _target: False,
+            )
+
+        assert action.kind == "skip"
+        matching_calls = [
+            call
+            for call in logger.info.call_args_list
+            if call.args == ("Skipping response: multiple agents in thread require explicit mention",)
+        ]
+        assert matching_calls
+        assert matching_calls[0].kwargs["agent_name"] == "calculator"
+        assert matching_calls[0].kwargs["thread_id"] == "$thread-root:localhost"
+        assert matching_calls[0].kwargs["agents_in_thread"] == [
+            self.agent_id("general"),
+            self.agent_id("calculator"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_response_policy_continues_after_router_handoff(self) -> None:
+        """The main turn policy should ignore router handoff as conversational participation."""
+        room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
+        runtime = MagicMock()
+        runtime.client = None
+        runtime.config = self.config
+        runtime.orchestrator = None
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=self.runtime_paths,
+                agent_name="general",
+                matrix_id=entity_ids(self.config, self.runtime_paths)["general"],
+            ),
+        )
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread-root:localhost",
+            thread_history=thread_history_result(
+                [
+                    _message(sender=self.sender, body="Can someone help?"),
+                    _message(
+                        sender=self.agent_id("router"),
+                        body="@mindroom_general could you help?",
+                        content={
+                            "m.mentions": {
+                                "user_ids": [self.agent_id("general")],
+                            },
+                        },
+                    ),
+                    _message(sender=self.agent_id("general"), body="I can help."),
+                    _message(sender=self.sender, body="What is the next step?"),
+                ],
+                is_full_history=True,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        target = MessageTarget.resolve(room.room_id, context.thread_id, "$event")
+        dispatch = PreparedDispatch(
+            requester_user_id=self.sender,
+            context=context,
+            target=target,
+            correlation_id="$event",
+            envelope=request_envelope(
+                room_id=room.room_id,
+                reply_to_event_id="$event",
+                thread_id=context.thread_id,
+                prompt="continue",
+                user_id=self.sender,
+                target=target,
+                agent_name="general",
+            ),
+        )
+        candidate_ids = entity_ids(self.config, self.runtime_paths)
+
+        with patch(
+            "mindroom.turn_policy.responder_candidate_entities_for_room",
+            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+        ):
+            action = await policy.resolve_response_action(
+                dispatch,
+                room,
+                "continue",
+                False,
+                has_active_response_for_target=lambda _target: False,
+            )
+
+        assert action.kind == "individual"
 
     def test_effective_response_action_does_not_convert_reject_to_configured_team(self) -> None:
         """Configured-team execution only upgrades individual actions."""
@@ -527,6 +688,151 @@ class TestAgentResponseLogic:
             sender_id=self.sender,
         )
         assert should_respond is False
+
+    def test_router_handoff_allows_target_agent_follow_up(self) -> None:
+        """Router handoff should not count as a second agent for untagged follow-ups."""
+        thread_history = [
+            _message(sender=self.sender, body="Can someone help?"),
+            _message(
+                sender=self.agent_id("router"),
+                body="@mindroom_general could you help?",
+                content={
+                    "m.mentions": {
+                        "user_ids": [self.agent_id("general")],
+                    },
+                },
+            ),
+            _message(sender=self.agent_id("general"), body="I can help."),
+            _message(sender=self.sender, body="What is the next step?"),
+        ]
+
+        agents_in_thread = get_agents_in_thread(thread_history, self.config, self.runtime_paths)
+
+        assert [agent.full_id for agent in agents_in_thread] == [self.agent_id("general")]
+        assert (
+            should_agent_respond(
+                agent_name="general",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+                thread_history=thread_history,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                sender_id=self.sender,
+            )
+            is True
+        )
+
+    def test_router_handoff_still_requires_mention_after_second_real_agent_participates(self) -> None:
+        """Router handoff is ignored, but two real agent participants still suppress auto-follow-up."""
+        thread_history = [
+            _message(sender=self.sender, body="Can someone help?"),
+            _message(
+                sender=self.agent_id("router"),
+                body="@mindroom_general could you help?",
+                content={
+                    "m.mentions": {
+                        "user_ids": [self.agent_id("general")],
+                    },
+                },
+            ),
+            _message(sender=self.agent_id("general"), body="I can help."),
+            _message(sender=self.agent_id("calculator"), body="I can also help with numbers."),
+            _message(sender=self.sender, body="What is the next step?"),
+        ]
+        room = create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config)
+
+        agents_in_thread = get_agents_in_thread(thread_history, self.config, self.runtime_paths)
+
+        assert [agent.full_id for agent in agents_in_thread] == [
+            self.agent_id("general"),
+            self.agent_id("calculator"),
+        ]
+        assert (
+            should_agent_respond(
+                agent_name="general",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=room,
+                thread_history=thread_history,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                sender_id=self.sender,
+            )
+            is False
+        )
+        assert (
+            should_agent_respond(
+                agent_name="calculator",
+                am_i_mentioned=False,
+                is_thread=True,
+                room=room,
+                thread_history=thread_history,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                sender_id=self.sender,
+            )
+            is False
+        )
+
+    def test_explicit_router_mention_still_detected(self) -> None:
+        """Filtering router from participants must not hide explicit router mentions."""
+        router_id = entity_ids(self.config, self.runtime_paths)["router"]
+        event_source = {
+            "content": {
+                "body": "@mindroom_router route this",
+                "msgtype": "m.text",
+                "m.mentions": {
+                    "user_ids": [router_id.full_id],
+                },
+            },
+        }
+
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+            event_source,
+            router_id,
+            self.config,
+            self.runtime_paths,
+        )
+
+        assert mentioned_agents == [router_id]
+        assert am_i_mentioned is True
+        assert has_non_agent_mentions is False
+        assert (
+            is_router_only_agent_mention(
+                mentioned_agents,
+                has_non_agent_mentions=has_non_agent_mentions,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+            )
+            is True
+        )
+
+    def test_explicit_target_agent_mention_still_works_in_multi_agent_thread(self) -> None:
+        """Explicitly mentioning the target agent overrides multi-agent follow-up suppression."""
+        thread_history = [
+            _message(sender=self.sender, body="Can someone help?"),
+            _message(sender=self.agent_id("router"), body="@mindroom_general could you help?"),
+            _message(sender=self.agent_id("general"), body="I can help."),
+            _message(sender=self.agent_id("calculator"), body="I can also help with numbers."),
+            _message(sender=self.sender, body="@mindroom_general what next?"),
+        ]
+        mentioned_agents = [entity_ids(self.config, self.runtime_paths)["general"]]
+
+        assert (
+            should_agent_respond(
+                agent_name="general",
+                am_i_mentioned=True,
+                is_thread=True,
+                room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
+                thread_history=thread_history,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                mentioned_agents=mentioned_agents,
+                sender_id=self.sender,
+            )
+            is True
+        )
 
     def test_only_permitted_agent_in_thread_continues(self) -> None:
         """A permitted agent should continue when other thread participants are disallowed."""

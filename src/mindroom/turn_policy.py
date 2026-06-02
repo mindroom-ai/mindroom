@@ -6,7 +6,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
+from mindroom.authorization import (
+    filter_responders_by_sender_permissions,
+    is_sender_allowed_for_agent_reply,
+    responder_candidate_entities_for_room,
+)
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -703,9 +707,45 @@ class TurnPolicy:
                 has_active_response_for_target=has_active_response_for_target,
             ):
                 return ResponseAction(kind="individual")
+            if agent_is_responder_candidate:
+                self._log_multi_agent_thread_skip(
+                    context,
+                    requester_user_id,
+                    agents_in_thread,
+                    available_responders_in_room,
+                )
             return ResponseAction(kind="skip")
 
         return ResponseAction(kind="individual")
+
+    def _log_multi_agent_thread_skip(
+        self,
+        context: MessageContext,
+        requester_user_id: str,
+        agents_in_thread: list[MatrixID],
+        available_responders_in_room: list[MatrixID],
+    ) -> None:
+        """Log the ambiguous multi-agent thread branch after router participants are filtered out."""
+        if not context.is_thread or context.mentioned_agents or context.has_non_agent_mentions:
+            return
+
+        available_responder_ids = {responder.full_id for responder in available_responders_in_room}
+        sender_visible_agents = filter_responders_by_sender_permissions(
+            agents_in_thread,
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        sender_visible_agents = [agent for agent in sender_visible_agents if agent.full_id in available_responder_ids]
+        if len(sender_visible_agents) < 2:
+            return
+
+        self.deps.logger.info(
+            "Skipping response: multiple agents in thread require explicit mention",
+            agent_name=self.deps.agent_name,
+            thread_id=context.thread_id,
+            agents_in_thread=[agent.full_id for agent in sender_visible_agents],
+        )
 
     def _should_queue_follow_up_in_active_response_thread(
         self,
