@@ -199,10 +199,11 @@ class TestConfigInit:
             "TOOLS.md",
             "HEARTBEAT.md",
         ]
-        assert mind["knowledge_bases"] == ["mind_memory"]
+        assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
             "coding",
+            "memory",
             "duckduckgo",
             "website",
             "browser",
@@ -212,14 +213,16 @@ class TestConfigInit:
             "thread_tags",
         ]
         assert mind["skills"] == ["mindroom-docs"]
-        assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
-        )
-        assert config["knowledge_bases"]["mind_memory"]["watch"] is True
+        assert "knowledge_bases" not in config
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert config["memory"]["search"] == {
+            "mode": "semantic",
+            "include": ["memory/**/*.md"],
+            "include_entrypoint": False,
+        }
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
 
@@ -263,14 +266,12 @@ class TestConfigInit:
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
-        assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
-        )
+        assert "knowledge_bases" not in config
 
         env_content = (tmp_path / ".env").read_text()
         assert f"MINDROOM_STORAGE_PATH={storage_root.resolve()}" in env_content
 
-    def test_init_runtime_storage_override_keeps_mind_workspace_and_kb_in_sync(
+    def test_init_runtime_storage_override_keeps_mind_workspace_in_sync(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -284,12 +285,7 @@ class TestConfigInit:
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(runtime_storage))
 
         config = load_config_yaml(target)
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
-        resolved_knowledge_path = constants_module.resolve_config_relative_path(
-            config.knowledge_bases["mind_memory"].path,
-            runtime_paths,
-        )
-        assert resolved_knowledge_path == runtime_storage.resolve() / "agents" / "mind" / "workspace" / "memory"
+        assert "mind_memory" not in config.knowledge_bases
 
         ensure_default_agent_workspaces(config, runtime_storage)
         runtime_workspace = runtime_storage / "agents" / "mind" / "workspace"
@@ -341,7 +337,7 @@ class TestConfigInit:
 
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
-        assert config["knowledge_bases"]["mind_memory"]["path"] == ("./mindroom_data/agents/mind/workspace/memory")
+        assert "knowledge_bases" not in config
         assert "${MINDROOM_STORAGE_PATH}" not in target.read_text()
         assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace").exists()
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
@@ -831,14 +827,10 @@ class TestConfigInit:
         workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
-        resolved_kb_path = constants_module.resolve_config_relative_path(
-            config["knowledge_bases"]["mind_memory"]["path"],
-            runtime_paths,
-        )
-        assert resolved_kb_path == workspace / "memory"
+        assert "knowledge_bases" not in config
+        assert (workspace / "memory").exists()
 
-    def test_init_keeps_existing_env_storage_root_for_workspace_and_knowledge_base(
+    def test_init_keeps_existing_env_storage_root_for_workspace(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -863,12 +855,8 @@ class TestConfigInit:
         workspace = custom_root / "agents" / "mind" / "workspace"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
-        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
-        resolved_kb_path = constants_module.resolve_config_relative_path(
-            config["knowledge_bases"]["mind_memory"]["path"],
-            runtime_paths,
-        )
-        assert resolved_kb_path == workspace / "memory"
+        assert "knowledge_bases" not in config
+        assert (workspace / "memory").exists()
         assert env_path.read_text(encoding="utf-8").startswith(f"MINDROOM_STORAGE_PATH={custom_root}\n")
 
     def test_init_overwrites_env_when_confirmed(self, tmp_path: Path) -> None:

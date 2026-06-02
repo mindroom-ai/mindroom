@@ -13,28 +13,22 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.base import Embedder
-from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 
+from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings import (
-    MindRoomOpenAIEmbedder,
-    create_sentence_transformers_embedder,
-    effective_knowledge_embedder_signature,
-)
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.embedding_factory import create_configured_embedder
+from mindroom.embeddings import effective_knowledge_embedder_signature
 from mindroom.knowledge.index_metadata import (
     load_index_metadata_payload,
     parse_index_metadata_fields,
@@ -48,7 +42,7 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -445,36 +439,6 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
-def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
-    provider = config.memory.embedder.provider
-    embedder_config = config.memory.embedder.config
-
-    if provider == "openai":
-        return MindRoomOpenAIEmbedder(
-            id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
-            base_url=embedder_config.host,
-            dimensions=embedder_config.dimensions,
-        )
-
-    if provider == "ollama":
-        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT
-        return OllamaEmbedder(id=embedder_config.model, host=host)
-
-    if provider == "sentence_transformers":
-        return create_sentence_transformers_embedder(
-            runtime_paths,
-            embedder_config.model,
-            dimensions=embedder_config.dimensions,
-        )
-
-    msg = (
-        f"Unsupported knowledge embedder provider: {provider}. "
-        "Supported providers: openai, ollama, sentence_transformers"
-    )
-    raise ValueError(msg)
-
-
 def _authenticated_repo_url(
     repo_url: str,
     credentials_service: str | None,
@@ -593,52 +557,6 @@ def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
     return merged or None
 
 
-def _split_posix_parts(value: str) -> tuple[str, ...]:
-    normalized = value.replace("\\", "/").strip()
-    normalized = normalized.removeprefix("./")
-    normalized = normalized.strip("/")
-    if not normalized:
-        return ()
-    return tuple(part for part in normalized.split("/") if part and part != ".")
-
-
-def _matches_root_glob(relative_path: str, pattern: str) -> bool:
-    """Return True when relative path matches the root-anchored glob pattern."""
-    path_parts = _split_posix_parts(relative_path)
-    pattern_parts = _split_posix_parts(pattern)
-    if not pattern_parts:
-        return False
-
-    cache: dict[tuple[int, int], bool] = {}
-
-    def _match(path_index: int, pattern_index: int) -> bool:
-        key = (path_index, pattern_index)
-        if key in cache:
-            return cache[key]
-
-        if pattern_index == len(pattern_parts):
-            result = path_index == len(path_parts)
-        else:
-            pattern_part = pattern_parts[pattern_index]
-            if pattern_part == "**":
-                next_index = pattern_index
-                while next_index < len(pattern_parts) and pattern_parts[next_index] == "**":
-                    next_index += 1
-                if next_index == len(pattern_parts):
-                    result = True
-                else:
-                    result = any(_match(next_path, next_index) for next_path in range(path_index, len(path_parts) + 1))
-            elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], pattern_part):
-                result = _match(path_index + 1, pattern_index + 1)
-            else:
-                result = False
-
-        cache[key] = result
-        return result
-
-    return _match(0, 0)
-
-
 def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
@@ -658,11 +576,11 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
         return True
 
     if git_config.include_patterns and not any(
-        _matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
+        matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
     ):
         return False
 
-    return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+    return not any(matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
 
 def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
@@ -1379,7 +1297,7 @@ class KnowledgeManager:
             collection=collection_name,
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config, self.runtime_paths),
+            embedder=create_configured_embedder(self.config, self.runtime_paths),
         )
 
     def _build_knowledge(self, collection_name: str) -> Knowledge:

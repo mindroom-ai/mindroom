@@ -144,28 +144,6 @@ def _default_mind_workspace(storage_root: Path) -> Path:
     return agent_workspace_root_path(storage_root, "mind")
 
 
-def _path_string_for_config(path: Path, config_dir: Path) -> str:
-    """Render one filesystem path for config.yaml, preferring config-relative paths when possible."""
-    resolved_path = path.expanduser().resolve()
-    try:
-        relative_path = resolved_path.relative_to(config_dir.resolve())
-    except ValueError:
-        return str(resolved_path)
-    return f"./{relative_path.as_posix()}"
-
-
-def _default_mind_knowledge_base_path(
-    config_dir: Path,
-    *,
-    storage_root: Path,
-    use_storage_env_placeholder: bool,
-) -> str:
-    """Return the starter knowledge-base path anchored to the chosen runtime storage root."""
-    if use_storage_env_placeholder:
-        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
-    return _path_string_for_config(_default_mind_workspace(storage_root) / "memory", config_dir)
-
-
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
     """Create the default Mind workspace files used by starter configs."""
     from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
@@ -837,14 +815,10 @@ def _full_template(
     `config init` intentionally generates the shared single-user starter model.
     Requester-private agents remain an opt-in advanced config surface.
     """
+    _ = config_dir, storage_root, use_storage_env_placeholder
     model_block = _model_template_block(provider_preset)
     additional_models_block = _additional_models_template_block(provider_preset)
     commented_model_options_block = _commented_model_options_template_block(provider_preset)
-    mind_memory_knowledge_path = _default_mind_knowledge_base_path(
-        config_dir,
-        storage_root=storage_root,
-        use_storage_env_placeholder=use_storage_env_placeholder,
-    )
 
     if matrix_server == "mindroom.chat":
         mindroom_user_block = ""
@@ -895,11 +869,10 @@ agents:
       - IDENTITY.md
       - TOOLS.md
       - HEARTBEAT.md
-    knowledge_bases:
-      - mind_memory
     tools:
       - shell
       - coding
+      - memory
       - duckduckgo
       - website
       - browser
@@ -914,7 +887,7 @@ agents:
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external or destructive actions.
-      - Before answering prior-history questions, search memory files first when a knowledge base is configured.
+      - Before answering prior-history questions, use search_memories first.
 
 router:
   model: default
@@ -929,12 +902,7 @@ matrix_space:
 
 {_MATRIX_DELIVERY_TEMPLATE_BLOCK}
 
-knowledge_bases:
-  mind_memory:
-    path: {mind_memory_knowledge_path}
-    watch: true
-
-# File-based memory requires no external LLM, and starter configs use a local embedder for knowledge indexing.
+# File-based memory requires no external LLM.
 memory:
   backend: file
   embedder:
@@ -943,6 +911,11 @@ memory:
       model: {SENTENCE_TRANSFORMERS_DEFAULT}
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
   auto_flush:
     enabled: true
 

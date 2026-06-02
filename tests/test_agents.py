@@ -2193,13 +2193,6 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                     "TOOLS.md",
                     "HEARTBEAT.md",
                 ],
-                knowledge_bases=["mind_memory"],
-            ),
-        },
-        knowledge_bases={
-            "mind_memory": KnowledgeBaseConfig(
-                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
-                watch=True,
             ),
         },
         models={"default": ModelConfig(provider="openai", id="gpt-4")},

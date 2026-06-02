@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
@@ -15,6 +16,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
 from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.path_globs import matches_root_glob
 from tests.conftest import orchestrator_runtime_paths
 
 
@@ -502,3 +504,87 @@ class TestMemoryConfig:
         assert config.get_agent_memory_backend("general") == "mem0"
         assert config.get_agent_memory_backend("scratch") == "none"
         assert config.uses_file_memory() is False
+
+
+def test_memory_search_defaults_to_keyword_daily_files() -> None:
+    """File-memory search should default to keyword mode over daily memory files."""
+    config = Config(router=RouterConfig(model="default"))
+
+    search = config.get_agent_memory_search("missing_agent")
+
+    assert search.mode == "keyword"
+    assert search.include == ["memory/**/*.md"]
+    assert search.include_entrypoint is False
+
+
+def test_agent_memory_search_override_merges_per_field() -> None:
+    """Per-agent memory search overrides should inherit omitted global fields."""
+    config = Config(
+        memory={
+            "search": {
+                "mode": "semantic",
+                "include": ["memory/**/*.md"],
+                "include_entrypoint": False,
+            },
+        },
+        agents={
+            "openclaw": AgentConfig(
+                display_name="OpenClaw",
+                memory_backend="file",
+                memory_search={"include_entrypoint": True},
+            ),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    search = config.get_agent_memory_search("openclaw")
+
+    assert search.mode == "semantic"
+    assert search.include == ["memory/**/*.md"]
+    assert search.include_entrypoint is True
+
+
+def test_agent_memory_search_can_override_include_patterns() -> None:
+    """Per-agent memory search should support custom include patterns."""
+    config = Config(
+        memory={
+            "search": {
+                "mode": "semantic",
+                "include": ["memory/**/*.md"],
+                "include_entrypoint": False,
+            },
+        },
+        agents={
+            "openclaw": AgentConfig(
+                display_name="OpenClaw",
+                memory_backend="file",
+                memory_search={
+                    "include": ["memory/**/*.md", "decisions/**/*.md"],
+                    "include_entrypoint": True,
+                },
+            ),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    search = config.get_agent_memory_search("openclaw")
+
+    assert search.include == ["memory/**/*.md", "decisions/**/*.md"]
+    assert search.include_entrypoint is True
+
+
+def test_memory_search_include_pattern_matches_direct_and_nested_daily_files() -> None:
+    """The root glob matcher should treat memory/**/*.md as daily-memory files."""
+    assert matches_root_glob("memory/2026-06-02.md", "memory/**/*.md")
+    assert matches_root_glob("memory/2026/06/02.md", "memory/**/*.md")
+    assert not matches_root_glob("MEMORY.md", "memory/**/*.md")
+    assert not matches_root_glob("docs/runbook.md", "memory/**/*.md")
+
+
+def test_memory_search_rejects_unsafe_include_pattern() -> None:
+    """Memory search include patterns must stay inside the memory root."""
+    with pytest.raises(ValueError, match=r"memory\.search\.include"):
+        Config(
+            memory={"search": {"include": ["../secret.md"]}},
+            router=RouterConfig(model="default"),
+        )

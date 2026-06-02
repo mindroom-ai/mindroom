@@ -10,14 +10,13 @@ import os
 import signal
 import sys
 import tempfile
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict
 
-import mindroom.knowledge.manager as manager_module
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -42,10 +41,8 @@ from mindroom.knowledge.registry import (
     published_index_metadata_path,
     published_index_settings_compatible,
     refresh_target_for_published_index_key,
-    resolve_published_index_bindings,
     resolve_published_index_key,
     resolve_refresh_target,
-    resolve_refresh_targets,
     save_published_index_state,
     source_root_for_published_index_key,
     source_root_for_refresh_target,
@@ -95,7 +92,6 @@ class _SubprocessRefreshRequest:
     storage_root: str
     execution_identity: SerializedToolExecutionIdentity | None = None
     force_reindex: bool = False
-    published_index_key: PublishedIndexKey | None = None
 
 
 class _SubprocessSessionKwargs(TypedDict, total=False):
@@ -196,13 +192,6 @@ def is_refresh_active_for_binding(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> bool:
     """Resolve a binding and return whether it has an active refresh."""
-    if execution_identity is None:
-        refresh_targets = resolve_refresh_targets(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        return any(is_refresh_active(refresh_target.key) for refresh_target in refresh_targets)
     try:
         key = resolve_refresh_target(
             base_id,
@@ -231,64 +220,20 @@ async def refresh_knowledge_binding_in_subprocess(
     control-plane event loop and its shared thread pool while preserving the
     last-good published index semantics.
     """
-    if execution_identity is None:
-        resolved_bindings = resolve_published_index_bindings(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            create=True,
-        )
-        if not resolved_bindings:
-            logger.debug(
-                "Skipping identityless knowledge refresh subprocess with no background-safe owners",
-                base_id=base_id,
-            )
-            return
-        if len(resolved_bindings) > 1:
-            for resolved_binding in resolved_bindings:
-                await _refresh_published_index_key_in_subprocess(
-                    resolved_binding.key,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=resolved_binding.execution_identity,
-                    force_reindex=force_reindex,
-                )
-            return
-        key = resolved_bindings[0].key
-        execution_identity = resolved_bindings[0].execution_identity
-    else:
-        key = resolve_published_index_key(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=True,
-        )
-    await _refresh_published_index_key_in_subprocess(
-        key,
+    key = resolve_published_index_key(
+        base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-        force_reindex=force_reindex,
+        create=True,
     )
-
-
-async def _refresh_published_index_key_in_subprocess(
-    key: PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-    force_reindex: bool,
-) -> None:
     initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
     request_payload = _serialize_subprocess_refresh_request(
-        key.base_id,
+        base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         force_reindex=force_reindex,
-        published_index_key=key,
     )
     env = dict(runtime_env_values(runtime_paths))
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
@@ -322,7 +267,7 @@ async def _refresh_published_index_key_in_subprocess(
         raise
 
     if return_code != 0:
-        msg = f"Knowledge refresh subprocess failed for {key.base_id!r} with exit code {return_code}"
+        msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
         await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
         raise RuntimeError(msg)
 
@@ -334,7 +279,6 @@ def _serialize_subprocess_refresh_request(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
-    published_index_key: PublishedIndexKey | None = None,
 ) -> bytes:
     payload = _SubprocessRefreshRequest(
         base_id=base_id,
@@ -345,47 +289,8 @@ def _serialize_subprocess_refresh_request(
         if execution_identity is None
         else serialize_tool_execution_identity(execution_identity),
         force_reindex=force_reindex,
-        published_index_key=published_index_key,
     )
     return json.dumps(asdict(payload), sort_keys=True).encode()
-
-
-def _load_subprocess_published_index_key(raw_key: object) -> PublishedIndexKey | None:
-    if raw_key is None:
-        return None
-    if not isinstance(raw_key, dict):
-        msg = "Knowledge refresh subprocess request published_index_key must be an object"
-        raise TypeError(msg)
-    raw_key_payload = cast("dict[str, object]", raw_key)
-    raw_base_id = raw_key_payload.get("base_id")
-    raw_storage_root = raw_key_payload.get("storage_root")
-    raw_knowledge_path = raw_key_payload.get("knowledge_path")
-    raw_indexing_settings = raw_key_payload.get("indexing_settings")
-    if not isinstance(raw_base_id, str) or not raw_base_id.strip():
-        msg = "Knowledge refresh subprocess request published_index_key.base_id must be a non-empty string"
-        raise TypeError(msg)
-    if not isinstance(raw_storage_root, str) or not raw_storage_root.strip():
-        msg = "Knowledge refresh subprocess request published_index_key.storage_root must be a non-empty string"
-        raise TypeError(msg)
-    if not isinstance(raw_knowledge_path, str) or not raw_knowledge_path.strip():
-        msg = "Knowledge refresh subprocess request published_index_key.knowledge_path must be a non-empty string"
-        raise TypeError(msg)
-    if not isinstance(raw_indexing_settings, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in raw_indexing_settings.items()
-    ):
-        msg = "Knowledge refresh subprocess request published_index_key.indexing_settings must be a string map"
-        raise TypeError(msg)
-    indexing_settings_payload = cast("dict[str, str]", raw_indexing_settings)
-    indexing_settings = manager_module.IndexingSettings.from_metadata(indexing_settings_payload)
-    if indexing_settings is None:
-        msg = "Knowledge refresh subprocess request published_index_key.indexing_settings is invalid"
-        raise TypeError(msg)
-    return PublishedIndexKey(
-        base_id=raw_base_id,
-        storage_root=raw_storage_root,
-        knowledge_path=raw_knowledge_path,
-        indexing_settings=indexing_settings,
-    )
 
 
 async def _send_subprocess_refresh_request(
@@ -534,24 +439,15 @@ async def knowledge_binding_mutation_lock(
     create: bool = False,
 ) -> AsyncIterator[None]:
     """Serialize source mutations with refresh publishes in this runtime event loop."""
-    refresh_targets = resolve_refresh_targets(
+    key = resolve_refresh_target(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=create,
     )
-    if not refresh_targets:
-        msg = f"Knowledge base '{base_id}' has no source binding to lock"
-        raise ValueError(msg)
-    source_roots = sorted(
-        {source_root_for_refresh_target(refresh_target.key) for refresh_target in refresh_targets},
-        key=lambda source_root: (source_root.storage_root, source_root.knowledge_path),
-    )
-    async with AsyncExitStack() as stack:
-        for source_root in source_roots:
-            await stack.enter_async_context(_acquire_refresh_lock(source_root))
-            await stack.enter_async_context(_acquire_refresh_file_lock(source_root))
+    source_root = source_root_for_refresh_target(key)
+    async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
         yield
 
 
@@ -564,41 +460,13 @@ async def refresh_knowledge_binding(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     """Build and publish one resolved knowledge binding."""
-    if execution_identity is None:
-        resolved_bindings = resolve_published_index_bindings(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            create=True,
-        )
-        if not resolved_bindings:
-            return _skipped_identityless_refresh_result(
-                base_id,
-                runtime_paths=runtime_paths,
-                last_error="Identityless refresh skipped because all file-memory owners require a requester scope",
-            )
-        if len(resolved_bindings) > 1:
-            results = [
-                await _refresh_resolved_knowledge_binding(
-                    resolved_binding.key,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=resolved_binding.execution_identity,
-                    force_reindex=force_reindex,
-                )
-                for resolved_binding in resolved_bindings
-            ]
-            return _aggregate_refresh_results(results)
-        key = resolved_bindings[0].key
-        execution_identity = resolved_bindings[0].execution_identity
-    else:
-        key = resolve_published_index_key(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=True,
-        )
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
     return await _refresh_resolved_knowledge_binding(
         key,
         config=config,
@@ -645,74 +513,6 @@ async def _refresh_resolved_knowledge_binding(
     finally:
         mark_refresh_inactive(refresh_target)
         prune_private_index_bookkeeping()
-
-
-def _skipped_identityless_refresh_result(
-    base_id: str,
-    *,
-    runtime_paths: RuntimePaths,
-    last_error: str,
-) -> KnowledgeRefreshResult:
-    storage_root = runtime_paths.storage_root.expanduser().resolve()
-    knowledge_path = (storage_root / "knowledge_db" / "__skipped_identityless_refresh__" / base_id).resolve()
-    return KnowledgeRefreshResult(
-        key=PublishedIndexKey(
-            base_id=base_id,
-            storage_root=str(storage_root),
-            knowledge_path=str(knowledge_path),
-            indexing_settings=manager_module.IndexingSettings(
-                base_id=base_id,
-                storage_root=str(storage_root),
-                knowledge_path=str(knowledge_path),
-                mode="files",
-                embedder_provider="",
-                embedder_model="",
-                embedder_host="",
-                embedder_dimensions="",
-                chunk_size="",
-                chunk_overlap="",
-                repo_identity="",
-                git_branch="",
-                git_lfs="",
-                git_skip_hidden="",
-                git_include_patterns="",
-                git_exclude_patterns="",
-                include_extensions="",
-                exclude_extensions="",
-            ),
-        ),
-        indexed_count=0,
-        index_published=False,
-        availability=KnowledgeAvailability.INITIALIZING,
-        last_error=last_error,
-    )
-
-
-def _aggregate_refresh_results(results: list[KnowledgeRefreshResult]) -> KnowledgeRefreshResult:
-    if not results:
-        msg = "Cannot aggregate an empty knowledge refresh result set"
-        raise ValueError(msg)
-    return KnowledgeRefreshResult(
-        key=results[0].key,
-        indexed_count=sum(result.indexed_count for result in results),
-        index_published=all(result.index_published for result in results),
-        availability=_aggregate_refresh_availability(results),
-        last_error=next((result.last_error for result in results if result.last_error is not None), None),
-    )
-
-
-def _aggregate_refresh_availability(results: list[KnowledgeRefreshResult]) -> KnowledgeAvailability:
-    if all(result.availability is KnowledgeAvailability.READY for result in results):
-        return KnowledgeAvailability.READY
-    for availability in (
-        KnowledgeAvailability.REFRESH_FAILED,
-        KnowledgeAvailability.CONFIG_MISMATCH,
-        KnowledgeAvailability.STALE,
-        KnowledgeAvailability.INITIALIZING,
-    ):
-        if any(result.availability is availability for result in results):
-            return availability
-    return KnowledgeAvailability.INITIALIZING
 
 
 async def _save_refreshing_state(key: PublishedIndexKey) -> None:
@@ -843,40 +643,13 @@ async def publish_file_mode_source_metadata_for_base(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeRefreshResult:
     """Resolve and publish current source metadata for a file-only base."""
-    if execution_identity is None:
-        resolved_bindings = resolve_published_index_bindings(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            create=True,
-        )
-        if not resolved_bindings:
-            return _skipped_identityless_refresh_result(
-                base_id,
-                runtime_paths=runtime_paths,
-                last_error="Identityless metadata publish skipped because all file-memory owners require a requester scope",
-            )
-        if len(resolved_bindings) > 1:
-            results = [
-                await _publish_file_mode_source_metadata_for_resolved(
-                    resolved_binding.key,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=resolved_binding.execution_identity,
-                )
-                for resolved_binding in resolved_bindings
-            ]
-            return _aggregate_refresh_results(results)
-        key = resolved_bindings[0].key
-        execution_identity = resolved_bindings[0].execution_identity
-    else:
-        key = resolve_published_index_key(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=True,
-        )
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
     return await _publish_file_mode_source_metadata_for_resolved(
         key,
         config=config,
@@ -1234,7 +1007,6 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     raw_storage_root = raw_payload.get("storage_root")
     raw_execution_identity = raw_payload.get("execution_identity")
     raw_force_reindex = raw_payload.get("force_reindex", False)
-    published_index_key = _load_subprocess_published_index_key(raw_payload.get("published_index_key"))
     if not isinstance(raw_base_id, str) or not raw_base_id.strip():
         msg = "Knowledge refresh subprocess request is missing base_id"
         raise TypeError(msg)
@@ -1250,9 +1022,6 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     if raw_execution_identity is not None and not isinstance(raw_execution_identity, dict):
         msg = "Knowledge refresh subprocess request execution_identity must be an object when present"
         raise TypeError(msg)
-    if published_index_key is not None and published_index_key.base_id != raw_base_id:
-        msg = "Knowledge refresh subprocess request published_index_key.base_id must match base_id"
-        raise TypeError(msg)
     return _SubprocessRefreshRequest(
         base_id=raw_base_id,
         config_data=raw_config_data,
@@ -1260,7 +1029,6 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
         storage_root=raw_storage_root,
         execution_identity=raw_execution_identity,
         force_reindex=bool(raw_force_reindex),
-        published_index_key=published_index_key,
     )
 
 
@@ -1280,14 +1048,6 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
             error_prefix="Knowledge refresh execution_identity",
         )
     )
-    if request.published_index_key is not None:
-        return await _refresh_resolved_knowledge_binding(
-            request.published_index_key,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            force_reindex=request.force_reindex,
-        )
     return await refresh_knowledge_binding(
         request.base_id,
         config=config,

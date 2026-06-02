@@ -72,7 +72,7 @@ def _create_memory_factory(
 
 
 @timed("system_prompt_assembly.memory_search.file_backend")
-def _search_file_backend_memories(
+async def _search_file_backend_memories(
     query: str,
     agent_name: str,
     storage_path: Path,
@@ -82,7 +82,7 @@ def _search_file_backend_memories(
     execution_identity: ToolExecutionIdentity | None,
     timing_scope: str | None,
 ) -> list[MemoryResult]:
-    return search_file_agent_memories(
+    return await search_file_agent_memories(
         query,
         agent_name,
         storage_path,
@@ -213,7 +213,7 @@ async def search_agent_memories(
     if use_disabled_memory_backend(config, agent_name=agent_name):
         return []
     if use_file_memory_backend(config, agent_name=agent_name):
-        return _search_file_backend_memories(
+        return await _search_file_backend_memories(
             query,
             agent_name,
             storage_path,

@@ -22,7 +22,7 @@ from mindroom.knowledge.index_metadata import (
     write_index_metadata_payload,
 )
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_knowledge_binding, resolve_knowledge_owner_bindings
+from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -105,24 +105,6 @@ class PublishedIndexResolution:
     state: PublishedIndexState | None
     availability: KnowledgeAvailability
     schedule_refresh_on_access: bool = False
-
-
-@dataclass(frozen=True)
-class _ResolvedPublishedIndexBinding:
-    """One resolved query-time binding with its published index key."""
-
-    key: PublishedIndexKey
-    binding: ResolvedKnowledgeBinding
-    owner_agent: str | None
-    execution_identity: ToolExecutionIdentity | None
-
-
-@dataclass(frozen=True)
-class ResolvedRefreshTarget:
-    """One resolved refresh target and the identity needed to refresh it."""
-
-    key: KnowledgeRefreshTarget
-    execution_identity: ToolExecutionIdentity | None
 
 
 class _PublishedIndexVectorDb(Protocol):
@@ -208,51 +190,14 @@ def resolve_published_index_key(
     create: bool = False,
 ) -> PublishedIndexKey:
     """Resolve one base ID to its current published index key."""
-    resolved_bindings = resolve_published_index_bindings(
+    key, _binding = _resolve_published_index_key_and_binding(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=create,
     )
-    if len(resolved_bindings) == 1:
-        return resolved_bindings[0].key
-    if not resolved_bindings:
-        msg = f"Knowledge base '{base_id}' has no background-safe published index binding"
-        raise ValueError(msg)
-    owners = ", ".join(binding.owner_agent or "<shared>" for binding in resolved_bindings)
-    msg = (
-        f"Knowledge base '{base_id}' resolves to multiple published index bindings ({owners}); "
-        "use a fan-out resolution path"
-    )
-    raise ValueError(msg)
-
-
-def resolve_published_index_bindings(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    create: bool = False,
-) -> tuple[_ResolvedPublishedIndexBinding, ...]:
-    """Resolve every distinct query-time published index binding for a base."""
-    return tuple(
-        _ResolvedPublishedIndexBinding(
-            key=_published_index_key_from_binding(base_id, owner_binding.binding, config=config),
-            binding=owner_binding.binding,
-            owner_agent=owner_binding.owner_agent,
-            execution_identity=owner_binding.execution_identity,
-        )
-        for owner_binding in resolve_knowledge_owner_bindings(
-            base_id,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-            start_watchers=False,
-            create=create,
-        )
-    )
+    return key
 
 
 def refresh_target_for_published_index_key(key: PublishedIndexKey) -> KnowledgeRefreshTarget:
@@ -292,31 +237,6 @@ def resolve_refresh_target(
             create=create,
         ),
     )
-
-
-def resolve_refresh_targets(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    create: bool = False,
-) -> tuple[ResolvedRefreshTarget, ...]:
-    """Resolve every distinct refresh target for a base."""
-    targets: dict[KnowledgeRefreshTarget, ResolvedRefreshTarget] = {}
-    for resolved_binding in resolve_published_index_bindings(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        create=create,
-    ):
-        target = refresh_target_for_published_index_key(resolved_binding.key)
-        targets.setdefault(
-            target,
-            ResolvedRefreshTarget(key=target, execution_identity=resolved_binding.execution_identity),
-        )
-    return tuple(targets.values())
 
 
 def _published_index_storage_path(key: PublishedIndexKey) -> Path:
@@ -526,7 +446,7 @@ def _build_published_index_vector_db(
             collection=_state_collection_name(state),
             path=str(_published_index_storage_path(key)),
             persistent_client=True,
-            embedder=manager_module._create_embedder(config, runtime_paths),
+            embedder=manager_module.create_configured_embedder(config, runtime_paths),
         ),
     )
 
@@ -849,32 +769,26 @@ def _published_index_keys_for_shared_source(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[PublishedIndexKey, ...]:
     base_mode = config.get_knowledge_base_config(base_id).mode
-    source_keys = tuple(
-        resolved_binding.key
-        for resolved_binding in resolve_published_index_bindings(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=False,
-        )
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=False,
     )
-    matching_keys = list(source_keys) if base_mode == "semantic" else []
+    matching_keys = [key] if base_mode == "semantic" else []
     for candidate_base_id in config.knowledge_bases:
         if candidate_base_id == base_id:
             continue
         if config.get_knowledge_base_config(candidate_base_id).mode != "semantic":
             continue
         try:
-            candidate_keys = tuple(
-                resolved_binding.key
-                for resolved_binding in resolve_published_index_bindings(
-                    candidate_base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    create=False,
-                )
+            candidate_key = resolve_published_index_key(
+                candidate_base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                create=False,
             )
         except Exception:
             logger.warning(
@@ -884,12 +798,9 @@ def _published_index_keys_for_shared_source(
                 exc_info=True,
             )
             continue
-        matching_keys.extend(
-            candidate_key
-            for candidate_key in candidate_keys
-            if any(_same_physical_source(candidate_key, source_key) for source_key in source_keys)
-        )
-    return tuple(dict.fromkeys(matching_keys))
+        if _same_physical_source(candidate_key, key):
+            matching_keys.append(candidate_key)
+    return tuple(matching_keys)
 
 
 def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, reason: str) -> bool:

@@ -179,6 +179,41 @@ class TestMemoryTools:
             assert "[id=abc-2]" in result
             assert "User prefers dark mode" in result
 
+    def test_search_memories_tool_description_is_backend_neutral(self, tools: MemoryTools) -> None:
+        """Agent-facing memory search should not mention a specific storage backend."""
+        description = tools.search_memories.__doc__
+
+        assert description is not None
+        assert "notes" in description
+        assert "knowledge base" not in description.lower()
+        assert "mem0" not in description.lower()
+
+    @pytest.mark.asyncio
+    async def test_search_memories_marks_result_modes(self, tools: MemoryTools) -> None:
+        """Search results should make semantic-vs-keyword mode visible when available."""
+        mock_results = [
+            {
+                "id": "semantic:file.md:1",
+                "memory": "Semantic match",
+                "metadata": {"search_mode": "semantic"},
+            },
+            {
+                "id": "file:MEMORY.md:2",
+                "memory": "Keyword match",
+                "metadata": {"search_mode": "keyword"},
+            },
+        ]
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=mock_results,
+        ):
+            result = await tools.search_memories("preferences")
+
+        assert "[id=semantic:file.md:1] [semantic] Semantic match" in result
+        assert "[id=file:MEMORY.md:2] [keyword] Keyword match" in result
+
     @pytest.mark.asyncio
     async def test_search_memories_empty(self, tools: MemoryTools) -> None:
         """Test that search_memories returns a message when no results found."""

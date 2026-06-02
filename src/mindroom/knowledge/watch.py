@@ -15,7 +15,7 @@ from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     KnowledgeSourceRoot,
     mark_knowledge_source_changed_async,
-    resolve_refresh_targets,
+    resolve_refresh_target,
     source_root_for_refresh_target,
 )
 from mindroom.logging_config import get_logger
@@ -24,26 +24,15 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class _WatchBase:
-    base_id: str
-    execution_identity: ToolExecutionIdentity | None
 
 
 @dataclass(frozen=True, slots=True)
 class _WatchTarget:
     key: KnowledgeSourceRoot
     path: Path
-    bases: tuple[_WatchBase, ...]
-
-    @property
-    def base_ids(self) -> tuple[str, ...]:
-        return tuple(base.base_id for base in self.bases)
+    base_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +40,6 @@ class _GitPollTarget:
     key: KnowledgeRefreshTarget
     base_id: str
     poll_interval_seconds: float
-    execution_identity: ToolExecutionIdentity | None
 
 
 @dataclass(slots=True)
@@ -68,7 +56,7 @@ def _ensure_watch_root(path: Path) -> None:
 
 
 def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> dict[KnowledgeSourceRoot, _WatchTarget]:
-    targets_by_key: dict[KnowledgeSourceRoot, list[_WatchBase]] = {}
+    targets_by_key: dict[KnowledgeSourceRoot, list[str]] = {}
     for base_id in sorted(config.knowledge_bases):
         base_config = config.get_knowledge_base_config(base_id)
         if base_config.mode != "semantic" or not base_config.watch or base_config.git is not None:
@@ -76,26 +64,19 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
 
-        for refresh_target in resolve_refresh_targets(
+        refresh_target = resolve_refresh_target(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             create=True,
-        ):
-            key = source_root_for_refresh_target(refresh_target.key)
-            targets_by_key.setdefault(key, []).append(
-                _WatchBase(base_id=base_id, execution_identity=refresh_target.execution_identity),
-            )
+        )
+        targets_by_key.setdefault(source_root_for_refresh_target(refresh_target), []).append(base_id)
 
     targets: dict[KnowledgeSourceRoot, _WatchTarget] = {}
-    for key, bases in targets_by_key.items():
+    for key, base_ids in targets_by_key.items():
         path = Path(key.knowledge_path)
         _ensure_watch_root(path)
-        targets[key] = _WatchTarget(
-            key=key,
-            path=path,
-            bases=tuple(bases),
-        )
+        targets[key] = _WatchTarget(key=key, path=path, base_ids=tuple(base_ids))
     return targets
 
 
@@ -111,18 +92,17 @@ def _shared_git_poll_targets(
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
 
-        for refresh_target in resolve_refresh_targets(
+        refresh_target = resolve_refresh_target(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             create=True,
-        ):
-            targets[refresh_target.key] = _GitPollTarget(
-                key=refresh_target.key,
-                base_id=base_id,
-                poll_interval_seconds=float(base_config.git.poll_interval_seconds),
-                execution_identity=refresh_target.execution_identity,
-            )
+        )
+        targets[refresh_target] = _GitPollTarget(
+            key=refresh_target,
+            base_id=base_id,
+            poll_interval_seconds=float(base_config.git.poll_interval_seconds),
+        )
     return targets
 
 
@@ -243,7 +223,6 @@ class KnowledgeSourceWatcher:
                     target.base_id,
                     config=config,
                     runtime_paths=runtime_paths,
-                    execution_identity=target.execution_identity,
                 )
                 logger.debug(
                     "Knowledge Git poller scheduled refresh",
@@ -269,22 +248,13 @@ class KnowledgeSourceWatcher:
         runtime_paths: RuntimePaths,
     ) -> None:
         scheduled_base_ids: set[str] = set()
-        for watch_base in target.bases:
-            try:
-                changed_base_ids = await mark_knowledge_source_changed_async(
-                    watch_base.base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=watch_base.execution_identity,
-                    reason="filesystem_watch",
-                )
-            except Exception:
-                logger.exception(
-                    "Skipping unresolved knowledge source change mark",
-                    base_id=watch_base.base_id,
-                    knowledge_path=str(target.path),
-                )
-                continue
+        for base_id in target.base_ids:
+            changed_base_ids = await mark_knowledge_source_changed_async(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                reason="filesystem_watch",
+            )
             for changed_base_id in changed_base_ids:
                 if changed_base_id in scheduled_base_ids:
                     continue
@@ -296,5 +266,4 @@ class KnowledgeSourceWatcher:
                     changed_base_id,
                     config=config,
                     runtime_paths=runtime_paths,
-                    execution_identity=watch_base.execution_identity,
                 )

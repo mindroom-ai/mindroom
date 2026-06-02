@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from mindroom.api import config_lifecycle
+from mindroom.constants import resolve_config_relative_path
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import git_checkout_present, include_knowledge_relative_path
 from mindroom.knowledge.manager import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
@@ -25,10 +26,7 @@ from mindroom.knowledge.refresh_runner import (
 )
 from mindroom.knowledge.status import (
     KnowledgeIndexStatus,
-    KnowledgeSourceRootBinding,
     get_knowledge_index_status,
-    get_knowledge_source_root_bindings,
-    get_knowledge_source_roots,
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
@@ -61,33 +59,6 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
-def _distinct_source_roots(root_bindings: tuple[KnowledgeSourceRootBinding, ...]) -> tuple[Path, ...]:
-    roots: list[Path] = []
-    seen: set[Path] = set()
-    for root_binding in root_bindings:
-        root = root_binding.root.resolve()
-        if root in seen:
-            continue
-        seen.add(root)
-        roots.append(root)
-    return tuple(roots)
-
-
-def _reject_ambiguous_dashboard_roots(base_id: str, root_bindings: tuple[KnowledgeSourceRootBinding, ...]) -> None:
-    distinct_roots = _distinct_source_roots(root_bindings)
-    if len(distinct_roots) <= 1:
-        return
-    owners = ", ".join(root_binding.owner_agent or "<shared>" for root_binding in root_bindings)
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            f"Knowledge base '{base_id}' has multiple owner roots ({owners}); "
-            "dashboard operations cannot manage file-memory knowledge with multiple source roots; "
-            "edit the underlying memory files directly"
-        ),
-    )
-
-
 def _knowledge_root(
     config: Config,
     base_id: str,
@@ -96,28 +67,10 @@ def _knowledge_root(
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root_bindings = get_knowledge_source_root_bindings(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        create=create,
-    )
-    if not root_bindings:
-        raise HTTPException(status_code=409, detail=f"Knowledge base '{base_id}' has no writable source root")
-    _reject_ambiguous_dashboard_roots(base_id, root_bindings)
-    root = root_bindings[0].root
+    root = resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _knowledge_roots(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-) -> tuple[Path, ...]:
-    _ensure_base_exists(config, base_id)
-    return get_knowledge_source_roots(base_id, config=config, runtime_paths=runtime_paths)
 
 
 def _resolve_within_root(root: Path, relative_path: str) -> Path:
@@ -233,10 +186,7 @@ def _same_source_base_ids(
     for candidate_id in config.knowledge_bases:
         if candidate_id == base_id:
             continue
-        if any(
-            candidate_root.resolve() == source_root
-            for candidate_root in _knowledge_roots(config, candidate_id, runtime_paths)
-        ):
+        if _knowledge_root(config, candidate_id, runtime_paths).resolve() == source_root:
             base_ids.append(candidate_id)
     return tuple(base_ids)
 
@@ -415,10 +365,8 @@ def _git_backed_bases_for_target(
     for candidate_id, candidate_config in config.knowledge_bases.items():
         if candidate_config.git is None:
             continue
-        if any(
-            _path_overlaps(resolved_target, candidate_root.resolve())
-            for candidate_root in _knowledge_roots(config, candidate_id, runtime_paths)
-        ):
+        candidate_root = resolve_config_relative_path(candidate_config.path, runtime_paths).resolve()
+        if _path_overlaps(resolved_target, candidate_root):
             git_base_ids.append(candidate_id)
     return tuple(git_base_ids)
 
@@ -796,14 +744,6 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     """Force reindexing of all files in one knowledge base folder."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
-    _reject_ambiguous_dashboard_roots(
-        base_id,
-        get_knowledge_source_root_bindings(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        ),
-    )
 
     try:
         refresh_scheduler = _request_refresh_scheduler(request)

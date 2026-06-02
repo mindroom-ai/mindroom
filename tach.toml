@@ -23,6 +23,22 @@
 exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
+[[modules]]
+path = "mindroom.chunking"
+depends_on = []
+
+[[modules]]
+path = "mindroom.embedding_factory"
+depends_on = [
+    "mindroom.credentials_sync",
+    "mindroom.embeddings",
+    "mindroom.model_defaults",
+]
+
+[[modules]]
+path = "mindroom.path_globs"
+depends_on = []
+
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
 [[modules]]
@@ -1029,7 +1045,7 @@ visibility = [
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = []
+depends_on = ["mindroom.path_globs"]
 
 [[modules]]
 path = "mindroom.config.main"
@@ -1137,9 +1153,20 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.memory._policy",
     "mindroom.memory._shared",
+    "mindroom.memory._semantic_file_search",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory.functions"]
+
+[[modules]]
+path = "mindroom.memory._semantic_file_search"
+depends_on = [
+    "mindroom.chunking",
+    "mindroom.embedding_factory",
+    "mindroom.logging_config",
+    "mindroom.path_globs",
+]
+visibility = ["mindroom.memory._file_backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_backend"
@@ -2218,7 +2245,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.knowledge.chunking"
-depends_on = []
+depends_on = ["mindroom.chunking"]
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
@@ -2241,10 +2268,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
+    "mindroom.chunking",
     "mindroom.constants",
-    "mindroom.knowledge.chunking",
+    "mindroom.embedding_factory",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.redaction",
+    "mindroom.path_globs",
 ]
 
 [[modules]]
@@ -2427,6 +2456,8 @@ expose = [
     "MemoryAutoFlushConfig",
     "MemoryBackend",
     "MemoryConfig",
+    "MemorySearchConfig",
+    "AgentMemorySearchConfig",
 ]
 from = ["mindroom.config.memory"]
 

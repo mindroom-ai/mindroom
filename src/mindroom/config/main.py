@@ -40,7 +40,7 @@ from mindroom.config.matrix import (
     MatrixSpaceConfig,
     MindRoomUserConfig,
 )
-from mindroom.config.memory import MemoryBackend, MemoryConfig
+from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
 from mindroom.config.models import (
     CompactionConfig,
     DebugConfig,
@@ -1689,6 +1689,21 @@ class Config(BaseModel):
         if agent_config.memory_backend is not None:
             return agent_config.memory_backend
         return self.memory.backend
+
+    def get_agent_memory_search(self, agent_name: str) -> MemorySearchConfig:
+        """Get effective file-memory search settings for one agent."""
+        inherited = self.memory.search
+        agent_config = self.agents.get(agent_name)
+        override = agent_config.memory_search if agent_config is not None else None
+        if override is None:
+            return inherited
+        return MemorySearchConfig(
+            mode=override.mode if override.mode is not None else inherited.mode,
+            include=override.include if override.include is not None else list(inherited.include),
+            include_entrypoint=(
+                override.include_entrypoint if override.include_entrypoint is not None else inherited.include_entrypoint
+            ),
+        )
 
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""

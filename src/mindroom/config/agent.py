@@ -16,7 +16,7 @@ from pydantic import (
 )
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
-from mindroom.config.memory import MemoryBackend  # noqa: TC001
+from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.models import (
     AgentLearningMode,
     CompactionOverrideConfig,
@@ -204,6 +204,10 @@ class AgentConfig(BaseModel):
         description=(
             "Memory backend override for this agent ('mem0', 'file', or 'none'); inherits memory.backend when omitted"
         ),
+    )
+    memory_search: AgentMemorySearchConfig | None = Field(
+        default=None,
+        description="Optional per-agent file-memory search override; omitted fields inherit memory.search",
     )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
