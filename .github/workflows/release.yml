@@ -41,7 +41,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -132,7 +131,7 @@ jobs:
           cp "$APPCAST_DIR/appcast.xml" macos/appcast.xml
       - name: Update Homebrew cask and Sparkle appcast
         env:
-          GH_TOKEN: ${{ secrets.PAT }}
+          GH_TOKEN: ${{ secrets.RELEASE_METADATA_PAT || secrets.PAT }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
           VERSION="${TAG_NAME#v}"
