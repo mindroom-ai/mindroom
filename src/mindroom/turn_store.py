@@ -13,11 +13,7 @@ from agno.run.team import TeamRunOutput
 from mindroom import constants
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import (
-    HandledTurnLedger,
-    HandledTurnRecord,
-    HandledTurnState,
-)
+from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:

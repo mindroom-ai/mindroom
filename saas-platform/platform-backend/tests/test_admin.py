@@ -410,11 +410,7 @@ class TestAdminEndpoints:
         assert "data" in data
 
     def test_admin_dashboard_metrics(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_admin: Mock,
-        monkeypatch: pytest.MonkeyPatch,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, monkeypatch: pytest.MonkeyPatch
     ):
         """Test admin dashboard metrics."""
         from backend import pricing

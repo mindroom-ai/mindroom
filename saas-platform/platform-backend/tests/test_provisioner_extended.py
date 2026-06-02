@@ -131,12 +131,7 @@ class TestProvisionerExtended:
                 with pytest.raises(HTTPException) as exc_info:
                     await provision_instance(
                         None,  # request
-                        {
-                            "subscription_id": "sub-123",
-                            "account_id": "acc-123",
-                            "tier": "byok",
-                            "instance_id": 123,
-                        },
+                        {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok", "instance_id": 123},
                         "Bearer test-api-key",  # authorization
                         None,  # background_tasks
                     )

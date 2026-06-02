@@ -177,9 +177,7 @@ class TestProvisionerCommandValidation:
 
         with patch.object(provisioner, "run_kubectl", side_effect=capture_kubectl_command):
             await provisioner._apply_instance_secret(
-                "123",
-                "mindroom-instances",
-                {"credentials_encryption_key": "secret-key-value"},
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
             )
 
         assert captured["mode"] == 0o600
@@ -240,10 +238,7 @@ class TestProvisionerCommandValidation:
             mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
             await provision_instance(
-                None,
-                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
-                "Bearer test-key",
-                None,
+                None, {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"}, "Bearer test-key", None
             )
 
         helm_args = captured_helm_args[0]

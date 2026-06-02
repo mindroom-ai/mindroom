@@ -14,11 +14,7 @@ from pydantic import ValidationError
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
-from mindroom.coalescing import (
-    CoalescingGate,
-    ReadyPendingEvent,
-    is_coalescing_exempt_source_kind,
-)
+from mindroom.coalescing import CoalescingGate, ReadyPendingEvent, is_coalescing_exempt_source_kind
 from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,

@@ -269,13 +269,7 @@ class TestAccountsEndpoints:
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
             "subscriptions": [
-                {
-                    "id": "sub_1",
-                    "account_id": "acc_test_123",
-                    "tier": "byok",
-                    "status": "cancelled",
-                    "instances": [],
-                },
+                {"id": "sub_1", "account_id": "acc_test_123", "tier": "byok", "status": "cancelled", "instances": []},
                 {
                     "id": "sub_2",
                     "account_id": "acc_test_123",

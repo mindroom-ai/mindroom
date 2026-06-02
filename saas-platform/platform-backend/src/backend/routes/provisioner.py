@@ -112,7 +112,7 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "sandboxRunnerResources.requests.cpu": "250m",
         "sandboxRunnerResources.limits.memory": "2Gi",
         "sandboxRunnerResources.limits.cpu": "1000m",
-    },
+    }
 }
 
 
@@ -193,9 +193,7 @@ def _stable_instance_secret(purpose: str, instance_id: str) -> str:
         msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
         raise HTTPException(status_code=500, detail=msg)
     digest = hmac.digest(
-        root_secret.encode("utf-8"),
-        f"mindroom.{purpose}.v1:{instance_id}".encode("utf-8"),
-        hashlib.sha256,
+        root_secret.encode("utf-8"), f"mindroom.{purpose}.v1:{instance_id}".encode("utf-8"), hashlib.sha256
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
@@ -313,8 +311,7 @@ async def _existing_instance_secret_value(instance_id: str, namespace: str, key:
     """Return an existing instance Secret value when present."""
     secret_name = _instance_secret_name(instance_id)
     code, out, err = await run_kubectl(
-        ["get", "secret", secret_name, "--ignore-not-found", f"-o=jsonpath={{.data.{key}}}"],
-        namespace=namespace,
+        ["get", "secret", secret_name, "--ignore-not-found", f"-o=jsonpath={{.data.{key}}}"], namespace=namespace
     )
     if code != 0:
         msg = f"Failed to inspect existing Secret value {key} for instance {instance_id}: {err or out}"
@@ -353,8 +350,7 @@ async def _existing_instance_storage_class_name(instance_id: str, namespace: str
     """Return the bound PVC storage class for an existing instance."""
     pvc_names = [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
     code, out, err = await run_kubectl(
-        ["get", "pvc", *pvc_names, "--ignore-not-found", "-o", "json"],
-        namespace=namespace,
+        ["get", "pvc", *pvc_names, "--ignore-not-found", "-o", "json"], namespace=namespace
     )
     if code != 0:
         msg = f"Failed to inspect existing PVC storage class for instance {instance_id}: {err or out}"
@@ -468,14 +464,7 @@ async def _provision_openrouter_key(
 
     metadata_persisted = False
     try:
-        await anyio.to_thread.run_sync(
-            partial(
-                _persist_openrouter_key_metadata,
-                sb,
-                instance_id,
-                created_key,
-            )
-        )
+        await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
         metadata_persisted = True
     except Exception:
         logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
@@ -586,10 +575,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     api_url = f"https://{customer_id}.api.{base_domain}"
     matrix_url = f"https://{customer_id}.matrix.{base_domain}"
     owner_matrix_user_id = _owner_matrix_user_id_for_account(
-        sb,
-        account_id=account_id,
-        instance_id=customer_id,
-        base_domain=base_domain,
+        sb, account_id=account_id, instance_id=customer_id, base_domain=base_domain
     )
     try:
         sb.table("instances").update(

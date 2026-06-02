@@ -168,11 +168,7 @@ def test_delete_openrouter_key_sends_management_delete_request() -> None:
         captured["headers"] = headers
         return 200, b'{"deleted":true}'
 
-    delete_openrouter_key(
-        management_api_key="sk-or-v1-management",
-        key_hash="hash_123",
-        http_delete=http_delete,
-    )
+    delete_openrouter_key(management_api_key="sk-or-v1-management", key_hash="hash_123", http_delete=http_delete)
 
     assert captured["url"] == "https://openrouter.ai/api/v1/keys/hash_123"
     assert captured["headers"]["Authorization"] == "Bearer sk-or-v1-management"
@@ -204,11 +200,7 @@ def test_delete_openrouter_key_default_transport_sends_empty_json_body(monkeypat
 
     delete_openrouter_key(management_api_key="sk-or-v1-management", key_hash="hash_123")
 
-    assert captured == {
-        "url": "https://openrouter.ai/api/v1/keys/hash_123",
-        "data": b"{}",
-        "timeout": 20,
-    }
+    assert captured == {"url": "https://openrouter.ai/api/v1/keys/hash_123", "data": b"{}", "timeout": 20}
 
 
 def test_delete_openrouter_key_reports_openrouter_failures() -> None:
@@ -218,11 +210,7 @@ def test_delete_openrouter_key_reports_openrouter_failures() -> None:
         return 404, b'{"error":{"message":"Key not found"}}'
 
     with pytest.raises(OpenRouterError, match='OpenRouter key deletion failed with status 404: {"error"'):
-        delete_openrouter_key(
-            management_api_key="sk-or-v1-management",
-            key_hash="hash_123",
-            http_delete=http_delete,
-        )
+        delete_openrouter_key(management_api_key="sk-or-v1-management", key_hash="hash_123", http_delete=http_delete)
 
 
 @pytest.mark.parametrize(
@@ -268,8 +256,4 @@ def test_delete_openrouter_key_rejects_malformed_success_response() -> None:
         return 200, b"[]"
 
     with pytest.raises(OpenRouterError, match=r"invalid response.*\[\]"):
-        delete_openrouter_key(
-            management_api_key="sk-or-v1-management",
-            key_hash="hash_123",
-            http_delete=http_delete,
-        )
+        delete_openrouter_key(management_api_key="sk-or-v1-management", key_hash="hash_123", http_delete=http_delete)

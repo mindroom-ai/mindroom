@@ -59,8 +59,7 @@ def _applied_instance_secret_data(apply_secret: AsyncMock) -> dict[str, str]:
 
     apply_secret.assert_awaited()
     bound = inspect.signature(_apply_instance_secret).bind(
-        *apply_secret.await_args.args,
-        **apply_secret.await_args.kwargs,
+        *apply_secret.await_args.args, **apply_secret.await_args.kwargs
     )
     return bound.arguments["secret_data"]
 
@@ -70,19 +69,11 @@ def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None
     from backend.routes.provisioner import _owner_matrix_user_id_from_email
 
     assert (
-        _owner_matrix_user_id_from_email(
-            "Owner.User+Test@Example.COM",
-            instance_id="42",
-            base_domain="mindroom.chat",
-        )
+        _owner_matrix_user_id_from_email("Owner.User+Test@Example.COM", instance_id="42", base_domain="mindroom.chat")
         == "@owner.user+test:42.mindroom.chat"
     )
     assert (
-        _owner_matrix_user_id_from_email(
-            "_Owner=Test@example.com",
-            instance_id="42",
-            base_domain="mindroom.chat",
-        )
+        _owner_matrix_user_id_from_email("_Owner=Test@example.com", instance_id="42", base_domain="mindroom.chat")
         == "@=5fowner=3dtest:42.mindroom.chat"
     )
 
@@ -618,10 +609,9 @@ class TestProvisionerEndpoints:
         accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
             data=[{"email": "Owner.User+Test@example.com"}]
         )
-        mock_supabase.table.side_effect = lambda table: {
-            "accounts": accounts_table,
-            "instances": instances_table,
-        }[table]
+        mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[
+            table
+        ]
 
         with patch.multiple(
             "backend.routes.provisioner",

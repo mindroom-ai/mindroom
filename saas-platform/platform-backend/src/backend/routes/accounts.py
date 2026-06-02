@@ -70,8 +70,4 @@ async def setup_account(request: Request, user: Annotated[dict, Depends(verify_u
     if subscription is not None:
         decorate_subscription_for_response(subscription, plan_limits=limits)
 
-    return {
-        "message": "Free tier account created",
-        "account_id": account_id,
-        "subscription": subscription,
-    }
+    return {"message": "Free tier account created", "account_id": account_id, "subscription": subscription}

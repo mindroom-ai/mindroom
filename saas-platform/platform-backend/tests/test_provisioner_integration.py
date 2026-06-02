@@ -141,11 +141,7 @@ class TestProvisionerIntegration:
 
                         provision_response = client.post(
                             "/system/provision",
-                            json={
-                                "subscription_id": "sub-lifecycle",
-                                "account_id": "acc-lifecycle",
-                                "tier": "byok",
-                            },
+                            json={"subscription_id": "sub-lifecycle", "account_id": "acc-lifecycle", "tier": "byok"},
                             headers=valid_auth,
                         )
 

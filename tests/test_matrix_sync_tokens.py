@@ -13,12 +13,7 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, _create_task_wrapper
-from mindroom.coalescing import (
-    CoalescingDrainResult,
-    CoalescingGate,
-    IngressAdmissionClosedError,
-    ReadyPendingEvent,
-)
+from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config

@@ -23,11 +23,7 @@ from mindroom.api.credentials import (
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
-from mindroom.oauth import (
-    OAuthClaimValidationError,
-    OAuthProvider,
-    OAuthProviderError,
-)
+from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
     OAuthConnectTarget,

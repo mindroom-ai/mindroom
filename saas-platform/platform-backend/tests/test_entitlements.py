@@ -30,9 +30,7 @@ def test_unexpired_trial_can_run_instances() -> None:
 def test_trial_days_remaining_rounds_up_partial_days() -> None:
     now = datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
     subscription = _subscription(
-        tier="byok",
-        status="trialing",
-        trial_ends_at=(now + timedelta(days=2, hours=1)).isoformat(),
+        tier="byok", status="trialing", trial_ends_at=(now + timedelta(days=2, hours=1)).isoformat()
     )
 
     assert trial_days_remaining(subscription, now=now) == 3
@@ -40,11 +38,7 @@ def test_trial_days_remaining_rounds_up_partial_days() -> None:
 
 def test_trial_days_remaining_is_zero_for_expired_trials() -> None:
     now = datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
-    subscription = _subscription(
-        tier="byok",
-        status="trialing",
-        trial_ends_at=(now - timedelta(seconds=1)).isoformat(),
-    )
+    subscription = _subscription(tier="byok", status="trialing", trial_ends_at=(now - timedelta(seconds=1)).isoformat())
 
     assert trial_days_remaining(subscription, now=now) == 0
 
