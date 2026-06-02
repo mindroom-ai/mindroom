@@ -141,6 +141,10 @@ sign_app() {
     codesign --deep --entitlements "$ENTITLEMENTS_PLIST" "${args[@]}" "$target"
 }
 
+first_find_match() {
+    find "$@" -print | sed -n '1p'
+}
+
 resolve_app_version() {
     local raw_version="$APP_VERSION"
     if [[ -z "$raw_version" ]]; then
@@ -282,15 +286,19 @@ quit_running_app() {
 
 echo "Building $DISPLAY_NAME..."
 swift build -c release --package-path "$PACKAGE_DIR" --product "$APP_NAME"
-BIN_DIR=$(swift build -c release --package-path "$PACKAGE_DIR" --show-bin-path)
-BINARY="$BIN_DIR/$APP_NAME"
+BIN_DIR=$(swift build -c release --package-path "$PACKAGE_DIR" --product "$APP_NAME" --show-bin-path)
+EXPECTED_BINARY="$BIN_DIR/$APP_NAME"
+BINARY="$EXPECTED_BINARY"
 
 if [[ ! -x "$BINARY" ]]; then
-    BINARY=$(find "$PACKAGE_DIR/.build" -type f -name "$APP_NAME" -path "*/release/$APP_NAME" -print -quit)
+    BINARY=$(first_find_match "$PACKAGE_DIR/.build" -type f -name "$APP_NAME" -path "*/release/$APP_NAME")
+    if [[ -n "$BINARY" ]]; then
+        echo "Using fallback built binary: $BINARY"
+    fi
 fi
 
 if [[ ! -x "$BINARY" ]]; then
-    echo "Built binary not found: $BINARY" >&2
+    echo "Built binary not found. Expected $EXPECTED_BINARY and found no fallback under $PACKAGE_DIR/.build." >&2
     exit 1
 fi
 
@@ -300,13 +308,17 @@ build_app_icon
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources/bin"
 
-SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
+EXPECTED_SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
+SPARKLE_FRAMEWORK="$EXPECTED_SPARKLE_FRAMEWORK"
 if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
-    SPARKLE_FRAMEWORK=$(find "$PACKAGE_DIR/.build" -type d -name Sparkle.framework -path "*/release/*" -print -quit)
+    SPARKLE_FRAMEWORK=$(first_find_match "$PACKAGE_DIR/.build" -type d -name Sparkle.framework -path "*/release/Sparkle.framework")
+    if [[ -n "$SPARKLE_FRAMEWORK" ]]; then
+        echo "Using fallback Sparkle framework: $SPARKLE_FRAMEWORK"
+    fi
 fi
 
 if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
-    echo "Built Sparkle framework not found: $SPARKLE_FRAMEWORK" >&2
+    echo "Built Sparkle framework not found. Expected $EXPECTED_SPARKLE_FRAMEWORK and found no fallback under $PACKAGE_DIR/.build." >&2
     exit 1
 fi
 
