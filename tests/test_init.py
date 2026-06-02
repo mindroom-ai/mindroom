@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tomllib
 import types
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,6 @@ def test_default_pytest_options_disable_tach_plugin() -> None:
     data = tomllib.loads(pyproject.read_text())
 
     addopts = data["tool"]["pytest"]["ini_options"]["addopts"].split()
+    addopts_pairs = pairwise(addopts)
 
-    assert "-p" in addopts
-    assert "no:tach" in addopts
+    assert ("-p", "no:tach") in addopts_pairs
