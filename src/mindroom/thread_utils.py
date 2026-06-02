@@ -187,20 +187,38 @@ def thread_requires_explicit_agent_targeting(
     available_responders_in_room: Sequence[MatrixID] | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
-    sender_visible_responders = authorization.filter_responders_by_sender_permissions(
+    sender_visible_responders = filter_thread_agents_for_sender(
         get_agents_in_thread(thread_history, config, runtime_paths),
         sender_id,
         config,
         runtime_paths,
+        available_responders_in_room=available_responders_in_room,
     )
-    if available_responders_in_room is not None:
-        available_responder_ids = {responder.full_id for responder in available_responders_in_room}
-        sender_visible_responders = [
-            responder for responder in sender_visible_responders if responder.full_id in available_responder_ids
-        ]
     if sender_visible_responders:
         return True
     return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)
+
+
+def filter_thread_agents_for_sender(
+    agents_in_thread: Sequence[MatrixID],
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    available_responders_in_room: Sequence[MatrixID] | None = None,
+) -> list[MatrixID]:
+    """Return participating agents that may reply within the sender and room responder boundary."""
+    sender_visible_agents = authorization.filter_responders_by_sender_permissions(
+        agents_in_thread,
+        sender_id,
+        config,
+        runtime_paths,
+    )
+    if available_responders_in_room is None:
+        return sender_visible_agents
+
+    available_responder_ids = {responder.full_id for responder in available_responders_in_room}
+    return [agent for agent in sender_visible_agents if agent.full_id in available_responder_ids]
 
 
 def get_all_mentioned_agents_in_thread(
@@ -294,14 +312,13 @@ def should_agent_respond(  # noqa: PLR0911
 
     # For threads, continue only if we're the single participating agent
     # that may reply to this sender within this room's responder boundary.
-    agents_in_thread = get_agents_in_thread(thread_history, config, runtime_paths)
-    agents_in_thread = authorization.filter_responders_by_sender_permissions(
-        agents_in_thread,
+    agents_in_thread = filter_thread_agents_for_sender(
+        get_agents_in_thread(thread_history, config, runtime_paths),
         sender_id,
         config,
         runtime_paths,
+        available_responders_in_room=available_responders,
     )
-    agents_in_thread = [agent for agent in agents_in_thread if agent.full_id in available_responder_ids]
     if agents_in_thread:
         return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 

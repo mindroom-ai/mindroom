@@ -6,11 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.authorization import (
-    filter_responders_by_sender_permissions,
-    is_sender_allowed_for_agent_reply,
-    responder_candidate_entities_for_room,
-)
+from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -45,6 +41,7 @@ from mindroom.teams import (
     resolve_configured_team,
 )
 from mindroom.thread_utils import (
+    filter_thread_agents_for_sender,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
@@ -729,14 +726,13 @@ class TurnPolicy:
         if not context.is_thread or context.mentioned_agents or context.has_non_agent_mentions:
             return
 
-        available_responder_ids = {responder.full_id for responder in available_responders_in_room}
-        sender_visible_agents = filter_responders_by_sender_permissions(
+        sender_visible_agents = filter_thread_agents_for_sender(
             agents_in_thread,
             requester_user_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            available_responders_in_room=available_responders_in_room,
         )
-        sender_visible_agents = [agent for agent in sender_visible_agents if agent.full_id in available_responder_ids]
         if len(sender_visible_agents) < 2:
             return
 
