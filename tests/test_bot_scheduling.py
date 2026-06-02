@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -24,12 +24,13 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.thread_utils import AgentResponseDecision, decide_agent_response
+from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
+    agent_response_should_respond,
     bind_runtime_paths,
     create_mock_room,
     dispatch_context_result,
@@ -50,11 +51,6 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
-
-
-def should_agent_respond(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
-    """Return the boolean result for legacy response-policy assertions."""
-    return decide_agent_response(*args, **kwargs).should_respond
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -1040,11 +1036,11 @@ class TestCommandHandling:
         ]
 
         # NOTE: In reality, when router sends an error without mentions,
-        # bot.py returns early and never calls should_agent_respond.
+        # bot.py returns early and never reaches individual response policy.
         # But we test what WOULD happen if it were called:
 
         # Test with single agent (finance only, router excluded from available_agents)
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
@@ -1059,7 +1055,7 @@ class TestCommandHandling:
         assert should_respond, "Single agent takes ownership after router error"
 
         # Test with multiple agents - nobody responds
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,

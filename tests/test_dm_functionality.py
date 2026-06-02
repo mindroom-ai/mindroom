@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,9 +16,9 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.thread_utils import decide_agent_response
 from tests.conftest import (
     TEST_PASSWORD,
+    agent_response_should_respond,
     bind_runtime_paths,
     drain_coalescing,
     install_generate_response_mock,
@@ -30,11 +30,6 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def should_agent_respond(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
-    """Return the boolean result for legacy response-policy assertions."""
-    return decide_agent_response(*args, **kwargs).should_respond
 
 
 def _bind_runtime_paths(config: Config, path: Path) -> Config:
@@ -67,7 +62,7 @@ class TestDMResponseLogic:
         room.users = {agent_matrix_id: None}
 
         # In DM mode, agent should respond when no one else has
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,  # Not mentioned
             is_thread=False,
@@ -98,7 +93,7 @@ class TestDMResponseLogic:
         room.users = {agent_matrix_id: None}
 
         # When mentioned, always respond
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=True,  # Mentioned
             is_thread=False,
@@ -131,7 +126,7 @@ class TestDMResponseLogic:
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # Another agent is mentioned, not this one
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -167,7 +162,7 @@ class TestDMResponseLogic:
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
-        should_respond_test = should_agent_respond(
+        should_respond_test = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -179,7 +174,7 @@ class TestDMResponseLogic:
             sender_id="@user:localhost",
         )
 
-        should_respond_other = should_agent_respond(
+        should_respond_other = agent_response_should_respond(
             agent_name="other_agent",
             am_i_mentioned=False,
             is_thread=False,

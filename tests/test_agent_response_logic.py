@@ -33,12 +33,18 @@ from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import (
     check_agent_mentioned,
-    decide_agent_response,
     get_agents_in_thread,
     is_router_only_agent_mention,
 )
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
-from tests.conftest import bind_runtime_paths, create_mock_room, request_envelope, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    agent_response_should_respond,
+    bind_runtime_paths,
+    create_mock_room,
+    request_envelope,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -47,11 +53,6 @@ def _bind_runtime_config(config: Config, runtime_root: Path | None = None) -> Co
     bound_config = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
     return bound_config
-
-
-def should_agent_respond(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
-    """Return the boolean result for legacy response-policy assertions."""
-    return decide_agent_response(*args, **kwargs).should_respond
 
 
 def _message(
@@ -70,7 +71,7 @@ def _message(
 
 
 class TestAgentResponseLogic:
-    """Test the should_agent_respond logic."""
+    """Test the agent response decision logic."""
 
     def setup_method(self) -> None:
         """Set up test config."""
@@ -98,7 +99,7 @@ class TestAgentResponseLogic:
 
     def test_mentioned_agent_always_responds(self) -> None:
         """If an agent is mentioned, it should always respond."""
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=True,
@@ -115,7 +116,7 @@ class TestAgentResponseLogic:
         self.config.authorization.agent_reply_permissions = {
             "calculator": [f"@alice:{self.domain}"],
         }
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
@@ -135,7 +136,7 @@ class TestAgentResponseLogic:
             "calculator": [canonical_user],
         }
         self.config.authorization.aliases = {canonical_user: [alias_user]}
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
@@ -561,7 +562,7 @@ class TestAgentResponseLogic:
         self.config.authorization.agent_reply_permissions = {
             "calculator": [f"*:{self.domain}"],
         }
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
@@ -583,7 +584,7 @@ class TestAgentResponseLogic:
         }
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
 
-        should_respond_calculator = should_agent_respond(
+        should_respond_calculator = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
@@ -593,7 +594,7 @@ class TestAgentResponseLogic:
             runtime_paths=self.runtime_paths,
             sender_id=f"@alice:{self.domain}",
         )
-        should_respond_general = should_agent_respond(
+        should_respond_general = agent_response_should_respond(
             agent_name="general",
             am_i_mentioned=False,
             is_thread=False,
@@ -614,7 +615,7 @@ class TestAgentResponseLogic:
             _message(sender="@user:localhost", body="What about 3+3?"),
         ]
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -634,7 +635,7 @@ class TestAgentResponseLogic:
             _message(sender=f"@user:{self.domain}", body="What about 3+3?"),
         ]
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -649,7 +650,7 @@ class TestAgentResponseLogic:
     def test_invited_agent_behaves_like_native_agent(self) -> None:
         """Invited agents should follow the same rules as native agents."""
         # Test 1: Invited agent with no agents in thread - router decides (multiple agents)
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -666,7 +667,7 @@ class TestAgentResponseLogic:
             _message(sender=self.agent_id("calculator"), body="2+2=4"),
             _message(sender="@user:localhost", body="What about 3+3?"),
         ]
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -684,7 +685,7 @@ class TestAgentResponseLogic:
             _message(sender=self.agent_id("general"), body="Let me help"),
             _message(sender="@user:localhost", body="What about 3+3?"),
         ]
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -699,7 +700,7 @@ class TestAgentResponseLogic:
     def test_only_agent_with_access_responds_when_no_history(self) -> None:
         """When no agents have spoken yet, router decides who responds if multiple agents available."""
         # Multiple agents with access - router should decide
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="general",
             am_i_mentioned=False,
             is_thread=True,
@@ -713,7 +714,7 @@ class TestAgentResponseLogic:
 
         # Agent in room but not configured - should not respond when multiple agents available
         # (router decides) but CAN respond if mentioned
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -726,7 +727,7 @@ class TestAgentResponseLogic:
         assert should_respond is False  # Router decides when multiple agents available
 
         # But if mentioned, agent in room can respond even if not configured
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=True,
@@ -740,7 +741,7 @@ class TestAgentResponseLogic:
 
     def test_no_agents_in_thread_uses_router(self) -> None:
         """If no agents have participated, router decides who responds (multiple agents available)."""
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -760,7 +761,7 @@ class TestAgentResponseLogic:
             _message(sender="@user:localhost", body="What about 3+3?"),
         ]
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -793,7 +794,7 @@ class TestAgentResponseLogic:
 
         assert [agent.full_id for agent in agents_in_thread] == [self.agent_id("general")]
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="general",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -832,7 +833,7 @@ class TestAgentResponseLogic:
             self.agent_id("calculator"),
         ]
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="general",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -845,7 +846,7 @@ class TestAgentResponseLogic:
             is False
         )
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -903,7 +904,7 @@ class TestAgentResponseLogic:
         mentioned_agents = [entity_ids(self.config, self.runtime_paths)["general"]]
 
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="general",
                 am_i_mentioned=True,
                 is_thread=True,
@@ -929,7 +930,7 @@ class TestAgentResponseLogic:
             _message(sender=f"@alice:{self.domain}", body="What about 3+3?"),
         ]
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -968,7 +969,7 @@ class TestAgentResponseLogic:
             _message(sender=f"@bob:{self.domain}", body="continue"),
         ]
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -997,7 +998,7 @@ class TestAgentResponseLogic:
         persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
@@ -1012,7 +1013,7 @@ class TestAgentResponseLogic:
 
     def test_not_in_thread_uses_router(self) -> None:
         """If not in a thread, use router to determine response."""
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
@@ -1026,7 +1027,7 @@ class TestAgentResponseLogic:
 
     def test_agent_not_in_room_no_response(self) -> None:
         """If agent is not in room (native or invited), don't respond."""
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1040,7 +1041,7 @@ class TestAgentResponseLogic:
 
     def test_mentioned_outside_thread_responds(self) -> None:
         """Agents respond when mentioned in room (will create thread)."""
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
@@ -1066,7 +1067,7 @@ class TestAgentResponseLogic:
         ]
 
         # Non-mentioned agent should not respond
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="general",
             am_i_mentioned=False,
             is_thread=True,
@@ -1081,7 +1082,7 @@ class TestAgentResponseLogic:
     def test_router_selection_scenarios(self) -> None:
         """Test various scenarios where router should be used."""
         # Scenario 1: Empty thread, native agent
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1098,7 +1099,7 @@ class TestAgentResponseLogic:
             _message(sender="@user:localhost", body="I need help with math"),
             _message(sender="@user:localhost", body="Can someone help?"),
         ]
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1112,7 +1113,7 @@ class TestAgentResponseLogic:
 
     def test_room_message_no_access_no_response(self) -> None:
         """Agent without room access doesn't respond to room messages."""
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
@@ -1127,7 +1128,7 @@ class TestAgentResponseLogic:
     def test_edge_case_empty_configured_rooms(self) -> None:
         """Test agent with no configured rooms but invited to thread."""
         # Should behave same as native agent when invited
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1151,7 +1152,7 @@ class TestAgentResponseLogic:
         ]
 
         # Multiple agents present, nobody should respond without mention
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1166,7 +1167,7 @@ class TestAgentResponseLogic:
     def test_router_disabled_when_any_agent_mentioned(self) -> None:
         """Test that router is disabled when any agent is mentioned, not just the current one."""
         # Room message scenario - agent1 is NOT mentioned but agent2 IS mentioned
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="agent1",
             am_i_mentioned=False,
             is_thread=False,
@@ -1180,7 +1181,7 @@ class TestAgentResponseLogic:
         assert not should_respond
 
         # Now test when no agents are mentioned - router should be used
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="agent1",
             am_i_mentioned=False,
             is_thread=False,
@@ -1195,7 +1196,7 @@ class TestAgentResponseLogic:
         assert not should_respond
 
         # Test when current agent is mentioned
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="agent1",
             am_i_mentioned=True,
             is_thread=True,
@@ -1212,7 +1213,7 @@ class TestAgentResponseLogic:
         """When an ad-hoc room has one agent with access to an empty thread, it takes ownership."""
         room = create_mock_room("!adhoc:localhost", ["calculator"], self.config)
 
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1229,7 +1230,7 @@ class TestAgentResponseLogic:
             _message(sender="@user:localhost", body="I need help"),
             _message(sender="@user:localhost", body="Anyone there?"),
         ]
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -1251,7 +1252,7 @@ class TestAgentResponseLogic:
             _message(sender="@bob:localhost", body="I also need help"),
         ]
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -1266,7 +1267,7 @@ class TestAgentResponseLogic:
 
         # Same thread but agent is explicitly mentioned → respond
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=True,
                 is_thread=True,
@@ -1284,7 +1285,7 @@ class TestAgentResponseLogic:
             _message(sender="@alice:localhost", body="Can someone help?"),
         ]
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -1305,7 +1306,7 @@ class TestAgentResponseLogic:
             _message(sender="@alice:localhost", body="Can you continue?"),
         ]
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -1323,7 +1324,7 @@ class TestAgentResponseLogic:
         room = create_mock_room("!room:localhost", ["calculator"], self.config)
 
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=False,
@@ -1344,7 +1345,7 @@ class TestAgentResponseLogic:
         room.users["@bob:localhost"] = None
 
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=False,
@@ -1378,7 +1379,7 @@ class TestAgentResponseLogic:
         ]
         # Only one real human — agent should auto-respond
         assert (
-            should_agent_respond(
+            agent_response_should_respond(
                 agent_name="calculator",
                 am_i_mentioned=False,
                 is_thread=True,
@@ -1405,7 +1406,7 @@ class TestAgentResponseLogic:
         ]
 
         # GeneralAgent should NOT respond because ResearchAgent is mentioned
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="general",
             am_i_mentioned=False,  # GeneralAgent is NOT mentioned
             is_thread=True,
@@ -1421,7 +1422,7 @@ class TestAgentResponseLogic:
         assert should_respond is False  # Should NOT respond when another agent is mentioned
 
         # But if no agents are mentioned, general should continue the conversation
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="general",
             am_i_mentioned=False,
             is_thread=True,
