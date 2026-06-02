@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -27,21 +27,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from mindroom.agent_policy import ResolvedAgentPolicy
-    from mindroom.workers.models import WorkerStatus
 
 __all__ = [
-    "DedicatedWorkerLifecycleState",
     "ScopedVisibleStateRoot",
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
-    "initial_dedicated_worker_lifecycle_state",
-    "mark_dedicated_worker_failed",
-    "mark_dedicated_worker_idle",
-    "mark_dedicated_worker_ready",
     "plan_scoped_visible_state_roots",
-    "prepare_dedicated_worker_ensure_lifecycle",
     "stable_signature_json",
-    "touch_dedicated_worker_lifecycle",
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
     "validate_unique_worker_visible_paths",
@@ -89,90 +81,6 @@ class ScopedVisibleStateRoot:
     worker_visible_path: Path
 
 
-@dataclass(frozen=True, slots=True)
-class DedicatedWorkerLifecycleState:
-    """Backend-neutral lifecycle fields persisted for one dedicated worker."""
-
-    created_at: float
-    last_used_at: float
-    status: WorkerStatus
-    last_started_at: float | None = None
-    startup_count: int = 0
-    failure_count: int = 0
-    failure_reason: str | None = None
-
-
-def initial_dedicated_worker_lifecycle_state(*, now: float) -> DedicatedWorkerLifecycleState:
-    """Return the initial lifecycle state for a newly created dedicated worker."""
-    return DedicatedWorkerLifecycleState(
-        created_at=now,
-        last_used_at=now,
-        status="starting",
-    )
-
-
-def prepare_dedicated_worker_ensure_lifecycle(
-    state: DedicatedWorkerLifecycleState,
-    *,
-    now: float,
-    should_restart: bool,
-    keep_starting_status: bool = False,
-) -> DedicatedWorkerLifecycleState:
-    """Return lifecycle fields for one ensure attempt before backend-specific startup IO."""
-    return replace(
-        state,
-        last_used_at=now,
-        status="starting" if should_restart or keep_starting_status else state.status,
-        last_started_at=now if should_restart else state.last_started_at,
-        startup_count=state.startup_count + int(should_restart),
-        failure_reason=None,
-    )
-
-
-def touch_dedicated_worker_lifecycle(
-    state: DedicatedWorkerLifecycleState,
-    *,
-    now: float,
-) -> DedicatedWorkerLifecycleState:
-    """Refresh last-used state and revive idle workers back to ready."""
-    next_status = "ready" if state.status == "idle" else state.status
-    return replace(
-        state,
-        last_used_at=now,
-        status=next_status,
-        failure_reason=None if next_status != "failed" else state.failure_reason,
-    )
-
-
-def mark_dedicated_worker_ready(
-    state: DedicatedWorkerLifecycleState,
-    *,
-    now: float,
-) -> DedicatedWorkerLifecycleState:
-    """Return lifecycle fields for one worker that completed startup successfully."""
-    return replace(
-        state,
-        last_used_at=now,
-        status="ready",
-        failure_reason=None,
-    )
-
-
-def mark_dedicated_worker_idle(
-    state: DedicatedWorkerLifecycleState,
-    *,
-    now: float | None = None,
-    update_last_used: bool = False,
-) -> DedicatedWorkerLifecycleState:
-    """Return lifecycle fields for one worker whose persisted state is being retained."""
-    if not update_last_used:
-        return replace(state, status="idle", failure_reason=None)
-    if now is None:
-        msg = "now is required when update_last_used is true."
-        raise ValueError(msg)
-    return replace(state, last_used_at=now, status="idle", failure_reason=None)
-
-
 def validate_private_user_agent_visibility(
     *,
     worker_key: str,
@@ -192,22 +100,6 @@ def validate_private_user_agent_visibility(
         return
     msg = f"user_agent worker key targets a private agent missing from explicit private-agent visibility: {worker_key}"
     raise WorkerBackendError(msg)
-
-
-def mark_dedicated_worker_failed(
-    state: DedicatedWorkerLifecycleState,
-    *,
-    now: float,
-    failure_reason: str,
-) -> DedicatedWorkerLifecycleState:
-    """Return lifecycle fields for one worker that failed to start or execute."""
-    return replace(
-        state,
-        last_used_at=now,
-        status="failed",
-        failure_count=state.failure_count + 1,
-        failure_reason=failure_reason,
-    )
 
 
 def stable_signature_json(value: object) -> str:

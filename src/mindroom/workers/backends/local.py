@@ -13,6 +13,16 @@ from typing import TYPE_CHECKING
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backends._lifecycle import (
+    initial_worker_lifecycle_state,
+    mark_worker_failed,
+    mark_worker_idle,
+    mark_worker_ready,
+    prepare_worker_ensure_lifecycle,
+    read_lifecycle_state,
+    touch_worker_lifecycle,
+    write_lifecycle_state,
+)
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
@@ -189,12 +199,15 @@ class _LocalWorkerBackend:
         with worker_lock:
             with self._lock:
                 metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
-                if self._effective_status(metadata, timestamp) != "ready":
-                    metadata.status = "starting"
-                    metadata.last_started_at = timestamp
-                    metadata.startup_count += 1
-                    metadata.failure_reason = None
-                metadata.last_used_at = timestamp
+                should_restart = self._effective_status(metadata, timestamp) != "ready"
+                write_lifecycle_state(
+                    metadata,
+                    prepare_worker_ensure_lifecycle(
+                        read_lifecycle_state(metadata),
+                        now=timestamp,
+                        should_restart=should_restart,
+                    ),
+                )
                 self._save_metadata(paths, metadata)
 
             try:
@@ -206,8 +219,7 @@ class _LocalWorkerBackend:
                 raise WorkerBackendError(failure_reason) from exc
 
             with self._lock:
-                metadata.status = "ready"
-                metadata.last_used_at = timestamp
+                write_lifecycle_state(metadata, mark_worker_ready(read_lifecycle_state(metadata), now=timestamp))
                 self._save_metadata(paths, metadata)
                 return self._to_handle(metadata, paths, now=timestamp)
 
@@ -230,7 +242,7 @@ class _LocalWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 return None
-            metadata.last_used_at = timestamp
+            write_lifecycle_state(metadata, touch_worker_lifecycle(read_lifecycle_state(metadata), now=timestamp))
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, paths, now=timestamp)
 
@@ -264,8 +276,10 @@ class _LocalWorkerBackend:
                 if metadata is None:
                     return None
                 if preserve_state:
-                    metadata.status = "idle"
-                    metadata.last_used_at = timestamp
+                    write_lifecycle_state(
+                        metadata,
+                        mark_worker_idle(read_lifecycle_state(metadata), now=timestamp, update_last_used=True),
+                    )
                     self._save_metadata(paths, metadata)
                     return self._to_handle(metadata, paths, now=timestamp)
 
@@ -284,7 +298,7 @@ class _LocalWorkerBackend:
                 if metadata is None:
                     continue
                 if metadata.status == "ready" and self._effective_status(metadata, timestamp) == "idle":
-                    metadata.status = "idle"
+                    write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
                     self._save_metadata(paths, metadata)
                     cleaned_workers.append(self._to_handle(metadata, paths, now=timestamp))
 
@@ -308,14 +322,15 @@ class _LocalWorkerBackend:
             return worker_lock
 
     def _default_metadata(self, worker_key: str, now: float) -> _LocalWorkerMetadata:
+        lifecycle = initial_worker_lifecycle_state(now=now)
         return _LocalWorkerMetadata(
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
             endpoint=f"{self.api_root}/execute",
             backend_name=self.backend_name,
-            created_at=now,
-            last_used_at=now,
-            status="starting",
+            created_at=lifecycle.created_at,
+            last_used_at=lifecycle.last_used_at,
+            status=lifecycle.status,
         )
 
     def _ensure_worker_state(self, paths: LocalWorkerStatePaths) -> None:
@@ -345,10 +360,10 @@ class _LocalWorkerBackend:
         now: float,
     ) -> WorkerHandle:
         metadata = self._load_metadata(paths) or self._default_metadata(worker_key, now)
-        metadata.status = "failed"
-        metadata.last_used_at = now
-        metadata.failure_count += 1
-        metadata.failure_reason = failure_reason
+        write_lifecycle_state(
+            metadata,
+            mark_worker_failed(read_lifecycle_state(metadata), now=now, failure_reason=failure_reason),
+        )
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, paths, now=now)
 
