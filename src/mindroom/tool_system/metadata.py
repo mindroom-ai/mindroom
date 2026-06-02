@@ -766,6 +766,15 @@ class ToolMetadata:
     factory: Callable | None = None  # Factory function to create tool instance
 
 
+@dataclass(frozen=True)
+class _ResolvedToolState:
+    """Runtime-visible tool state plus validation-only skipped-plugin metadata."""
+
+    tool_registry: dict[str, Callable[[], type[Toolkit]]]
+    tool_metadata: dict[str, ToolMetadata]
+    unavailable_tool_metadata: dict[str, ToolMetadata]
+
+
 def register_tool_with_metadata(
     *,
     name: str,
@@ -933,7 +942,7 @@ def _resolved_tool_state_for_runtime(
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
-) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata], dict[str, ToolMetadata]]:
+) -> _ResolvedToolState:
     """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
@@ -949,7 +958,7 @@ def _resolved_tool_state_for_runtime(
             mcp_registry,
             mcp_metadata,
         )
-        return builtin_registry, builtin_metadata, {}
+        return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
     plugin_bases = plugin_module._collect_plugin_bases(
         plugin_entries,
@@ -1021,7 +1030,7 @@ def _resolved_tool_state_for_runtime(
         desired_registry,
         desired_metadata,
     )
-    return desired_registry, desired_metadata, unavailable_tool_metadata
+    return _ResolvedToolState(desired_registry, desired_metadata, unavailable_tool_metadata)
 
 
 def _unavailable_tool_metadata_without_resolved_tools(
@@ -1060,12 +1069,12 @@ def resolved_tool_metadata_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    _, desired_metadata, _ = _resolved_tool_state_for_runtime(
+    resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    return desired_metadata
+    return resolved_state.tool_metadata
 
 
 def _tool_validation_snapshot_from_state(
@@ -1156,19 +1165,19 @@ def resolved_tool_validation_snapshot_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolValidationInfo]:
     """Return validation-only tool state visible for one runtime config."""
-    tool_registry, desired_metadata, unavailable_tool_metadata = _resolved_tool_state_for_runtime(
+    resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     validation_metadata = {
-        **desired_metadata,
-        **unavailable_tool_metadata,
+        **resolved_state.tool_metadata,
+        **resolved_state.unavailable_tool_metadata,
     }
     return _tool_validation_snapshot_from_state(
-        tool_registry,
+        resolved_state.tool_registry,
         validation_metadata,
-        unavailable_plugin_tool_names=frozenset(unavailable_tool_metadata),
+        unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
     )
 
 
