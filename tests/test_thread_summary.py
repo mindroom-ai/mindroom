@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -31,6 +32,7 @@ from mindroom.thread_summary import (
     _next_thread_summary_threshold,
     _next_threshold,
     _recover_last_summary_count,
+    _resolve_thread_summary_model_name,
     _thread_locks,
     _thread_summary_cache_key,
     _ThreadSummary,
@@ -43,9 +45,6 @@ from mindroom.thread_summary import (
     update_last_summary_count,
 )
 from tests.conftest import make_matrix_client_mock
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
@@ -335,6 +334,7 @@ def _mock_config(
     first_threshold: int = 5,
     subsequent_interval: int = 10,
     summary_temperature: float | None = 0.2,
+    room_thread_summary_models: dict[str, str] | None = None,
 ) -> Config:
     return Config(
         defaults={
@@ -343,14 +343,57 @@ def _mock_config(
             "thread_summary_subsequent_interval": subsequent_interval,
             "thread_summary_temperature": summary_temperature,
         },
+        room_thread_summary_models=room_thread_summary_models or {},
         matrix_delivery=MatrixDeliveryConfig(),
     )
 
 
 def _mock_runtime_paths() -> MagicMock:
     rp = MagicMock()
-    rp.storage_root = "/var/empty/test_storage"
+    rp.storage_root = Path("/var/empty/test_storage")
     return rp
+
+
+class TestResolveThreadSummaryModelName:
+    """Tests for room-specific automatic summary model selection."""
+
+    def test_uses_default_summary_model_without_room_override(self) -> None:
+        """The global summary model remains the default when a room has no override."""
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
+        rp = _mock_runtime_paths()
+
+        with patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value="dev"):
+            result = _resolve_thread_summary_model_name(config, rp, "!dev:example")
+
+        assert result == "haiku"
+
+    def test_uses_room_specific_summary_model(self) -> None:
+        """A configured room summary model should override the global summary model."""
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
+        rp = _mock_runtime_paths()
+
+        with patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value="private"):
+            result = _resolve_thread_summary_model_name(config, rp, "!private:example")
+
+        assert result == "qwen"
+
+    def test_uses_raw_room_id_override(self) -> None:
+        """Unmanaged rooms can still be overridden by Matrix room ID."""
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"!external:example": "qwen"})
+        rp = _mock_runtime_paths()
+
+        result = _resolve_thread_summary_model_name(config, rp, "!external:example")
+
+        assert result == "qwen"
+
+    def test_falls_back_to_default_model_without_global_summary_model(self) -> None:
+        """The resolver should preserve the existing default-model fallback."""
+        config = _mock_config(model_name=None)
+        rp = _mock_runtime_paths()
+
+        result = _resolve_thread_summary_model_name(config, rp, None)
+
+        assert result == "default"
 
 
 def _logging_runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -565,6 +608,40 @@ class TestMaybeGenerateThreadSummary:
         client.room_send.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
+    async def test_room_specific_model_generates_and_records_metadata(self) -> None:
+        """Room-specific summary model overrides should drive generation and event metadata."""
+        client = _mock_client()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
+        rp = _mock_runtime_paths()
+        thread_history = _make_thread_history(5)
+
+        with (
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=thread_history,
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Users discussed testing strategies",
+            ) as mock_gen,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+            patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value="private"),
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_gen.assert_awaited_once_with(
+            thread_history,
+            config,
+            rp,
+            model_name="qwen",
+        )
+        content = client.room_send.call_args.kwargs["content"]
+        assert content["io.mindroom.thread_summary"]["model"] == "qwen"
+
     @pytest.mark.parametrize(
         ("message_count", "should_generate"),
         [
@@ -638,7 +715,7 @@ class TestMaybeGenerateThreadSummary:
         generation_started = asyncio.Event()
         release_generation = asyncio.Event()
 
-        async def _blocked_generate(*_: object) -> str:
+        async def _blocked_generate(*_: object, **__: object) -> str:
             generation_started.set()
             await release_generation.wait()
             return "Users discussed testing strategies"
@@ -737,7 +814,7 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp, message_count_hint=4)
 
         mock_fetch.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
-        mock_gen.assert_awaited_once_with(thread_history, config, rp)
+        mock_gen.assert_awaited_once_with(thread_history, config, rp, model_name="default")
         client.room_send.assert_awaited_once()
 
     async def test_threshold_hint_fetches_on_boundary(self) -> None:
@@ -756,7 +833,7 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp, message_count_hint=5)
 
         mock_fetch.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
-        mock_gen.assert_awaited_once_with(thread_history, config, rp)
+        mock_gen.assert_awaited_once_with(thread_history, config, rp, model_name="default")
         client.room_send.assert_awaited_once()
 
     async def test_already_summarized_skips(self) -> None:
@@ -1430,6 +1507,25 @@ class TestGenerateSummary:
 
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
+
+    async def test_generate_summary_uses_explicit_model_name(self) -> None:
+        """Callers can pass the resolved room-specific summary model to generation."""
+        history = _make_thread_history(3)
+        config = _mock_config(model_name="haiku")
+        rp = _mock_runtime_paths()
+        mock_model = _TemperatureAwareModel()
+        mock_response = MagicMock()
+        mock_response.content = _ThreadSummary(summary="🧵 Room-specific summary model")
+
+        with (
+            patch("mindroom.model_loading.get_model_instance", return_value=mock_model) as mock_get_model,
+            patch("mindroom.thread_summary.Agent"),
+            patch("mindroom.thread_summary.cached_agent_run", new=AsyncMock(return_value=mock_response)),
+        ):
+            result = await _generate_summary(history, config, rp, model_name="qwen")
+
+        assert result == "🧵 Room-specific summary model"
+        mock_get_model.assert_called_once_with(config, rp, "qwen")
 
     async def test_generate_summary_can_disable_temperature_override(self) -> None:
         """A null summary temperature should clear any inherited model temperature."""

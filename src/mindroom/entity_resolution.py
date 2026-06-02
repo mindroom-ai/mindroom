@@ -15,7 +15,7 @@ from mindroom.matrix_identifiers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
@@ -366,8 +366,22 @@ def effective_entity_model_name(
     """Return the effective model for one entity in one room context."""
     if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
         return "default"
-    if room_id is not None:
-        room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
-        if room_alias and room_alias in config.room_models:
-            return config.room_models[room_alias]
+    if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
+        return room_override
     return config.get_entity_model_name(entity_name)
+
+
+def resolve_room_scoped_model_override(
+    overrides: Mapping[str, str],
+    room_id: str | None,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return a model override keyed by raw room ID or persisted room key."""
+    if room_id is None:
+        return None
+    if room_id in overrides:
+        return overrides[room_id]
+    room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
+    if room_alias and room_alias in overrides:
+        return overrides[room_alias]
+    return None
