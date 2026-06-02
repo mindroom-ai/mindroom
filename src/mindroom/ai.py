@@ -252,6 +252,27 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
     return "\n".join(response_parts) if response_parts else ""
 
 
+def _run_error_event_text(event: RunErrorEvent) -> str:
+    """Return the best available error text for an Agno streaming error event."""
+    if event.content:
+        return event.content
+
+    additional_data = event.additional_data or {}
+    additional_message = additional_data.get("message") or additional_data.get("error") or additional_data.get("detail")
+    if isinstance(additional_message, str) and additional_message.strip():
+        return additional_message.strip()
+
+    details = []
+    if event.error_type:
+        details.append(f"type={event.error_type}")
+    if event.error_id:
+        details.append(f"id={event.error_id}")
+    if details:
+        return f"Agent run failed ({', '.join(details)})"
+
+    return "Agent run failed without provider error details"
+
+
 def _extract_replayable_response_text(response: RunOutput) -> str:
     """Return canonical assistant text without inline tool-rendering duplication."""
     return _extract_response_content(response, show_tool_calls=False)
@@ -1288,7 +1309,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 return
 
             if isinstance(event, RunErrorEvent):
-                error_text = event.content or "Unknown agent error"
+                error_text = _run_error_event_text(event)
                 if _request_stream_retry(
                     state,
                     retried_after_media_fallback=retried_after_media_fallback,

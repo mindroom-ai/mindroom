@@ -6005,6 +6005,47 @@ class TestUserIdPassthrough:
         mock_friendly_error.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_stream_agent_response_uses_run_error_event_metadata_when_content_empty(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Empty Agno streaming errors should surface available error metadata."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def empty_error_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content=None, error_type="APITimeoutError", error_id="timeout-1")
+
+        mock_agent.arun = MagicMock(return_value=empty_error_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch(
+                "mindroom.ai.get_user_friendly_error_message",
+                return_value="friendly-error",
+            ) as mock_friendly_error,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+            ]
+
+        assert chunks == ["friendly-error"]
+        friendly_error = mock_friendly_error.call_args.args[0]
+        assert str(friendly_error) == "Agent run failed (type=APITimeoutError, id=timeout-1)"
+
+    @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:
         """Test that user_id defaults to None when not provided (backward compatibility)."""
         mock_agent = MagicMock()
