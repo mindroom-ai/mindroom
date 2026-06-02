@@ -46,7 +46,7 @@ def test_mindroom_runtime_image_builds_dashboard_assets_explicitly() -> None:
     """The runtime image should ship dashboard assets without runtime Bun."""
     text = _MINDROOM_DOCKERFILE.read_text(encoding="utf-8")
     frontend_copy_index = text.index("COPY frontend /app/frontend")
-    final_stage_index = text.index("FROM public.ecr.aws/docker/library/python:3.13-slim AS final")
+    final_stage_index = text.index(" AS final")
     builder_after_frontend = text[frontend_copy_index:final_stage_index]
 
     assert "PUPPETEER_SKIP_DOWNLOAD=true" in builder_after_frontend
