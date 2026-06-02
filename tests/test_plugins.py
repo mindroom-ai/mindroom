@@ -1858,6 +1858,58 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
         )
 
 
+def test_unavailable_plugin_tool_is_validation_only_not_runtime_metadata(tmp_path: Path) -> None:
+    """Skipped plugin tools should not appear in public runtime tool metadata."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_pre_registration_broken_tool_plugin(plugin_root)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - broken_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config = Config(plugins=["./plugins/broken"])
+
+    with _preserved_plugin_loader_state():
+        runtime_metadata = metadata_module.resolved_tool_metadata_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=True,
+        )
+        validation_snapshot = metadata_module.resolved_tool_validation_snapshot_for_runtime(
+            runtime_paths,
+            config,
+            tolerate_plugin_load_errors=True,
+        )
+
+        assert "broken_plugin_tool" not in runtime_metadata
+        assert validation_snapshot["broken_plugin_tool"].runtime_loadable is False
+        assert validation_snapshot["broken_plugin_tool"].unavailable_due_to_plugin_load_error is True
+
+
 def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
