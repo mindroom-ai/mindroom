@@ -64,7 +64,14 @@ from mindroom.workers.backends.docker_projection import (
     DockerProjectionManager,
 )
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
-from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
+from mindroom.workers.models import (
+    ProgressSink,
+    WorkerHandle,
+    WorkerReadyPhase,
+    WorkerReadyProgress,
+    WorkerSpec,
+    WorkerStatus,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -353,9 +360,30 @@ class DockerWorkerBackend:
             msg = f"Failed to shut down Docker workers: {failure_text}"
             raise WorkerBackendError(msg)
 
-    def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+    def ensure_worker(
+        self,
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> WorkerHandle:
         """Resolve or start the dedicated worker container for the given worker key."""
         timestamp = time.time() if now is None else now
+        start_time = time.monotonic()
+
+        def emit_progress(phase: WorkerReadyPhase, *, error: str | None = None) -> None:
+            if progress_sink is None:
+                return
+            progress_sink(
+                WorkerReadyProgress(
+                    phase=phase,
+                    worker_key=spec.worker_key,
+                    backend_name=self.backend_name,
+                    elapsed_seconds=max(0.0, time.monotonic() - start_time),
+                    error=error,
+                ),
+            )
+
         with self._worker_lock(spec.worker_key):
             self._launch_config_hash = self._compute_launch_config_hash()
             paths = self._state_paths(spec.worker_key)
@@ -376,6 +404,8 @@ class DockerWorkerBackend:
                 ),
             )
             self._save_metadata(paths, metadata)
+            if self._lifecycle_state(metadata).status == "starting":
+                emit_progress("cold_start")
 
             sync_shared_credentials_to_worker(
                 spec.worker_key,
@@ -393,6 +423,7 @@ class DockerWorkerBackend:
             except Exception as exc:
                 failure_reason = str(exc)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
+                emit_progress("failed", error=failure_reason)
                 if isinstance(exc, WorkerBackendError):
                     raise
                 raise WorkerBackendError(failure_reason) from exc
@@ -409,7 +440,9 @@ class DockerWorkerBackend:
             metadata.worker_port = self.config.worker_port
             metadata.launch_config_hash = self._launch_config_hash
             self._save_metadata(paths, metadata)
-            return self._to_handle(metadata, container, now=timestamp, paths=paths)
+            handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
+            emit_progress("ready")
+            return handle
 
     def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Return the current worker handle for one worker key, if present."""
