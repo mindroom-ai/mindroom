@@ -86,7 +86,8 @@ MindRoom then:
 - `MINDROOM_NAMESPACE`
 
 `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**.
-`MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
+`MINDROOM_NAMESPACE` is optional and blank by default for hosted pairing, which keeps existing unnamespaced managed agent usernames and room aliases.
+Set `MINDROOM_NAMESPACE` only when you intentionally want a namespaced local install on a shared homeserver.
 
 They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows).
 Revoke them from `Settings -> Local MindRoom` in the chat UI.

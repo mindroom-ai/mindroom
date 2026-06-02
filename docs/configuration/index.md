@@ -109,7 +109,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
+| `MINDROOM_NAMESPACE` | Optional installation namespace for Matrix identity isolation. Leave blank for unnamespaced hosted installs, or set 4–32 lowercase alphanumeric chars to append a namespace to managed agent usernames and room aliases. | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
