@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixDeliveryConfig
 from mindroom.constants import RuntimePaths
+from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
@@ -357,6 +358,17 @@ def _mock_runtime_paths() -> MagicMock:
 class TestResolveThreadSummaryModelName:
     """Tests for room-specific automatic summary model selection."""
 
+    def test_empty_override_map_skips_room_state_lookup(self) -> None:
+        """Empty override maps should not touch persisted room state."""
+        config = _mock_config(model_name="haiku", room_thread_summary_models={})
+        rp = _mock_runtime_paths()
+
+        with patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id") as lookup:
+            result = _resolve_thread_summary_model_name(config, rp, "!dev:example")
+
+        assert result == "haiku"
+        lookup.assert_not_called()
+
     def test_uses_default_summary_model_without_room_override(self) -> None:
         """The global summary model remains the default when a room has no override."""
         config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
@@ -377,6 +389,21 @@ class TestResolveThreadSummaryModelName:
 
         assert result == "qwen"
 
+    def test_uses_full_matrix_room_alias_override(self) -> None:
+        """Full Matrix aliases persisted in room state should resolve to overrides."""
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"#private:example": "qwen"})
+        rp = _mock_runtime_paths()
+        room = MagicMock(room_id="!private:example", alias="#private:example")
+        state = MagicMock(rooms={"private": room})
+
+        with (
+            patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
+            patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=state),
+        ):
+            result = _resolve_thread_summary_model_name(config, rp, "!private:example")
+
+        assert result == "qwen"
+
     def test_uses_raw_room_id_override(self) -> None:
         """Unmanaged rooms can still be overridden by Matrix room ID."""
         config = _mock_config(model_name="haiku", room_thread_summary_models={"!external:example": "qwen"})
@@ -385,6 +412,18 @@ class TestResolveThreadSummaryModelName:
         result = _resolve_thread_summary_model_name(config, rp, "!external:example")
 
         assert result == "qwen"
+
+    def test_raw_room_id_override_requires_explicit_opt_in(self) -> None:
+        """Legacy room model overrides remain scoped to persisted room keys and aliases."""
+        rp = _mock_runtime_paths()
+
+        with (
+            patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
+            patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=MagicMock(rooms={})),
+        ):
+            result = resolve_room_scoped_model_override({"!external:example": "qwen"}, "!external:example", rp)
+
+        assert result is None
 
     def test_falls_back_to_default_model_without_global_summary_model(self) -> None:
         """The resolver should preserve the existing default-model fallback."""
@@ -606,6 +645,36 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
+
+    async def test_model_resolution_failure_records_count(self) -> None:
+        """Room override lookup failures should not retry until the next threshold."""
+        client = _mock_client()
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=_make_thread_history(5),
+            ),
+            patch(
+                "mindroom.thread_summary._timed_generate_summary",
+                new=AsyncMock(return_value="Users discussed testing strategies"),
+            ) as mock_timed_gen,
+            patch(
+                "mindroom.thread_summary._recover_last_summary_count",
+                return_value=0,
+            ),
+            patch(
+                "mindroom.entity_resolution.matrix_state.get_room_alias_from_id",
+                side_effect=RuntimeError("state unavailable"),
+            ),
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_timed_gen.assert_not_awaited()
+        client.room_send.assert_not_awaited()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_room_specific_model_generates_and_records_metadata(self) -> None:

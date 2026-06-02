@@ -375,13 +375,18 @@ def resolve_room_scoped_model_override(
     overrides: Mapping[str, str],
     room_id: str | None,
     runtime_paths: RuntimePaths,
+    *,
+    allow_raw_room_id: bool = False,
 ) -> str | None:
-    """Return a model override keyed by raw room ID or persisted room key."""
-    if room_id is None:
+    """Return a model override keyed by persisted room key or alias."""
+    if room_id is None or not overrides:
         return None
-    if room_id in overrides:
+    if allow_raw_room_id and room_id in overrides:
         return overrides[room_id]
     room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
     if room_alias and room_alias in overrides:
         return overrides[room_alias]
+    for room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.values():
+        if room.room_id == room_id and room.alias in overrides:
+            return overrides[room.alias]
     return None

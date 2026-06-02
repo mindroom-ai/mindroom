@@ -286,7 +286,12 @@ def _resolve_thread_summary_model_name(
     room_id: str | None,
 ) -> str:
     """Return the model name for automatic thread summaries in one room."""
-    if override := resolve_room_scoped_model_override(config.room_thread_summary_models, room_id, runtime_paths):
+    if override := resolve_room_scoped_model_override(
+        config.room_thread_summary_models,
+        room_id,
+        runtime_paths,
+        allow_raw_room_id=True,
+    ):
         return override
     return config.defaults.thread_summary_model or "default"
 
@@ -505,8 +510,8 @@ async def maybe_generate_thread_summary(
             message_count = max(message_count, message_count_hint)
         if message_count < threshold:
             return
-        model_name = _resolve_thread_summary_model_name(config, runtime_paths, room_id)
         try:
+            model_name = _resolve_thread_summary_model_name(config, runtime_paths, room_id)
             summary = await _timed_generate_summary(thread_history, config, runtime_paths, model_name=model_name)
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
