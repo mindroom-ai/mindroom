@@ -453,6 +453,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ init       Create a starter config.yaml with example agents and models.                │
+│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
 │ show       Display the current config file with syntax highlighting.                   │
 │ edit       Open config.yaml in your default editor.                                    │
 │ validate   Validate config.yaml and check for common issues.                           │

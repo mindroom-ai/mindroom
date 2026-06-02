@@ -22,6 +22,7 @@ from .config import (
     print_config_search_locations,
 )
 from .local_stack import local_stack_setup
+from .migrate import config_migrate
 from .service import service_app
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
+config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(avatars_app, name="avatars")
 app.add_typer(service_app, name="service")

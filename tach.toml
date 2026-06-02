@@ -1787,6 +1787,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.cli.migrate"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.constants",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.service"
 depends_on = [
     "mindroom.services.config",
@@ -1803,6 +1811,7 @@ depends_on = [
     "mindroom.cli.connect",
     "mindroom.cli.doctor",
     "mindroom.cli.local_stack",
+    "mindroom.cli.migrate",
     "mindroom.cli.service",
     "mindroom.config.main",
     "mindroom.constants",
