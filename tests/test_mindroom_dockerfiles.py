@@ -10,6 +10,7 @@ _MINDROOM_DOCKERFILES = (
     _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom",
     _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom-minimal",
 )
+_MINDROOM_DOCKERFILE = _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom"
 _RUNTIME_DEPLOYMENT_TEMPLATE = _REPO_ROOT / "cluster/k8s/runtime/templates/deployment.yaml"
 _INSTANCE_HELPERS_TEMPLATE = _REPO_ROOT / "cluster/k8s/instance/templates/_helpers.tpl"
 _PLATFORM_BACKEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-backend"
@@ -39,6 +40,19 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
         assert "tini" in _apt_install_packages(text)
         assert 'ENTRYPOINT ["tini", "--"]' in text
         assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
+
+
+def test_mindroom_runtime_image_builds_dashboard_assets_explicitly() -> None:
+    """The runtime image should ship dashboard assets without runtime Bun."""
+    text = _MINDROOM_DOCKERFILE.read_text(encoding="utf-8")
+    frontend_copy_index = text.index("COPY frontend /app/frontend")
+    final_stage_index = text.index("FROM public.ecr.aws/docker/library/python:3.13-slim AS final")
+    builder_after_frontend = text[frontend_copy_index:final_stage_index]
+
+    assert "PUPPETEER_SKIP_DOWNLOAD=true" in builder_after_frontend
+    assert "bun install --frozen-lockfile" in builder_after_frontend
+    assert "bun run build" in builder_after_frontend
+    assert "rm -rf node_modules" in builder_after_frontend
 
 
 def test_kubernetes_command_overrides_run_under_tini() -> None:

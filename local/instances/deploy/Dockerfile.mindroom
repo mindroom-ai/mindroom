@@ -6,7 +6,7 @@ FROM oven/bun:1 AS bun
 FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
-# Copy bun for frontend builds triggered by the editable install hook
+# Copy bun for explicit frontend builds in the builder stage
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
@@ -24,6 +24,16 @@ COPY src /app/src
 COPY avatars /app/avatars
 COPY skills /app/skills
 COPY frontend /app/frontend
+
+# Build dashboard assets for the runtime image. The final stage does not include
+# Bun, so `/app/frontend/dist` must already exist when MindRoom starts.
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+WORKDIR /app/frontend
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile \
+    && bun run build \
+    && rm -rf node_modules
+WORKDIR /app
 
 # Install the project itself.
 # Keep the sentence_transformers extra runtime-only so the full image doesn't
