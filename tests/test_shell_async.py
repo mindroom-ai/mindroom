@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from agno.tools.function import Function
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -26,6 +25,7 @@ from mindroom.tools.shell import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
@@ -160,7 +160,9 @@ async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) ->
     ],
 )
 async def test_run_shell_command_accepts_bracketed_shell_command_strings(
-    tmp_path: Path, command: str, expected: str
+    tmp_path: Path,
+    command: str,
+    expected: str,
 ) -> None:
     """Shell grammar that starts with JSON-like characters should still execute through bash."""
     tool = _get_toolkit(tmp_path)

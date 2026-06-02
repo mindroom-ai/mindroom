@@ -1909,11 +1909,11 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
         )
 
 
-def test_load_config_tolerates_toolkit_reference_to_tool_declared_by_broken_plugin(
+def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plugin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tolerant startup should drop unavailable skipped-plugin tools from dynamic toolkits."""
+    """Tolerant startup should drop unavailable skipped-plugin deferred tools."""
     plugin_root = tmp_path / "plugins" / "broken"
     _write_broken_tool_plugin(plugin_root)
 
@@ -1926,18 +1926,13 @@ def test_load_config_tolerates_toolkit_reference_to_tool_declared_by_broken_plug
             "    id: gpt-5.4\n"
             "router:\n"
             "  model: default\n"
-            "toolkits:\n"
-            "  sleepy:\n"
-            "    tools:\n"
-            "      - broken_plugin_tool\n"
             "agents:\n"
             "  assistant:\n"
             "    display_name: Assistant\n"
             "    role: test\n"
-            "    allowed_toolkits:\n"
-            "      - sleepy\n"
-            "    initial_toolkits:\n"
-            "      - sleepy\n"
+            "    tools:\n"
+            "      - name: broken_plugin_tool\n"
+            "        defer: true\n"
             "plugins:\n"
             "  - ./plugins/broken\n"
         ),
@@ -1957,12 +1952,12 @@ def test_load_config_tolerates_toolkit_reference_to_tool_declared_by_broken_plug
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_toolkit_tool_configs("sleepy") == []
+        assert config.get_agent_authored_deferred_tool_configs("assistant") == []
         assert config.get_agent_tools("assistant") == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
-            and call.kwargs["config_path"] == "toolkits.sleepy.tools[0]"
+            and call.kwargs["config_path"] == "agents.assistant.tools[0]"
             for call in mock_logger.warning.call_args_list
         )
 
@@ -2083,8 +2078,8 @@ def test_load_config_still_rejects_unknown_tool_without_broken_plugin_explanatio
         load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
 
-def test_load_config_still_rejects_unknown_toolkit_tool_without_broken_plugin_explanation(tmp_path: Path) -> None:
-    """Tolerant startup should not allow ordinary unknown tools in dynamic toolkits."""
+def test_load_config_still_rejects_unknown_deferred_tool_without_broken_plugin_explanation(tmp_path: Path) -> None:
+    """Tolerant startup should not allow ordinary unknown deferred tools."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         (
@@ -2094,18 +2089,13 @@ def test_load_config_still_rejects_unknown_toolkit_tool_without_broken_plugin_ex
             "    id: gpt-5.4\n"
             "router:\n"
             "  model: default\n"
-            "toolkits:\n"
-            "  sleepy:\n"
-            "    tools:\n"
-            "      - typo_plugin_tool\n"
             "agents:\n"
             "  assistant:\n"
             "    display_name: Assistant\n"
             "    role: test\n"
-            "    allowed_toolkits:\n"
-            "      - sleepy\n"
-            "    initial_toolkits:\n"
-            "      - sleepy\n"
+            "    tools:\n"
+            "      - name: typo_plugin_tool\n"
+            "        defer: true\n"
         ),
         encoding="utf-8",
     )
@@ -2118,7 +2108,7 @@ def test_load_config_still_rejects_unknown_toolkit_tool_without_broken_plugin_ex
         },
     )
 
-    with pytest.raises(ValueError, match="'typo_plugin_tool' is not supported"):
+    with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'typo_plugin_tool'"):
         load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
 

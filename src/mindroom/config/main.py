@@ -1408,6 +1408,8 @@ class Config(BaseModel):
 
         if agent_config.include_default_tools:
             for entry in agent_config.tools:
+                if not self._tool_name_is_available(entry.name):
+                    continue
                 base_overrides: dict[str, object] = {}
                 if default_entry := default_entries_by_name.get(entry.name):
                     base_overrides = apply_authored_overrides({}, default_entry.overrides)
@@ -1424,6 +1426,8 @@ class Config(BaseModel):
             for entry in self.defaults.tools:
                 if entry.name in agent_entry_names:
                     continue
+                if not self._tool_name_is_available(entry.name):
+                    continue
                 effective_authored_entries.append(
                     EffectiveToolConfig(
                         name=entry.name,
@@ -1434,6 +1438,8 @@ class Config(BaseModel):
                 )
         else:
             for entry in agent_config.tools:
+                if not self._tool_name_is_available(entry.name):
+                    continue
                 effective_authored_entries.append(
                     EffectiveToolConfig(
                         name=entry.name,
@@ -1447,10 +1453,16 @@ class Config(BaseModel):
 
         return effective_authored_entries
 
+    def _tool_name_is_available(self, tool_name: str) -> bool:
+        """Return whether an authored tool survived tolerant plugin-load validation."""
+        return tool_name not in self._unavailable_plugin_tool_names
+
     def get_agent_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
         """Return effective runtime tool config entries for each authored owner."""
         effective_entries = []
         for authored_entry in self._get_agent_authored_tool_configs(agent_name):
+            if not self._tool_name_is_available(authored_entry.name):
+                continue
             effective_entries.extend(
                 (
                     EffectiveToolConfig(
@@ -1475,9 +1487,9 @@ class Config(BaseModel):
     def get_agent_available_tools(self, agent_name: str) -> list[str]:
         """Get all tools the agent may use after dynamic loading."""
         agent_config = self.get_agent(agent_name)
-        explicit_names = list(agent_config.tool_names)
+        explicit_names = [name for name in agent_config.tool_names if self._tool_name_is_available(name)]
         if agent_config.include_default_tools:
-            explicit_names.extend(self.defaults.tool_names)
+            explicit_names.extend(name for name in self.defaults.tool_names if self._tool_name_is_available(name))
         return self.expand_tool_names(explicit_names)
 
     def get_agent_authored_deferred_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
@@ -1492,7 +1504,7 @@ class Config(BaseModel):
                 authored_name=entry.name,
             )
             for entry in self._get_agent_authored_tool_configs(agent_name)
-            if entry.defer
+            if entry.defer and self._tool_name_is_available(entry.name)
         ]
 
     def get_agent_authored_deferred_tool_config(
