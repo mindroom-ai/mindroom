@@ -250,7 +250,9 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     room.room_id = "!test:localhost"
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
+        question_text="Which option should I use?",
         selection_key="1",
+        selected_label="Option 1",
         selected_value="Option 1",
         thread_id="$thread-root:localhost",
     )
@@ -287,7 +289,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         assert response_envelope is not None
         captured_envelope = response_envelope
         captured_metadata = matrix_run_metadata
-        assert prompt == "The user selected: Option 1"
+        assert prompt == interactive.build_selection_prompt(selection)
         assert response_envelope.target.room_id == room.room_id
         assert response_envelope.target.reply_to_event_id == selection.question_event_id
         assert response_envelope.target.resolved_thread_id == selection.thread_id
@@ -368,7 +370,9 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     room.room_id = "!test:localhost"
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
+        question_text="Which option should I use?",
         selection_key="1",
+        selected_label="Option 1",
         selected_value="Option 1",
         thread_id="$thread-root:localhost",
     )
