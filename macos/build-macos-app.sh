@@ -281,8 +281,13 @@ quit_running_app() {
 }
 
 echo "Building $DISPLAY_NAME..."
+swift build -c release --package-path "$PACKAGE_DIR" --product "$APP_NAME"
 BIN_DIR=$(swift build -c release --package-path "$PACKAGE_DIR" --show-bin-path)
 BINARY="$BIN_DIR/$APP_NAME"
+
+if [[ ! -x "$BINARY" ]]; then
+    BINARY=$(find "$PACKAGE_DIR/.build" -type f -name "$APP_NAME" -path "*/release/$APP_NAME" -print -quit)
+fi
 
 if [[ ! -x "$BINARY" ]]; then
     echo "Built binary not found: $BINARY" >&2
@@ -296,6 +301,10 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources/bin"
 
 SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+    SPARKLE_FRAMEWORK=$(find "$PACKAGE_DIR/.build" -type d -name Sparkle.framework -path "*/release/*" -print -quit)
+fi
+
 if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
     echo "Built Sparkle framework not found: $SPARKLE_FRAMEWORK" >&2
     exit 1
