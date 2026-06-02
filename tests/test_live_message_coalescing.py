@@ -4881,6 +4881,47 @@ def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
     assert not should_skip
 
 
+def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
+    """Visible router voice echoes must not suppress the canonical voice turn in full history."""
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice",
+        body="check my calendar",
+        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
+        server_timestamp=1000,
+    )
+    visible_echo = ResolvedVisibleMessage(
+        sender="@mindroom_router:localhost",
+        body="check my calendar",
+        timestamp=2000,
+        event_id="$visible_echo",
+        content={
+            "msgtype": "m.text",
+            "body": "check my calendar",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+        thread_id="$thread",
+        latest_event_id="$visible_echo",
+    )
+
+    should_skip = has_newer_unresponded_in_thread(
+        older_event,
+        "@user:localhost",
+        [visible_echo],
+        may_be_superseded_by_newer_requester_turn=True,
+        requester_user_id_for_event=lambda sender, source: (
+            source["content"].get(ORIGINAL_SENDER_KEY) if sender == "@mindroom_router:localhost" else sender
+        ),
+        sender_is_trusted_for_ingress_metadata=lambda sender: sender == "@mindroom_router:localhost",
+        is_handled=lambda _event_id: False,
+        logger=MagicMock(),
+    )
+
+    assert not should_skip
+
+
 @pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voice_echo(tmp_path: Path) -> None:
     """Router transcript echoes must not suppress the canonical voice turn they represent."""
@@ -4925,16 +4966,24 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     bot.event_cache.get_recent_room_events.return_value = [visible_echo_source]
 
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
+    history_guard.assert_not_called()
+    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+        room.room_id,
+        event_type="m.room.message",
+        since_ts_ms=1000,
+    )
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$voice")
 

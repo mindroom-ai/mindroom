@@ -2,6 +2,7 @@
 
 import pytest
 
+from mindroom.constants import VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_source import (
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
@@ -11,6 +12,7 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    is_visible_router_voice_echo_content,
     source_kind_allows_internal_relay_detection,
     source_kind_allows_trusted_original_sender,
     source_kind_bypasses_coalescing,
@@ -109,3 +111,29 @@ def test_source_kind_allows_internal_relay_detection_rejects_specialized_turns(
 ) -> None:
     """Specialized source kinds should not be reclassified as generic trusted relays."""
     assert not source_kind_allows_internal_relay_detection(source_kind)
+
+
+@pytest.mark.parametrize("content", [None, [], "visible echo"])
+def test_visible_router_voice_echo_content_rejects_non_mappings(content: object) -> None:
+    """Only Matrix content mappings can carry the visible voice echo marker."""
+    assert not is_visible_router_voice_echo_content(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {},
+        {VISIBLE_ROUTER_VOICE_ECHO_KEY: False},
+        {VISIBLE_ROUTER_VOICE_ECHO_KEY: "true"},
+    ],
+)
+def test_visible_router_voice_echo_content_rejects_missing_or_non_true_marker(
+    content: dict[str, object],
+) -> None:
+    """Only the explicit True marker identifies display-only router voice echoes."""
+    assert not is_visible_router_voice_echo_content(content)
+
+
+def test_visible_router_voice_echo_content_accepts_true_marker() -> None:
+    """The visible router voice echo marker is a strict boolean metadata flag."""
+    assert is_visible_router_voice_echo_content({VISIBLE_ROUTER_VOICE_ECHO_KEY: True})
