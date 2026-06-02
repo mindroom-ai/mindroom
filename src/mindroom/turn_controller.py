@@ -460,6 +460,22 @@ class TurnController:
         sender_agent_name = self._managed_entity_name_for_sender(event.sender)
         return sender_agent_name == ROUTER_AGENT_NAME
 
+    def _is_trusted_router_visible_voice_echo_content(self, sender: str, content: object) -> bool:
+        """Return whether replay history content is a display-only router voice echo."""
+        if self._managed_entity_name_for_sender(sender) != ROUTER_AGENT_NAME:
+            return False
+        if not is_visible_router_voice_echo_content(content) or not isinstance(content, dict):
+            return False
+        content_dict = cast("dict[str, Any]", content)
+        return (
+            self._trusted_human_original_sender(
+                sender=sender,
+                content=content_dict,
+                source_kind=source_kind_from_content(content_dict),
+            )
+            is not None
+        )
+
     def _should_use_trusted_router_relay_context(
         self,
         event: DispatchEvent,
@@ -556,6 +572,7 @@ class TurnController:
                 sender=sender,
                 source=source,
             ),
+            is_visible_router_voice_echo=self._is_trusted_router_visible_voice_echo_content,
             sender_is_trusted_for_ingress_metadata=self._sender_is_trusted_for_ingress_metadata,
             is_handled=self.deps.turn_store.is_handled,
             logger=self.deps.logger,
@@ -584,6 +601,7 @@ class TurnController:
                 sender=sender,
                 source=source,
             ),
+            is_visible_router_voice_echo=self._is_trusted_router_visible_voice_echo_content,
             sender_is_trusted_for_ingress_metadata=self._sender_is_trusted_for_ingress_metadata,
             is_handled=self.deps.turn_store.is_handled,
             logger=self.deps.logger,

@@ -7,10 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.commands.parsing import command_parser
-from mindroom.dispatch_source import (
-    is_visible_router_voice_echo_content,
-    is_voice_event,
-)
+from mindroom.dispatch_source import is_voice_event
 from mindroom.matrix.event_info import EventInfo
 
 if TYPE_CHECKING:
@@ -21,6 +18,7 @@ if TYPE_CHECKING:
 
 type _RequesterResolver = Callable[[str, object], str]
 type _HandledLookup = Callable[[str], bool]
+type _VisibleRouterVoiceEchoLookup = Callable[[str, object], bool]
 type _RecentRoomEventsLookup = Callable[..., Awaitable[Sequence[dict[str, Any]]]]
 # Implementations fail open by returning None after logging lookup failures.
 type _ThreadIdForEventLookup = Callable[[str, str], Awaitable[str | None]]
@@ -41,6 +39,7 @@ def has_newer_unresponded_in_thread(
     *,
     may_be_superseded_by_newer_requester_turn: bool,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
@@ -52,9 +51,7 @@ def has_newer_unresponded_in_thread(
     if event_ts is None or not thread_history:
         return False
     for message in thread_history:
-        if sender_is_trusted_for_ingress_metadata(message.sender) and is_visible_router_voice_echo_content(
-            message.content,
-        ):
+        if is_visible_router_voice_echo(message.sender, message.content):
             continue
         if (
             requester_user_id_for_event(
@@ -111,6 +108,7 @@ def _unresponded_requester_event_id(
     skipped_event_id: str,
     requester_user_id: str,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
@@ -123,8 +121,9 @@ def _unresponded_requester_event_id(
         return None
     content = event_source.get("content")
     if (
-        sender_is_trusted_for_ingress_metadata(sender) and is_visible_router_voice_echo_content(content)
-    ) or requester_user_id_for_event(sender, event_source) != requester_user_id:
+        is_visible_router_voice_echo(sender, content)
+        or requester_user_id_for_event(sender, event_source) != requester_user_id
+    ):
         return None
     if is_handled(event_id):
         return None
@@ -149,6 +148,7 @@ async def _newer_unresponded_cached_thread_event_id(
     thread_id: str,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
@@ -170,6 +170,7 @@ async def _newer_unresponded_cached_thread_event_id(
             skipped_event_id=skipped_event_id,
             requester_user_id=requester_user_id,
             requester_user_id_for_event=requester_user_id_for_event,
+            is_visible_router_voice_echo=is_visible_router_voice_echo,
             sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
             is_handled=is_handled,
         )
@@ -188,6 +189,7 @@ async def has_newer_unresponded_cached_thread_event(
     get_recent_room_events: _RecentRoomEventsLookup | None,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
+    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
     sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
@@ -222,6 +224,7 @@ async def has_newer_unresponded_cached_thread_event(
         thread_id=thread_id,
         get_thread_id_for_event=get_thread_id_for_event,
         requester_user_id_for_event=requester_user_id_for_event,
+        is_visible_router_voice_echo=is_visible_router_voice_echo,
         sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
         is_handled=is_handled,
     )

@@ -4873,6 +4873,7 @@ def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
         [newer_msg],
         may_be_superseded_by_newer_requester_turn=False,
         requester_user_id_for_event=lambda sender, _source: sender,
+        is_visible_router_voice_echo=lambda _sender, _content: False,
         sender_is_trusted_for_ingress_metadata=lambda _sender: True,
         is_handled=lambda _event_id: False,
         logger=MagicMock(),
@@ -4914,12 +4915,61 @@ def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
         requester_user_id_for_event=lambda sender, source: (
             source["content"].get(ORIGINAL_SENDER_KEY) if sender == "@mindroom_router:localhost" else sender
         ),
+        is_visible_router_voice_echo=lambda sender, content: (
+            sender == "@mindroom_router:localhost"
+            and isinstance(content, dict)
+            and content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+        ),
         sender_is_trusted_for_ingress_metadata=lambda sender: sender == "@mindroom_router:localhost",
         is_handled=lambda _event_id: False,
         logger=MagicMock(),
     )
 
     assert not should_skip
+
+
+def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
+    """Only router voice echoes are display-only; other trusted relay turns still suppress older turns."""
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice",
+        body="check my calendar",
+        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
+        server_timestamp=1000,
+    )
+    marked_helper_relay = ResolvedVisibleMessage(
+        sender="@mindroom_helper:localhost",
+        body="check my calendar",
+        timestamp=2000,
+        event_id="$helper_relay",
+        content={
+            "msgtype": "m.text",
+            "body": "check my calendar",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        },
+        thread_id="$thread",
+        latest_event_id="$helper_relay",
+    )
+
+    should_skip = has_newer_unresponded_in_thread(
+        older_event,
+        "@user:localhost",
+        [marked_helper_relay],
+        may_be_superseded_by_newer_requester_turn=True,
+        requester_user_id_for_event=lambda sender, _source: (
+            "@user:localhost" if sender == "@mindroom_helper:localhost" else sender
+        ),
+        is_visible_router_voice_echo=lambda sender, _content: sender == "@mindroom_router:localhost",
+        sender_is_trusted_for_ingress_metadata=lambda sender: (
+            sender in {"@mindroom_helper:localhost", "@mindroom_router:localhost"}
+        ),
+        is_handled=lambda _event_id: False,
+        logger=MagicMock(),
+    )
+
+    assert should_skip
 
 
 @pytest.mark.asyncio
@@ -4950,7 +5000,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     dispatch.context.requires_model_history_refresh = True
     visible_echo_source = {
         "event_id": "$visible_echo",
-        "sender": bot.agent_user.user_id,
+        "sender": "@mindroom_router:localhost",
         "origin_server_ts": 2000,
         "room_id": room.room_id,
         "type": "m.room.message",
@@ -4986,6 +5036,72 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     )
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$voice")
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_echo_marker(tmp_path: Path) -> None:
+    """Only router transcript echoes are replay noise; other marked relays still count as newer turns."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice",
+        body="check my calendar",
+        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$voice", body="check my calendar", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    marked_helper_relay_source = {
+        "event_id": "$helper_relay",
+        "sender": bot.agent_user.user_id,
+        "origin_server_ts": 2000,
+        "room_id": room.room_id,
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.text",
+            "body": "check my calendar",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    bot.event_cache.get_recent_room_events.return_value = [marked_helper_relay_source]
+
+    action_mock = AsyncMock()
+    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+
+    history_guard.assert_not_called()
+    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+        room.room_id,
+        event_type="m.room.message",
+        since_ts_ms=1000,
+    )
+    action_mock.assert_not_awaited()
+    assert bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio
