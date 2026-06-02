@@ -63,6 +63,7 @@ class _MediaRetryDecision:
     removed_kinds: frozenset[_MediaKind]
 
 
+# Intentional process-lifetime pessimism: learned negative capability state is cleared by restart.
 _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[ModelMediaRoute, set[_MediaKind]] = {}
 
 
@@ -78,13 +79,14 @@ def build_model_media_route(model: object | str | None) -> ModelMediaRoute | Non
             base_url=None,
         )
 
-    model_vars = vars(model)
-    provider = _route_text(model_vars.get("provider")) or _model_provider_method_text(model) or model.__class__.__name__
-    model_id = _route_text(model_vars.get("id")) or model.__class__.__name__
+    provider = (
+        _route_text(_route_value(model, "provider")) or _model_provider_method_text(model) or model.__class__.__name__
+    )
+    model_id = _route_text(_route_value(model, "id")) or model.__class__.__name__
     return ModelMediaRoute(
         provider=provider.lower(),
         model_id=model_id,
-        base_url=_route_endpoint(model_vars),
+        base_url=_route_endpoint(model),
     )
 
 
@@ -191,14 +193,18 @@ def _unsupported_media_kinds_from_error(error_text: str) -> frozenset[_MediaKind
     kinds: set[_MediaKind] = set()
     for pattern in _INLINE_MEDIA_UNSUPPORTED_PATTERNS:
         for match in pattern.finditer(lowered_error_text):
-            kinds.add(_canonical_media_kind(match.group("kind")))
+            kind = _canonical_media_kind(match.group("kind"))
+            if kind is not None:
+                kinds.add(kind)
     return frozenset(kinds)
 
 
 def _media_validation_kinds_from_error(error_text: str) -> frozenset[_MediaKind]:
     lowered_error_text = error_text.lower()
     kinds = {
-        _canonical_media_kind(match.group("kind")) for match in _INLINE_MEDIA_FIELD_PATTERN.finditer(lowered_error_text)
+        kind
+        for match in _INLINE_MEDIA_FIELD_PATTERN.finditer(lowered_error_text)
+        if (kind := _canonical_media_kind(match.group("kind"))) is not None
     }
     if _INLINE_MEDIA_MIME_MISMATCH_PATTERN.search(lowered_error_text):
         kinds.add("image")
@@ -209,7 +215,7 @@ def _is_ambiguous_media_error(error_text: str) -> bool:
     return bool(_INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(error_text.lower()))
 
 
-def _canonical_media_kind(provider_kind: str) -> _MediaKind:
+def _canonical_media_kind(provider_kind: str) -> _MediaKind | None:
     if provider_kind == "document":
         return "file"
     if provider_kind == "audio":
@@ -220,8 +226,7 @@ def _canonical_media_kind(provider_kind: str) -> _MediaKind:
         return "file"
     if provider_kind == "video":
         return "video"
-    msg = f"Unknown media kind: {provider_kind}"
-    raise ValueError(msg)
+    return None
 
 
 def _media_kinds_present(media_inputs: MediaInputs) -> frozenset[_MediaKind]:
@@ -246,13 +251,13 @@ def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[_MediaKind]
     )
 
 
-def _route_endpoint(model_vars: dict[str, object]) -> str | None:
+def _route_endpoint(model: object) -> str | None:
     for field_name in ("base_url", "host", "azure_endpoint"):
-        endpoint = _route_text(model_vars.get(field_name))
+        endpoint = _route_text(_route_value(model, field_name))
         if endpoint:
             return endpoint.rstrip("/")
 
-    client_params = model_vars.get("client_params")
+    client_params = _route_value(model, "client_params")
     if not isinstance(client_params, Mapping):
         return None
     client_params_by_name = cast("Mapping[str, object]", client_params)
@@ -264,17 +269,18 @@ def _route_endpoint(model_vars: dict[str, object]) -> str | None:
 
 
 def _model_provider_method_text(model: object) -> str | None:
-    for cls in model.__class__.__mro__:
-        method = cls.__dict__.get("get_provider")
-        if callable(method):
-            return _route_text(method(model))
-    return None
+    method = getattr(model, "get_provider", None)
+    if not callable(method):
+        return None
+    return _route_text(method())
 
 
 def _route_text(value: object) -> str | None:
-    if value is None or callable(value):
+    if not isinstance(value, str):
         return None
-    if value.__class__.__module__ == "unittest.mock":
-        return None
-    text = str(value).strip()
+    text = value.strip()
     return text or None
+
+
+def _route_value(model: object, field_name: str) -> object:
+    return getattr(model, field_name, None)

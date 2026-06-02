@@ -5266,6 +5266,10 @@ class TestUserIdPassthrough:
         assert isinstance(first_prompt, list)
         assert isinstance(retry_prompt, list)
         assert isinstance(cached_prompt, list)
+        fallback_marker = "Inline media unavailable for this model"
+        assert fallback_marker not in str(first_prompt[-1].content)
+        assert fallback_marker in str(retry_prompt[-1].content)
+        assert fallback_marker in str(cached_prompt[-1].content)
         assert first_prompt[-1].audio == [audio_input]
         assert first_prompt[-1].images == [image_input]
         assert retry_prompt[-1].audio == ()
@@ -5840,6 +5844,10 @@ class TestUserIdPassthrough:
             videos=(object(),),
         )
         assert should_retry_without_inline_media(error_text, media_inputs) is expected
+
+    def test_should_retry_without_inline_media_ignores_media_errors_without_media(self) -> None:
+        """Media-shaped errors should not trigger retry when no media was sent."""
+        assert should_retry_without_inline_media("audio input is not supported", MediaInputs()) is False
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""

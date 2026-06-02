@@ -36,6 +36,17 @@ def test_model_route_includes_provider_model_and_base_url() -> None:
     )
 
 
+def test_model_route_supports_slotted_models() -> None:
+    """Route construction should not require model objects to expose __dict__."""
+    model = _SlottedRouteModel(provider="OpenAI", model_id="qwen-local", base_url="http://localhost:9292/v1/")
+
+    assert build_model_media_route(model) == ModelMediaRoute(
+        provider="openai",
+        model_id="qwen-local",
+        base_url="http://localhost:9292/v1",
+    )
+
+
 def test_audio_unsupported_error_records_audio_only() -> None:
     """Audio unsupported errors should disable only audio for the route."""
     reset_model_media_capability_cache()
@@ -151,3 +162,12 @@ class _RouteModel:
 
     def get_provider(self) -> str:
         return self.provider
+
+
+class _SlottedRouteModel:
+    __slots__ = ("base_url", "id", "provider")
+
+    def __init__(self, *, provider: str, model_id: str, base_url: str) -> None:
+        self.provider = provider
+        self.id = model_id
+        self.base_url = base_url
