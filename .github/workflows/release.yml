@@ -132,7 +132,7 @@ jobs:
           cp "$APPCAST_DIR/appcast.xml" macos/appcast.xml
       - name: Update Homebrew cask and Sparkle appcast
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PAT }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
           VERSION="${TAG_NAME#v}"
