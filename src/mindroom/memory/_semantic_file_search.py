@@ -113,6 +113,8 @@ def _settings_signature(config: Config, search_config: MemorySearchConfig, root:
             embedder_config.dimensions,
             tuple(search_config.include),
             search_config.include_entrypoint,
+            _CHUNK_SIZE,
+            _CHUNK_OVERLAP,
         ),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
