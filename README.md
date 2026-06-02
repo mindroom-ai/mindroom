@@ -164,7 +164,7 @@ MindRoom also ships as a macOS menu bar app for running the local MindRoom servi
 The app bundles `uv`, installs the `mindroom` CLI with `uv tool install`, uses `~/.mindroom` for normal config and state, and manages the existing `mindroom service` launchd service.
 
 ```bash
-brew install --cask mindroom
+brew install --cask mindroom-ai/mindroom/mindroom
 ```
 
 Open **MindRoom** from `/Applications` or Spotlight.

@@ -3,6 +3,9 @@ name: Create CalVer Release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - Casks/mindroom.rb
+      - macos/appcast.xml
 
 permissions:
   actions: write
