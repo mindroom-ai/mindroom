@@ -2018,6 +2018,7 @@ depends_on = []
 path = "mindroom.thread_summary"
 depends_on = [
     "mindroom.ai_runtime",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.model_loading",
 ]

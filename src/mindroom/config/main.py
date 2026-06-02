@@ -118,6 +118,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "cultures",
     "rooms",
     "room_models",
+    "room_thread_summary_models",
     "toolkits",
     "knowledge_bases",
     "mcp_servers",
@@ -341,6 +342,10 @@ class Config(BaseModel):
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
+    room_thread_summary_models: dict[str, str] = Field(
+        default_factory=dict,
+        description="Room-specific model overrides for automatic thread summaries",
+    )
     toolkits: dict[str, ToolkitDefinition] = Field(
         default_factory=dict,
         description="Dynamically loadable tool bundles keyed by public toolkit name",

@@ -764,7 +764,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         await asyncio.gather(*scheduled_tasks)
 
     mock_fetch.assert_awaited_once_with(conversation_cache, "!room:localhost", "$thread")
-    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths)
+    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="default")
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",

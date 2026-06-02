@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
+from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
@@ -279,18 +280,36 @@ def _build_conversation_text(thread_history: Sequence[ResolvedVisibleMessage]) -
     return "\n".join(lines)
 
 
+def _resolve_thread_summary_model_name(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room_id: str | None,
+) -> str:
+    """Return the model name for automatic thread summaries in one room."""
+    if override := resolve_room_scoped_model_override(
+        config.room_thread_summary_models,
+        room_id,
+        runtime_paths,
+        allow_raw_room_id=True,
+    ):
+        return override
+    return config.defaults.thread_summary_model or "default"
+
+
 async def _generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    model_name: str | None = None,
 ) -> str | None:
     """Generate a one-line summary of a thread conversation via LLM."""
-    model_name = config.defaults.thread_summary_model or "default"
-    model = model_loading.get_model_instance(config, runtime_paths, model_name)
+    resolved_model_name = model_name or config.defaults.thread_summary_model or "default"
+    model = model_loading.get_model_instance(config, runtime_paths, resolved_model_name)
     _configure_summary_model_temperature(
         model,
         summary_temperature=config.defaults.thread_summary_temperature,
-        model_name=model_name,
+        model_name=resolved_model_name,
     )
 
     conversation = _build_conversation_text(thread_history)
@@ -320,9 +339,11 @@ async def _timed_generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    model_name: str | None = None,
 ) -> str | None:
     """Run the summary generation attempt with timing instrumentation."""
-    return await _generate_summary(thread_history, config, runtime_paths)
+    return await _generate_summary(thread_history, config, runtime_paths, model_name=model_name)
 
 
 async def send_thread_summary_event(
@@ -490,7 +511,8 @@ async def maybe_generate_thread_summary(
         if message_count < threshold:
             return
         try:
-            summary = await _timed_generate_summary(thread_history, config, runtime_paths)
+            model_name = _resolve_thread_summary_model_name(config, runtime_paths, room_id)
+            summary = await _timed_generate_summary(thread_history, config, runtime_paths, model_name=model_name)
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
@@ -513,7 +535,6 @@ async def maybe_generate_thread_summary(
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
-        model_name = config.defaults.thread_summary_model or "default"
         # Record count before sending — the LLM cost is already incurred, so don't
         # retry on Matrix send failure (avoids cost amplification loop).
         update_last_summary_count(room_id, thread_id, message_count)
