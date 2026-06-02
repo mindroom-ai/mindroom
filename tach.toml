@@ -1131,6 +1131,7 @@ visibility = [
     "mindroom.memory._mem0_backend",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
+    "mindroom.memory._semantic_file_search",
     "mindroom.memory.functions",
 ]
 
@@ -1164,6 +1165,7 @@ depends_on = [
     "mindroom.chunking",
     "mindroom.embedding_factory",
     "mindroom.logging_config",
+    "mindroom.memory._shared",
     "mindroom.path_globs",
 ]
 visibility = ["mindroom.memory._file_backend"]

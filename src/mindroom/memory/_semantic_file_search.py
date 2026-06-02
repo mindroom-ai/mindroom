@@ -20,6 +20,7 @@ from agno.vectordb.chroma import ChromaDb
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.logging_config import get_logger
+from mindroom.memory._shared import MemoryResult
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemorySearchConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.memory._shared import MemoryResult
 
 logger = get_logger(__name__)
 _COLLECTION_PREFIX = "mindroom_memory"
@@ -289,15 +289,12 @@ async def search_semantic_file_memories(
             continue
         score = document.reranking_score
         results.append(
-            cast(
-                "MemoryResult",
-                {
-                    "id": f"semantic:{source_file}:{rank}",
-                    "memory": content,
-                    "user_id": scope_user_id,
-                    "score": float(score) if score is not None else 1.0 - (rank * 0.000001),
-                    "metadata": {"source_file": source_file, "semantic": True, "search_mode": "semantic"},
-                },
+            MemoryResult(
+                id=f"semantic:{source_file}:{rank}",
+                memory=content,
+                user_id=scope_user_id,
+                score=float(score) if score is not None else 1.0 - (rank * 0.000001),
+                metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )
     return results
