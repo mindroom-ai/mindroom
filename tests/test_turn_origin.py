@@ -155,6 +155,19 @@ def test_requester_id_from_trusted_original_sender_rejects_managed_plain_hooks()
     )
 
 
+def test_requester_id_from_trusted_original_sender_requires_original_sender() -> None:
+    """Trusted metadata without an original sender cannot act as a requester."""
+    assert (
+        requester_id_from_trusted_original_sender(
+            original_sender=None,
+            original_sender_entity_name=None,
+            source_kind=HOOK_DISPATCH_SOURCE_KIND,
+            sender_trusts_original_sender=True,
+        )
+        is None
+    )
+
+
 def test_router_handoff_is_trusted_user_relay() -> None:
     """Router handoffs are trusted relays of the original human author."""
     origin = classify_turn_origin(
