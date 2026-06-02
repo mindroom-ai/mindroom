@@ -5,7 +5,9 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 import types
+from pathlib import Path
 
 import pytest
 
@@ -128,3 +130,14 @@ if missing:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_default_pytest_options_disable_tach_plugin() -> None:
+    """Plain pytest should not run Tach impact analysis unless explicitly requested."""
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text())
+
+    addopts = data["tool"]["pytest"]["ini_options"]["addopts"].split()
+
+    assert "-p" in addopts
+    assert "no:tach" in addopts

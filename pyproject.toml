@@ -533,6 +533,7 @@ python_files = "test_*.py"
 asyncio_mode = "auto"
 pythonpath = [ "src" ]
 addopts = """
+    -p no:tach
     -vvv
     -n auto
     --cov=mindroom
