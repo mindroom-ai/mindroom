@@ -491,6 +491,11 @@ class KubernetesWorkerBackend:
         annotations[resources.ANNOTATION_LAST_USED_AT] = str(timestamp)
         if annotations.get(resources.ANNOTATION_WORKER_STATUS) == "idle":
             annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
+        if annotations.get(resources.ANNOTATION_WORKER_STATUS) != "failed":
+            # A touch revives a worker, so a stale failure reason must not linger.
+            # patch_deployment merges annotations, so clear by blanking rather than
+            # popping (which the merge would not remove server-side).
+            annotations[resources.ANNOTATION_FAILURE_REASON] = ""
         self._resources.patch_deployment(worker_id, annotations=annotations)
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -658,7 +663,7 @@ class KubernetesWorkerBackend:
             expires_at=None,
             startup_count=resources.parse_annotation_int(annotations, resources.ANNOTATION_STARTUP_COUNT),
             failure_count=resources.parse_annotation_int(annotations, resources.ANNOTATION_FAILURE_COUNT),
-            failure_reason=annotations.get(resources.ANNOTATION_FAILURE_REASON),
+            failure_reason=annotations.get(resources.ANNOTATION_FAILURE_REASON) or None,
             debug_metadata={
                 "namespace": self.config.namespace,
                 "deployment_name": worker_id,

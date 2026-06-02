@@ -1982,6 +1982,21 @@ def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
     assert "template" not in patch_body.get("spec", {})
 
 
+def test_kubernetes_backend_touch_revives_idle_worker_and_clears_stale_failure_reason() -> None:
+    """A touch must revive an idle worker and drop a lingering failure reason."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "idle"
+    deployment.metadata.annotations["mindroom.ai/failure-reason"] = "boom"
+
+    touched = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=25.0)
+
+    assert touched is not None
+    assert touched.status == "ready"
+    assert touched.failure_reason is None
+
+
 def test_kubernetes_backend_pins_workers_to_control_plane_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
