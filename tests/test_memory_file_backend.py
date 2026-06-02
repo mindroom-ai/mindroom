@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+from threading import Lock
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
+import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -628,6 +632,75 @@ def test_semantic_memory_index_updates_changed_files_incrementally(tmp_path: Pat
         {"source_path": "memory/2026-06-02.md"},
     ]
     assert knowledge.inserted == ["2026-06-02.md"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_index_refresh_and_search_are_serialized(storage_path: Path, config: Config) -> None:
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
+
+    active_sections = 0
+    max_active_sections = 0
+    section_lock = Lock()
+
+    def run_blocking_index_section() -> None:
+        nonlocal active_sections, max_active_sections
+        with section_lock:
+            active_sections += 1
+            max_active_sections = max(max_active_sections, active_sections)
+        try:
+            time.sleep(0.1)
+        finally:
+            with section_lock:
+                active_sections -= 1
+
+    def fake_ensure_index_current(*_args: object, **_kwargs: object) -> None:
+        run_blocking_index_section()
+
+    class FakeKnowledge:
+        def __init__(self, *, vector_db: object) -> None:
+            self.vector_db = vector_db
+
+        def search(self, *, query: str, max_results: int) -> list[object]:
+            assert query == "semantic memory"
+            assert max_results == 5
+            run_blocking_index_section()
+            return []
+
+    class FakeChromaDb:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    with (
+        patch.object(semantic_file_search, "Knowledge", FakeKnowledge),
+        patch.object(semantic_file_search, "ChromaDb", FakeChromaDb),
+        patch.object(semantic_file_search, "create_configured_embedder", return_value=object()),
+        patch.object(semantic_file_search, "_ensure_index_current", fake_ensure_index_current),
+    ):
+        await asyncio.gather(
+            semantic_file_search.search_semantic_file_memories(
+                "semantic memory",
+                scope_user_id="agent_general",
+                root=root,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                search_config=config.memory.search,
+                limit=5,
+            ),
+            semantic_file_search.search_semantic_file_memories(
+                "semantic memory",
+                scope_user_id="agent_general",
+                root=root,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                search_config=config.memory.search,
+                limit=5,
+            ),
+        )
+
+    assert max_active_sections == 1
 
 
 @pytest.mark.asyncio

@@ -133,11 +133,25 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: keyword
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 ```
 
 `memory.file.path` is an optional fallback root for file-memory paths.
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
+`memory.search` controls how `search_memories` reads file-backed agent memory.
+`mode: keyword` scans markdown files directly.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
+`include` contains root-relative glob patterns below the effective file-memory root.
+The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+Semantic mode applies to the agent's own file-memory scope.
+Team-visible file memory is still keyword searched.
 
 Per-agent override example:
 
@@ -150,7 +164,14 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
 ```
+
+Omitted `memory_search` fields inherit from `memory.search`.
 
 For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
 For requester-private agents, file memory lives directly under the effective private root.
@@ -235,6 +256,7 @@ The Dashboard **Memory** page supports:
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `max_entrypoint_lines`)
+- search settings (`mode`, `include`, `include_entrypoint`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)

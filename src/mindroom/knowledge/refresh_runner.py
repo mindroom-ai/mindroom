@@ -15,10 +15,11 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -58,16 +59,6 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from types import ModuleType
-
-
-_fcntl_module: ModuleType | None
-if os.name != "nt":
-    import fcntl as _fcntl
-
-    _fcntl_module = _fcntl
-else:
-    _fcntl_module = None
 
 
 logger = get_logger(__name__)
@@ -312,57 +303,11 @@ def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
     return Path(tempfile.gettempdir()) / "mindroom" / "knowledge_refresh_locks" / f"{digest}.lock"
 
 
-def _open_refresh_file_lock_sync(key: KnowledgeSourceRoot) -> tuple[Any, Any] | None:
-    if _fcntl_module is None:
-        return None
-
-    lock_path = _refresh_file_lock_path(key)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    return _fcntl_module, lock_path.open("a", encoding="utf-8")
-
-
-def _try_acquire_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> bool:
-    if handle is None:
-        return True
-    fcntl, lock_file = handle
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return False
-    return True
-
-
-def _close_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
-    if handle is not None:
-        _fcntl, lock_file = handle
-        lock_file.close()
-
-
-def _release_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
-    if handle is None:
-        return
-    fcntl, lock_file = handle
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    finally:
-        lock_file.close()
-
-
 @asynccontextmanager
 async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
     """Serialize source-root refresh and mutation work across processes."""
-    handle = _open_refresh_file_lock_sync(key)
-    acquired = False
-    try:
-        while not _try_acquire_refresh_file_lock_sync(handle):  # noqa: ASYNC110
-            await asyncio.sleep(_REFRESH_FILE_LOCK_POLL_SECONDS)
-        acquired = True
+    async with async_exclusive_file_lock(_refresh_file_lock_path(key), poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS):
         yield
-    finally:
-        if acquired:
-            _release_refresh_file_lock_sync(handle)
-        else:
-            _close_refresh_file_lock_sync(handle)
 
 
 def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:

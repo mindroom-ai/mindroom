@@ -25,6 +25,7 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
+from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
@@ -2967,39 +2968,40 @@ async def test_mutation_lock_uses_cross_process_source_lock(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_cross_process_file_lock_waiter_closes_unacquired_handle(
+async def test_cancelled_async_file_lock_waiter_closes_unacquired_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled file-lock waiter must not leak a handle that can later acquire the lock."""
-    source_root = knowledge_registry.KnowledgeSourceRoot(storage_root="/storage", knowledge_path="/storage/docs")
-    handle = object()
+    lock_path = Path("/storage/docs.lock")
     opened = asyncio.Event()
-    closed: list[object] = []
-    released: list[object] = []
+    closed: list[FakeLockFile] = []
+    released: list[int] = []
 
-    def _open(_source_root: knowledge_registry.KnowledgeSourceRoot) -> object:
+    class FakeLockFile:
+        def fileno(self) -> int:
+            return 123
+
+        def close(self) -> None:
+            closed.append(self)
+
+    handle = FakeLockFile()
+
+    def _open(_lock_path: Path) -> FakeLockFile:
         opened.set()
         return handle
 
-    def _try_acquire(_handle: object) -> bool:
-        assert _handle is handle
-        return False
-
-    def _close(_handle: object) -> None:
-        closed.append(_handle)
-
-    def _release(_handle: object) -> None:
-        released.append(_handle)
+    def _flock(file_descriptor: int, flags: int) -> None:
+        assert file_descriptor == 123
+        if flags & file_locks.fcntl.LOCK_EX:
+            raise BlockingIOError
+        released.append(flags)
 
     async def _wait_for_file_lock() -> None:
-        async with knowledge_refresh_runner._acquire_refresh_file_lock(source_root):
+        async with file_locks.async_exclusive_file_lock(lock_path, poll_seconds=0.001):
             pytest.fail("lock waiter unexpectedly acquired the file lock")
 
-    monkeypatch.setattr(knowledge_refresh_runner, "_REFRESH_FILE_LOCK_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(knowledge_refresh_runner, "_open_refresh_file_lock_sync", _open)
-    monkeypatch.setattr(knowledge_refresh_runner, "_try_acquire_refresh_file_lock_sync", _try_acquire)
-    monkeypatch.setattr(knowledge_refresh_runner, "_close_refresh_file_lock_sync", _close)
-    monkeypatch.setattr(knowledge_refresh_runner, "_release_refresh_file_lock_sync", _release)
+    monkeypatch.setattr(file_locks, "_open_lock_file", _open)
+    monkeypatch.setattr(file_locks.fcntl, "flock", _flock)
 
     waiter = asyncio.create_task(_wait_for_file_lock())
     await opened.wait()

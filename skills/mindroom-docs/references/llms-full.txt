@@ -992,6 +992,11 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
+    memory_search:                 # Optional: Per-agent file-memory search override
+      mode: semantic               # keyword or semantic; omitted fields inherit memory.search
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
       - SOUL.md
@@ -1149,6 +1154,11 @@ memory:
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
     max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
+  search:                          # File-backed memory search settings
+    mode: keyword                  # Default: keyword (keyword or semantic)
+    include:                       # Root-relative globs below the effective file-memory root
+      - memory/**/*.md             # Default: dated daily memory files
+    include_entrypoint: false      # Default: false (MEMORY.md is already preloaded)
   auto_flush:                      # Background memory auto-flush (file backend only)
     enabled: false                 # Default: false (enable background flush worker)
     flush_interval_seconds: 1800   # Default: 1800 (loop interval)
@@ -1424,6 +1434,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
+- `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
@@ -1581,6 +1592,7 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
+| `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
@@ -1605,6 +1617,8 @@ Per-agent fields with a `null` default inherit from the `defaults` section at ru
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
+`agents.<name>.memory_search` can override `mode`, `include`, and `include_entrypoint` when the effective memory backend is `file`.
+Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
@@ -1845,6 +1859,11 @@ agents:
     tools: [file, shell]
     worker_tools: [file, shell]
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     private:
       per: user
       root: mind_data
@@ -7881,10 +7900,15 @@ The tool always uses the current agent's configured MindRoom memory backend, so 
 Agents with `memory_backend: none` do not receive this tool.
 Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
+For file-backed memory, `search_memories()` follows `memory.search.mode`.
+Keyword mode scans markdown files directly.
+Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Result metadata includes `search_mode` so callers can tell which path produced the result.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
+Use `memory.search` or `agents.<name>.memory_search` to configure file-backed search behavior.
 
 ### Example
 
@@ -11773,11 +11797,25 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: keyword
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 ```
 
 `memory.file.path` is an optional fallback root for file-memory paths.
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
+`memory.search` controls how `search_memories` reads file-backed agent memory.
+`mode: keyword` scans markdown files directly.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
+`include` contains root-relative glob patterns below the effective file-memory root.
+The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+Semantic mode applies to the agent's own file-memory scope.
+Team-visible file memory is still keyword searched.
 
 Per-agent override example:
 
@@ -11790,7 +11828,14 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
 ```
+
+Omitted `memory_search` fields inherit from `memory.search`.
 
 For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
 For requester-private agents, file memory lives directly under the effective private root.
@@ -11875,6 +11920,7 @@ The Dashboard **Memory** page supports:
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `max_entrypoint_lines`)
+- search settings (`mode`, `include`, `include_entrypoint`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)

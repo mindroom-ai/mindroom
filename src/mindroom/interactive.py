@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -18,6 +17,7 @@ import nio
 
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.message_builder import build_reaction_content
 
@@ -282,12 +282,8 @@ def _refresh_active_questions_locked() -> None:
         return
 
     try:
-        with _persistence_lock_file.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
-            try:
-                persisted_questions = _load_persisted_questions()
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with advisory_file_lock(_persistence_lock_file, exclusive=False):
+            persisted_questions = _load_persisted_questions()
     except Exception as exc:
         logger.warning(
             "Failed to refresh persisted interactive questions; continuing with in-memory snapshot",
@@ -309,22 +305,18 @@ def _save_active_questions_locked() -> None:
 
     try:
         _persistence_file.parent.mkdir(parents=True, exist_ok=True)
-        with _persistence_lock_file.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        with advisory_file_lock(_persistence_lock_file):
             try:
-                try:
-                    merged_questions = _apply_local_changes_locked(_load_persisted_questions())
-                except Exception as exc:
-                    merged_questions = dict(_active_questions)
-                    logger.warning(
-                        "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
-                        path=str(_persistence_file),
-                        error=str(exc),
-                    )
-                _write_active_questions_atomically_locked(merged_questions)
-                _replace_active_questions_locked(merged_questions)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                merged_questions = _apply_local_changes_locked(_load_persisted_questions())
+            except Exception as exc:
+                merged_questions = dict(_active_questions)
+                logger.warning(
+                    "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
+                    path=str(_persistence_file),
+                    error=str(exc),
+                )
+            _write_active_questions_atomically_locked(merged_questions)
+            _replace_active_questions_locked(merged_questions)
     except Exception as exc:
         logger.warning(
             "Failed to persist interactive questions; continuing in-memory",
@@ -344,14 +336,10 @@ def init_persistence(storage_root: Path) -> None:
         _persistence_lock_file = persistence_lock_file
         try:
             persistence_file.parent.mkdir(parents=True, exist_ok=True)
-            with persistence_lock_file.open("a+") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                try:
-                    loaded_questions = _load_persisted_questions()
-                    _write_active_questions_atomically_locked(loaded_questions)
-                    _replace_active_questions_locked(loaded_questions)
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            with advisory_file_lock(persistence_lock_file):
+                loaded_questions = _load_persisted_questions()
+                _write_active_questions_atomically_locked(loaded_questions)
+                _replace_active_questions_locked(loaded_questions)
         except Exception as exc:
             _active_questions = {}
             _dirty_question_ids.clear()

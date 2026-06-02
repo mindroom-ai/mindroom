@@ -201,6 +201,11 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
+    memory_search:                 # Optional: Per-agent file-memory search override
+      mode: semantic               # keyword or semantic; omitted fields inherit memory.search
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
       - SOUL.md
@@ -358,6 +363,11 @@ memory:
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
     max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
+  search:                          # File-backed memory search settings
+    mode: keyword                  # Default: keyword (keyword or semantic)
+    include:                       # Root-relative globs below the effective file-memory root
+      - memory/**/*.md             # Default: dated daily memory files
+    include_entrypoint: false      # Default: false (MEMORY.md is already preloaded)
   auto_flush:                      # Background memory auto-flush (file backend only)
     enabled: false                 # Default: false (enable background flush worker)
     flush_interval_seconds: 1800   # Default: 1800 (loop interval)
@@ -633,6 +643,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](agents.md))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](agents.md))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
+- `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents

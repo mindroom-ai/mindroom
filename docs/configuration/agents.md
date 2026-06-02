@@ -146,6 +146,7 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
+| `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
@@ -170,6 +171,8 @@ Per-agent fields with a `null` default inherit from the `defaults` section at ru
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
+`agents.<name>.memory_search` can override `mode`, `include`, and `include_entrypoint` when the effective memory backend is `file`.
+Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
@@ -410,6 +413,11 @@ agents:
     tools: [file, shell]
     worker_tools: [file, shell]
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     private:
       per: user
       root: mind_data
