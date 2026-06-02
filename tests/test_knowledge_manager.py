@@ -4436,6 +4436,119 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_identityless_multi_owner_subprocess_refresh_spawns_per_binding_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identityless multi-owner refresh must keep owner work in child processes."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    captured_payloads: list[dict[str, object]] = []
+
+    class _Stdin:
+        def __init__(self) -> None:
+            self.payload = bytearray()
+
+        def write(self, payload: bytes) -> None:
+            self.payload.extend(payload)
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            captured_payloads.append(json.loads(bytes(self.payload).decode()))
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            return 0
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fail_in_process_refresh(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("multi-owner subprocess refresh ran owner work in-process")
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_resolved_knowledge_binding", _fail_in_process_refresh)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert len(captured_payloads) == 2
+    owner_payloads = sorted(
+        (
+            payload["execution_identity"]["agent_name"],
+            Path(payload["published_index_key"]["knowledge_path"]),
+        )
+        for payload in captured_payloads
+    )
+    assert owner_payloads == [
+        ("mindroom_spouse", runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory"),
+        ("openclaw", runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subprocess_request_with_published_index_key_refreshes_exact_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact-key subprocess requests must not re-enter identityless fan-out."""
+    config, runtime_paths = _daily_memory_multi_owner_config(tmp_path)
+    openclaw_identity = _identity("@alice:localhost", agent_name="openclaw")
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=openclaw_identity,
+        create=True,
+    )
+    captured: list[tuple[object, ToolExecutionIdentity | None, bool]] = []
+
+    async def _capture_refresh(
+        key: object,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None,
+        force_reindex: bool,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        _ = config, runtime_paths
+        captured.append((key, execution_identity, force_reindex))
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=openclaw_key,
+            indexed_count=1,
+            index_published=True,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_resolved_knowledge_binding", _capture_refresh)
+    payload = knowledge_refresh_runner._serialize_subprocess_refresh_request(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=openclaw_identity,
+        force_reindex=True,
+        published_index_key=openclaw_key,
+    )
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(payload)
+
+    assert result.index_published is True
+    assert captured == [(openclaw_key, openclaw_identity, True)]
+
+
+@pytest.mark.asyncio
 async def test_subprocess_refresh_tolerates_broken_unused_plugin(tmp_path: Path) -> None:
     """Child refresh config validation should match startup's broken-plugin tolerance."""
     docs_path = tmp_path / "docs"
