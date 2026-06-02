@@ -1681,7 +1681,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             media_route,
                             e,
                             attempt_media_inputs,
-                            learn_route_capability=True,
                         )
                         if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
@@ -1713,7 +1712,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             media_route,
                             error_text,
                             attempt_media_inputs,
-                            learn_route_capability=True,
                         )
                         if not retried_after_media_fallback and retry_decision.should_retry:
                             logger.warning(
@@ -2274,7 +2272,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     media_route,
                                     error_text,
                                     attempt_media_inputs,
-                                    learn_route_capability=True,
                                 )
                                 if (
                                     not retried_after_media_fallback
@@ -2326,7 +2323,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 media_route,
                                 error_text,
                                 attempt_media_inputs,
-                                learn_route_capability=True,
                             )
                             if (
                                 not retried_after_media_fallback

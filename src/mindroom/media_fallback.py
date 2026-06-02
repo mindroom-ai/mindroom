@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Literal
 
 from agno.models.anthropic import Claude
 from agno.models.azure.openai_chat import AzureOpenAI
-from agno.models.base import Model
 from agno.models.cerebras import Cerebras
 from agno.models.deepseek import DeepSeek
 from agno.models.google import Gemini
@@ -22,6 +21,8 @@ from mindroom.media_inputs import MediaInputs
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from agno.models.base import Model
 
 __all__ = [
     "ModelMediaRoute",
@@ -48,6 +49,15 @@ _INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
 )
 
 type _MediaKind = Literal["audio", "image", "file", "video"]
+
+# Provider error vocabulary -> our MediaInputs kind (providers say "document" for files).
+_PROVIDER_MEDIA_KINDS: dict[str, _MediaKind] = {
+    "audio": "audio",
+    "image": "image",
+    "video": "video",
+    "file": "file",
+    "document": "file",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,18 +90,9 @@ class _MediaRetryDecision:
 _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[ModelMediaRoute, set[_MediaKind]] = {}
 
 
-def build_model_media_route(model: Model | str | None) -> ModelMediaRoute | None:
+def build_model_media_route(model: Model | None) -> ModelMediaRoute | None:
     """Return a process-cache key for one effective model route."""
     if model is None:
-        return None
-    if isinstance(model, str):
-        provider, separator, model_id = model.partition(":")
-        return ModelMediaRoute(
-            provider=provider.lower() if separator else "unknown",
-            model_id=model_id or provider,
-            base_url=None,
-        )
-    if not isinstance(model, Model):
         return None
 
     provider = _route_text(model.provider) or model.__class__.__name__
@@ -124,14 +125,13 @@ def retry_media_inputs_after_failure(
     route: ModelMediaRoute | None,
     error: Exception | str,
     media_inputs: MediaInputs,
-    *,
-    learn_route_capability: bool = False,
 ) -> _MediaRetryDecision:
     """Decide whether and how one media-bearing request should retry.
 
-    Only callers that just sent inline media to a model should set
-    ``learn_route_capability``; otherwise explicit media-kind errors retry once
-    without poisoning the process-local route cache.
+    Explicit "kind is not supported" errors teach the route cache so later
+    requests pre-drop that kind; validation and ambiguous media errors retry
+    once without poisoning the cache. A kind can only be learned when it was
+    actually present in ``media_inputs``.
     """
     if not media_inputs.has_any():
         return _no_media_retry_decision(media_inputs)
@@ -142,7 +142,7 @@ def retry_media_inputs_after_failure(
         return _media_retry_decision_for_kinds(
             media_inputs,
             unsupported_kinds,
-            cache_route=route if learn_route_capability else None,
+            cache_route=route,
         )
 
     validation_kinds = _media_validation_kinds_from_error(error_text)
@@ -231,17 +231,7 @@ def _is_ambiguous_media_error(error_text: str) -> bool:
 
 
 def _canonical_media_kind(provider_kind: str) -> _MediaKind | None:
-    if provider_kind == "document":
-        return "file"
-    if provider_kind == "audio":
-        return "audio"
-    if provider_kind == "image":
-        return "image"
-    if provider_kind == "file":
-        return "file"
-    if provider_kind == "video":
-        return "video"
-    return None
+    return _PROVIDER_MEDIA_KINDS.get(provider_kind)
 
 
 def _media_kinds_present(media_inputs: MediaInputs) -> frozenset[_MediaKind]:
@@ -278,14 +268,12 @@ def _route_endpoint(model: Model) -> str | None:
             model.host,
             _client_params_endpoint(model.client_params),
         )
-    if isinstance(model, VertexAIClaude):
-        return _route_endpoint_text(
-            str(model.base_url) if model.base_url is not None else None,
-            _client_params_endpoint(model.client_params),
-        )
+    # VertexAIClaude subclasses the Anthropic Claude model but exposes a base_url,
+    # so it must be matched here, before the Claude/Gemini branch below.
     if isinstance(
         model,
         (
+            VertexAIClaude,
             Cerebras,
             DeepSeek,
             Groq,

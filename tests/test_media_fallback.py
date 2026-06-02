@@ -48,7 +48,6 @@ def test_audio_unsupported_error_records_audio_only() -> None:
         route,
         RuntimeError("audio input is not supported - hint: you may need to provide the mmproj"),
         media,
-        learn_route_capability=True,
     )
 
     assert decision.should_retry is True
@@ -74,7 +73,6 @@ def test_image_remains_enabled_when_only_audio_failed() -> None:
         route,
         "Error code: 400 - at most 0 audio(s) may be provided",
         media,
-        learn_route_capability=True,
     )
 
     filtered = filter_media_inputs_for_route(route, media)
@@ -93,7 +91,6 @@ def test_different_base_url_does_not_inherit_negative_cache() -> None:
         first_route,
         "audio input is not supported",
         media,
-        learn_route_capability=True,
     )
 
     filtered = filter_media_inputs_for_route(second_route, media)
@@ -130,26 +127,12 @@ def test_generic_media_error_retries_without_caching() -> None:
     assert filtered.media_inputs == media
 
 
-def test_unsupported_media_retry_does_not_cache_without_learning_signal() -> None:
-    """Callers must opt in before explicit unsupported-kind failures teach a route."""
-    reset_model_media_capability_cache()
-    media = _media_inputs()
-    route = _route()
-
-    decision = retry_media_inputs_after_failure(route, "audio input is not supported", media)
-
-    assert decision.should_retry is True
-    assert decision.removed_kinds == frozenset({"audio"})
-    filtered = filter_media_inputs_for_route(route, media)
-    assert filtered.media_inputs == media
-
-
 def test_cache_can_be_reset() -> None:
     """Tests need explicit access to clear process-local learned state."""
     media = _media_inputs()
     route = _route()
 
-    retry_media_inputs_after_failure(route, "image input is not supported", media, learn_route_capability=True)
+    retry_media_inputs_after_failure(route, "image input is not supported", media)
     assert filter_media_inputs_for_route(route, media).media_inputs.images == ()
 
     reset_model_media_capability_cache()
