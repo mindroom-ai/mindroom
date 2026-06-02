@@ -729,7 +729,7 @@ async def _assert_thread_tags_write_allowed(
     )
 
 
-async def _get_thread_tags(
+async def get_thread_tags(
     client: nio.AsyncClient,
     room_id: str,
     thread_root_id: str,
@@ -744,15 +744,6 @@ async def _get_thread_tags(
         room_id,
     )
     return states.get(normalized_thread_root_id)
-
-
-async def get_thread_tags(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_root_id: str,
-) -> ThreadTagsState | None:
-    """Fetch all valid tags for one thread root from Matrix state."""
-    return await _get_thread_tags(client, room_id, thread_root_id)
 
 
 async def set_thread_tag(
@@ -807,7 +798,7 @@ async def set_thread_tag(
             error_prefix="Failed to write thread tags state",
         )
 
-        verified_state = await _get_thread_tags(
+        verified_state = await get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
@@ -850,7 +841,7 @@ async def remove_thread_tag(
 
     remove_written = False
     for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
-        existing_state = await _get_thread_tags(
+        existing_state = await get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
@@ -876,7 +867,7 @@ async def remove_thread_tag(
         )
         remove_written = True
 
-        verified_state = await _get_thread_tags(
+        verified_state = await get_thread_tags(
             client,
             room_id,
             normalized_thread_root_id,
