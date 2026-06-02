@@ -634,6 +634,90 @@ def test_semantic_memory_index_updates_changed_files_incrementally(tmp_path: Pat
     assert knowledge.inserted == ["2026-06-02.md"]
 
 
+def test_semantic_memory_failed_reset_forces_next_reset(tmp_path: Path) -> None:
+    class FakeVectorDb:
+        collection_name = "memory_collection"
+
+        def __init__(self, *, exists_before: bool) -> None:
+            self.exists_before = exists_before
+            self.deleted = False
+            self.created = False
+
+        def exists(self) -> bool:
+            return self.exists_before
+
+        def delete(self) -> None:
+            self.deleted = True
+
+        def create(self) -> None:
+            self.created = True
+
+    class FakeKnowledge:
+        def __init__(self, *, exists_before: bool, fail_insert: bool) -> None:
+            self.vector_db = FakeVectorDb(exists_before=exists_before)
+            self.fail_insert = fail_insert
+            self.inserted: list[str] = []
+
+        def insert(self, *, path: str, metadata: dict[str, object], upsert: bool, reader: object) -> None:
+            assert upsert is True
+            assert metadata["source_path"] == "memory/2026-06-02.md"
+            assert reader is not None
+            if self.fail_insert:
+                msg = "embedder failed"
+                raise RuntimeError(msg)
+            self.inserted.append(path.rsplit("/", 1)[-1])
+
+    memory_root = tmp_path / "memory-root"
+    memory_root.mkdir()
+    memory_file = memory_root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir()
+    memory_file.write_text("current", encoding="utf-8")
+    current_file = _IndexedFile(
+        path=memory_file,
+        relative_path="memory/2026-06-02.md",
+        mtime_ns=1,
+        size=7,
+    )
+    index_path = tmp_path / "index"
+    index_path.mkdir()
+    (index_path / "index_state.json").write_text(
+        json.dumps(
+            {
+                "settings_signature": "same-settings",
+                "collection": "memory_collection",
+                "files": {"memory/2026-06-02.md": {"mtime_ns": 1, "size": 7}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    failing_knowledge = FakeKnowledge(exists_before=False, fail_insert=True)
+    with pytest.raises(RuntimeError, match="embedder failed"):
+        _ensure_index_current(
+            failing_knowledge,
+            [current_file],
+            index_path,
+            "memory_collection",
+            "same-settings",
+        )
+
+    incomplete_state = json.loads((index_path / "index_state.json").read_text(encoding="utf-8"))
+    assert "files" not in incomplete_state
+
+    succeeding_knowledge = FakeKnowledge(exists_before=True, fail_insert=False)
+    _ensure_index_current(
+        succeeding_knowledge,
+        [current_file],
+        index_path,
+        "memory_collection",
+        "same-settings",
+    )
+
+    assert succeeding_knowledge.vector_db.deleted is True
+    assert succeeding_knowledge.vector_db.created is True
+    assert succeeding_knowledge.inserted == ["2026-06-02.md"]
+
+
 @pytest.mark.asyncio
 async def test_semantic_memory_index_refresh_and_search_are_serialized(storage_path: Path, config: Config) -> None:
     root = storage_path / "memory-root"

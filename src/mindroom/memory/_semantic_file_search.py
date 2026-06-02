@@ -176,6 +176,22 @@ def _write_state(
     )
 
 
+def _write_resetting_state(index_path: Path, *, settings_signature: str, collection_name: str) -> None:
+    _state_path(index_path).write_text(
+        json.dumps(
+            {
+                "settings_signature": settings_signature,
+                "collection": collection_name,
+                "resetting": True,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _build_reader(file_path: Path) -> Reader:
     reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
     if not isinstance(reader, (TextReader, MarkdownReader)):
@@ -232,6 +248,7 @@ def _ensure_index_current(
     )
 
     if needs_reset:
+        _write_resetting_state(index_path, settings_signature=settings_signature, collection_name=collection_name)
         _reset_collection(knowledge)
         for indexed_file in files:
             _insert_file(knowledge, indexed_file)
