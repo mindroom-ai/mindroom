@@ -475,11 +475,11 @@ models:
     id: claude-sonnet-4-6
     provider: anthropic
   # --- OpenAI ---
-  gpt52:
-    id: gpt-5.2
+  gpt55:
+    id: gpt-5.5
     provider: openai
   gpt5mini:
-    id: gpt-5-mini
+    id: gpt-5.4-mini
     provider: openai
   # --- Google ---
   gemini_flash:
