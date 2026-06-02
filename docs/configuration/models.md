@@ -51,7 +51,7 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
   # Azure OpenAI
   azure:
