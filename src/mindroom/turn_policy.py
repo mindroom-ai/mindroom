@@ -725,6 +725,12 @@ class TurnPolicy:
         """Log the ambiguous multi-agent thread branch after router participants are filtered out."""
         if not context.is_thread or context.mentioned_agents or context.has_non_agent_mentions:
             return
+        if has_multiple_non_agent_users_in_thread(
+            context.planning_thread_history,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ):
+            return
 
         sender_visible_agents = filter_thread_agents_for_sender(
             agents_in_thread,

@@ -353,6 +353,78 @@ class TestAgentResponseLogic:
         ]
 
     @pytest.mark.asyncio
+    async def test_response_policy_does_not_log_multi_agent_skip_for_multi_human_thread(self) -> None:
+        """Multi-human thread suppression should not be misreported as multi-agent suppression."""
+        room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
+        runtime = MagicMock()
+        runtime.client = None
+        runtime.config = self.config
+        runtime.orchestrator = None
+        logger = MagicMock()
+        policy = TurnPolicy(
+            TurnPolicyDeps(
+                runtime=runtime,
+                logger=logger,
+                runtime_paths=self.runtime_paths,
+                agent_name="calculator",
+                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
+            ),
+        )
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread-root:localhost",
+            thread_history=thread_history_result(
+                [
+                    _message(sender=self.agent_id("general"), body="I can help."),
+                    _message(sender="@other-human:localhost", body="I have context too."),
+                    _message(sender=self.agent_id("calculator"), body="I can also help."),
+                    _message(sender=self.sender, body="What next?"),
+                ],
+                is_full_history=True,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        target = MessageTarget.resolve(room.room_id, context.thread_id, "$event")
+        dispatch = PreparedDispatch(
+            requester_user_id=self.sender,
+            context=context,
+            target=target,
+            correlation_id="$event",
+            envelope=request_envelope(
+                room_id=room.room_id,
+                reply_to_event_id="$event",
+                thread_id=context.thread_id,
+                prompt="continue",
+                user_id=self.sender,
+                target=target,
+                agent_name="calculator",
+            ),
+        )
+        candidate_ids = entity_ids(self.config, self.runtime_paths)
+
+        with patch(
+            "mindroom.turn_policy.responder_candidate_entities_for_room",
+            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+        ):
+            action = await policy.resolve_response_action(
+                dispatch,
+                room,
+                "continue",
+                False,
+                has_active_response_for_target=lambda _target: False,
+            )
+
+        assert action.kind == "skip"
+        matching_calls = [
+            call
+            for call in logger.info.call_args_list
+            if call.args == ("Skipping response: multiple agents in thread require explicit mention",)
+        ]
+        assert not matching_calls
+
+    @pytest.mark.asyncio
     async def test_response_policy_continues_after_router_handoff(self) -> None:
         """The main turn policy should ignore router handoff as conversational participation."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
@@ -411,9 +483,15 @@ class TestAgentResponseLogic:
         )
         candidate_ids = entity_ids(self.config, self.runtime_paths)
 
-        with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+        with (
+            patch(
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
+                new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            ),
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new=AsyncMock(return_value=TeamResolution.none()),
+            ),
         ):
             action = await policy.resolve_response_action(
                 dispatch,
