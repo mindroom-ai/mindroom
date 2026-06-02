@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import secrets
-from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,7 +18,6 @@ from typing import TYPE_CHECKING, TypedDict
 import httpx
 
 from mindroom.constants import execution_tool_runtime_env_values, sandbox_shell_execution_runtime_env_values
-from mindroom.credentials import load_scoped_credentials
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -27,13 +25,21 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     get_worker_progress_pump,
 )
+from mindroom.tool_system.worker_proxy_client import (
+    SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
+    WorkerProxyClientConfig,
+    execute_worker_proxy_request,
+    post_worker_proxy_json,
+    record_proxy_response_failure_for_worker,
+    to_json_compatible,
+)
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     WorkerScope,
     resolve_unscoped_worker_key,
     tool_stays_local,
 )
-from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec, worker_api_endpoint
+from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
     lease_primary_worker_manager,
@@ -44,6 +50,8 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -51,14 +59,10 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
     from mindroom.workers.manager import WorkerManager
 
-_SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
-_SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
-_SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
-_SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
@@ -156,24 +160,6 @@ class _PrimaryWorkerManagerContext:
     storage_root: Path
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None
     worker_grantable_credentials: frozenset[str] | None
-
-
-def _proxy_http_error_message(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, Mapping):
-        detail = payload.get("detail")
-        if detail:
-            return str(detail)
-        error = payload.get("error")
-        if error:
-            return str(error)
-    body = response.text.strip()
-    if body:
-        return body
-    return f"Sandbox proxy request failed with status {response.status_code}."
 
 
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
@@ -292,107 +278,14 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     )
 
 
-def to_json_compatible(value: object) -> object:
-    """Convert arbitrary values into JSON-friendly structures."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): to_json_compatible(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [to_json_compatible(item) for item in value]
-    return str(value)
-
-
-def _credential_services_for_call(
-    tool_name: str,
-    function_name: str,
-    *,
-    proxy_config: _SandboxProxyConfig,
-) -> list[str]:
-    policy = proxy_config.credential_policy
-    selectors = ("*", tool_name, f"{tool_name}.{function_name}")
-    services: list[str] = []
-    for selector in selectors:
-        for service in policy.get(selector, ()):
-            if service not in services:
-                services.append(service)
-    return services
-
-
-def _filter_internal_credential_keys(credentials: Mapping[str, object]) -> dict[str, object]:
-    return {str(key): value for key, value in credentials.items() if not str(key).startswith("_")}
-
-
-def _collect_credential_overrides(
-    tool_name: str,
-    function_name: str,
-    *,
-    proxy_config: _SandboxProxyConfig,
-    credentials_manager: CredentialsManager | None,
-    worker_target: ResolvedWorkerTarget | None,
-) -> dict[str, object]:
-    if credentials_manager is None:
-        return {}
-    services = _credential_services_for_call(tool_name, function_name, proxy_config=proxy_config)
-    if not services:
-        return {}
-    allowed_shared_services: frozenset[str] | None = None
-    if worker_target is not None and worker_target.worker_scope is not None:
-        context = get_tool_runtime_context()
-        allowed_shared_services = (
-            context.config.get_worker_grantable_credentials() if context is not None else frozenset()
-        )
-
-    merged_overrides: dict[str, object] = {}
-    for service in services:
-        credentials = load_scoped_credentials(
-            service,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
-        )
-        if isinstance(credentials, Mapping):
-            merged_overrides.update(_filter_internal_credential_keys(credentials))
-    return merged_overrides
-
-
-def _create_credential_lease(
-    client: httpx.Client,
-    *,
-    proxy_config: _SandboxProxyConfig,
-    lease_url: str,
-    headers: Mapping[str, str],
-    credentials_manager: CredentialsManager | None,
-    tool_name: str,
-    function_name: str,
-    worker_target: ResolvedWorkerTarget | None,
-) -> str | None:
-    credential_overrides = _collect_credential_overrides(
-        tool_name,
-        function_name,
-        proxy_config=proxy_config,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
+def _worker_proxy_client_config(proxy_config: _SandboxProxyConfig) -> WorkerProxyClientConfig:
+    return WorkerProxyClientConfig(
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        proxy_timeout_seconds=proxy_config.proxy_timeout_seconds,
+        credential_lease_ttl_seconds=proxy_config.credential_lease_ttl_seconds,
+        credential_policy=proxy_config.credential_policy,
     )
-    if not credential_overrides:
-        return None
-
-    lease_payload = {
-        "tool_name": tool_name,
-        "function_name": function_name,
-        "credential_overrides": to_json_compatible(credential_overrides),
-        "ttl_seconds": proxy_config.credential_lease_ttl_seconds,
-        "max_uses": 1,
-    }
-    response = client.post(lease_url, json=lease_payload, headers=headers)
-    response.raise_for_status()
-    lease_data = response.json()
-    if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
-        msg = "Sandbox proxy lease response is missing lease_id."
-        raise TypeError(msg)
-    return lease_data["lease_id"]
 
 
 def _build_worker_routing_payload(  # noqa: C901, PLR0912
@@ -568,74 +461,6 @@ def _execution_env_payload(
     return dict(execution_tool_runtime_env_values(runtime_paths))
 
 
-def _request_headers_for_handle(
-    worker_handle: WorkerHandle | None,
-    *,
-    proxy_config: _SandboxProxyConfig,
-) -> dict[str, str]:
-    token = worker_handle.auth_token if worker_handle is not None else proxy_config.proxy_token
-    if token is None:
-        msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
-        raise RuntimeError(msg)
-    return {_SANDBOX_PROXY_TOKEN_HEADER: token}
-
-
-def _record_proxy_exception_for_worker(
-    exc: Exception,
-    *,
-    worker_handle: WorkerHandle | None,
-    runtime_paths: RuntimePaths,
-    proxy_config: _SandboxProxyConfig,
-    worker_manager: WorkerManager | None = None,
-) -> None:
-    """Classify one proxy exception as either worker-health or request-level failure."""
-    if worker_handle is None:
-        return
-    manager = worker_manager or _get_worker_manager(runtime_paths, proxy_config)
-    if _is_request_level_proxy_http_error(exc):
-        manager.touch_worker(worker_handle.worker_key)
-        return
-    manager.record_failure(worker_handle.worker_key, str(exc))
-
-
-def _is_request_level_proxy_http_error(exc: Exception) -> bool:
-    """Return whether one execute-route HTTP failure came from a healthy worker."""
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return False
-    status_code = exc.response.status_code
-    if status_code not in {400, 404, 422}:
-        return False
-    try:
-        payload = exc.response.json()
-    except (ValueError, json.JSONDecodeError):
-        return False
-    detail = payload.get("detail") if isinstance(payload, Mapping) else None
-    if isinstance(detail, str) and detail:
-        return status_code in {400, 422} or detail != "Not Found"
-    if status_code == 422 and isinstance(detail, list):
-        return bool(detail)
-    return False
-
-
-def _record_proxy_response_failure_for_worker(
-    *,
-    worker_handle: WorkerHandle | None,
-    runtime_paths: RuntimePaths,
-    proxy_config: _SandboxProxyConfig,
-    error: str,
-    failure_kind: object,
-    worker_manager: WorkerManager | None = None,
-) -> None:
-    """Classify one structured runner failure response for worker health."""
-    if worker_handle is None:
-        return
-    manager = worker_manager or _get_worker_manager(runtime_paths, proxy_config)
-    if failure_kind == "tool":
-        manager.touch_worker(worker_handle.worker_key)
-        return
-    manager.record_failure(worker_handle.worker_key, error)
-
-
 def attachment_save_uses_worker(
     *,
     runtime_paths: RuntimePaths,
@@ -658,13 +483,12 @@ def attachment_save_uses_worker(
 def _record_worker_save_failure(
     *,
     worker_handle: WorkerHandle | None,
-    runtime_paths: RuntimePaths,
-    proxy_config: _SandboxProxyConfig,
+    worker_manager: WorkerManager,
     error: str,
 ) -> None:
     """Record a worker save protocol/integrity failure against worker health."""
     if worker_handle is not None:
-        _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, error)
+        worker_manager.record_failure(worker_handle.worker_key, error)
 
 
 def _validated_worker_save_receipt(
@@ -674,8 +498,7 @@ def _validated_worker_save_receipt(
     byte_count: int,
     sha256: str,
     worker_handle: WorkerHandle | None,
-    runtime_paths: RuntimePaths,
-    proxy_config: _SandboxProxyConfig,
+    worker_manager: WorkerManager,
 ) -> WorkerAttachmentSaveReceipt:
     result = _validate_attachment_save_receipt(
         data,
@@ -686,8 +509,7 @@ def _validated_worker_save_receipt(
     if isinstance(result, str):
         _record_worker_save_failure(
             worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
+            worker_manager=worker_manager,
             error=result,
         )
         raise RuntimeError(result)  # noqa: TRY004
@@ -723,12 +545,14 @@ def save_attachment_to_worker(
         raise RuntimeError(msg)
 
     proxy_config = sandbox_proxy_config(runtime_paths)
+    worker_manager = _get_worker_manager(runtime_paths, proxy_config)
     worker_payload, worker_handle = _build_worker_routing_payload(
         runtime_paths=runtime_paths,
         tool_name="attachments",
         function_name="get_attachment",
         worker_target=worker_target,
         progress_sink=None,
+        worker_manager=worker_manager,
     )
     if worker_handle is None and proxy_config.proxy_url is None:
         return None
@@ -743,56 +567,44 @@ def save_attachment_to_worker(
         "filename": filename,
     }
 
-    try:
-        headers = _request_headers_for_handle(worker_handle, proxy_config=proxy_config)
-        save_url = (
-            worker_api_endpoint(worker_handle, "save-attachment")
-            if worker_handle is not None
-            else (f"{proxy_config.proxy_url}{_SANDBOX_PROXY_SAVE_ATTACHMENT_PATH}")
-        )
-        with httpx.Client(timeout=proxy_config.proxy_timeout_seconds) as client:
-            response = client.post(save_url, json=request_payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        _record_proxy_exception_for_worker(
-            exc,
-            worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
-        )
-        raise
+    data = post_worker_proxy_json(
+        config=_worker_proxy_client_config(proxy_config),
+        payload=request_payload,
+        worker_handle=worker_handle,
+        worker_manager=worker_manager,
+        proxy_path=SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
+        worker_operation="save-attachment",
+        client_factory=httpx.Client,
+    )
 
-    if not isinstance(data, Mapping):
+    if not isinstance(data, dict):
         msg = "Sandbox save-attachment returned a non-object response."
         _record_worker_save_failure(
             worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
+            worker_manager=worker_manager,
             error=msg,
         )
         raise TypeError(msg)
-    if data.get("ok") is True:
+    response_data = {str(key): value for key, value in data.items()}
+    if response_data.get("ok") is True:
         receipt = _validated_worker_save_receipt(
-            data,
+            response_data,
             requested_path=mindroom_output_path,
             byte_count=byte_count,
             sha256=attachment_fields["sha256"],
             worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
+            worker_manager=worker_manager,
         )
         if worker_handle is not None:
-            _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
+            worker_manager.touch_worker(worker_handle.worker_key)
         return receipt
 
-    error = data.get("error") or "Sandbox attachment save failed."
-    _record_proxy_response_failure_for_worker(
+    error = response_data.get("error") or "Sandbox attachment save failed."
+    record_proxy_response_failure_for_worker(
         worker_handle=worker_handle,
-        runtime_paths=runtime_paths,
-        proxy_config=proxy_config,
+        worker_manager=worker_manager,
         error=str(error),
-        failure_kind=data.get("failure_kind"),
+        failure_kind=response_data.get("failure_kind"),
     )
     raise RuntimeError(str(error))
 
@@ -892,7 +704,7 @@ def _sandbox_proxy_enabled_for_tool(
     return primary_worker_backend_is_dedicated(runtime_paths)
 
 
-def _call_proxy_sync(  # noqa: C901, PLR0912, PLR0915
+def _call_proxy_sync(
     *,
     runtime_paths: RuntimePaths,
     tool_name: str,
@@ -957,87 +769,25 @@ def _call_proxy_sync(  # noqa: C901, PLR0912, PLR0915
             payload["extra_env_passthrough"] = extra_env_passthrough
         if tool_config_overrides:
             payload["tool_config_overrides"] = to_json_compatible(tool_config_overrides)
-        if worker_handle is None and proxy_config.proxy_url is None:
-            msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
-            raise RuntimeError(msg)
-
-        try:
-            headers = _request_headers_for_handle(worker_handle, proxy_config=proxy_config)
-            execute_url = (
-                worker_api_endpoint(worker_handle, "execute")
-                if worker_handle is not None
-                else (f"{proxy_config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}")
-            )
-            worker_key = worker_payload.get("worker_key")
-            portable_tool_init_overrides = _portable_tool_init_overrides(
-                tool_init_overrides,
-                shared_storage_root_path=shared_storage_root_path,
-                worker_key=worker_key if isinstance(worker_key, str) else None,
-            )
-            if portable_tool_init_overrides:
-                payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
-            lease_url = (
-                worker_api_endpoint(worker_handle, "leases")
-                if worker_handle is not None
-                else (f"{proxy_config.proxy_url}{_SANDBOX_PROXY_LEASE_PATH}")
-            )
-            with httpx.Client(timeout=proxy_config.proxy_timeout_seconds) as client:
-                lease_id = _create_credential_lease(
-                    client,
-                    proxy_config=proxy_config,
-                    lease_url=lease_url,
-                    headers=headers,
-                    credentials_manager=credentials_manager,
-                    tool_name=tool_name,
-                    function_name=function_name,
-                    worker_target=worker_target,
-                )
-                if lease_id is not None:
-                    payload["lease_id"] = lease_id
-
-                response = client.post(execute_url, json=payload, headers=headers)
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    if worker_handle is None:
-                        raise RuntimeError(_proxy_http_error_message(exc.response)) from exc
-                    raise
-                data = response.json()
-        except Exception as exc:
-            _record_proxy_exception_for_worker(
-                exc,
-                worker_handle=worker_handle,
-                runtime_paths=runtime_paths,
-                proxy_config=proxy_config,
-                worker_manager=worker_manager,
-            )
-            raise
-
-        if not isinstance(data, Mapping):
-            msg = "Sandbox proxy returned a non-object response."
-            _record_proxy_response_failure_for_worker(
-                worker_handle=worker_handle,
-                runtime_paths=runtime_paths,
-                proxy_config=proxy_config,
-                error=msg,
-                failure_kind=None,
-                worker_manager=worker_manager,
-            )
-            raise TypeError(msg)
-        if data.get("ok") is True:
-            if worker_handle is not None:
-                worker_manager.touch_worker(worker_handle.worker_key)
-            return data.get("result")
-        error = data.get("error") or "Sandbox execution failed."
-        _record_proxy_response_failure_for_worker(
-            worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
-            error=str(error),
-            failure_kind=data.get("failure_kind"),
-            worker_manager=worker_manager,
+        worker_key = worker_payload.get("worker_key")
+        portable_tool_init_overrides = _portable_tool_init_overrides(
+            tool_init_overrides,
+            shared_storage_root_path=shared_storage_root_path,
+            worker_key=worker_key if isinstance(worker_key, str) else None,
         )
-        raise RuntimeError(str(error))
+        if portable_tool_init_overrides:
+            payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
+        return execute_worker_proxy_request(
+            config=_worker_proxy_client_config(proxy_config),
+            payload=payload,
+            credentials_manager=credentials_manager,
+            tool_name=tool_name,
+            function_name=function_name,
+            worker_target=worker_target,
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            client_factory=httpx.Client,
+        )
 
 
 def _wrap_sync_function(

@@ -60,6 +60,7 @@ from mindroom.tool_system.metadata import (
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -378,6 +379,47 @@ def _recording_client_class(
             return _FakeResponse(payload)
 
     return _FakeClient
+
+
+def test_worker_proxy_client_records_worker_success() -> None:
+    """Worker proxy HTTP details should live behind one focused client seam."""
+    captured: dict[str, Any] = {}
+    manager = _TrackingWorkerManager()
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+
+    result = execute_worker_proxy_request(
+        config=WorkerProxyClientConfig(
+            proxy_url=None,
+            proxy_token=None,
+            proxy_timeout_seconds=7.0,
+            credential_lease_ttl_seconds=60,
+            credential_policy={},
+        ),
+        payload={"tool_name": "shell", "function_name": "run_shell_command"},
+        credentials_manager=None,
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_target=None,
+        worker_handle=handle,
+        worker_manager=manager,
+        client_factory=_recording_client_class(captured=captured),
+    )
+
+    assert result == "sandbox-result"
+    assert captured["url"] == "http://worker/api/sandbox-runner/execute"
+    assert captured["headers"] == {"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN}
+    assert captured["timeout"] == 7.0
+    assert manager.touched == ["agent:test"]
+    assert manager.failures == []
 
 
 class _MinimalModel(Model):
