@@ -93,7 +93,6 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.room_member_joins import (
     RoomMemberJoin,
-    record_room_member_joins_from_sync_state_seen,
     room_member_join_from_event,
     room_member_joins_from_sync_state,
     room_member_joins_from_sync_timeline,
@@ -1135,15 +1134,7 @@ class AgentBot:
         if room_member_join_hook_plan.emit_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
         if room_member_join_hook_plan.record_state_seen:
-            client = self.client
-            if client is not None:
-                record_room_member_joins_from_sync_state_seen(
-                    response,
-                    rooms=client.rooms,
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    storage_root=self.runtime_paths.storage_root,
-                )
+            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
@@ -1621,11 +1612,16 @@ class AgentBot:
 
         await self._emit_room_member_joined_hooks(join)
 
-    async def _emit_room_member_joined_sync_state_hooks(self, response: nio.SyncResponse) -> None:
-        """Expose human joins that matrix-nio delivers through sync room state."""
+    async def _emit_room_member_joined_sync_state_hooks(
+        self,
+        response: nio.SyncResponse,
+        *,
+        record_only: bool = False,
+    ) -> None:
+        """Expose or record human joins that matrix-nio delivers through sync room state."""
         if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
             return
-        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+        if not record_only and not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
         client = self.client
         if client is None:
@@ -1637,6 +1633,7 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            record_only=record_only,
         ):
             await self._emit_room_member_joined_hooks(join)
 
