@@ -33,9 +33,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.thread_utils import (
     check_agent_mentioned,
+    decide_agent_response,
     get_agents_in_thread,
     is_router_only_agent_mention,
-    should_agent_respond,
 )
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
 from tests.conftest import bind_runtime_paths, create_mock_room, request_envelope, runtime_paths_for, test_runtime_paths
@@ -47,6 +47,11 @@ def _bind_runtime_config(config: Config, runtime_root: Path | None = None) -> Co
     bound_config = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
     return bound_config
+
+
+def should_agent_respond(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+    """Return the boolean result for legacy response-policy assertions."""
+    return decide_agent_response(*args, **kwargs).should_respond
 
 
 def _message(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,7 +16,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.thread_utils import should_agent_respond
+from mindroom.thread_utils import decide_agent_response
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -30,6 +30,11 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def should_agent_respond(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+    """Return the boolean result for legacy response-policy assertions."""
+    return decide_agent_response(*args, **kwargs).should_respond
 
 
 def _bind_runtime_paths(config: Config, path: Path) -> Config:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -24,7 +24,7 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.thread_utils import should_agent_respond
+from mindroom.thread_utils import AgentResponseDecision, decide_agent_response
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from tests.conftest import (
@@ -50,6 +50,11 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
+
+
+def should_agent_respond(*args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+    """Return the boolean result for legacy response-policy assertions."""
+    return decide_agent_response(*args, **kwargs).should_respond
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -922,8 +927,8 @@ class TestCommandHandling:
             return_value=dispatch_context_result(mock_context),
         )
 
-        # Mock should_agent_respond to return True
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True):
+        # Mock decide_agent_response to return a positive decision
+        with patch("mindroom.turn_policy.decide_agent_response", return_value=AgentResponseDecision(True)):
             # Create a room and event with a regular message
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             event = nio.RoomMessageText.from_dict(
