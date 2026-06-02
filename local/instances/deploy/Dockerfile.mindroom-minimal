@@ -8,7 +8,7 @@ FROM oven/bun:1 AS bun
 FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
-# Copy bun for frontend builds triggered by the editable install hook
+# Copy bun for explicit frontend builds in the builder stage
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
@@ -28,11 +28,16 @@ COPY skills /app/skills
 COPY frontend /app/frontend
 
 # Install the project itself (base only, no extras)
+# Opt into the editable-install frontend build so the final image has
+# `/app/frontend/dist` without carrying Bun into the runtime stage.
+ENV MINDROOM_BUILD_FRONTEND=1
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 # Set pretend version for setuptools-scm (no .git in container)
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --reinstall-package mindroom \
+    && rm -rf frontend/node_modules
 
 # Final production stage
 FROM public.ecr.aws/docker/library/python:3.13-slim AS final

@@ -10,7 +10,6 @@ _MINDROOM_DOCKERFILES = (
     _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom",
     _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom-minimal",
 )
-_MINDROOM_DOCKERFILE = _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom"
 _RUNTIME_DEPLOYMENT_TEMPLATE = _REPO_ROOT / "cluster/k8s/runtime/templates/deployment.yaml"
 _INSTANCE_HELPERS_TEMPLATE = _REPO_ROOT / "cluster/k8s/instance/templates/_helpers.tpl"
 _PLATFORM_BACKEND_DOCKERFILE = _REPO_ROOT / "saas-platform/Dockerfile.platform-backend"
@@ -42,17 +41,22 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
         assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
 
 
-def test_mindroom_runtime_image_builds_dashboard_assets_explicitly() -> None:
+def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:
     """The runtime image should ship dashboard assets without runtime Bun."""
-    text = _MINDROOM_DOCKERFILE.read_text(encoding="utf-8")
-    frontend_copy_index = text.index("COPY frontend /app/frontend")
-    final_stage_index = text.index(" AS final")
-    builder_after_frontend = text[frontend_copy_index:final_stage_index]
+    for dockerfile in _MINDROOM_DOCKERFILES:
+        text = dockerfile.read_text(encoding="utf-8")
+        frontend_copy_index = text.index("COPY frontend /app/frontend")
+        final_stage_index = text.index(" AS final")
+        builder_after_frontend = text[frontend_copy_index:final_stage_index]
+        frontend_build_env_index = builder_after_frontend.index("ENV MINDROOM_BUILD_FRONTEND=1")
+        project_install_index = builder_after_frontend.index("uv sync --locked --no-dev")
 
-    assert "PUPPETEER_SKIP_DOWNLOAD=true" in builder_after_frontend
-    assert "bun install --frozen-lockfile" in builder_after_frontend
-    assert "bun run build" in builder_after_frontend
-    assert "rm -rf node_modules" in builder_after_frontend
+        assert frontend_build_env_index < project_install_index
+        assert "MINDROOM_BUILD_FRONTEND=1" in builder_after_frontend
+        assert "PUPPETEER_SKIP_DOWNLOAD=true" in builder_after_frontend
+        assert "--reinstall-package mindroom" in builder_after_frontend
+        assert "rm -rf frontend/node_modules" in builder_after_frontend
+        assert "bun install --frozen-lockfile" not in text
 
 
 def test_kubernetes_command_overrides_run_under_tini() -> None:
