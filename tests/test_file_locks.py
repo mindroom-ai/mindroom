@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -64,24 +63,23 @@ async def test_async_exclusive_file_lock_released_on_cancellation(tmp_path: Path
 def test_advisory_file_lock_exclusive_blocks_second_holder(tmp_path: Path) -> None:
     lock_path = tmp_path / "state.lock"
     order: list[str] = []
-
-    def first() -> None:
-        with advisory_file_lock(lock_path):
-            order.append("first-acquire")
-            time.sleep(0.2)
-            order.append("first-release")
+    second_attempting = threading.Event()
 
     def second() -> None:
-        time.sleep(0.05)
+        second_attempting.set()
         with advisory_file_lock(lock_path):
             order.append("second-acquire")
 
-    threads = [threading.Thread(target=first), threading.Thread(target=second)]
-    for thread in threads:
+    thread = threading.Thread(target=second)
+    with advisory_file_lock(lock_path):
+        order.append("first-acquire")
         thread.start()
-    for thread in threads:
-        thread.join()
+        assert second_attempting.wait(timeout=2)
+        assert order == ["first-acquire"]
+        order.append("first-release")
 
+    thread.join(timeout=2)
+    assert not thread.is_alive()
     assert order == ["first-acquire", "first-release", "second-acquire"]
 
 
