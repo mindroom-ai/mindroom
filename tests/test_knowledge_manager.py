@@ -503,7 +503,7 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
     )
     runtime_paths = runtime_paths_for(config)
     embedder_factory = MagicMock(return_value=object())
-    monkeypatch.setattr(knowledge_manager_module, "_create_embedder", embedder_factory)
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", embedder_factory)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
