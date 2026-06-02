@@ -989,7 +989,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 turn_recorder.set_run_metadata(metadata)
 
             response: RunOutput | None = None
-            media_route = build_model_media_route(agent.model)
+            media_route = build_model_media_route(agent.model) if media_inputs.has_any() else None
             media_filter = filter_media_inputs_for_route(media_route, media_inputs)
             attempt_prompt = (
                 ai_runtime.append_inline_media_fallback_to_run_input(
@@ -1510,7 +1510,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
 
-            media_route = build_model_media_route(agent.model)
+            media_route = build_model_media_route(agent.model) if media_inputs.has_any() else None
             media_filter = filter_media_inputs_for_route(media_route, media_inputs)
             attempt_prompt = (
                 ai_runtime.append_inline_media_fallback_to_run_input(

@@ -1659,7 +1659,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             response: object | None = None
             cleaned_response: RunOutput | TeamRunOutput | None = None
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
-            media_route = build_model_media_route(team.model)
+            media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
             media_filter = filter_media_inputs_for_route(media_route, media_inputs)
             attempt_prompt = (
                 append_inline_media_fallback_prompt(
@@ -2045,7 +2045,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             logger.info("team_streaming_setup", agents=agent_names, display_names=display_names)
             media_inputs = media or MediaInputs()
             inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
-            media_route = build_model_media_route(team.model)
+            media_route = build_model_media_route(team.model) if media_inputs.has_any() else None
             media_filter = filter_media_inputs_for_route(media_route, media_inputs)
             attempt_prompt = (
                 append_inline_media_fallback_prompt(
