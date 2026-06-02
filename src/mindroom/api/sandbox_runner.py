@@ -11,7 +11,7 @@ import os
 import secrets
 import subprocess
 import sys
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
-from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
+from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
     SandboxWorkerListResponse,
@@ -755,72 +755,20 @@ def _resolve_entrypoint(
     return toolkit, function.entrypoint
 
 
-def _workspace_env_overlay_for_request(
-    request: SandboxRunnerExecuteRequest,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: dict[str, str],
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    subprocess_env: dict[str, str] | None = None,
-    apply: bool,
-) -> tuple[dict[str, str], SandboxRunnerExecuteResponse | None]:
-    """Source `.mindroom/worker-env.sh` for one request.
-
-    Returns `(overlay, None)` on success (overlay is empty when no hook exists).
-    Returns `({}, tool_failure_response)` when the hook fails to source — the
-    caller should return that response directly. Skips silently when `apply` is
-    False, used by the in-subprocess re-execution path after the parent already
-    sourced the hook.
-    """
-    base_env = _workspace_env_overlay_base_env(
-        prepared,
-        execution_env,
-        subprocess_env=subprocess_env,
-    )
-    if not apply:
-        return {}, None
-    if request.tool_name not in _WORKSPACE_ENV_HOOK_TOOL_NAMES:
-        return {}, None
-
-    workspace = _workspace_env_hook_workspace_for_request(
-        request,
-        prepared,
-        runtime_paths=runtime_paths,
-        config=config,
-    )
-    if workspace is None:
-        return {}, None
-
-    try:
-        hook_path = sandbox_exec.resolve_workspace_env_hook_path(workspace)
-        if hook_path is None:
-            return {}, None
-        overlay = sandbox_exec.source_workspace_env_hook(
-            hook_path=hook_path,
-            base_env=base_env,
-            cwd=workspace,
-        )
-    except sandbox_exec.WorkspaceEnvHookError as exc:
-        return (
-            {},
-            SandboxRunnerExecuteResponse(
-                ok=False,
-                error=str(exc),
-                failure_kind="tool",
-            ),
-        )
-    return overlay, None
-
-
-def _request_workspace_home_root(
+def _resolve_request_workspace(
     request: SandboxRunnerExecuteRequest,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     *,
     runtime_paths: RuntimePaths,
     config: Config,
 ) -> Path | None:
-    """Return the request workspace that should behave as HOME, if explicit."""
+    """Return the resolved workspace whose `.mindroom/worker-env.sh` and HOME contract apply.
+
+    Returns `None` when the tool does not support workspace hooks or no workspace
+    applies. Workspace *resolution* (including agent routing) lives here; the
+    canonical env-assembly ordering lives in
+    :mod:`mindroom.api.sandbox_env_assembly`.
+    """
     if request.tool_name not in _WORKSPACE_ENV_HOOK_TOOL_NAMES:
         return None
     return _workspace_env_hook_workspace_for_request(
@@ -829,155 +777,6 @@ def _request_workspace_home_root(
         runtime_paths=runtime_paths,
         config=config,
     )
-
-
-def _workspace_home_contract_env(
-    *,
-    workspace: Path,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-) -> dict[str, str]:
-    """Build the env contract for an already-resolved worker workspace."""
-    return constants.workspace_home_identity_env(workspace) | _worker_owned_env(prepared)
-
-
-def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None) -> dict[str, str]:
-    """Return env names that must stay owned by the prepared worker runtime."""
-    if prepared is not None:
-        worker_env = {
-            "XDG_CACHE_HOME": str(prepared.paths.cache_dir),
-            "PIP_CACHE_DIR": str(prepared.paths.cache_dir / "pip"),
-            "UV_CACHE_DIR": str(prepared.paths.cache_dir / "uv"),
-            "PYTHONPYCACHEPREFIX": str(prepared.paths.cache_dir / "pycache"),
-            "VIRTUAL_ENV": str(prepared.paths.venv_dir),
-        }
-        for name in constants.WORKER_RUNTIME_ENV_NAMES:
-            worker_env.setdefault(name, "")
-        return worker_env
-    return {}
-
-
-def _existing_worker_runtime_env(
-    execution_env: Mapping[str, str],
-    *,
-    subprocess_env: Mapping[str, str] | None,
-) -> dict[str, str]:
-    """Return existing worker-runtime env values to preserve when no worker was prepared."""
-    env: dict[str, str] = {}
-    if subprocess_env is not None:
-        env.update(
-            {name: subprocess_env[name] for name in constants.WORKER_RUNTIME_ENV_NAMES if name in subprocess_env},
-        )
-    env.update({name: execution_env[name] for name in constants.WORKER_RUNTIME_ENV_NAMES if name in execution_env})
-    return env
-
-
-def _protected_execution_env_names(
-    *,
-    workspace_home: Path | None,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-) -> frozenset[str]:
-    """Return env names that workspace hooks must not override."""
-    if workspace_home is not None:
-        return constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
-    if prepared is not None:
-        return constants.WORKER_RUNTIME_ENV_NAMES
-    return frozenset()
-
-
-def _trusted_workspace_overlay_for_runtime_paths(
-    overlay: dict[str, str],
-    protected_names: Collection[str],
-) -> dict[str, str]:
-    """Return hook overlay values that may influence runtime path reconstruction."""
-    if not protected_names:
-        return overlay
-    return {name: value for name, value in overlay.items() if name not in protected_names}
-
-
-def _apply_workspace_home_contract_for_request(
-    request: SandboxRunnerExecuteRequest,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: dict[str, str],
-    *,
-    runtime_paths: RuntimePaths,
-    config: Config,
-) -> Path | None:
-    """Overlay MindRoom's workspace-home defaults and return the resolved workspace."""
-    workspace = _request_workspace_home_root(
-        request,
-        prepared,
-        runtime_paths=runtime_paths,
-        config=config,
-    )
-    if workspace is None:
-        return None
-    resolved_workspace = workspace.expanduser().resolve()
-    execution_env.update(_workspace_home_contract_env(workspace=resolved_workspace, prepared=prepared))
-    return resolved_workspace
-
-
-def _protected_execution_env(
-    *,
-    workspace_home: Path | None,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: Mapping[str, str],
-    subprocess_env: Mapping[str, str] | None,
-) -> dict[str, str]:
-    """Return env names owned by MindRoom for this request."""
-    if workspace_home is not None:
-        protected_env = _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
-        if prepared is None:
-            protected_env.update(_existing_worker_runtime_env(execution_env, subprocess_env=subprocess_env))
-        return protected_env
-    return _worker_owned_env(prepared)
-
-
-def _build_request_execution_env(
-    request: SandboxRunnerExecuteRequest,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: dict[str, str],
-    *,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    subprocess_env: dict[str, str] | None = None,
-    apply_workspace_home_contract: bool = True,
-    apply_workspace_env_hook: bool = True,
-) -> tuple[Path | None, dict[str, str], SandboxRunnerExecuteResponse | None]:
-    """Apply request env overlays in the security-sensitive canonical order."""
-    workspace_home = (
-        _apply_workspace_home_contract_for_request(
-            request,
-            prepared,
-            execution_env,
-            runtime_paths=runtime_paths,
-            config=config,
-        )
-        if apply_workspace_home_contract
-        else None
-    )
-    protected_names = _protected_execution_env_names(workspace_home=workspace_home, prepared=prepared)
-    protected_env = _protected_execution_env(
-        workspace_home=workspace_home,
-        prepared=prepared,
-        execution_env=execution_env,
-        subprocess_env=subprocess_env,
-    )
-    overlay, overlay_failure = _workspace_env_overlay_for_request(
-        request,
-        prepared,
-        execution_env,
-        runtime_paths,
-        config,
-        subprocess_env=subprocess_env,
-        apply=apply_workspace_env_hook,
-    )
-    if overlay_failure is not None:
-        return None, {}, overlay_failure
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_names)
-    if trusted_overlay:
-        execution_env.update(trusted_overlay)
-    execution_env.update(protected_env)
-    return workspace_home, trusted_overlay, None
 
 
 def _workspace_env_hook_workspace_for_request(
@@ -1040,27 +839,6 @@ def _request_targets_user_agent_worker(request: SandboxRunnerExecuteRequest) -> 
     if request.worker_key is None:
         return False
     return resolved_worker_key_scope(request.worker_key) == "user_agent"
-
-
-def _workspace_env_overlay_base_env(
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: dict[str, str],
-    *,
-    subprocess_env: dict[str, str] | None,
-) -> dict[str, str]:
-    if subprocess_env is not None:
-        base_env = dict(subprocess_env)
-        base_env.update(execution_env)
-        return base_env
-
-    base_env = dict(execution_env)
-    # Seed PATH/HOME defaults so bash can locate `printenv` when sourcing the
-    # hook for inprocess unkeyed proxy calls (the subprocess path already gets
-    # these via worker_subprocess_env / generic_subprocess_env).
-    if prepared is None:
-        for key, value in sandbox_exec.generic_subprocess_env().items():
-            base_env.setdefault(key, value)
-    return base_env
 
 
 def _uses_trusted_child_execution_env(
@@ -1147,24 +925,26 @@ def _prepare_execute_request(
     )
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared) or execution_env
     config = config or _runtime_config_or_empty(runtime_paths)
-    _workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
-        request,
-        prepared,
-        execution_env,
-        runtime_paths=runtime_paths,
-        config=config,
-        apply_workspace_home_contract=apply_workspace_home_contract,
-        apply_workspace_env_hook=apply_workspace_env_hook,
-    )
-    if env_failure is not None:
-        raise sandbox_worker_prep.WorkerRequestPreparationError(
-            env_failure.error or "Failed to prepare sandbox execution environment.",
-            failure_kind="request",
+    request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
+    try:
+        env_result = sandbox_env_assembly.build_request_execution_env(
+            request_workspace=request_workspace,
+            prepared=prepared,
+            execution_env=execution_env,
+            apply_workspace_home_contract=apply_workspace_home_contract,
+            apply_workspace_env_hook=apply_workspace_env_hook,
         )
+    except sandbox_exec.WorkspaceEnvHookError as exc:
+        raise sandbox_worker_prep.WorkerRequestPreparationError(
+            str(exc),
+            failure_kind="request",
+        ) from exc
+    workspace_home = env_result.workspace_home
+    trusted_overlay = env_result.trusted_overlay
     trusted_env_overlay = (
-        _trusted_workspace_overlay_for_runtime_paths(
+        sandbox_env_assembly.trusted_workspace_overlay_for_runtime_paths(
             request.execution_env,
-            _protected_execution_env_names(workspace_home=_workspace_home, prepared=prepared),
+            sandbox_env_assembly.protected_execution_env_names(workspace_home=workspace_home, prepared=prepared),
         )
         if trusted_child_execution_env
         else trusted_overlay

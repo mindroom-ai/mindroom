@@ -22,6 +22,7 @@ from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import mindroom.api.sandbox_env_assembly as sandbox_env_assembly_module
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
@@ -4547,29 +4548,25 @@ def test_workspace_home_contract_runs_before_workspace_env_hook(tmp_path: Path) 
         execution_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
     )
     execution_env = dict(request.execution_env)
-
-    sandbox_runner_module._apply_workspace_home_contract_for_request(
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=None,
-        execution_env=execution_env,
+        None,
         runtime_paths=runtime_paths,
         config=config,
     )
-    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
-        request,
+    result = sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
         prepared=None,
         execution_env=execution_env,
-        runtime_paths=runtime_paths,
-        config=config,
-        apply=True,
     )
 
-    assert failure is None
+    # The hook sees the platform HOME default while sourcing, but the contract
+    # wins in the final env and the hook cannot redirect HOME.
     assert execution_env["HOME"] == str(workspace.resolve())
     assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
-    assert overlay["HOOK_SAW_HOME"] == str(workspace.resolve())
-    assert overlay["HOOK_SAW_AGENT_WORKSPACE"] == str(workspace.resolve())
-    assert overlay["HOME"] == str(workspace.resolve() / "hook-home")
+    assert result.trusted_overlay["HOOK_SAW_HOME"] == str(workspace.resolve())
+    assert result.trusted_overlay["HOOK_SAW_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert "HOME" not in result.trusted_overlay
 
 
 def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_names(tmp_path: Path) -> None:
@@ -4615,13 +4612,17 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
         },
     )
     execution_env = dict(request.execution_env)
-
-    sandbox_runner_module._apply_workspace_home_contract_for_request(
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=prepared,
-        execution_env=execution_env,
+        prepared,
         runtime_paths=runtime_paths,
         config=config,
+    )
+    sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
+        prepared=prepared,
+        execution_env=execution_env,
+        apply_workspace_env_hook=False,
     )
 
     assert execution_env["HOME"] == str(workspace.resolve())
@@ -4670,15 +4671,20 @@ def test_workspace_home_contract_uses_prepared_default_worker_workspace_without_
     )
     execution_env = dict(request.execution_env)
 
-    workspace_home = sandbox_runner_module._apply_workspace_home_contract_for_request(
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=prepared,
-        execution_env=execution_env,
+        prepared,
         runtime_paths=runtime_paths,
         config=config,
     )
+    result = sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
+        prepared=prepared,
+        execution_env=execution_env,
+        apply_workspace_env_hook=False,
+    )
 
-    assert workspace_home == worker_paths.workspace.resolve()
+    assert result.workspace_home == worker_paths.workspace.resolve()
     assert execution_env["HOME"] == str(worker_paths.workspace.resolve())
     assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(worker_paths.workspace.resolve())
     assert execution_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
@@ -4718,12 +4724,17 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
     )
     execution_env: dict[str, str] = {}
 
-    sandbox_runner_module._apply_workspace_home_contract_for_request(
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=prepared,
-        execution_env=execution_env,
+        prepared,
         runtime_paths=runtime_paths,
         config=config,
+    )
+    sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
+        prepared=prepared,
+        execution_env=execution_env,
+        apply_workspace_env_hook=False,
     )
     overlay = {
         "HOME": "/hook-home",
@@ -4739,12 +4750,12 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
         "VIRTUAL_ENV": "/hook-venv",
     }
     execution_env.update(overlay)
-    protected_env = sandbox_runner_module._workspace_home_contract_env(
+    protected_env = sandbox_env_assembly_module._workspace_home_contract_env(
         workspace=workspace.resolve(),
         prepared=prepared,
     )
     execution_env.update(protected_env)
-    trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
+    trusted_overlay = sandbox_env_assembly_module.trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     effective_runtime_paths = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
@@ -4787,7 +4798,7 @@ def test_workspace_home_contract_keys_match_shared_constant(tmp_path: Path) -> N
         runtime_overrides={"base_dir": tmp_path / "workspace"},
     )
 
-    contract = sandbox_runner_module._workspace_home_contract_env(
+    contract = sandbox_env_assembly_module._workspace_home_contract_env(
         workspace=tmp_path / "workspace",
         prepared=prepared,
     )
@@ -5290,18 +5301,21 @@ def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_pat
         function_name="run_shell_command",
         routing_agent_name="general",
     )
-    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
+    execution_env = {"PATH": "/usr/bin:/bin"}
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=None,
-        execution_env={"PATH": "/usr/bin:/bin"},
+        None,
         runtime_paths=runtime_paths,
         config=config,
-        apply=True,
+    )
+    result = sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
+        prepared=None,
+        execution_env=execution_env,
     )
 
-    assert failure is None
-    assert overlay["WORKSPACE_HOOK_TOKEN"] == "from-agent-workspace"  # noqa: S105
-    assert overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
+    assert result.trusted_overlay["WORKSPACE_HOOK_TOKEN"] == "from-agent-workspace"  # noqa: S105
+    assert result.trusted_overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
 
 
 def test_workspace_env_hook_user_agent_routed_request_uses_prepared_private_base_dir(tmp_path: Path) -> None:
@@ -5397,16 +5411,19 @@ def test_workspace_home_contract_filters_worker_names_for_routed_static_sidecar(
     )
     execution_env = dict(request.execution_env)
 
-    workspace_home, trusted_overlay, failure = sandbox_runner_module._build_request_execution_env(
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=None,
-        execution_env=execution_env,
+        None,
         runtime_paths=runtime_paths,
         config=config,
     )
+    result = sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
+        prepared=None,
+        execution_env=execution_env,
+    )
 
-    assert failure is None
-    assert workspace_home == workspace.resolve()
+    assert result.workspace_home == workspace.resolve()
     assert execution_env["HOME"] == str(workspace.resolve())
     assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
     assert execution_env["VIRTUAL_ENV"] == "/runtime-venv"
@@ -5415,7 +5432,7 @@ def test_workspace_home_contract_filters_worker_names_for_routed_static_sidecar(
     assert "UV_CACHE_DIR" not in execution_env
     assert "PYTHONPYCACHEPREFIX" not in execution_env
     assert execution_env["WORKSPACE_TOOLCHAIN_PATH"] == "/hook/bin"
-    assert trusted_overlay == {"WORKSPACE_TOOLCHAIN_PATH": "/hook/bin"}
+    assert result.trusted_overlay == {"WORKSPACE_TOOLCHAIN_PATH": "/hook/bin"}
 
 
 def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
@@ -5540,25 +5557,23 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
         routing_agent_name="general",
     )
     execution_env = {"PATH": "/usr/bin:/bin"}
-    sandbox_runner_module._apply_workspace_home_contract_for_request(
+    request_workspace = sandbox_runner_module._resolve_request_workspace(
         request,
-        prepared=None,
-        execution_env=execution_env,
+        None,
         runtime_paths=runtime_paths,
         config=config,
     )
-    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
-        request,
+    result = sandbox_env_assembly_module.build_request_execution_env(
+        request_workspace=request_workspace,
         prepared=None,
         execution_env=execution_env,
-        runtime_paths=runtime_paths,
-        config=config,
-        apply=True,
     )
 
+    # Non-execution tools resolve no workspace, so neither the HOME contract nor
+    # the (deliberately failing) hook run.
+    assert request_workspace is None
     assert execution_env == {"PATH": "/usr/bin:/bin"}
-    assert overlay == {}
-    assert failure is None
+    assert result.trusted_overlay == {}
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
