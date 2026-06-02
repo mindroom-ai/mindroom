@@ -9,9 +9,7 @@ import os
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from typing import TYPE_CHECKING, cast
-from weakref import WeakValueDictionary
 
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
@@ -49,30 +47,13 @@ class _IndexedFile:
     size: int
 
 
-_index_locks_guard = Lock()
-_index_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-
-
 def _safe_identifier(value: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
     return sanitized or "default"
 
 
-def _index_lock_key(index_path: Path, collection_name: str) -> str:
-    return f"{index_path.resolve()}\0{collection_name}"
-
-
 def _index_file_lock_path(index_path: Path) -> Path:
     return index_path / ".semantic-memory-index.lock"
-
-
-def _index_lock_for(key: str) -> asyncio.Lock:
-    with _index_locks_guard:
-        lock = _index_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _index_locks[key] = lock
-        return lock
 
 
 def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
@@ -293,10 +274,9 @@ async def search_semantic_file_memories(
             embedder=create_configured_embedder(config, runtime_paths),
         ),
     )
-    async with (
-        _index_lock_for(_index_lock_key(index_path, collection_name)),
-        async_exclusive_file_lock(_index_file_lock_path(index_path)),
-    ):
+    # One advisory file lock serializes index build + search per scope across both
+    # coroutines (flock contends across separate open descriptions) and processes.
+    async with async_exclusive_file_lock(_index_file_lock_path(index_path)):
         await asyncio.to_thread(
             _ensure_index_current,
             knowledge,
