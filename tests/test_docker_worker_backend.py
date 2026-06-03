@@ -104,6 +104,7 @@ class _FakeContainer:
         self.started = 0
         self.stopped = 0
         self.removed = 0
+        self.logs_output: bytes = b""
 
     def reload(self) -> None:
         self.attrs["State"]["Status"] = self.status
@@ -123,6 +124,10 @@ class _FakeContainer:
         assert force is True
         self.removed += 1
         self.status = "removed"
+
+    def logs(self, *, tail: int = 100) -> bytes:
+        assert tail > 0
+        return self.logs_output
 
 
 class _FakeContainersApi:
@@ -1882,6 +1887,48 @@ def test_docker_backend_records_failure_and_stops_container(
     container = next(iter(fake_client.containers.by_name.values()))
     assert container.stopped == 1
     assert container.status == "exited"
+
+
+def test_docker_worker_ready_failure_surfaces_container_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker that exits during startup should surface its container logs in the error."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    container = _FakeContainer(
+        name="mindroom-worker-x",
+        image="img",
+        image_identity="sha256:x",
+        host_port=44999,
+        environment={},
+        labels={},
+        user=None,
+        status="exited",
+    )
+    container.logs_output = b"ValidationError: agents.code.display_name Field required"
+
+    # Call the real implementation; _backend patches the instance attribute.
+    with pytest.raises(WorkerBackendError, match="display_name"):
+        DockerWorkerBackend._wait_for_ready(backend, container)
+
+
+def test_docker_backend_cleanup_reaps_abandoned_failed_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Idle cleanup should reap the exited container of a failed, idle-timed-out worker."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    backend.record_failure(_TEST_UNSCOPED_WORKER_KEY, "boom", now=1.0)
+    container = next(iter(fake_client.containers.by_name.values()))
+
+    # A recently failed worker keeps its exited container for a quick restart.
+    backend.cleanup_idle_workers(now=10.0)
+    assert container.removed == 0
+
+    # Once past the idle timeout it is abandoned, so the container is reaped.
+    backend.cleanup_idle_workers(now=1.0 + 61.0)
+    assert container.removed == 1
 
 
 def test_docker_backend_preserving_evict_clears_stale_failure_reason(

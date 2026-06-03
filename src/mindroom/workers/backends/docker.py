@@ -85,6 +85,8 @@ if TYPE_CHECKING:
 
         def remove(self, force: bool = True) -> None: ...
 
+        def logs(self, *, tail: int = ...) -> bytes: ...
+
     class _DockerContainersApi(Protocol):
         def get(self, name: str) -> _DockerContainer: ...
 
@@ -544,15 +546,24 @@ class DockerWorkerBackend:
                 container = self._read_container(metadata.container_name)
                 metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
                 handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
-                if handle.status != "idle" or not self._container_is_running(container):
-                    continue
-                self._stop_container(container)
-                write_lifecycle_state(
-                    metadata,
-                    mark_worker_idle(read_lifecycle_state(metadata)),
-                )
-                self._save_metadata(paths, metadata)
-                cleaned.append(self._to_handle(metadata, container, now=timestamp, paths=paths))
+                idle_timed_out = timestamp - metadata.last_used_at >= self.idle_timeout_seconds
+                if handle.status == "idle" and self._container_is_running(container):
+                    self._stop_container(container)
+                    write_lifecycle_state(
+                        metadata,
+                        mark_worker_idle(read_lifecycle_state(metadata)),
+                    )
+                    self._save_metadata(paths, metadata)
+                    cleaned.append(self._to_handle(metadata, container, now=timestamp, paths=paths))
+                elif handle.status == "failed" and container is not None and idle_timed_out:
+                    # A worker that failed and was never revived keeps its exited
+                    # container so a quick retry can restart it. Once it is past the
+                    # idle timeout it is abandoned, so reap the container to stop
+                    # stale failures from accumulating; the failed metadata is kept
+                    # and a later ensure recreates the container.
+                    self._stop_container(container)
+                    self._remove_container(container)
+                    self._reconcile_missing_container_metadata(paths, metadata, None)
         return sorted(cleaned, key=lambda handle: handle.last_used_at, reverse=True)
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
@@ -784,7 +795,7 @@ class DockerWorkerBackend:
             while True:
                 self._reload_container(container)
                 if not self._container_is_running(container):
-                    msg = "Docker worker stopped before it became ready."
+                    msg = "Docker worker stopped before it became ready." + self._container_logs_excerpt(container)
                     raise WorkerBackendError(msg)
 
                 try:
@@ -796,7 +807,10 @@ class DockerWorkerBackend:
                     return f"{endpoint_root}/api/sandbox-runner/execute"
 
                 if time.time() >= deadline:
-                    msg = f"Docker worker did not become ready within {self.config.ready_timeout_seconds:.0f}s."
+                    msg = (
+                        f"Docker worker did not become ready within {self.config.ready_timeout_seconds:.0f}s."
+                        + self._container_logs_excerpt(container)
+                    )
                     raise WorkerBackendError(msg)
                 time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
@@ -1089,6 +1103,24 @@ class DockerWorkerBackend:
             if isinstance(state_status, str):
                 return state_status
         return None
+
+    def _container_logs_excerpt(self, container: _DockerContainer, *, tail: int = 50) -> str:
+        """Return a short tail of a worker container's logs for failure diagnostics.
+
+        A worker that exits during startup (for example because its projected
+        config fails validation) only records the cause in its own logs, so the
+        backend surfaces that tail in the raised error instead of forcing
+        operators to inspect the container by hand.
+        """
+        try:
+            raw_logs = container.logs(tail=tail)
+        except self._docker_errors.DockerException:
+            return ""
+        text = raw_logs.decode("utf-8", errors="replace") if isinstance(raw_logs, bytes) else str(raw_logs)
+        text = text.strip()
+        if not text:
+            return ""
+        return f"\nRecent worker container logs:\n{text}"
 
     def _container_is_running(self, container: _DockerContainer | None) -> bool:
         if container is None:
