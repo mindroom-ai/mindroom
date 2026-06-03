@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import httpx
 
-from mindroom.constants import execution_tool_runtime_env_values, sandbox_shell_execution_runtime_env_values
+from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -62,7 +62,6 @@ if TYPE_CHECKING:
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-_EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
@@ -448,17 +447,14 @@ def _execution_env_payload(
     extra_env_passthrough: str | None = None,
 ) -> dict[str, str] | None:
     """Return explicit execution env only for tools that intentionally support it."""
-    if tool_name not in _EXECUTION_ENV_TOOL_NAMES:
+    if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return None
-    if tool_name == "shell":
-        return dict(
-            sandbox_shell_execution_runtime_env_values(
-                runtime_paths,
-                extra_env_passthrough=extra_env_passthrough,
-                process_env=runtime_paths.process_env,
-            ),
-        )
-    return dict(execution_tool_runtime_env_values(runtime_paths))
+    return build_execution_tool_env(
+        tool_name,
+        runtime_paths,
+        extra_env_passthrough=extra_env_passthrough,
+        shell_process_env=runtime_paths.process_env,
+    )
 
 
 def attachment_save_uses_worker(

@@ -470,9 +470,9 @@ class TestCredentialsSync:
             public_runtime["process_env"],
             public_runtime["env_file_values"],
             constants_mod.trusted_tool_runtime_env_values(runtime_paths),
-            constants_mod.execution_tool_runtime_env_values(runtime_paths),
+            constants_mod._execution_tool_runtime_env_values(runtime_paths),
             constants_mod.trusted_tool_runtime_env_values(isolated_runtime),
-            constants_mod.execution_tool_runtime_env_values(isolated_runtime),
+            constants_mod._execution_tool_runtime_env_values(isolated_runtime),
         ]
 
         assert isolated_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) == "encryption-key-material"

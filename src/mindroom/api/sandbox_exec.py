@@ -45,7 +45,7 @@ _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
-EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
+EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
 
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
@@ -157,20 +157,17 @@ def request_execution_env(
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
         return {key: value for key, value in execution_env.items() if key not in protected_env_names}
-    if tool_name == "shell":
-        source_env = (
-            runtime_paths.process_env
-            if runner_uses_dedicated_worker(runtime_paths)
-            else {**os.environ, **runtime_paths.process_env}
-        )
-        return dict(
-            constants.sandbox_shell_execution_runtime_env_values(
-                runtime_paths,
-                extra_env_passthrough=extra_env_passthrough,
-                process_env=source_env,
-            ),
-        )
-    return dict(constants.execution_tool_runtime_env_values(runtime_paths))
+    shell_process_env = (
+        runtime_paths.process_env
+        if runner_uses_dedicated_worker(runtime_paths)
+        else {**os.environ, **runtime_paths.process_env}
+    )
+    return constants.build_execution_tool_env(
+        tool_name,
+        runtime_paths,
+        extra_env_passthrough=extra_env_passthrough,
+        shell_process_env=shell_process_env,
+    )
 
 
 def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:

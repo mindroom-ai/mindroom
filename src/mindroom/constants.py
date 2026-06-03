@@ -589,7 +589,7 @@ def trusted_tool_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
     process_env = runtime_env_policy.execution_tool_runtime_env(runtime_paths.process_env)
     env_file_values = runtime_env_policy.execution_tool_runtime_env(runtime_paths.env_file_values)
@@ -641,7 +641,7 @@ def runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | No
     return path
 
 
-def sandbox_shell_execution_runtime_env_values(
+def _sandbox_shell_execution_runtime_env_values(
     runtime_paths: RuntimePaths,
     *,
     extra_env_passthrough: str | None = None,
@@ -660,6 +660,34 @@ def sandbox_shell_execution_runtime_env_values(
         ),
     )
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
+
+
+def build_execution_tool_env(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    extra_env_passthrough: str | None = None,
+    shell_process_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the from-scratch execution env for an execution tool (shell or python).
+
+    Callers gate on :data:`EXECUTION_ENV_TOOL_NAMES` first. The shell
+    ``process_env`` source differs between the client proxy (which only trusts
+    the runtime paths) and the worker runner (which may merge ``os.environ``),
+    so it is supplied by the caller.
+    """
+    if tool_name == "shell":
+        return dict(
+            _sandbox_shell_execution_runtime_env_values(
+                runtime_paths,
+                extra_env_passthrough=extra_env_passthrough,
+                process_env=shell_process_env,
+            ),
+        )
+    return dict(_execution_tool_runtime_env_values(runtime_paths))
 
 
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
