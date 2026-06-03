@@ -484,6 +484,44 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
     ).is_dir()
 
 
+def test_docker_worker_projection_rewrites_mapping_plugin_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mapping-style plugin entries must be copied into the worker projection."""
+    plugin_root = tmp_path / "plugins" / "mapped-plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "plugin.py").write_text("PLUGIN_VERSION = 'mapped'\n", encoding="utf-8")
+    config_text = """
+plugins:
+  - path: ./plugins/mapped-plugin
+    enabled: true
+agents: {}
+models:
+  default:
+    provider: openai
+    id: test-model
+router:
+  model: default
+""".lstrip()
+
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+    )
+    projection = backend._projection_manager.projected_config(
+        local_worker_state_paths_for_root(tmp_path / "workers" / "mapped-plugin"),
+        materialize=True,
+    )
+
+    projected_config = (projection.root / "config.yaml").read_text(encoding="utf-8")
+    assert "path: ./.mindroom-worker-assets/plugins/00-mapped-plugin" in projected_config
+    assert "enabled: true" in projected_config
+    projected_plugin_path = projection.root / ".mindroom-worker-assets" / "plugins" / "00-mapped-plugin" / "plugin.py"
+    assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'mapped'\n"
+
+
 def _backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

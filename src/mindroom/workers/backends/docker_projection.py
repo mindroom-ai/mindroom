@@ -641,23 +641,40 @@ class DockerProjectionManager:
 
         plugins = cast("list[object]", raw_plugins)
         for index, raw_plugin in enumerate(plugins):
-            if not isinstance(raw_plugin, str) or not _plugin_uses_filesystem_path(
-                raw_plugin,
+            raw_plugin_path = self._plugin_path_value(raw_plugin)
+            if raw_plugin_path is None or not _plugin_uses_filesystem_path(
+                raw_plugin_path,
                 runtime_paths=self._runtime_paths,
             ):
                 continue
-            host_path = config_relative_path(raw_plugin, self._runtime_paths)
-            plugins[index] = self._projected_path_value(
+            host_path = config_relative_path(raw_plugin_path, self._runtime_paths)
+            projected_path = self._projected_path_value(
                 host_path,
                 PurePosixPath(
                     _PROJECTED_ASSETS_DIRNAME,
                     "plugins",
-                    f"{index:02d}-{_projection_display_name(host_path, fallback=raw_plugin)}",
+                    f"{index:02d}-{_projection_display_name(host_path, fallback=raw_plugin_path)}",
                 ),
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
+            # Config accepts either `- ./plugin` or `- path: ./plugin`.
+            # Keep mapping metadata intact, but make the worker-visible path point
+            # at the copied projection so plugin validation can run in the worker.
+            if isinstance(raw_plugin, dict):
+                cast("dict[str, object]", raw_plugin)["path"] = projected_path
+            else:
+                plugins[index] = projected_path
+
+    @staticmethod
+    def _plugin_path_value(raw_plugin: object) -> str | None:
+        if isinstance(raw_plugin, str):
+            return raw_plugin
+        if not isinstance(raw_plugin, dict):
+            return None
+        raw_path = cast("dict[str, object]", raw_plugin).get("path")
+        return raw_path if isinstance(raw_path, str) else None
 
     def _rewrite_projected_knowledge_paths(
         self,
