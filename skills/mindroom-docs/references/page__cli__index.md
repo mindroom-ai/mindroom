@@ -457,6 +457,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ edit       Open config.yaml in your default editor.                                    │
 │ validate   Validate config.yaml and check for common issues.                           │
 │ path       Show the resolved config file path and search locations.                    │
+│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
