@@ -25,5 +25,6 @@ register_builtin_tool_metadata(
         icon_color="text-sky-500",
         config_fields=[],
         dependencies=[],
+        function_names=("list_tools", "load_tool", "unload_tool", "tool_search"),
     ),
 )

@@ -1020,6 +1020,47 @@ async def test_mcp_manager_marks_local_function_name_collisions_as_failed(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_marks_direct_builtin_function_name_collisions_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject MCP functions that collide with direct built-in tool functions."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("memory")]
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "tool_prefix": "add",
+                },
+            },
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Write code",
+                    "tools": ["memory", "mcp_demo"],
+                    "memory_backend": "file",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    manager = MCPServerManager(runtime_paths)
+
+    changed = await manager.sync_servers(config)
+
+    assert changed == set()
+    assert manager.failed_server_ids() == {"demo"}
+    error = manager._states["demo"].last_error
+    assert isinstance(error, MCPProtocolError)
+    assert "add_memory" in str(error)
+    assert "existing MindRoom tool function" in str(error)
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_ignores_deferred_unloaded_local_function_collisions_at_startup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

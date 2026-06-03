@@ -29,7 +29,7 @@ from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url, oauth_credentials_usable
-from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
 if TYPE_CHECKING:
@@ -908,15 +908,28 @@ class MCPServerManager:
         return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
 
     @staticmethod
-    def _special_tool_function_names(tool_names: set[str]) -> set[str]:
-        """Return provider-visible function names for special control-plane tools."""
+    def _metadata_only_tool_function_names(tool_name: str, *, config: Config, agent_name: str) -> set[str]:
+        """Return provider-visible names for context-built tools declared in metadata."""
+        metadata = TOOL_METADATA.get(tool_name)
+        if metadata is None or metadata.factory is not None:
+            return set()
+        if tool_name == "memory" and config.get_agent_memory_backend(agent_name) == "none":
+            return set()
+        return set(metadata.function_names)
+
+    def _metadata_only_tool_function_names_for_surface(
+        self,
+        tool_names: set[str],
+        *,
+        config: Config,
+        agent_name: str,
+    ) -> set[str]:
+        """Return provider-visible function names for metadata-only configured tools."""
         function_names: set[str] = set()
-        if "delegate" in tool_names:
-            function_names.add("delegate_task")
-        if "self_config" in tool_names:
-            function_names.update({"get_own_config", "update_own_config"})
-        if "dynamic_tools" in tool_names:
-            function_names.update({"list_tools", "load_tool", "unload_tool", "tool_search"})
+        for tool_name in sorted(tool_names):
+            function_names.update(
+                self._metadata_only_tool_function_names(tool_name, config=config, agent_name=agent_name),
+            )
         return function_names
 
     def _tool_function_names_for_local_tools(
@@ -961,13 +974,21 @@ class MCPServerManager:
             self._configured_tool_configs(agent_name, loaded_tools=loaded_tools),
         )
         local_tool_names = {entry.name for entry in local_tool_configs}
-        function_names = self._special_tool_function_names(local_tool_names)
+        function_names = self._metadata_only_tool_function_names_for_surface(
+            local_tool_names,
+            config=config,
+            agent_name=agent_name,
+        )
         function_names.update(
             self._tool_function_names_for_local_tools(
                 [
                     entry
                     for entry in local_tool_configs
-                    if entry.name not in {"delegate", "self_config", "dynamic_tools"}
+                    if not self._metadata_only_tool_function_names(
+                        entry.name,
+                        config=config,
+                        agent_name=agent_name,
+                    )
                 ],
                 get_tool_by_name=get_tool_by_name,
             ),
