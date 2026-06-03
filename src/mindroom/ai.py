@@ -1649,12 +1649,31 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                         continue
 
-                    if state.user_error is not None:
-                        yield get_user_friendly_error_message(state.user_error, agent_name)
-                        return
-
-                    if state.stream_exception is not None:
-                        yield get_user_friendly_error_message(state.stream_exception, agent_name)
+                    run_error = state.user_error or state.stream_exception
+                    if run_error is not None:
+                        if state.assistant_text or state.completed_tools or state.pending_tools:
+                            interrupted_tools = [pending.trace_entry for pending in state.pending_tools]
+                            if turn_recorder is not None:
+                                turn_recorder.record_interrupted(
+                                    run_metadata=metadata,
+                                    assistant_text=state.assistant_text,
+                                    completed_tools=state.completed_tools,
+                                    interrupted_tools=interrupted_tools,
+                                )
+                            elif not standalone_interrupted_replay_persisted:
+                                persist_interrupted_replay(
+                                    scope_context=scope_context,
+                                    session_id=session_id,
+                                    run_id=attempt_run_id or str(uuid4()),
+                                    user_message=prompt,
+                                    partial_text=state.assistant_text,
+                                    completed_tools=state.completed_tools,
+                                    interrupted_tools=interrupted_tools,
+                                    run_metadata=metadata,
+                                    is_team=False,
+                                )
+                                standalone_interrupted_replay_persisted = True
+                        yield get_user_friendly_error_message(run_error, agent_name)
                         return
 
                     if state.cancelled_run_event is not None:

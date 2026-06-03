@@ -1630,6 +1630,16 @@ class ResponseRunner:
                 )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
+                if turn_recorder.outcome == "interrupted":
+                    self._persist_interrupted_recorder(
+                        recorder=turn_recorder,
+                        session_scope=self.deps.state_writer.history_scope(),
+                        session_id=runtime.session_id,
+                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        run_id=run_id,
+                        is_team=False,
+                        response_event_id=request.existing_event_id,
+                    )
                 return transport_outcome
         except asyncio.CancelledError:
             self._persist_interrupted_recorder(
