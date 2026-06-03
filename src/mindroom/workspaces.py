@@ -84,7 +84,7 @@ def validate_local_copy_source_dir(
         field_name=field_name,
     )
     if not resolved_source_dir.is_dir():
-        msg = f"{field_name} does not exist: {resolved_source_dir}"
+        msg = f"{field_name} is not a directory: {resolved_source_dir}"
         raise ValueError(msg)
     for source_path, _ in iter_local_copy_source_entries(resolved_source_dir):
         if source_path.is_symlink():
