@@ -1382,6 +1382,79 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     ]
 
 
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_persists_interrupted_history_when_model_stream_errors(
+    tmp_path: Path,
+) -> None:
+    """Model stream errors returned as text should still persist interrupted replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    mock_agent = MagicMock()
+    mock_agent.model = MagicMock()
+    mock_agent.model.__class__.__name__ = "OpenAIChat"
+    mock_agent.model.id = "test-model"
+    mock_agent.name = "GeneralAgent"
+    mock_agent.add_history_to_context = False
+
+    completed_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="run_shell_command",
+        tool_args={"cmd": "pwd"},
+        result="/app",
+    )
+
+    async def errored_agent_stream() -> AsyncIterator[object]:
+        yield RunContentEvent(content="Partial answer")
+        yield ToolCallStartedEvent(tool=completed_tool)
+        yield ToolCallCompletedEvent(tool=completed_tool)
+        yield RunErrorEvent(content="Error code: 500 - provider exploded")
+
+    mock_agent.arun = MagicMock(return_value=errored_agent_stream())
+
+    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery(request: object) -> StreamTransportOutcome:
+            rendered = "".join([str(chunk) async for chunk in request.response_stream])
+            request.visible_event_id_callback("$streamed")
+            return _stream_outcome("$streamed", rendered)
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            run_id="run-1",
+        )
+
+    assert delivery.event_id == "$streamed"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "run-1"
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["matrix_response_event_id"] == "$streamed"
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        (
+            "assistant",
+            "Partial answer\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
+        ),
+    ]
+
+
 def test_strip_visible_tool_markers_handles_blank_lined_markers() -> None:
     """The tool-marker stripper should leave bodies intact when markers are followed by blank lines."""
     text = "Intro\n\n🔧 `run_shell_command` [1]\n\n---\n\nBody"
