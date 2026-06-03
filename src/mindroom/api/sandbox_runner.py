@@ -312,16 +312,6 @@ def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Con
     ensure_tool_registry_loaded(runtime_paths, config)
 
 
-def _runner_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
-    """Return the sandbox runner's persisted credential manager."""
-    return get_runtime_credentials_manager(runtime_paths)
-
-
-def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozenset[str] | None:
-    """Return the explicit user-agent visibility snapshot carried by one request."""
-    return _freeze_private_agent_names(request.private_agent_names)
-
-
 def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
     """Freeze one optional private-agent visibility snapshot."""
     if private_agent_names is None:
@@ -393,13 +383,13 @@ def _subprocess_credential_overrides(
         return request.credential_overrides
     persisted_credentials = load_scoped_credentials(
         request.tool_name,
-        credentials_manager=_runner_credentials_manager(runtime_paths),
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=build_worker_target_from_runtime_env(
             request.worker_scope,
             request.routing_agent_name,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
-            private_agent_names=_request_private_agent_names(request),
+            private_agent_names=_freeze_private_agent_names(request.private_agent_names),
         ),
         allowed_shared_services=(
             config.get_worker_grantable_credentials() if request.worker_scope is not None else None
@@ -576,21 +566,6 @@ def app_runner_token(app: FastAPI) -> str | None:
     return runner_token
 
 
-def _sandbox_runner_runtime_paths(request: Request) -> RuntimePaths:
-    """Return the committed runtime paths for one sandbox runner request."""
-    return app_runtime_paths(request.app)
-
-
-def _sandbox_runner_runtime_config(request: Request) -> Config:
-    """Return the committed validated config for one sandbox runner request."""
-    return app_runtime_config(request.app)
-
-
-def _sandbox_runner_tool_metadata(request: Request) -> dict[str, Any]:
-    """Return the committed tool metadata snapshot for one sandbox runner request."""
-    return _app_tool_metadata(request.app)
-
-
 async def _validate_runner_token(
     request: Request,
     x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
@@ -725,7 +700,7 @@ def _resolve_entrypoint(
             runtime_paths=runtime_paths,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
-            credentials_manager=credentials_manager or _runner_credentials_manager(runtime_paths),
+            credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
@@ -908,7 +883,7 @@ def _prepare_execute_request(
         worker_key=request.worker_key,
         tool_init_overrides=request.tool_init_overrides,
         runtime_paths=runtime_paths,
-        private_agent_names=_request_private_agent_names(request),
+        private_agent_names=_freeze_private_agent_names(request.private_agent_names),
         prepared_worker=prepared_worker,
         runner_token=runner_token,
     )
@@ -1055,7 +1030,7 @@ async def _execute_prepared_request_inprocess(
                 tool_config_overrides=prepared.tool_config_overrides or None,
                 tool_init_overrides=prepared.tool_init_overrides or None,
                 runtime_overrides=prepared.runtime_overrides or None,
-                credentials_manager=credentials_manager or _runner_credentials_manager(runtime_paths),
+                credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
                 worker_scope=prepared.worker_scope,
                 routing_agent_name=prepared.routing_agent_name,
                 private_agent_names=private_agent_names,
@@ -1068,7 +1043,7 @@ async def _execute_prepared_request_inprocess(
                 function_name=prepared.function_name,
                 provider_id=exc.provider_id,
             )
-            return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
+            return SandboxRunnerExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
 
         try:
             result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
@@ -1079,7 +1054,7 @@ async def _execute_prepared_request_inprocess(
                 function_name=prepared.function_name,
                 provider_id=exc.provider_id,
             )
-            return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
+            return SandboxRunnerExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
         except Exception as exc:
             logger.warning(
                 "sandbox_tool_execution_failed",
@@ -1094,11 +1069,6 @@ async def _execute_prepared_request_inprocess(
             )
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
-
-
-def _oauth_connection_required_result(exc: OAuthConnectionRequired) -> dict[str, object]:
-    """Serialize OAuthConnectionRequired as the same structured tool result used in-process."""
-    return oauth_connection_required_payload(exc)
 
 
 async def _execute_request_inprocess(
@@ -1127,7 +1097,7 @@ async def _execute_request_inprocess(
         prepared_request.request,
         prepared_request.runtime_paths,
         config,
-        credentials_manager=_runner_credentials_manager(runtime_paths),
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
     )
 
 
@@ -1317,7 +1287,7 @@ async def create_credential_lease(
 @router.get("/workers", response_model=SandboxWorkerListResponse)
 async def list_workers(request: Request, include_idle: bool = True) -> SandboxWorkerListResponse:
     """List known workers and their current lifecycle status."""
-    runtime_paths = _sandbox_runner_runtime_paths(request)
+    runtime_paths = app_runtime_paths(request.app)
     workers = [
         serialize_sandbox_worker_response(worker)
         for worker in get_local_worker_manager(runtime_paths).list_workers(include_idle=include_idle)
@@ -1328,7 +1298,7 @@ async def list_workers(request: Request, include_idle: bool = True) -> SandboxWo
 @router.post("/workers/cleanup", response_model=SandboxWorkerCleanupResponse)
 async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Mark idle workers inactive while retaining their persisted state."""
-    runtime_paths = _sandbox_runner_runtime_paths(request)
+    runtime_paths = app_runtime_paths(request.app)
     worker_manager = get_local_worker_manager(runtime_paths)
     cleaned_workers = [serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()]
     return SandboxWorkerCleanupResponse(
@@ -1390,8 +1360,8 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     payload: SandboxRunnerSaveAttachmentRequest,
 ) -> SandboxRunnerSaveAttachmentResponse:
     """Save one context-authorized attachment into the prepared worker workspace."""
-    runtime_paths = _sandbox_runner_runtime_paths(request)
-    config = _sandbox_runner_runtime_config(request)
+    runtime_paths = app_runtime_paths(request.app)
+    config = app_runtime_config(request.app)
     runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
@@ -1487,9 +1457,9 @@ async def execute_tool_call(
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
-    runtime_paths = _sandbox_runner_runtime_paths(request)
-    config = _sandbox_runner_runtime_config(request)
-    tool_metadata = _sandbox_runner_tool_metadata(request)
+    runtime_paths = app_runtime_paths(request.app)
+    config = app_runtime_config(request.app)
+    tool_metadata = _app_tool_metadata(request.app)
     runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
@@ -1509,7 +1479,7 @@ async def execute_tool_call(
                 worker_key=payload.worker_key,
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
-                private_agent_names=_request_private_agent_names(payload),
+                private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:

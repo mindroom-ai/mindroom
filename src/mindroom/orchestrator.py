@@ -73,7 +73,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, set_primary_worker_storage_path
+from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -2118,8 +2118,8 @@ async def main(  # noqa: PLR0915
     api_task: asyncio.Task[None] | None = None
 
     try:
-        # Scope dedicated worker state to the active runtime before startup work runs.
-        set_primary_worker_storage_path(storage_path)
+        # Drop any stale worker manager before startup work builds the active runtime.
+        shutdown_primary_worker_manager(timeout_seconds=0.0)
 
         # Configure logging before any background tasks or account setup begin.
         setup_logging(level=log_level, runtime_paths=runtime_paths)
@@ -2206,4 +2206,4 @@ async def main(  # noqa: PLR0915
         finally:
             reset_matrix_sync_health()
             reset_runtime_state()
-            set_primary_worker_storage_path(None)
+            shutdown_primary_worker_manager()

@@ -373,16 +373,7 @@ def is_worker_extra_env_name(name: str) -> bool:
 
 def public_worker_startup_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return the env safe to serialize into public worker startup manifests."""
-    return {
-        key: value
-        for key, value in env.items()
-        if is_public_worker_startup_env_name(key) or _is_worker_projected_file_secret_env(key, value)
-    }
-
-
-def _is_worker_projected_file_secret_env(name: str, value: str) -> bool:
-    """Return whether an env var points at a copied worker-local file secret."""
-    return name.endswith("_FILE") and "/.runtime/file-secrets/" in value
+    return {key: value for key, value in env.items() if is_public_worker_startup_env_name(key)}
 
 
 def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:

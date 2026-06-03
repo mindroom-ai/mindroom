@@ -180,6 +180,33 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
     }
 
 
+def test_public_runtime_paths_keep_only_worker_local_file_secret_paths(tmp_path: Path) -> None:
+    """Copied worker-local file-secret paths are public only inside the worker storage root."""
+    storage_root = tmp_path / "worker"
+    projected_secret = storage_root / ".runtime" / "file-secrets" / "OPENAI_API_KEY_FILE" / "openai.key"
+    stray_secret = tmp_path / "other" / ".runtime" / "file-secrets" / "GITHUB_TOKEN_FILE" / "token"
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={
+            "OPENAI_API_KEY_FILE": str(projected_secret),
+            "GITHUB_TOKEN_FILE": str(stray_secret),
+            "MATRIX_HOMESERVER": "https://matrix.example.invalid",
+        },
+    )
+
+    assert runtime_env_policy.public_worker_startup_env(runtime_paths.process_env) == {
+        "MATRIX_HOMESERVER": "https://matrix.example.invalid",
+    }
+
+    public_runtime = constants.serialize_public_runtime_paths(runtime_paths)
+
+    assert public_runtime["process_env"] == {
+        "MATRIX_HOMESERVER": "https://matrix.example.invalid",
+        "OPENAI_API_KEY_FILE": str(projected_secret),
+    }
+
+
 def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
     """Explicit broad shell passthrough still denies runtime control material."""
     env = {

@@ -297,10 +297,30 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
+def _worker_projected_file_secret_env(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> dict[str, str]:
+    """Return worker-local file-secret paths safe to name in public startup payloads."""
+    file_secret_root = (runtime_paths.storage_root / ".runtime" / "file-secrets").resolve()
+    projected_env: dict[str, str] = {}
+    for name, raw_value in env.items():
+        if not name.endswith("_FILE"):
+            continue
+        path = Path(raw_value).expanduser()
+        if not path.is_absolute():
+            continue
+        try:
+            path.resolve().relative_to(file_secret_root)
+        except ValueError:
+            continue
+        projected_env[name] = raw_value
+    return projected_env
+
+
 def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = runtime_env_policy.public_worker_startup_env(runtime_paths.process_env)
     env_file_values = runtime_env_policy.public_worker_startup_env(runtime_paths.env_file_values)
+    process_env.update(_worker_projected_file_secret_env(runtime_paths, runtime_paths.process_env))
+    env_file_values.update(_worker_projected_file_secret_env(runtime_paths, runtime_paths.env_file_values))
     return {
         "config_path": str(runtime_paths.config_path),
         "storage_root": str(runtime_paths.storage_root),
@@ -642,17 +662,12 @@ def runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | No
 
 
 def _sandbox_shell_execution_runtime_env_values(
-    runtime_paths: RuntimePaths,
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied shell execution."""
     merged_env = dict(_sandbox_shell_system_env_values(process_env=process_env))
-    for name in ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SERVICE_ACCOUNT_FILE", "OPENAI_API_KEY_FILE"):
-        source_path = runtime_env_source_path(runtime_paths, name)
-        if source_path is not None:
-            merged_env[name] = str(source_path.resolve())
     merged_env.update(
         shell_extra_env_values(
             extra_env_passthrough=extra_env_passthrough,
@@ -682,7 +697,6 @@ def build_execution_tool_env(
     if tool_name == "shell":
         return dict(
             _sandbox_shell_execution_runtime_env_values(
-                runtime_paths,
                 extra_env_passthrough=extra_env_passthrough,
                 process_env=shell_process_env,
             ),

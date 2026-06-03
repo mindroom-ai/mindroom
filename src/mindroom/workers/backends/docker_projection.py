@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
+from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
@@ -547,8 +548,6 @@ class DockerProjectionManager:
         }
         if not agent_mappings:
             return {}
-
-        from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index  # noqa: PLC0415
 
         seeds = build_agent_policy_seeds(
             agent_mappings,

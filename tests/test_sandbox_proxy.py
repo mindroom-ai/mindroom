@@ -35,7 +35,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     RuntimePaths,
-    _sandbox_shell_execution_runtime_env_values,
+    build_execution_tool_env,
     isolated_runtime_paths,
     resolve_runtime_paths,
     shell_execution_runtime_env_values,
@@ -70,7 +70,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.local import _local_worker_state_paths_for_root
+from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
@@ -885,7 +885,7 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
         session_id="session-1",
     )
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
-    worker_paths = _local_worker_state_paths_for_root(tmp_path / "worker-scratch")
+    worker_paths = local_worker_state_paths_for_root(tmp_path / "worker-scratch")
     worker_paths.workspace.mkdir(parents=True, exist_ok=True)
     prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle(
@@ -1076,7 +1076,11 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
     payload_bytes = b"attachment-bytes"
     sha256 = hashlib.sha256(payload_bytes).hexdigest()
 
-    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", lambda *_args, **_kwargs: manager)
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -1173,7 +1177,11 @@ def test_save_attachment_to_worker_rejects_bad_receipts(
     )
     worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
 
-    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", lambda *_args, **_kwargs: manager)
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(responder=lambda _url, _json: response_payload),
@@ -1218,7 +1226,11 @@ def test_save_attachment_to_worker_request_failure_does_not_record_worker_failur
     )
     worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
 
-    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", lambda *_args, **_kwargs: manager)
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -1776,10 +1788,11 @@ def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
     )
 
     worker_paths = isolated_runtime_paths(runtime_paths)
-    shell_env = _sandbox_shell_execution_runtime_env_values(
+    shell_env = build_execution_tool_env(
+        "shell",
         worker_paths,
         extra_env_passthrough="OPENAI_API_KEY",
-        process_env=runtime_paths.process_env,
+        shell_process_env=runtime_paths.process_env,
     )
 
     assert worker_paths.env_value("OPENAI_API_KEY") is None
@@ -1799,10 +1812,11 @@ def test_worker_env_includes_extra_env_passthrough(tmp_path: Path) -> None:
     )
 
     worker_paths = isolated_runtime_paths(runtime_paths)
-    shell_env = _sandbox_shell_execution_runtime_env_values(
+    shell_env = build_execution_tool_env(
+        "shell",
         worker_paths,
         extra_env_passthrough="MY_VAR",
-        process_env=runtime_paths.process_env,
+        shell_process_env=runtime_paths.process_env,
     )
 
     assert worker_paths.env_value("MY_VAR") is None
@@ -2295,8 +2309,9 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
         function_name: str,
         worker_target: ResolvedWorkerTarget | None,
         worker_manager: object | None = None,
+        progress_sink: object = None,
     ) -> tuple[dict[str, object], WorkerHandle | None]:
-        _ = worker_target
+        _ = worker_target, progress_sink
         assert runtime_paths is not None
         assert tool_name == "calculator"
         assert function_name == "add"
@@ -2389,8 +2404,9 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
         function_name: str,
         worker_target: ResolvedWorkerTarget | None,
         worker_manager: object | None = None,
+        progress_sink: object = None,
     ) -> tuple[dict[str, object], WorkerHandle | None]:
-        _ = runtime_paths, worker_target
+        _ = runtime_paths, worker_target, progress_sink
         assert tool_name == "calculator"
         assert function_name == "add"
         assert worker_manager is worker_manager_ref
@@ -2812,8 +2828,14 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypa
             self.ensured_handle = ensured_handle
             self.ensure_calls: list[str] = []
 
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
-            _ = now
+        def ensure_worker(
+            self,
+            spec: WorkerSpec,
+            *,
+            now: float | None = None,
+            progress_sink: object = None,
+        ) -> WorkerHandle:
+            _ = now, progress_sink
             self.ensure_calls.append(spec.worker_key)
             return self.ensured_handle
 
@@ -2862,8 +2884,14 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
             self.ensured_handle = ensured_handle
             self.ensure_calls: list[str] = []
 
-        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
-            _ = now
+        def ensure_worker(
+            self,
+            spec: WorkerSpec,
+            *,
+            now: float | None = None,
+            progress_sink: object = None,
+        ) -> WorkerHandle:
+            _ = now, progress_sink
             self.ensure_calls.append(spec.worker_key)
             return self.ensured_handle
 
@@ -3138,8 +3166,8 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_set_primary_worker_storage_path_none_resets_default_runtime_manager() -> None:
-    """Resetting the default storage path should tear down the cached manager."""
+def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None:
+    """Shutting down the primary manager should tear down the cached manager."""
     workers_runtime_module._reset_primary_worker_manager()
     shutdown_calls: list[str] = []
 
@@ -3155,7 +3183,7 @@ def test_set_primary_worker_storage_path_none_resets_default_runtime_manager() -
         config_signature=("docker", "cached"),
     )
 
-    workers_runtime_module.set_primary_worker_storage_path(None)
+    workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
 
     assert shutdown_calls == ["cached"]
     assert workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY is None

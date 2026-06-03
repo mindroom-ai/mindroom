@@ -15,7 +15,6 @@ from mindroom.credentials import (
     CredentialsManager,
     _merge_credential_layers,
     _reset_credentials_manager_cache,
-    get_credentials_manager,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
@@ -1074,13 +1073,15 @@ class TestGlobalCredentialsManager:
 
     def test_get_credentials_manager_returns_same_cached_instance(self, tmp_path: Path) -> None:
         """Same storage roots should reuse the same cached manager."""
-        manager1 = get_credentials_manager(storage_root=tmp_path)
-        manager2 = get_credentials_manager(storage_root=tmp_path)
+        runtime_paths = constants_mod.resolve_runtime_paths(storage_path=tmp_path)
+        manager1 = get_runtime_credentials_manager(runtime_paths)
+        manager2 = get_runtime_credentials_manager(runtime_paths)
         assert manager1 is manager2
 
     def test_cached_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
         """The cached manager should use the provided storage root."""
-        manager = get_credentials_manager(storage_root=tmp_path)
+        runtime_paths = constants_mod.resolve_runtime_paths(storage_path=tmp_path)
+        manager = get_runtime_credentials_manager(runtime_paths)
         assert manager.base_path == tmp_path / "credentials"
 
     def test_global_manager_uses_explicit_shared_credentials_path(

@@ -34,7 +34,6 @@ __all__ = [
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
     "serialized_kubernetes_worker_validation_snapshot",
-    "set_primary_worker_storage_path",
     "shutdown_primary_worker_manager",
 ]
 
@@ -53,7 +52,6 @@ class _WorkerManagerEntry:
     manager: WorkerBackend
     config_signature: tuple[str, ...]
     active_leases: int = 0
-    retired: bool = False
 
 
 @dataclass(slots=True)
@@ -163,12 +161,6 @@ def _normalize_backend_name(raw_value: str | None) -> str:
         return "kubernetes"
     msg = f"Unsupported worker backend: {raw_value}"
     raise WorkerBackendError(msg)
-
-
-def set_primary_worker_storage_path(storage_path: Path | None) -> None:
-    """Clear cached dedicated-worker managers when the primary storage root changes."""
-    del storage_path
-    shutdown_primary_worker_manager(timeout_seconds=0.0)
 
 
 def primary_worker_backend_name(runtime_paths: RuntimePaths) -> str:
@@ -428,7 +420,6 @@ def _resolve_primary_worker_manager_entry(
         )
         _PRIMARY_WORKER_MANAGER_ENTRY = new_entry
         if previous_entry is not None:
-            previous_entry.retired = True
             _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(previous_entry)
         managers_to_shutdown = _drain_retired_entries_locked()
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
@@ -533,16 +524,13 @@ def shutdown_primary_worker_manager(
         with _PRIMARY_WORKER_MANAGER_CONDITION:
             active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
             if active_entry is not None:
-                active_entry.retired = True
                 _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(active_entry)
                 _PRIMARY_WORKER_MANAGER_ENTRY = None
 
             managers_to_shutdown = _drain_retired_entries_locked()
-            if managers_to_shutdown:
-                pass
-            elif not _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
-                break
-            else:
+            if not managers_to_shutdown:
+                if not _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning(

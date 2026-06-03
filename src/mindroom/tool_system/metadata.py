@@ -325,9 +325,7 @@ def sanitize_tool_init_overrides(
     if metadata is None:
         msg = f"Unknown tool '{tool_name}'."
         raise ToolInitOverrideError(msg)
-    allowed_fields = {
-        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
-    }
+    allowed_fields = safe_tool_init_override_fields(tool_name, tool_metadata=metadata_by_name)
     unexpected_fields = sorted(set(tool_init_overrides) - allowed_fields)
     if unexpected_fields:
         allowed = ", ".join(sorted(allowed_fields)) or "none"

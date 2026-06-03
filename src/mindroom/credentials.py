@@ -41,9 +41,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "CredentialsManager",
-    "credentials_manager_key",
     "delete_scoped_credentials",
-    "get_credentials_manager",
     "get_runtime_credentials_manager",
     "get_runtime_shared_credentials_manager",
     "list_worker_grantable_shared_services",
@@ -474,16 +472,6 @@ def _credentials_manager_key(
     )
 
 
-def credentials_manager_key(*, storage_root: Path) -> _CredentialsManagerKey:
-    """Return the cache key for one shared credentials manager root."""
-    base_path = _credentials_base_path(storage_root)
-    return _credentials_manager_key(
-        base_path=base_path,
-        shared_base_path=_default_shared_credentials_base_path(base_path),
-        encryption_key=os.environ.get(_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV),
-    )
-
-
 def runtime_credentials_manager_key(runtime_paths: RuntimePaths) -> _CredentialsManagerKey:
     """Return the cache key for one explicit runtime credential context."""
     base_path = _credentials_base_path(runtime_paths.storage_root)
@@ -494,23 +482,6 @@ def runtime_credentials_manager_key(runtime_paths: RuntimePaths) -> _Credentials
         current_worker_root=_runtime_dedicated_worker_root(runtime_paths),
         encryption_key=runtime_paths.env_value(_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV),
     )
-
-
-def get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
-    """Return the cached credentials manager for one explicit storage root."""
-    key = credentials_manager_key(storage_root=storage_root)
-    with _credentials_manager_lock:
-        manager = _credentials_managers.get(key)
-        if manager is None:
-            manager = CredentialsManager(
-                base_path=key.base_path,
-                shared_base_path=key.shared_base_path,
-                current_worker_key=key.current_worker_key,
-                current_worker_root=key.current_worker_root,
-                encryption_key=key.encryption_key,
-            )
-            _credentials_managers[key] = manager
-        return manager
 
 
 def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:

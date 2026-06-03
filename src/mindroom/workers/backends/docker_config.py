@@ -186,14 +186,10 @@ def _default_docker_user_for_os(os_name: str) -> str | None:
     return None
 
 
-def _default_docker_user() -> str | None:
-    return _default_docker_user_for_os(os.name)
-
-
 def _read_docker_user(env: Mapping[str, str] | None = None) -> str | None:
     raw_value = os.getenv(_USER_ENV) if env is None else env.get(_USER_ENV)
     if raw_value is None:
-        return _default_docker_user()
+        return _default_docker_user_for_os(os.name)
     normalized = raw_value.strip()
     return normalized or None
 

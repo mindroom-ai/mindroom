@@ -287,7 +287,7 @@ def _worker_proxy_client_config(proxy_config: _SandboxProxyConfig) -> WorkerProx
     )
 
 
-def _build_worker_routing_payload(  # noqa: C901, PLR0912
+def _build_worker_routing_payload(
     *,
     runtime_paths: RuntimePaths,
     tool_name: str,
@@ -324,13 +324,10 @@ def _build_worker_routing_payload(  # noqa: C901, PLR0912
             tenant_id=worker_target.tenant_id if worker_target is not None else None,
             account_id=worker_target.account_id if worker_target is not None else None,
         )
-        if progress_sink is None:
-            worker_handle = resolved_worker_manager.ensure_worker(WorkerSpec(worker_key))
-        else:
-            worker_handle = resolved_worker_manager.ensure_worker(
-                WorkerSpec(worker_key),
-                progress_sink=progress_sink,
-            )
+        worker_handle = resolved_worker_manager.ensure_worker(
+            WorkerSpec(worker_key),
+            progress_sink=progress_sink,
+        )
         return (
             {
                 "routing_agent_name": effective_agent_name,
@@ -359,15 +356,10 @@ def _build_worker_routing_payload(  # noqa: C901, PLR0912
                 "could not be resolved from the current execution identity."
             )
             raise RuntimeError(msg)
-    if progress_sink is None:
-        worker_handle = resolved_worker_manager.ensure_worker(
-            WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
-        )
-    else:
-        worker_handle = resolved_worker_manager.ensure_worker(
-            WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
-            progress_sink=progress_sink,
-        )
+    worker_handle = resolved_worker_manager.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
+        progress_sink=progress_sink,
+    )
     return (
         {
             "worker_scope": worker_scope,
@@ -541,68 +533,76 @@ def save_attachment_to_worker(
         raise RuntimeError(msg)
 
     proxy_config = sandbox_proxy_config(runtime_paths)
-    worker_manager = _get_worker_manager(runtime_paths, proxy_config)
-    worker_payload, worker_handle = _build_worker_routing_payload(
-        runtime_paths=runtime_paths,
-        tool_name="attachments",
-        function_name="get_attachment",
-        worker_target=worker_target,
-        progress_sink=None,
-        worker_manager=worker_manager,
-    )
-    if worker_handle is None and proxy_config.proxy_url is None:
-        return None
-
-    attachment_fields = _attachment_save_payload_fields(payload_bytes)
-    request_payload: dict[str, object] = {
-        **worker_payload,
-        "attachment_id": attachment_id,
-        "mindroom_output_path": mindroom_output_path,
-        **attachment_fields,
-        "mime_type": mime_type,
-        "filename": filename,
-    }
-
-    data = post_worker_proxy_json(
-        config=_worker_proxy_client_config(proxy_config),
-        payload=request_payload,
-        worker_handle=worker_handle,
-        worker_manager=worker_manager,
-        proxy_path=SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
-        worker_operation="save-attachment",
-        client_factory=httpx.Client,
-    )
-
-    if not isinstance(data, dict):
-        msg = "Sandbox save-attachment returned a non-object response."
-        _record_worker_save_failure(
-            worker_handle=worker_handle,
-            worker_manager=worker_manager,
-            error=msg,
-        )
-        raise TypeError(msg)
-    response_data = {str(key): value for key, value in data.items()}
-    if response_data.get("ok") is True:
-        receipt = _validated_worker_save_receipt(
-            response_data,
-            requested_path=mindroom_output_path,
-            byte_count=byte_count,
-            sha256=attachment_fields["sha256"],
-            worker_handle=worker_handle,
+    manager_context = _primary_worker_manager_context(runtime_paths)
+    with lease_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=manager_context.storage_root,
+        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        worker_grantable_credentials=manager_context.worker_grantable_credentials,
+    ) as worker_manager:
+        worker_payload, worker_handle = _build_worker_routing_payload(
+            runtime_paths=runtime_paths,
+            tool_name="attachments",
+            function_name="get_attachment",
+            worker_target=worker_target,
+            progress_sink=None,
             worker_manager=worker_manager,
         )
-        if worker_handle is not None:
-            worker_manager.touch_worker(worker_handle.worker_key)
-        return receipt
+        if worker_handle is None and proxy_config.proxy_url is None:
+            return None
 
-    error = response_data.get("error") or "Sandbox attachment save failed."
-    record_proxy_response_failure_for_worker(
-        worker_handle=worker_handle,
-        worker_manager=worker_manager,
-        error=str(error),
-        failure_kind=response_data.get("failure_kind"),
-    )
-    raise RuntimeError(str(error))
+        attachment_fields = _attachment_save_payload_fields(payload_bytes)
+        request_payload: dict[str, object] = {
+            **worker_payload,
+            "attachment_id": attachment_id,
+            "mindroom_output_path": mindroom_output_path,
+            **attachment_fields,
+            "mime_type": mime_type,
+            "filename": filename,
+        }
+
+        data = post_worker_proxy_json(
+            config=_worker_proxy_client_config(proxy_config),
+            payload=request_payload,
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            proxy_path=SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
+            worker_operation="save-attachment",
+            client_factory=httpx.Client,
+        )
+
+        if not isinstance(data, dict):
+            msg = "Sandbox save-attachment returned a non-object response."
+            _record_worker_save_failure(
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+                error=msg,
+            )
+            raise TypeError(msg)
+        response_data = {str(key): value for key, value in data.items()}
+        if response_data.get("ok") is True:
+            receipt = _validated_worker_save_receipt(
+                response_data,
+                requested_path=mindroom_output_path,
+                byte_count=byte_count,
+                sha256=attachment_fields["sha256"],
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+            )
+            if worker_handle is not None:
+                worker_manager.touch_worker(worker_handle.worker_key)
+            return receipt
+
+        error = response_data.get("error") or "Sandbox attachment save failed."
+        record_proxy_response_failure_for_worker(
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            error=str(error),
+            failure_kind=response_data.get("failure_kind"),
+        )
+        raise RuntimeError(str(error))
 
 
 def _make_progress_sink(
@@ -741,23 +741,14 @@ def _call_proxy_sync(
         kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     ) as worker_manager:
-        if progress_sink is None:
-            worker_payload, worker_handle = _build_worker_routing_payload(
-                runtime_paths=runtime_paths,
-                tool_name=tool_name,
-                function_name=function_name,
-                worker_target=worker_target,
-                worker_manager=worker_manager,
-            )
-        else:
-            worker_payload, worker_handle = _build_worker_routing_payload(
-                runtime_paths=runtime_paths,
-                tool_name=tool_name,
-                function_name=function_name,
-                worker_target=worker_target,
-                progress_sink=progress_sink,
-                worker_manager=worker_manager,
-            )
+        worker_payload, worker_handle = _build_worker_routing_payload(
+            runtime_paths=runtime_paths,
+            tool_name=tool_name,
+            function_name=function_name,
+            worker_target=worker_target,
+            progress_sink=progress_sink,
+            worker_manager=worker_manager,
+        )
         payload.update(worker_payload)
         if execution_env:
             payload["execution_env"] = execution_env
