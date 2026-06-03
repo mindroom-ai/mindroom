@@ -1103,9 +1103,10 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _TEST_AUTH_TOKEN
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == _TEST_UNSCOPED_WORKER_KEY
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"
-    assert env["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/shared-storage"
+    assert env["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
     assert env["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
     assert env["MINDROOM_CONFIG_PATH"] == "/app/config-host/config.yaml"
+    assert env["HOME"] == "/app/worker/agents/code/workspace"
     assert env["EXTRA_ENV"] == "present"
 
     volumes = run_call["volumes"]
@@ -2322,7 +2323,7 @@ def test_docker_backend_recreates_container_when_extra_stale_mount_is_present(
         {
             "Type": "bind",
             "Source": str((tmp_path / "agents" / "beta").resolve()),
-            "Destination": "/app/shared-storage/agents/beta",
+            "Destination": "/app/worker/agents/beta",
             "Mode": "rw",
             "RW": True,
         },
@@ -2700,9 +2701,12 @@ def test_docker_backend_shared_worker_mounts_canonical_agent_root(
     assert isinstance(volumes, dict)
     expected_agent_root = (tmp_path / "agents" / "alpha").resolve()
     assert volumes[str(expected_agent_root)] == {
-        "bind": "/app/shared-storage/agents/alpha",
+        "bind": "/app/worker/agents/alpha",
         "mode": "rw",
     }
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert isinstance(env, dict)
+    assert env["HOME"] == "/app/worker/agents/alpha/workspace"
 
 
 def test_docker_backend_user_agent_requires_explicit_private_visibility(
@@ -2977,10 +2981,13 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     assert isinstance(volumes, dict)
     expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
     assert volumes[str(expected_private_root)] == {
-        "bind": f"/app/shared-storage/private_instances/{worker_dir_name(worker_key)}/alpha",
+        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha",
         "mode": "rw",
     }
-    assert all(spec["bind"] != "/app/shared-storage/agents/alpha" for spec in volumes.values())
+    assert all(spec["bind"] != "/app/worker/agents/alpha" for spec in volumes.values())
+    env = fake_client.containers.run_calls[0]["environment"]
+    assert isinstance(env, dict)
+    assert env["HOME"] == "/app/worker"
 
 
 def test_docker_backend_rejects_private_user_agent_container_without_target_visibility(
@@ -3015,7 +3022,7 @@ def test_docker_backend_rejects_private_user_agent_container_without_target_visi
     assert isinstance(second_volumes, dict)
     expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
     assert second_volumes[str(expected_private_root)] == {
-        "bind": f"/app/shared-storage/private_instances/{worker_dir_name(worker_key)}/alpha",
+        "bind": f"/app/worker/private_instances/{worker_dir_name(worker_key)}/alpha",
         "mode": "rw",
     }
     assert handle.status == "ready"
