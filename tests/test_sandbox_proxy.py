@@ -2812,11 +2812,6 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypa
             self.ensured_handle = ensured_handle
             self.ensure_calls: list[str] = []
 
-        def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-            _ = worker_key, now
-            msg = "Dedicated worker routing should reconcile via ensure_worker, not reuse cached handles directly"
-            raise AssertionError(msg)
-
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
             _ = now
             self.ensure_calls.append(spec.worker_key)
@@ -2866,11 +2861,6 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
         def __init__(self, ensured_handle: WorkerHandle) -> None:
             self.ensured_handle = ensured_handle
             self.ensure_calls: list[str] = []
-
-        def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-            _ = worker_key, now
-            msg = "Dedicated worker routing should not bypass ensure_worker"
-            raise AssertionError(msg)
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
             _ = now
@@ -3883,22 +3873,10 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             del spec, now, progress_sink
             raise NotImplementedError
 
-        def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
-            raise NotImplementedError
-
         def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
             raise NotImplementedError
 
         def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[object]:
-            raise NotImplementedError
-
-        def evict_worker(
-            self,
-            worker_key: str,
-            *,
-            preserve_state: bool = True,
-            now: float | None = None,
-        ) -> object:
             raise NotImplementedError
 
         def cleanup_idle_workers(self, *, now: float | None = None) -> list[object]:
@@ -4002,22 +3980,10 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             del spec, now, progress_sink
             raise NotImplementedError
 
-        def get_worker(self, worker_key: str, *, now: float | None = None) -> object:
-            raise NotImplementedError
-
         def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
             raise NotImplementedError
 
         def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[object]:
-            raise NotImplementedError
-
-        def evict_worker(
-            self,
-            worker_key: str,
-            *,
-            preserve_state: bool = True,
-            now: float | None = None,
-        ) -> object:
             raise NotImplementedError
 
         def cleanup_idle_workers(self, *, now: float | None = None) -> list[object]:

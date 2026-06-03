@@ -109,15 +109,6 @@ class StaticSandboxRunnerBackend:
             self._workers[spec.worker_key] = metadata
             return self._to_handle(metadata, now=timestamp)
 
-    def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Return one known shared-runner worker handle."""
-        timestamp = time.time() if now is None else now
-        with self._lock:
-            metadata = self._workers.get(worker_key)
-            if metadata is None:
-                return None
-            return self._to_handle(metadata, now=timestamp)
-
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one shared-runner worker."""
         timestamp = time.time() if now is None else now
@@ -134,28 +125,6 @@ class StaticSandboxRunnerBackend:
         with self._lock:
             handles = [self._to_handle(metadata, now=timestamp) for metadata in self._workers.values()]
         return filter_and_sort_worker_handles(handles, include_idle)
-
-    def evict_worker(
-        self,
-        worker_key: str,
-        *,
-        preserve_state: bool = True,
-        now: float | None = None,
-    ) -> WorkerHandle | None:
-        """Evict one shared-runner worker handle."""
-        timestamp = time.time() if now is None else now
-        with self._lock:
-            metadata = self._workers.get(worker_key)
-            if metadata is None:
-                return None
-            if preserve_state:
-                write_lifecycle_state(
-                    metadata,
-                    mark_worker_idle(read_lifecycle_state(metadata), now=timestamp, update_last_used=True),
-                )
-                return self._to_handle(metadata, now=timestamp)
-            self._workers.pop(worker_key, None)
-            return None
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Mark idle shared-runner workers inactive."""

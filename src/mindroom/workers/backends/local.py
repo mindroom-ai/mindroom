@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import threading
 import time
 import venv
@@ -227,16 +226,6 @@ class _LocalWorkerBackend:
                 self._save_metadata(paths, metadata)
                 return self._to_handle(metadata, paths, now=timestamp)
 
-    def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Return one known local worker handle."""
-        timestamp = time.time() if now is None else now
-        paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        with self._lock:
-            metadata = self._load_metadata(paths)
-            if metadata is None:
-                return None
-            return self._to_handle(metadata, paths, now=timestamp)
-
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one local worker."""
         timestamp = time.time() if now is None else now
@@ -261,35 +250,6 @@ class _LocalWorkerBackend:
             ]
 
         return filter_and_sort_worker_handles(handles, include_idle)
-
-    def evict_worker(
-        self,
-        worker_key: str,
-        *,
-        preserve_state: bool = True,
-        now: float | None = None,
-    ) -> WorkerHandle | None:
-        """Evict one local worker and optionally preserve its state."""
-        timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(worker_key)
-        paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-
-        with worker_lock:
-            with self._lock:
-                metadata = self._load_metadata(paths)
-                if metadata is None:
-                    return None
-                if preserve_state:
-                    write_lifecycle_state(
-                        metadata,
-                        mark_worker_idle(read_lifecycle_state(metadata), now=timestamp, update_last_used=True),
-                    )
-                    self._save_metadata(paths, metadata)
-                    return self._to_handle(metadata, paths, now=timestamp)
-
-            if paths.root.exists():
-                shutil.rmtree(paths.root)
-            return None
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Mark timed-out local workers idle."""

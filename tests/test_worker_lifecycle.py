@@ -117,13 +117,11 @@ def test_static_backend_touch_revives_idle_worker() -> None:
         idle_timeout_seconds=10.0,
     )
     backend.ensure_worker(WorkerSpec(worker_key="v1:t:shared:a"), now=0.0)
-    backend.evict_worker("v1:t:shared:a", preserve_state=True, now=0.0)
 
-    idled = backend.get_worker("v1:t:shared:a", now=0.0)
-    assert idled is not None
+    idled = backend.cleanup_idle_workers(now=11.0)[0]
     assert idled.status == "idle"
 
-    touched = backend.touch_worker("v1:t:shared:a", now=1.0)
+    touched = backend.touch_worker("v1:t:shared:a", now=12.0)
     assert touched is not None
     assert touched.status == "ready"
 

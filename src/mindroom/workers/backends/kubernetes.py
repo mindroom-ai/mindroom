@@ -472,14 +472,6 @@ class KubernetesWorkerBackend:
             if progress_sink is not None:
                 self._unregister_progress_sink(worker_key, progress_sink)
 
-    def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Return the current worker handle for one worker key, if present."""
-        deployment = self._resources.read_deployment(self._worker_id(worker_key))
-        if deployment is None:
-            return None
-        timestamp = time.time() if now is None else now
-        return self._handle_from_deployment(deployment, now=timestamp)
-
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
@@ -504,41 +496,6 @@ class KubernetesWorkerBackend:
             self._handle_from_deployment(deployment, now=timestamp) for deployment in self._resources.list_deployments()
         ]
         return filter_and_sort_worker_handles(handles, include_idle)
-
-    def evict_worker(
-        self,
-        worker_key: str,
-        *,
-        preserve_state: bool = True,
-        now: float | None = None,
-    ) -> WorkerHandle | None:
-        """Evict a worker and optionally retain its persisted state."""
-        timestamp = time.time() if now is None else now
-        worker_id = self._worker_id(worker_key)
-        deployment = self._resources.read_deployment(worker_id)
-        if deployment is None:
-            return None
-        if not preserve_state:
-            self._resources.delete_deployment(worker_id)
-            self._resources.delete_service(worker_id)
-            self._resources.delete_secret(worker_id)
-            return None
-
-        annotations = dict(deployment.metadata.annotations or {})
-        resources.apply_lifecycle_annotations(
-            annotations,
-            mark_worker_idle(
-                resources.lifecycle_from_annotations(annotations, now=timestamp),
-                now=timestamp,
-                update_last_used=True,
-            ),
-        )
-        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
-        self._resources.delete_service(worker_id)
-        self._resources.delete_secret(worker_id)
-        deployment.spec.replicas = 0
-        deployment.metadata.annotations = annotations
-        return self._handle_from_deployment(deployment, now=timestamp)
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Scale idle workers to zero while retaining their state."""

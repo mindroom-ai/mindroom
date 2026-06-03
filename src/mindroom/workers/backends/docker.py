@@ -6,7 +6,6 @@ import hashlib
 import importlib
 import json
 import os
-import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from mindroom.constants import (
     serialize_runtime_paths,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import worker_dir_name
@@ -108,6 +108,7 @@ if TYPE_CHECKING:
 
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
 
 _TOKEN_ENV_NAME = SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]
 _RUNNER_PORT_ENV_NAME = SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]
@@ -442,18 +443,6 @@ class DockerWorkerBackend:
             emit_progress("ready")
             return handle
 
-    def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Return the current worker handle for one worker key, if present."""
-        timestamp = time.time() if now is None else now
-        paths = self._state_paths(worker_key)
-        with self._worker_lock(worker_key):
-            metadata = self._load_metadata(paths)
-            if metadata is None:
-                return None
-            container = self._read_container(metadata.container_name)
-            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
-            return self._to_handle(metadata, container, now=timestamp, paths=paths)
-
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
@@ -494,42 +483,6 @@ class DockerWorkerBackend:
             if include_idle or handle.status != "idle":
                 handles.append(handle)
         return sorted(handles, key=lambda handle: handle.last_used_at, reverse=True)
-
-    def evict_worker(
-        self,
-        worker_key: str,
-        *,
-        preserve_state: bool = True,
-        now: float | None = None,
-    ) -> WorkerHandle | None:
-        """Evict one worker and optionally preserve its persisted state."""
-        timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
-            paths = self._state_paths(worker_key)
-            metadata = self._load_metadata(paths)
-            if metadata is None:
-                return None
-
-            container = self._read_container(metadata.container_name)
-            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
-            if preserve_state:
-                self._stop_container(container)
-                write_lifecycle_state(
-                    metadata,
-                    mark_worker_idle(
-                        read_lifecycle_state(metadata),
-                        now=timestamp,
-                        update_last_used=True,
-                    ),
-                )
-                self._save_metadata(paths, metadata)
-                return self._to_handle(metadata, container, now=timestamp, paths=paths)
-
-            self._remove_container(container)
-            self._projection_manager.remove_projected_configs(paths)
-            if paths.root.exists():
-                shutil.rmtree(paths.root)
-            return None
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Stop idle containers while retaining worker-owned state."""
@@ -1116,8 +1069,8 @@ class DockerWorkerBackend:
             raw_logs = container.logs(tail=tail)
         except self._docker_errors.DockerException:
             return ""
-        text = raw_logs.decode("utf-8", errors="replace") if isinstance(raw_logs, bytes) else str(raw_logs)
-        text = text.strip()
+        raw_text = raw_logs.decode("utf-8", errors="replace") if isinstance(raw_logs, bytes) else str(raw_logs)
+        text = redact_sensitive_text(raw_text.strip(), max_length=_CONTAINER_LOG_EXCERPT_MAX_CHARS)
         if not text:
             return ""
         return f"\nRecent worker container logs:\n{text}"

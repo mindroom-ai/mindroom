@@ -4451,8 +4451,7 @@ def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Pa
 
     assert exceptions == []
     assert create_call_count == 1
-    worker = backend.get_worker("worker-race")
-    assert worker is not None
+    worker = backend.list_workers()[0]
     assert worker.startup_count == 1
     assert worker.status == "ready"
 

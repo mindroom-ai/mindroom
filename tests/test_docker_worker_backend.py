@@ -1846,28 +1846,6 @@ def test_docker_backend_cleanup_stops_idle_workers(
     assert worker_file.read_text(encoding="utf-8") == "still here"
 
 
-def test_docker_backend_evict_without_preserving_state_removes_container_and_root(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Evicting without preserving state should remove both the container and state root."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
-
-    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    worker_root = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
-    volumes = fake_client.containers.run_calls[0]["volumes"]
-    assert isinstance(volumes, dict)
-    projection_root = _projection_root(volumes)
-
-    result = backend.evict_worker(_TEST_UNSCOPED_WORKER_KEY, preserve_state=False, now=20.0)
-
-    assert result is None
-    assert not worker_root.exists()
-    assert not projection_root.exists()
-    container = next(iter(fake_client.containers.by_name.values()))
-    assert container.removed == 1
-
-
 def test_docker_backend_records_failure_and_stops_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1892,7 +1870,7 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A worker that exits during startup should surface its container logs in the error."""
+    """Startup log diagnostics should be useful without leaking secrets or huge payloads."""
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     container = _FakeContainer(
         name="mindroom-worker-x",
@@ -1904,11 +1882,19 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
         user=None,
         status="exited",
     )
-    container.logs_output = b"ValidationError: agents.code.display_name Field required"
+    container.logs_output = (
+        b"OPENAI_API_KEY=sk-secret-value\nValidationError: agents.code.display_name Field required\n" + (b"x" * 5000)
+    )
 
     # Call the real implementation; _backend patches the instance attribute.
-    with pytest.raises(WorkerBackendError, match="display_name"):
+    with pytest.raises(WorkerBackendError) as exc_info:
         DockerWorkerBackend._wait_for_ready(backend, container)
+    message = str(exc_info.value)
+    assert "display_name" in message
+    assert "sk-secret-value" not in message
+    assert "OPENAI_API_KEY=***redacted***" in message
+    assert "... [truncated]" in message
+    assert len(message) < 4300
 
 
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(
@@ -1930,7 +1916,7 @@ def test_docker_backend_cleanup_reaps_abandoned_failed_container(
     assert container.removed == 1
 
 
-def test_docker_backend_preserving_evict_clears_stale_failure_reason(
+def test_docker_backend_restart_clears_stale_failure_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1940,15 +1926,9 @@ def test_docker_backend_preserving_evict_clears_stale_failure_reason(
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     backend.record_failure(_TEST_UNSCOPED_WORKER_KEY, "boom", now=11.0)
 
-    evicted = backend.evict_worker(_TEST_UNSCOPED_WORKER_KEY, preserve_state=True, now=12.0)
-    assert evicted is not None
-    assert evicted.status == "idle"
-    assert evicted.failure_reason is None
-
-    touched = backend.touch_worker(_TEST_UNSCOPED_WORKER_KEY, now=13.0)
-    assert touched is not None
-    assert touched.status == "idle"
-    assert touched.failure_reason is None
+    restarted = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=12.0)
+    assert restarted.status == "ready"
+    assert restarted.failure_reason is None
 
 
 def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path: Path) -> None:
@@ -2310,8 +2290,7 @@ def test_docker_backend_shutdown_removes_running_containers_and_keeps_idle_metad
     backend.shutdown()
 
     assert container.removed == 1
-    idle_handle = backend.get_worker(_TEST_UNSCOPED_WORKER_KEY, now=20.0)
-    assert idle_handle is not None
+    idle_handle = backend.list_workers(now=20.0)[0]
     assert idle_handle.status == "idle"
     assert idle_handle.failure_reason is None
 
