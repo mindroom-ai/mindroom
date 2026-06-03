@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
-    _WorkerLifecycleState,
+    WorkerLifecycleState,
     mark_worker_failed,
     mark_worker_idle,
     touch_worker_lifecycle,
@@ -62,7 +62,7 @@ def test_filter_and_sort_worker_handles_hides_idle_workers_and_orders_by_recent_
 
 def test_touch_revives_idle_worker_to_ready() -> None:
     """Touching an idle worker brings it back to ready and refreshes last-used."""
-    state = _WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="idle")
+    state = WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="idle")
     revived = touch_worker_lifecycle(state, now=50.0)
     assert revived.status == "ready"
     assert revived.last_used_at == 50.0
@@ -70,7 +70,7 @@ def test_touch_revives_idle_worker_to_ready() -> None:
 
 def test_touch_clears_stale_failure_reason_when_not_failed() -> None:
     """Reviving an idle worker clears a stale failure reason but keeps the count."""
-    state = _WorkerLifecycleState(
+    state = WorkerLifecycleState(
         created_at=1.0,
         last_used_at=1.0,
         status="idle",
@@ -85,7 +85,7 @@ def test_touch_clears_stale_failure_reason_when_not_failed() -> None:
 
 def test_touch_keeps_failed_status_and_reason() -> None:
     """A failed worker is not revived by a touch."""
-    state = _WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="failed", failure_reason="boom")
+    state = WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="failed", failure_reason="boom")
     touched = touch_worker_lifecycle(state, now=50.0)
     assert touched.status == "failed"
     assert touched.failure_reason == "boom"
@@ -93,7 +93,7 @@ def test_touch_keeps_failed_status_and_reason() -> None:
 
 def test_mark_idle_clears_failure_reason() -> None:
     """Idling a worker clears any leftover failure reason."""
-    state = _WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="ready", failure_reason="boom")
+    state = WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="ready", failure_reason="boom")
     idled = mark_worker_idle(state)
     assert idled.status == "idle"
     assert idled.failure_reason is None
@@ -101,7 +101,7 @@ def test_mark_idle_clears_failure_reason() -> None:
 
 def test_mark_failed_increments_count_and_records_reason() -> None:
     """Failing a worker records the reason and increments the failure count."""
-    state = _WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="ready", failure_count=1)
+    state = WorkerLifecycleState(created_at=1.0, last_used_at=1.0, status="ready", failure_count=1)
     failed = mark_worker_failed(state, now=9.0, failure_reason="kaboom")
     assert failed.status == "failed"
     assert failed.failure_count == 2

@@ -28,6 +28,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
@@ -272,6 +273,42 @@ def metadata_annotations(
     if failure_reason:
         annotations[ANNOTATION_FAILURE_REASON] = failure_reason
     return annotations
+
+
+def lifecycle_from_annotations(annotations: dict[str, str], *, now: float) -> WorkerLifecycleState:
+    """Project the lifecycle state persisted on a worker Deployment's annotations.
+
+    Lets the Kubernetes backend reuse the shared worker-lifecycle transitions
+    instead of mutating status annotations inline.
+    """
+    last_used_at = parse_annotation_float(annotations, ANNOTATION_LAST_USED_AT, now)
+    created_at = parse_annotation_float(annotations, ANNOTATION_CREATED_AT, last_used_at)
+    last_started_raw = annotations.get(ANNOTATION_LAST_STARTED_AT)
+    return WorkerLifecycleState(
+        created_at=created_at,
+        last_used_at=last_used_at,
+        status=cast("WorkerStatus", annotations.get(ANNOTATION_WORKER_STATUS, "starting")),
+        last_started_at=float(last_started_raw) if last_started_raw else None,
+        startup_count=parse_annotation_int(annotations, ANNOTATION_STARTUP_COUNT),
+        failure_count=parse_annotation_int(annotations, ANNOTATION_FAILURE_COUNT),
+        failure_reason=annotations.get(ANNOTATION_FAILURE_REASON) or None,
+    )
+
+
+def apply_lifecycle_annotations(annotations: dict[str, str], state: WorkerLifecycleState) -> None:
+    """Write one lifecycle state onto a Deployment's annotations dict in place.
+
+    The failure reason is blanked rather than dropped so the merge-based
+    deployment patch clears it (it is read back as ``None``).
+    """
+    annotations[ANNOTATION_CREATED_AT] = str(state.created_at)
+    annotations[ANNOTATION_LAST_USED_AT] = str(state.last_used_at)
+    annotations[ANNOTATION_WORKER_STATUS] = state.status
+    if state.last_started_at is not None:
+        annotations[ANNOTATION_LAST_STARTED_AT] = str(state.last_started_at)
+    annotations[ANNOTATION_STARTUP_COUNT] = str(state.startup_count)
+    annotations[ANNOTATION_FAILURE_COUNT] = str(state.failure_count)
+    annotations[ANNOTATION_FAILURE_REASON] = state.failure_reason or ""
 
 
 def _template_hash(template: dict[str, object]) -> str:

@@ -11,6 +11,7 @@ from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -488,14 +489,10 @@ class KubernetesWorkerBackend:
             return None
 
         annotations = dict(deployment.metadata.annotations or {})
-        annotations[resources.ANNOTATION_LAST_USED_AT] = str(timestamp)
-        if annotations.get(resources.ANNOTATION_WORKER_STATUS) == "idle":
-            annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
-        if annotations.get(resources.ANNOTATION_WORKER_STATUS) != "failed":
-            # A touch revives a worker, so a stale failure reason must not linger.
-            # patch_deployment merges annotations, so clear by blanking rather than
-            # popping (which the merge would not remove server-side).
-            annotations[resources.ANNOTATION_FAILURE_REASON] = ""
+        resources.apply_lifecycle_annotations(
+            annotations,
+            touch_worker_lifecycle(resources.lifecycle_from_annotations(annotations, now=timestamp), now=timestamp),
+        )
         self._resources.patch_deployment(worker_id, annotations=annotations)
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -528,8 +525,14 @@ class KubernetesWorkerBackend:
             return None
 
         annotations = dict(deployment.metadata.annotations or {})
-        annotations[resources.ANNOTATION_LAST_USED_AT] = str(timestamp)
-        annotations[resources.ANNOTATION_WORKER_STATUS] = "idle"
+        resources.apply_lifecycle_annotations(
+            annotations,
+            mark_worker_idle(
+                resources.lifecycle_from_annotations(annotations, now=timestamp),
+                now=timestamp,
+                update_last_used=True,
+            ),
+        )
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
         self._resources.delete_secret(worker_id)
@@ -546,7 +549,10 @@ class KubernetesWorkerBackend:
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
             annotations = dict(deployment.metadata.annotations or {})
-            annotations[resources.ANNOTATION_WORKER_STATUS] = "idle"
+            resources.apply_lifecycle_annotations(
+                annotations,
+                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=timestamp)),
+            )
             self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             self._resources.delete_service(handle.worker_id)
             self._resources.delete_secret(handle.worker_id)
@@ -574,11 +580,13 @@ class KubernetesWorkerBackend:
         annotations = dict(deployment.metadata.annotations or {})
         if annotations_override is not None:
             annotations.update(annotations_override)
-        annotations[resources.ANNOTATION_LAST_USED_AT] = str(timestamp)
-        annotations[resources.ANNOTATION_WORKER_STATUS] = "failed"
-        annotations[resources.ANNOTATION_FAILURE_REASON] = failure_reason
-        annotations[resources.ANNOTATION_FAILURE_COUNT] = str(
-            resources.parse_annotation_int(annotations, resources.ANNOTATION_FAILURE_COUNT) + 1,
+        resources.apply_lifecycle_annotations(
+            annotations,
+            mark_worker_failed(
+                resources.lifecycle_from_annotations(annotations, now=timestamp),
+                now=timestamp,
+                failure_reason=failure_reason,
+            ),
         )
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)

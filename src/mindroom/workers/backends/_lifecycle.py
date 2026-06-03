@@ -3,7 +3,7 @@
 The dedicated (docker, local) and shared (static) worker backends persist the
 same lifecycle fields and apply the same status-transition rules. This module is
 the single source of truth for those rules; each backend converts its own
-metadata to and from :class:`_WorkerLifecycleState` at the edge.
+metadata to and from :class:`WorkerLifecycleState` at the edge.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class _WorkerLifecycleState:
+class WorkerLifecycleState:
     """Backend-neutral lifecycle fields persisted for one worker."""
 
     created_at: float
@@ -40,9 +40,9 @@ class _MutableLifecycleMetadata(Protocol):
     failure_reason: str | None
 
 
-def read_lifecycle_state(metadata: _MutableLifecycleMetadata) -> _WorkerLifecycleState:
+def read_lifecycle_state(metadata: _MutableLifecycleMetadata) -> WorkerLifecycleState:
     """Project the lifecycle fields of one backend metadata record."""
-    return _WorkerLifecycleState(
+    return WorkerLifecycleState(
         created_at=metadata.created_at,
         last_used_at=metadata.last_used_at,
         status=metadata.status,
@@ -53,7 +53,7 @@ def read_lifecycle_state(metadata: _MutableLifecycleMetadata) -> _WorkerLifecycl
     )
 
 
-def write_lifecycle_state(metadata: _MutableLifecycleMetadata, state: _WorkerLifecycleState) -> None:
+def write_lifecycle_state(metadata: _MutableLifecycleMetadata, state: WorkerLifecycleState) -> None:
     """Write one lifecycle state back onto a backend metadata record in place."""
     metadata.created_at = state.created_at
     metadata.last_used_at = state.last_used_at
@@ -64,9 +64,9 @@ def write_lifecycle_state(metadata: _MutableLifecycleMetadata, state: _WorkerLif
     metadata.failure_reason = state.failure_reason
 
 
-def initial_worker_lifecycle_state(*, now: float) -> _WorkerLifecycleState:
+def initial_worker_lifecycle_state(*, now: float) -> WorkerLifecycleState:
     """Return the initial lifecycle state for a newly created worker."""
-    return _WorkerLifecycleState(
+    return WorkerLifecycleState(
         created_at=now,
         last_used_at=now,
         status="starting",
@@ -74,11 +74,11 @@ def initial_worker_lifecycle_state(*, now: float) -> _WorkerLifecycleState:
 
 
 def prepare_worker_ensure_lifecycle(
-    state: _WorkerLifecycleState,
+    state: WorkerLifecycleState,
     *,
     now: float,
     should_restart: bool,
-) -> _WorkerLifecycleState:
+) -> WorkerLifecycleState:
     """Return lifecycle fields for one ensure attempt before backend-specific startup IO."""
     return replace(
         state,
@@ -91,10 +91,10 @@ def prepare_worker_ensure_lifecycle(
 
 
 def touch_worker_lifecycle(
-    state: _WorkerLifecycleState,
+    state: WorkerLifecycleState,
     *,
     now: float,
-) -> _WorkerLifecycleState:
+) -> WorkerLifecycleState:
     """Refresh last-used state and revive idle workers back to ready."""
     next_status = "ready" if state.status == "idle" else state.status
     return replace(
@@ -106,10 +106,10 @@ def touch_worker_lifecycle(
 
 
 def mark_worker_ready(
-    state: _WorkerLifecycleState,
+    state: WorkerLifecycleState,
     *,
     now: float,
-) -> _WorkerLifecycleState:
+) -> WorkerLifecycleState:
     """Return lifecycle fields for one worker that completed startup successfully."""
     return replace(
         state,
@@ -120,11 +120,11 @@ def mark_worker_ready(
 
 
 def mark_worker_idle(
-    state: _WorkerLifecycleState,
+    state: WorkerLifecycleState,
     *,
     now: float | None = None,
     update_last_used: bool = False,
-) -> _WorkerLifecycleState:
+) -> WorkerLifecycleState:
     """Return lifecycle fields for one worker whose persisted state is being retained."""
     if not update_last_used:
         return replace(state, status="idle", failure_reason=None)
@@ -135,11 +135,11 @@ def mark_worker_idle(
 
 
 def mark_worker_failed(
-    state: _WorkerLifecycleState,
+    state: WorkerLifecycleState,
     *,
     now: float,
     failure_reason: str,
-) -> _WorkerLifecycleState:
+) -> WorkerLifecycleState:
     """Return lifecycle fields for one worker that failed to start or execute."""
     return replace(
         state,
