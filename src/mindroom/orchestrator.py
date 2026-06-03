@@ -24,6 +24,7 @@ from mindroom.entity_resolution import (
     configured_bot_user_ids_for_room,
     entity_identity_registry,
     is_configured_room,
+    mindroom_user_id,
 )
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
@@ -256,6 +257,14 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         self.should_exit = True
 
 
+@dataclass(slots=True)
+class _FilteredRuntimeConfig:
+    """Runtime config after disabling entities unavailable during startup."""
+
+    config: Config
+    disabled_entities: set[str]
+
+
 @dataclass
 class _MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
@@ -284,6 +293,8 @@ class _MultiAgentOrchestrator:
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
+    _last_account_preparation_failed_entities: list[str] = field(default_factory=list, init=False)
+    _account_preparation_failed_entities: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -769,25 +780,51 @@ class _MultiAgentOrchestrator:
         self,
         config: Config,
         entity_names: Iterable[str],
+        *,
+        allow_partial: bool = False,
     ) -> dict[str, AgentMatrixUser]:
         """Ensure managed Matrix accounts exist before runtime bot construction."""
         homeserver = constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths)
         users: dict[str, AgentMatrixUser] = {}
+        failed_entities: list[str] = []
         entity_names = tuple(entity_names)
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
+        self._last_account_preparation_failed_entities = []
+        if not allow_partial:
+            self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=False)
 
         async def _prepare_accounts() -> None:
-            nonlocal users
+            nonlocal failed_entities, users
             prepared_users: dict[str, AgentMatrixUser] = {}
+            permanently_failed_entities: list[str] = []
             for entity_name in entity_names:
-                prepared_users[entity_name] = await create_agent_user(
-                    homeserver,
-                    entity_name,
-                    self._entity_display_name(config, entity_name),
-                    runtime_paths=self.runtime_paths,
-                )
-            self._validate_entity_accounts(config)
+                try:
+                    if allow_partial:
+                        self._preflight_account_provisioning(
+                            config,
+                            entity_names=[entity_name],
+                            include_internal_user=False,
+                        )
+                    prepared_users[entity_name] = await create_agent_user(
+                        homeserver,
+                        entity_name,
+                        self._entity_display_name(config, entity_name),
+                        runtime_paths=self.runtime_paths,
+                    )
+                except PermanentStartupError as exc:
+                    if not allow_partial or entity_name == ROUTER_AGENT_NAME:
+                        raise
+                    logger.error(  # noqa: TRY400
+                        "Managed Matrix account preparation failed permanently; leaving entity disabled",
+                        agent_name=entity_name,
+                        error=str(exc),
+                    )
+                    permanently_failed_entities.append(entity_name)
+            if permanently_failed_entities:
+                self._validate_prepared_entity_accounts(prepared_users, config)
+            else:
+                self._validate_entity_accounts(config)
             users = prepared_users
+            failed_entities = permanently_failed_entities
 
         await run_with_retry(
             "Preparing managed Matrix accounts",
@@ -795,7 +832,38 @@ class _MultiAgentOrchestrator:
             permanent_error_check=is_permanent_startup_error,
             update_runtime_state=not self.running,
         )
+        self._last_account_preparation_failed_entities = failed_entities
         return users
+
+    def _validate_prepared_entity_accounts(self, users: dict[str, AgentMatrixUser], config: Config) -> None:
+        """Validate prepared Matrix identities when some optional entities are disabled."""
+        owners_by_user_id: dict[str, str] = {}
+        duplicates: list[tuple[str, str, str]] = []
+        for entity_name, user in users.items():
+            previous_owner = owners_by_user_id.get(user.user_id)
+            if previous_owner is not None:
+                duplicates.append((user.user_id, previous_owner, entity_name))
+                continue
+            owners_by_user_id[user.user_id] = entity_name
+        if duplicates:
+            formatted = ", ".join(
+                f"{user_id} shared by {first_entity!r} and {second_entity!r}"
+                for user_id, first_entity, second_entity in duplicates
+            )
+            msg = f"Configured entities must have unique Matrix IDs: {formatted}"
+            raise PermanentStartupError(msg)
+
+        internal_user_id = mindroom_user_id(config, self.runtime_paths)
+        if internal_user_id is None:
+            return
+        matching_entity = owners_by_user_id.get(internal_user_id)
+        if matching_entity is None:
+            return
+        msg = (
+            "MindRoom internal user Matrix ID must not match a configured entity Matrix ID: "
+            f"{internal_user_id} is also used by {matching_entity!r}"
+        )
+        raise PermanentStartupError(msg)
 
     def _validate_entity_accounts(self, config: Config) -> None:
         """Validate persisted Matrix identities for all configured runtime entities."""
@@ -822,6 +890,82 @@ class _MultiAgentOrchestrator:
             )
         requests.extend(ManagedAccountProvisioningRequest(entity_name) for entity_name in entity_names)
         preflight_managed_account_provisioning(requests, self.runtime_paths)
+
+    def _preflight_internal_user_entity_collisions(self, config: Config) -> None:
+        """Reject generated internal-user/entity localpart collisions before account writes."""
+        if config.mindroom_user is None:
+            return
+        requests = [
+            ManagedAccountProvisioningRequest(
+                INTERNAL_USER_AGENT_NAME,
+                username=config.mindroom_user.username,
+            ),
+            *(ManagedAccountProvisioningRequest(entity_name) for entity_name in self._configured_entity_names(config)),
+        ]
+        preflight_managed_account_provisioning(requests, self.runtime_paths)
+
+    def _filter_runtime_config_for_account_failures(
+        self,
+        config: Config,
+        failed_entities: Iterable[str],
+    ) -> _FilteredRuntimeConfig:
+        """Return a runtime config excluding entities whose accounts cannot be prepared."""
+        failed = set(failed_entities)
+        if not failed:
+            return _FilteredRuntimeConfig(config=config, disabled_entities=set())
+
+        disabled_agents = set(config.agents) & failed
+        disabled_teams = (set(config.teams) & failed) | {
+            team_name
+            for team_name, team_config in config.teams.items()
+            if any(agent_name in disabled_agents for agent_name in team_config.agents)
+        }
+        disabled_entities = disabled_agents | disabled_teams
+        if not disabled_entities:
+            return _FilteredRuntimeConfig(config=config, disabled_entities=set())
+
+        active_agents = {}
+        for agent_name, agent_config in config.agents.items():
+            if agent_name in disabled_agents:
+                continue
+            active_delegate_targets = [
+                delegate_name for delegate_name in agent_config.delegate_to if delegate_name not in disabled_agents
+            ]
+            if active_delegate_targets == agent_config.delegate_to:
+                active_agents[agent_name] = agent_config
+                continue
+            active_agents[agent_name] = agent_config.model_copy(update={"delegate_to": active_delegate_targets})
+
+        active_teams = {
+            team_name: team_config for team_name, team_config in config.teams.items() if team_name not in disabled_teams
+        }
+        active_cultures = {}
+        for culture_name, culture_config in config.cultures.items():
+            active_culture_agents = [agent_name for agent_name in culture_config.agents if agent_name in active_agents]
+            if active_culture_agents:
+                active_cultures[culture_name] = culture_config.model_copy(update={"agents": active_culture_agents})
+        active_reply_permissions = {
+            entity_name: user_ids
+            for entity_name, user_ids in config.authorization.agent_reply_permissions.items()
+            if entity_name == "*" or entity_name not in disabled_entities
+        }
+        active_authorization = config.authorization.model_copy(
+            update={"agent_reply_permissions": active_reply_permissions},
+        )
+        runtime_config = config.model_copy(
+            update={
+                "agents": active_agents,
+                "teams": active_teams,
+                "cultures": active_cultures,
+                "authorization": active_authorization,
+            },
+        )
+        logger.warning(
+            "Configured entities disabled because Matrix account preparation failed",
+            entities=sorted(disabled_entities),
+            account_failed_entities=sorted(failed),
+        )
+        return _FilteredRuntimeConfig(config=runtime_config, disabled_entities=disabled_entities)
 
     def validate_managed_entity_identities(self) -> None:
         """Validate persisted managed Matrix identities for the live config."""
@@ -1041,9 +1185,18 @@ class _MultiAgentOrchestrator:
         config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
         hook_registry = self._build_hook_registry(config)
         entity_names = self._configured_entity_names(config)
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
+        self._preflight_internal_user_entity_collisions(config)
+        self._preflight_account_provisioning(config, entity_names=[], include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
-        entity_users = await self._prepare_entity_accounts(config, entity_names)
+        self._last_account_preparation_failed_entities = []
+        entity_users = await self._prepare_entity_accounts(config, entity_names, allow_partial=True)
+        filtered_config = self._filter_runtime_config_for_account_failures(
+            config,
+            self._last_account_preparation_failed_entities,
+        )
+        config = filtered_config.config
+        self._account_preparation_failed_entities = filtered_config.disabled_entities
+        entity_names = self._configured_entity_names(config)
         self.config = config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
@@ -1120,12 +1273,15 @@ class _MultiAgentOrchestrator:
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:
+            failed_agent_names = set(failed_agents)
+            operational_agent_count = len([name for name in self.agent_bots if name not in failed_agent_names])
+            total_agent_count = len(self.agent_bots) + len(failed_agent_names - set(self.agent_bots))
             logger.warning(
                 "System starting in degraded mode",
                 failed_agents=failed_agents,
                 failed_agent_count=len(failed_agents),
-                operational_agent_count=len(self.agent_bots) - len(failed_agents),
-                total_agent_count=len(self.agent_bots),
+                operational_agent_count=operational_agent_count,
+                total_agent_count=total_agent_count,
             )
             return
         logger.info("All agent bots started successfully")
@@ -1212,7 +1368,11 @@ class _MultiAgentOrchestrator:
         )
         started_bots = [router_bot, *start_results.started_bots]
         self._log_degraded_startup(
-            [*start_results.retryable_entities, *start_results.permanently_failed_entities],
+            [
+                *sorted(self._account_preparation_failed_entities),
+                *start_results.retryable_entities,
+                *start_results.permanently_failed_entities,
+            ],
         )
 
         config = self._require_config()
@@ -1249,13 +1409,25 @@ class _MultiAgentOrchestrator:
 
     async def _load_initial_config(self, new_config: Config, hook_registry: HookRegistry) -> bool:
         """Handle config loading before the runtime has an active config."""
+        self._preflight_internal_user_entity_collisions(new_config)
         self._preflight_account_provisioning(
             new_config,
-            entity_names=self._configured_entity_names(new_config),
+            entity_names=[],
             include_internal_user=True,
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        await self._prepare_entity_accounts(new_config, self._configured_entity_names(new_config))
+        self._last_account_preparation_failed_entities = []
+        await self._prepare_entity_accounts(
+            new_config,
+            self._configured_entity_names(new_config),
+            allow_partial=True,
+        )
+        filtered_config = self._filter_runtime_config_for_account_failures(
+            new_config,
+            self._last_account_preparation_failed_entities,
+        )
+        new_config = filtered_config.config
+        self._account_preparation_failed_entities = filtered_config.disabled_entities
         self.config = new_config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(new_config)
@@ -1428,6 +1600,8 @@ class _MultiAgentOrchestrator:
     async def _prepare_accounts_for_config_update(self, new_config: Config, plan: ConfigUpdatePlan) -> None:
         """Prepare or validate managed Matrix accounts before publishing a reloaded config."""
         entities_requiring_account_check = plan.added_entities | (plan.entities_to_restart & plan.configured_entities)
+        if plan.mindroom_user_changed:
+            self._preflight_internal_user_entity_collisions(new_config)
         self._preflight_account_provisioning(
             new_config,
             entity_names=entities_requiring_account_check,
