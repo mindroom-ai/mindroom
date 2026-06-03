@@ -8,6 +8,7 @@ security-sensitive precedence is now testable in isolation.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,11 @@ def _prepared_worker(tmp_path: Path) -> PreparedWorkerRequest:
         paths=local_worker_state_paths_for_root(tmp_path / "worker-root"),
         runtime_overrides={},
     )
+
+
+def test_build_request_execution_env_has_no_subprocess_env_parameter() -> None:
+    """The assembly API should not keep a dead subprocess-env branch."""
+    assert "subprocess_env" not in inspect.signature(assembly.build_request_execution_env).parameters
 
 
 def test_request_workspace_none_is_noop() -> None:

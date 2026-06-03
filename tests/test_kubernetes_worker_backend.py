@@ -1633,6 +1633,52 @@ def test_kubernetes_backend_user_agent_mounts_require_explicit_private_visibilit
         backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
 
+def test_kubernetes_backend_rejects_private_user_agent_worker_without_target_visibility(tmp_path: Path) -> None:
+    """Private user-agent workers must fail closed until the targeted private agent is explicitly visible."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    private:
+      per: user_agent
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    with pytest.raises(WorkerBackendError, match="missing from explicit private-agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    assert apps_api.created_bodies == []
+
+
 def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() -> None:
     """User-agent workers should mount their private root from the explicit worker spec visibility."""
     backend, apps_api, _core_api = _backend()

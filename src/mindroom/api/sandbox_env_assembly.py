@@ -40,7 +40,6 @@ def build_request_execution_env(
     request_workspace: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
-    subprocess_env: dict[str, str] | None = None,
     apply_workspace_home_contract: bool = True,
     apply_workspace_env_hook: bool = True,
 ) -> _RequestExecutionEnv:
@@ -68,13 +67,11 @@ def build_request_execution_env(
         workspace_home=workspace_home,
         prepared=prepared,
         execution_env=execution_env,
-        subprocess_env=subprocess_env,
     )
     overlay = _workspace_env_overlay(
         request_workspace=request_workspace,
         prepared=prepared,
         execution_env=execution_env,
-        subprocess_env=subprocess_env,
         apply=apply_workspace_env_hook,
     )
     trusted_overlay = trusted_workspace_overlay_for_runtime_paths(overlay, protected_names)
@@ -146,17 +143,9 @@ def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None
 
 def _existing_worker_runtime_env(
     execution_env: Mapping[str, str],
-    *,
-    subprocess_env: Mapping[str, str] | None,
 ) -> dict[str, str]:
     """Return existing worker-runtime env values to preserve when no worker was prepared."""
-    env: dict[str, str] = {}
-    if subprocess_env is not None:
-        env.update(
-            {name: subprocess_env[name] for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES if name in subprocess_env},
-        )
-    env.update({name: execution_env[name] for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES if name in execution_env})
-    return env
+    return {name: execution_env[name] for name in constants.WORKER_RUNTIME_PATH_ENV_NAMES if name in execution_env}
 
 
 def _protected_execution_env(
@@ -164,13 +153,12 @@ def _protected_execution_env(
     workspace_home: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: Mapping[str, str],
-    subprocess_env: Mapping[str, str] | None,
 ) -> dict[str, str]:
     """Return env names owned by MindRoom for this request."""
     if workspace_home is not None:
         protected_env = _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
         if prepared is None:
-            protected_env.update(_existing_worker_runtime_env(execution_env, subprocess_env=subprocess_env))
+            protected_env.update(_existing_worker_runtime_env(execution_env))
         return protected_env
     return _worker_owned_env(prepared)
 
@@ -180,7 +168,6 @@ def _workspace_env_overlay(
     request_workspace: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
-    subprocess_env: dict[str, str] | None,
     apply: bool,
 ) -> dict[str, str]:
     """Source ``.mindroom/worker-env.sh`` for one request.
@@ -196,7 +183,7 @@ def _workspace_env_overlay(
     hook_path = sandbox_exec.resolve_workspace_env_hook_path(request_workspace)
     if hook_path is None:
         return {}
-    base_env = _workspace_env_overlay_base_env(prepared, execution_env, subprocess_env=subprocess_env)
+    base_env = _workspace_env_overlay_base_env(prepared, execution_env)
     return sandbox_exec.source_workspace_env_hook(
         hook_path=hook_path,
         base_env=base_env,
@@ -207,14 +194,7 @@ def _workspace_env_overlay(
 def _workspace_env_overlay_base_env(
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
-    *,
-    subprocess_env: dict[str, str] | None,
 ) -> dict[str, str]:
-    if subprocess_env is not None:
-        base_env = dict(subprocess_env)
-        base_env.update(execution_env)
-        return base_env
-
     base_env = dict(execution_env)
     # Seed PATH/HOME defaults so bash can locate `printenv` when sourcing the
     # hook for inprocess unkeyed proxy calls (the subprocess path already gets

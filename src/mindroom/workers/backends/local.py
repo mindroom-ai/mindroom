@@ -143,18 +143,19 @@ def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
     builder.create(paths.venv_dir)
 
 
-def ensure_local_worker_state_locked(worker_key: str, paths: LocalWorkerStatePaths) -> None:
+def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
     """Create one worker runtime root under a shared per-worker initialization lock."""
-    with _shared_worker_initialization_lock(worker_key):
+    with _shared_worker_initialization_lock(paths):
         _ensure_local_worker_state(paths)
 
 
-def _shared_worker_initialization_lock(worker_key: str) -> threading.Lock:
+def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
+    lock_key = str(paths.root)
     with _SHARED_INITIALIZATION_LOCK:
-        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(worker_key)
+        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
         if worker_lock is None:
             worker_lock = threading.Lock()
-            _SHARED_INITIALIZATION_LOCKS[worker_key] = worker_lock
+            _SHARED_INITIALIZATION_LOCKS[lock_key] = worker_lock
     return worker_lock
 
 
@@ -175,7 +176,6 @@ class _LocalWorkerBackend:
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self.worker_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._initialization_locks: dict[str, threading.Lock] = {}
 
     def shutdown(self) -> None:
         """Local worker state is persistent; manager replacement does not need extra teardown."""
@@ -191,8 +191,8 @@ class _LocalWorkerBackend:
         """Resolve or create one local worker."""
         del progress_sink
         timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(spec.worker_key)
         paths = _local_worker_state_paths(spec.worker_key, worker_root=self.worker_root)
+        worker_lock = self._worker_lock(paths)
 
         with worker_lock:
             with self._lock:
@@ -224,8 +224,8 @@ class _LocalWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one local worker."""
         timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(worker_key)
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
+        worker_lock = self._worker_lock(paths)
         with worker_lock, self._lock:
             metadata = self._load_metadata(paths)
             if metadata is None:
@@ -266,19 +266,14 @@ class _LocalWorkerBackend:
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist one local worker failure."""
         timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(worker_key)
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
+        worker_lock = self._worker_lock(paths)
 
         with worker_lock, self._lock:
             return self._record_failure_locked(paths, worker_key, failure_reason, now=timestamp)
 
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._lock:
-            worker_lock = self._initialization_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._initialization_locks[worker_key] = worker_lock
-            return worker_lock
+    def _worker_lock(self, paths: LocalWorkerStatePaths) -> threading.Lock:
+        return _shared_worker_initialization_lock(paths)
 
     def _default_metadata(self, worker_key: str, now: float) -> _LocalWorkerMetadata:
         lifecycle = initial_worker_lifecycle_state(now=now)

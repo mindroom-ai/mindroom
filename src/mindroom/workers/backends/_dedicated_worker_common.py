@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import (
     RuntimePaths,
     deserialize_runtime_paths,
@@ -25,12 +26,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 __all__ = [
     "ScopedVisibleStateRoot",
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
     "plan_scoped_visible_state_roots",
+    "resolved_agent_policies_from_config_data",
     "stable_signature_json",
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
@@ -129,6 +132,43 @@ def build_backend_config_signature(
         *(stable_signature_json(value) for value in json_values),
         *suffix_parts,
     )
+
+
+def _default_worker_scope_from_config_data(config_data: Mapping[str, object]) -> WorkerScope | None:
+    raw_defaults = config_data.get("defaults")
+    if not isinstance(raw_defaults, dict):
+        return None
+    raw_worker_scope = cast("dict[str, object]", raw_defaults).get("worker_scope")
+    if isinstance(raw_worker_scope, str) and raw_worker_scope in {
+        "shared",
+        "user",
+        "user_agent",
+    }:
+        return cast("WorkerScope", raw_worker_scope)
+    return None
+
+
+def resolved_agent_policies_from_config_data(
+    config_data: Mapping[str, object],
+) -> dict[str, ResolvedAgentPolicy]:
+    """Resolve worker isolation policy from raw config data."""
+    raw_agents = config_data.get("agents")
+    if not isinstance(raw_agents, dict):
+        return {}
+
+    agent_mappings = {
+        agent_name: cast("dict[str, object]", raw_agent)
+        for agent_name, raw_agent in raw_agents.items()
+        if isinstance(agent_name, str) and isinstance(raw_agent, dict)
+    }
+    if not agent_mappings:
+        return {}
+
+    seeds = build_agent_policy_seeds(
+        agent_mappings,
+        default_worker_scope=_default_worker_scope_from_config_data(config_data),
+    )
+    return resolve_agent_policy_index(seeds).policies
 
 
 def build_dedicated_worker_runtime_paths(

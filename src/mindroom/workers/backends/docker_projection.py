@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
-from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
@@ -26,6 +25,7 @@ from mindroom.tool_system.worker_routing import (
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
     validate_local_copy_source_dir,
@@ -289,7 +289,7 @@ class DockerProjectionManager:
             raise WorkerBackendError(msg)
 
         config_data = self._load_host_config_data(host_config_path)
-        resolved_agent_policies = self._resolved_agent_policies(config_data)
+        resolved_agent_policies = resolved_agent_policies_from_config_data(config_data)
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path] = {}
         assets: list[_DockerProjectedConfigAsset] = []
@@ -358,7 +358,7 @@ class DockerProjectionManager:
         host_config_path = self.config.host_config_path
         if host_config_path is None:
             return {}
-        return self._resolved_agent_policies(self._load_host_config_data(host_config_path))
+        return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
     def prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
         """Remove stale projected config snapshots for one worker root."""
@@ -536,25 +536,6 @@ class DockerProjectionManager:
         config_data.clear()
         config_data.update(cast("dict[str, object]", redacted_data))
 
-    def _resolved_agent_policies(self, config_data: dict[str, object]) -> dict[str, ResolvedAgentPolicy]:
-        raw_agents = config_data.get("agents")
-        if not isinstance(raw_agents, dict):
-            return {}
-
-        agent_mappings = {
-            agent_name: cast("dict[str, object]", raw_agent)
-            for agent_name, raw_agent in raw_agents.items()
-            if isinstance(agent_name, str) and isinstance(raw_agent, dict)
-        }
-        if not agent_mappings:
-            return {}
-
-        seeds = build_agent_policy_seeds(
-            agent_mappings,
-            default_worker_scope=self._default_projected_worker_scope(config_data),
-        )
-        return resolve_agent_policy_index(seeds).policies
-
     def _projected_agent_names(
         self,
         *,
@@ -631,19 +612,6 @@ class DockerProjectionManager:
             if isinstance(private_knowledge_base_id, str):
                 projected_knowledge_base_ids.append(private_knowledge_base_id)
         return _ordered_unique_nonempty_strings(projected_knowledge_base_ids)
-
-    def _default_projected_worker_scope(self, config_data: dict[str, object]) -> WorkerScope | None:
-        raw_defaults = config_data.get("defaults")
-        if not isinstance(raw_defaults, dict):
-            return None
-        raw_worker_scope = cast("dict[str, object]", raw_defaults).get("worker_scope")
-        if isinstance(raw_worker_scope, str) and raw_worker_scope in {
-            "shared",
-            "user",
-            "user_agent",
-        }:
-            return cast("WorkerScope", raw_worker_scope)
-        return None
 
     def _worker_key_targets_agent(
         self,

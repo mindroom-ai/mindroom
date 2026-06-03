@@ -4449,6 +4449,63 @@ def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Pa
     assert worker.status == "ready"
 
 
+def test_local_worker_backend_and_preparer_share_initialization_lock(tmp_path: Path) -> None:
+    """The local backend and direct preparer helper must serialize the same worker root."""
+    backend = local_workers_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=60.0,
+    )
+    worker_key = "worker-race"
+    paths = local_workers_module.local_worker_state_paths_for_root(backend.worker_root / worker_dir_name(worker_key))
+    first_create_started = threading.Event()
+    allow_first_create_to_finish = threading.Event()
+    second_create_started = threading.Event()
+    call_count_lock = threading.Lock()
+    create_call_count = 0
+    exceptions: list[Exception] = []
+
+    def fake_create(_self: object, venv_dir: Path) -> None:
+        nonlocal create_call_count
+        with call_count_lock:
+            create_call_count += 1
+            call_number = create_call_count
+        if call_number == 1:
+            first_create_started.set()
+            assert allow_first_create_to_finish.wait(timeout=1.0)
+        else:
+            second_create_started.set()
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
+
+    def prepare_worker_state() -> None:
+        try:
+            local_workers_module.ensure_local_worker_state_locked(paths)
+        except Exception as exc:  # pragma: no cover - surfaced by test assertion below
+            exceptions.append(exc)
+
+    def ensure_worker() -> None:
+        try:
+            backend.ensure_worker(WorkerSpec(worker_key))
+        except Exception as exc:  # pragma: no cover - surfaced by test assertion below
+            exceptions.append(exc)
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+        thread_one = threading.Thread(target=prepare_worker_state)
+        thread_two = threading.Thread(target=ensure_worker)
+
+        thread_one.start()
+        assert first_create_started.wait(timeout=1.0)
+        thread_two.start()
+        assert not second_create_started.wait(timeout=0.2)
+        allow_first_create_to_finish.set()
+        thread_one.join(timeout=1.0)
+        thread_two.join(timeout=1.0)
+
+    assert exceptions == []
+    assert create_call_count == 1
+
+
 def test_sandbox_runner_records_worker_initialization_failures(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
