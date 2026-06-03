@@ -47,7 +47,7 @@ def _runtime_paths() -> object:
     return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
-def _isolated_runtime_paths(tmp_path: Path) -> object:
+def _test_runtime_paths(tmp_path: Path) -> object:
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -1669,7 +1669,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
     """Configured schedule rooms should use the static responder boundary without membership refresh."""
     client = AsyncMock()
     room = _matrix_room("!test:server", members_synced=False)
-    runtime_paths = _isolated_runtime_paths(tmp_path)
+    runtime_paths = _test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={
@@ -1734,7 +1734,7 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
     """Existing-thread schedules should validate parsed mentions against thread-scoped responders."""
     client = AsyncMock()
     room = _matrix_room("!test:server")
-    runtime_paths = _isolated_runtime_paths(tmp_path)
+    runtime_paths = _test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={

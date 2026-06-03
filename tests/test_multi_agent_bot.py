@@ -2240,6 +2240,94 @@ class TestAgentBot:
         assert observed_credentials_root == runtime_storage.resolve()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_shuts_down_primary_worker_manager(self, tmp_path: Path) -> None:
+        """The orchestrator should clear stale workers before startup and shut them down on exit."""
+        reset_runtime_state()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+        shutdown_calls: list[dict[str, object]] = []
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        runtime_paths = self._runtime_paths(tmp_path)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator.shutdown_primary_worker_manager",
+                side_effect=lambda **kwargs: shutdown_calls.append(kwargs),
+            ),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_shuts_down_primary_worker_manager_when_env_sync_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Startup failures before orchestrator creation should still shut down worker managers."""
+        reset_runtime_state()
+        shutdown_calls: list[dict[str, object]] = []
+        runtime_paths = self._runtime_paths(tmp_path)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator") as mock_orchestrator_cls,
+            patch(
+                "mindroom.orchestrator.shutdown_primary_worker_manager",
+                side_effect=lambda **kwargs: shutdown_calls.append(kwargs),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await main(
+                log_level="INFO",
+                runtime_paths=runtime_paths,
+                api=False,
+            )
+
+        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_orchestrator_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_shuts_down_primary_worker_manager_when_stop_fails(self, tmp_path: Path) -> None:
+        """Shutdown failures should still attempt primary worker manager shutdown."""
+        reset_runtime_state()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_orchestrator.stop = AsyncMock(side_effect=RuntimeError("stop boom"))
+        mock_orchestrator.running = False
+        shutdown_calls: list[dict[str, object]] = []
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        runtime_paths = self._runtime_paths(tmp_path)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator.shutdown_primary_worker_manager",
+                side_effect=lambda **kwargs: shutdown_calls.append(kwargs),
+            ),
+            pytest.raises(RuntimeError, match="stop boom"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        assert shutdown_calls == [{"timeout_seconds": 0.0}, {}]
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
         config = self._config_for_storage(tmp_path)

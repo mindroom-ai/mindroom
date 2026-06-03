@@ -218,7 +218,8 @@ def stream_with_tool_execution_identity[ChunkT](
     )
 
 
-def _normalize_worker_key_part(value: str) -> str:
+def normalize_worker_key_part(value: str) -> str:
+    """Return one normalized worker-key component."""
     normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
     return normalized or "default"
 
@@ -457,8 +458,8 @@ def resolve_worker_key(
     agent_name: str | None = None,
 ) -> str | None:
     """Derive a stable worker key from scope and execution identity."""
-    tenant_key = _normalize_worker_key_part(identity.tenant_id or identity.account_id or "default")
-    effective_agent_name = _normalize_worker_key_part(agent_name or identity.agent_name)
+    tenant_key = normalize_worker_key_part(identity.tenant_id or identity.account_id or "default")
+    effective_agent_name = normalize_worker_key_part(agent_name or identity.agent_name)
     worker_key: str | None
 
     if worker_scope == "shared":
@@ -489,14 +490,14 @@ def resolve_unscoped_worker_key(
 ) -> str:
     """Derive a stable backend worker key for unscoped sandbox execution."""
     identity = execution_identity
-    tenant_key = _normalize_worker_key_part(
+    tenant_key = normalize_worker_key_part(
         tenant_id
         or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
         or account_id
         or (identity.account_id if identity is not None and identity.account_id is not None else None)
         or "default",
     )
-    effective_agent_name = _normalize_worker_key_part(agent_name)
+    effective_agent_name = normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
@@ -538,7 +539,7 @@ def requires_explicit_private_agent_visibility(worker_key: str) -> bool:
     return resolved_worker_key_scope(worker_key) == "user_agent"
 
 
-def _worker_key_agent_name(worker_key: str) -> str | None:
+def worker_key_agent_name(worker_key: str) -> str | None:
     """Return the encoded agent name for one resolved worker key, when present."""
     scope = resolved_worker_key_scope(worker_key)
     if scope is None or scope == "user":
@@ -691,7 +692,7 @@ def visible_state_roots_for_worker_key(
             private_instance_scope_root_path(base_storage_path, worker_key),
         )
 
-    agent_name = _worker_key_agent_name(worker_key)
+    agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
     if scope == "user_agent" and agent_name in private_agent_names:

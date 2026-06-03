@@ -47,6 +47,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
+    "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
     "validate_authored_tool_entry_overrides",

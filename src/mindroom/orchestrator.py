@@ -73,7 +73,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.runtime import clear_worker_validation_snapshot_cache
+from mindroom.workers.runtime import clear_worker_validation_snapshot_cache, shutdown_primary_worker_manager
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
@@ -2099,7 +2099,7 @@ async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
         await task
 
 
-async def main(
+async def main(  # noqa: PLR0915
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -2109,19 +2109,7 @@ async def main(
 ) -> None:
     """Main entry point for the multi-agent bot system."""
     storage_path = runtime_paths.storage_root
-
-    # Configure logging before any background tasks or account setup begin.
-    setup_logging(level=log_level, runtime_paths=runtime_paths)
-
-    logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-
-    # Ensure storage exists before any runtime components try to write into it.
-    storage_path.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Starting orchestrator...")
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    set_runtime_starting()
+    orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
     api_server = _EmbeddedApiServerContext(host=api_host, port=api_port)
@@ -2130,6 +2118,21 @@ async def main(
     api_task: asyncio.Task[None] | None = None
 
     try:
+        # Drop any stale worker manager before startup work builds the active runtime.
+        shutdown_primary_worker_manager(timeout_seconds=0.0)
+
+        # Configure logging before any background tasks or account setup begin.
+        setup_logging(level=log_level, runtime_paths=runtime_paths)
+
+        logger.info("Syncing API keys from environment to CredentialsManager...")
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        # Ensure storage exists before any runtime components try to write into it.
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Starting orchestrator...")
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        set_runtime_starting()
         auxiliary_specs = [
             (
                 "config watcher",
@@ -2197,6 +2200,10 @@ async def main(
         for task in auxiliary_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        await orchestrator.stop()
-        reset_matrix_sync_health()
-        reset_runtime_state()
+        try:
+            if orchestrator is not None:
+                await orchestrator.stop()
+        finally:
+            reset_matrix_sync_health()
+            reset_runtime_state()
+            shutdown_primary_worker_manager()

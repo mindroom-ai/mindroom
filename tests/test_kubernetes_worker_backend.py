@@ -839,8 +839,8 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
     assert core_api.secrets[auth_secret_name].data == expected_secret_data
 
 
-def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
-    """Evicting one worker should null out only its key in the shared tenant Secret."""
+def test_kubernetes_backend_cleanup_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
+    """Cleaning up one idle worker should null out only its key in the shared tenant Secret."""
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -853,7 +853,7 @@ def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(t
     core_api.secrets[auth_secret_name].data = {other_worker_id: "preexisting"}
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=20.0)
+    backend.cleanup_idle_workers(now=80.0)
 
     assert core_api.deleted_secret_names == []
     delete_patch = (
@@ -991,9 +991,9 @@ def test_kubernetes_backend_shared_auth_secret_cleanup_ignores_missing_secret(tm
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     core_api.secrets.pop(auth_secret_name)
 
-    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=20.0)
+    cleaned = backend.cleanup_idle_workers(now=80.0)
 
-    assert evicted is None
+    assert [worker.worker_key for worker in cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
     assert (
         auth_secret_name,
         {"data": {handle.worker_id: None, f"{handle.worker_id}.credentials-encryption-key": None}},
@@ -1633,6 +1633,52 @@ def test_kubernetes_backend_user_agent_mounts_require_explicit_private_visibilit
         backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
 
+def test_kubernetes_backend_rejects_private_user_agent_worker_without_target_visibility(tmp_path: Path) -> None:
+    """Private user-agent workers must fail closed until the targeted private agent is explicitly visible."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    private:
+      per: user_agent
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    with pytest.raises(WorkerBackendError, match="missing from explicit private-agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    assert apps_api.created_bodies == []
+
+
 def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() -> None:
     """User-agent workers should mount their private root from the explicit worker spec visibility."""
     backend, apps_api, _core_api = _backend()
@@ -1908,28 +1954,15 @@ def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> 
     assert len(apps_api.patched_bodies) == patch_count_after_first_cleanup
 
 
-def test_kubernetes_backend_evict_without_preserving_state_deletes_runtime_resources() -> None:
-    """Non-preserving eviction should delete the worker service and deployment resources."""
+def test_kubernetes_backend_cleanup_idle_deletes_service_but_keeps_deployment() -> None:
+    """Idle cleanup should scale down the worker and release its Service."""
     backend, apps_api, core_api = _backend()
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
 
-    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=5.0)
+    cleaned = backend.cleanup_idle_workers(now=80.0)
 
-    assert evicted is None
-    assert handle.worker_id not in apps_api.deployments
-    assert handle.worker_id not in core_api.services
-    assert handle.worker_id not in core_api.secrets
-
-
-def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deployment() -> None:
-    """Idle-preserving eviction should scale down the worker and release its Service."""
-    backend, apps_api, core_api = _backend()
-    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
-
-    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=True, now=5.0)
-
-    assert evicted is not None
-    assert evicted.status == "idle"
+    assert [worker.worker_key for worker in cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert cleaned[0].status == "idle"
     assert handle.worker_id in apps_api.deployments
     assert apps_api.deployments[handle.worker_id].spec.replicas == 0
     assert handle.worker_id not in core_api.services
@@ -1980,6 +2013,21 @@ def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
     assert patch_name == handle.worker_id
     assert patch_body["metadata"]["annotations"]["mindroom.ai/last-used-at"] == "25.0"
     assert "template" not in patch_body.get("spec", {})
+
+
+def test_kubernetes_backend_touch_revives_idle_worker_and_clears_stale_failure_reason() -> None:
+    """A touch must revive an idle worker and drop a lingering failure reason."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "idle"
+    deployment.metadata.annotations["mindroom.ai/failure-reason"] = "boom"
+
+    touched = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=25.0)
+
+    assert touched is not None
+    assert touched.status == "ready"
+    assert touched.failure_reason is None
 
 
 def test_kubernetes_backend_pins_workers_to_control_plane_node(
@@ -2047,8 +2095,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert deployment.metadata.annotations["mindroom.ai/failure-count"] == "1"
     assert deployment.spec.replicas == 0
 
-    handle = backend.get_worker(_TEST_SCOPED_WORKER_KEY_A, now=11.0)
-    assert handle is not None
+    handle = backend.list_workers(now=11.0)[0]
     assert handle.status == "failed"
     assert handle.failure_reason == error_message
     assert worker_id not in _core_api.services

@@ -28,11 +28,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, THREAD_HISTORY_ERROR_DIAGNOSTIC
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamOutcome, TeamResolution
-from mindroom.thread_utils import (
-    check_agent_mentioned,
-    get_agents_in_thread,
-    is_router_only_agent_mention,
-)
+from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
 from tests.conftest import (
     agent_response_should_respond,

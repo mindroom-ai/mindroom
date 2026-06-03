@@ -485,6 +485,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.sandbox_env_assembly"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.constants",
+]
+
+[[modules]]
 path = "mindroom.api.sandbox_exec"
 depends_on = [
     "mindroom.constants",
@@ -506,6 +513,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_protocol",
     "mindroom.api.sandbox_worker_prep",
@@ -2025,6 +2033,19 @@ depends_on = [
     "mindroom.constants",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.worker_proxy_client",
+]
+
+[[modules]]
+path = "mindroom.tool_system.worker_proxy_client"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.runtime_env_policy",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.workers.models",
+]
+visibility = [
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
@@ -2763,6 +2784,7 @@ expose = [
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
+    "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
     "validate_authored_tool_entry_overrides",
@@ -2801,6 +2823,7 @@ expose = [
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
+    "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
     "validate_authored_tool_entry_overrides",

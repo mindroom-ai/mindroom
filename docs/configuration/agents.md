@@ -4,7 +4,8 @@ icon: lucide/user
 
 # Agent Configuration
 
-Agents are the core building blocks of MindRoom. Each agent is a specialized AI actor with specific capabilities.
+Agents are the core building blocks of MindRoom.
+Each agent is a specialized AI actor with specific capabilities.
 
 ## Basic Agent
 
@@ -330,12 +331,20 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
+Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
+Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
+Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
+A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-The shared-only integrations require `worker_scope` unset or `shared`.
+Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
 That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
 OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
-Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+`gmail`, `google_calendar`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
 
@@ -538,9 +547,11 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+Agents can delegate tasks to other agents using the `delegate_to` field.
+When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
+The delegated agent runs as a fresh, one-shot instance with no shared session or history.
+It executes the task and returns its response as the tool result.
 
 ```yaml
 agents:
@@ -580,7 +591,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for all agents.
+Any agent that omits a setting inherits the value from here.
 
 ```yaml
 defaults:

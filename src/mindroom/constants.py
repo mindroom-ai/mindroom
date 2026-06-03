@@ -43,7 +43,7 @@ _WORKSPACE_HOME_IDENTITY_ENV_NAMES = frozenset(
         "XDG_STATE_HOME",
     },
 )
-WORKER_RUNTIME_ENV_NAMES = frozenset(
+WORKER_RUNTIME_PATH_ENV_NAMES = frozenset(
     {
         "XDG_CACHE_HOME",
         "PIP_CACHE_DIR",
@@ -52,7 +52,7 @@ WORKER_RUNTIME_ENV_NAMES = frozenset(
         "VIRTUAL_ENV",
     },
 )
-WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
+WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_PATH_ENV_NAMES
 
 
 def prompt_roles_for_history_storage(system_message_role: str = "system") -> frozenset[str]:
@@ -297,7 +297,7 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
-def _serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
+def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = runtime_env_policy.public_worker_startup_env(runtime_paths.process_env)
     env_file_values = runtime_env_policy.public_worker_startup_env(runtime_paths.env_file_values)
@@ -317,7 +317,7 @@ def _serialize_startup_manifest(
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners."""
     return {
-        "runtime_paths": _serialize_public_runtime_paths(runtime_paths)
+        "runtime_paths": serialize_public_runtime_paths(runtime_paths)
         if public_runtime
         else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
@@ -470,6 +470,38 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
+def runtime_paths_with_config_path(runtime_paths: RuntimePaths, config_path: Path) -> RuntimePaths:
+    """Return a primary-runtime context rebased to one explicit config path."""
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    if resolved_config_path == runtime_paths.config_path:
+        return _with_primary_runtime_env(runtime_paths)
+    return resolve_primary_runtime_paths(
+        config_path=resolved_config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env=dict(runtime_paths.process_env),
+    )
+
+
+def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: Path) -> RuntimePaths:
+    """Return a runtime context rebased to one explicit storage root."""
+    resolved_storage_root = Path(storage_root).expanduser().resolve()
+    normalized_process_env = dict(runtime_paths.process_env)
+    normalized_process_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
+    normalized_process_env["MINDROOM_STORAGE_PATH"] = str(resolved_storage_root)
+    if resolved_storage_root == runtime_paths.storage_root and normalized_process_env == dict(
+        runtime_paths.process_env,
+    ):
+        return runtime_paths
+    return RuntimePaths(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=resolved_storage_root,
+        process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
+        env_file_values=runtime_paths.env_file_values,
+    )
+
+
 def _trusted_tool_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -545,12 +577,19 @@ def trusted_tool_runtime_env_values(
     process_env, env_file_values = _trusted_tool_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
+    for name in tuple(merged_env):
+        if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
+            continue
+        source_path = _runtime_env_source_path(runtime_paths, name)
+        if source_path is None:
+            continue
+        merged_env[name] = str(source_path.resolve())
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
     process_env = runtime_env_policy.execution_tool_runtime_env(runtime_paths.process_env)
     env_file_values = runtime_env_policy.execution_tool_runtime_env(runtime_paths.env_file_values)
@@ -591,8 +630,18 @@ def shell_execution_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def sandbox_shell_execution_runtime_env_values(
-    _runtime_paths: RuntimePaths,
+def _runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
+    """Return one runtime env var as a lexical filesystem path without resolving symlinks."""
+    raw_value = runtime_paths.env_value(name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = runtime_paths.config_dir / path
+    return path
+
+
+def _sandbox_shell_execution_runtime_env_values(
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
@@ -608,15 +657,42 @@ def sandbox_shell_execution_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
+EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
+
+
+def build_execution_tool_env(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    extra_env_passthrough: str | None = None,
+    shell_process_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the from-scratch execution env for an execution tool (shell or python).
+
+    Callers gate on :data:`EXECUTION_ENV_TOOL_NAMES` first. The shell
+    ``process_env`` source differs between the client proxy (which only trusts
+    the runtime paths) and the worker runner (which may merge ``os.environ``),
+    so it is supplied by the caller.
+    """
+    if tool_name == "shell":
+        return dict(
+            _sandbox_shell_execution_runtime_env_values(
+                extra_env_passthrough=extra_env_passthrough,
+                process_env=shell_process_env,
+            ),
+        )
+    return dict(_execution_tool_runtime_env_values(runtime_paths))
+
+
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     """Resolve one runtime env var as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    raw_value = runtime_paths.env_value(name)
-    if raw_value is None or not raw_value.strip():
+    source_path = _runtime_env_source_path(runtime_paths, name)
+    if source_path is None:
         return None
-    return _resolve_runtime_relative_path(raw_value, base_dir=runtime_paths.config_dir)
+    return source_path.resolve()
 
 
 def runtime_env_flag(
@@ -682,19 +758,27 @@ def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "encryption_keys"
 
 
-def resolve_config_relative_path(
+def config_relative_path(
     raw_path: str | Path,
     runtime_paths: RuntimePaths,
 ) -> Path:
-    """Resolve a configured path, treating relative values as config-directory-relative.
+    """Return one configured path relative to the runtime config directory without resolving symlinks.
 
     Config-relative paths may use `${MINDROOM_STORAGE_PATH}` or
     `${MINDROOM_CONFIG_PATH}` placeholders only.
     """
     unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), runtime_paths)).expanduser()
     if unresolved.is_absolute():
-        return unresolved.resolve()
-    return (runtime_paths.config_dir / unresolved).resolve()
+        return unresolved
+    return runtime_paths.config_dir / unresolved
+
+
+def resolve_config_relative_path(
+    raw_path: str | Path,
+    runtime_paths: RuntimePaths,
+) -> Path:
+    """Resolve a configured path, treating relative values as config-directory-relative."""
+    return config_relative_path(raw_path, runtime_paths).resolve()
 
 
 def resolve_config_relative_path_preserving_leaf(

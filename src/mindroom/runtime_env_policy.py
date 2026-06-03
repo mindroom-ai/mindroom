@@ -7,6 +7,8 @@ from collections.abc import Mapping  # noqa: TC003 - public annotations support 
 from types import MappingProxyType
 from typing import cast
 
+from mindroom.sensitivity import secret_name_suffixes
+
 __all__ = [
     "AZURE_OPENAI_ENV_BY_KEY",
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
@@ -154,7 +156,6 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "AZURE_OPENAI_API_VERSION",
         "AZURE_OPENAI_DEPLOYMENT",
         "AZURE_OPENAI_ENDPOINT",
-        "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_CLOUD_PROJECT",
         "OLLAMA_HOST",
@@ -224,13 +225,8 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
-_RUNTIME_STARTUP_SECRET_SUFFIXES = (
-    "_API_KEY",
-    "_API_KEYS",
-    "_PASSWORD",
-    "_SECRET",
-    "_TOKEN",
-)
+# Shared secret stems (api_key/password/secret/token) plus the env-only `_API_KEYS`.
+_RUNTIME_STARTUP_SECRET_SUFFIXES = (*secret_name_suffixes(upper=True), "_API_KEYS")
 _RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
 _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
@@ -320,7 +316,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
-    if is_runtime_database_url_env_name(name):
+    if is_runtime_database_url_env_name(name) or name.endswith("_FILE"):
         return False
     if name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX) and name not in _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES:
         return False
