@@ -2735,6 +2735,32 @@ def test_docker_backend_user_agent_requires_explicit_private_visibility(
         backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
 
+def test_docker_backend_user_agent_home_is_neutral_without_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-agent HOME should come from worker-key scope, not visibility metadata."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    assert worker_key is not None
+    assert backend._container_env(worker_key)["HOME"] == "/app/worker"
+
+
 def test_docker_backend_rejects_unknown_worker_keys_for_scoped_mounts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -26,7 +26,7 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.dependencies import ensure_optional_deps
-from mindroom.tool_system.worker_routing import worker_dir_name, worker_key_agent_name
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
@@ -663,7 +663,7 @@ class DockerWorkerBackend:
 
         if not self._container_env_matches(
             container,
-            expected_env=self._container_env(metadata.worker_key, private_agent_names=private_agent_names),
+            expected_env=self._container_env(metadata.worker_key),
         ):
             return False
 
@@ -703,7 +703,7 @@ class DockerWorkerBackend:
                 command=["/app/run-sandbox-runner.sh"],
                 name=metadata.container_name,
                 detach=True,
-                environment=self._container_env(metadata.worker_key, private_agent_names=private_agent_names),
+                environment=self._container_env(metadata.worker_key),
                 volumes=self._container_volumes(
                     paths,
                     worker_key=metadata.worker_key,
@@ -788,12 +788,7 @@ class DockerWorkerBackend:
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, container, now=now, paths=paths)
 
-    def _container_env(
-        self,
-        worker_key: str,
-        *,
-        private_agent_names: frozenset[str] | None,
-    ) -> dict[str, str]:
+    def _container_env(self, worker_key: str) -> dict[str, str]:
         dedicated_root = Path(self.config.storage_mount_path)
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
@@ -818,7 +813,7 @@ class DockerWorkerBackend:
             SHARED_CREDENTIALS_PATH_ENV: f"{self.config.storage_mount_path}/.shared_credentials",
             _DEDICATED_WORKER_KEY_ENV: worker_key,
             _DEDICATED_WORKER_ROOT_ENV: self.config.storage_mount_path,
-            "HOME": self._container_home_path(worker_key, private_agent_names=private_agent_names),
+            "HOME": self._container_home_path(worker_key),
             _TOKEN_ENV_NAME: self.auth_token,
         }
         if self.config.host_config_path is not None:
@@ -870,16 +865,11 @@ class DockerWorkerBackend:
             extra_env=self.config.extra_env,
         )
 
-    def _container_home_path(
-        self,
-        worker_key: str,
-        *,
-        private_agent_names: frozenset[str] | None,
-    ) -> str:
+    def _container_home_path(self, worker_key: str) -> str:
         agent_name = worker_key_agent_name(worker_key)
         if agent_name is None:
             return self.config.storage_mount_path
-        if private_agent_names is not None and agent_name in private_agent_names:
+        if resolved_worker_key_scope(worker_key) == "user_agent":
             # Private workspaces can be renamed in config, so the request
             # preparation layer remains the source of truth for the command cwd.
             return self.config.storage_mount_path
