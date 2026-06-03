@@ -40,6 +40,7 @@ from mindroom.ai import (
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
+    _run_error_event_text,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
     ai_response,
@@ -6003,6 +6004,32 @@ class TestUserIdPassthrough:
         assert str(second_prompt[-1].content).count("Inline media unavailable for this model") == 1
         assert chunks == ["friendly-error"]
         mock_friendly_error.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("event", "expected"),
+        [
+            (
+                RunErrorEvent(content=None, additional_data={"message": " direct provider failure "}),
+                "direct provider failure",
+            ),
+            (
+                RunErrorEvent(content=None, additional_data={"error": {"message": "nested provider failure"}}),
+                "nested provider failure",
+            ),
+            (
+                RunErrorEvent(content=None, additional_data={"detail": {"error": {"message": "deep detail"}}}),
+                "deep detail",
+            ),
+            (RunErrorEvent(content=None), "Agent run failed without provider error details"),
+        ],
+    )
+    def test_run_error_event_text_uses_additional_data_and_fallback(
+        self,
+        event: RunErrorEvent,
+        expected: str,
+    ) -> None:
+        """Run errors should surface nested provider payloads before static fallback."""
+        assert _run_error_event_text(event) == expected
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_run_error_event_metadata_when_content_empty(
