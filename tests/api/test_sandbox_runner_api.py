@@ -1853,7 +1853,6 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
         worker_key="v1:default:shared:code",
         config_path=Path("/app/config.yaml"),
         dedicated_root=Path("/app/worker"),
-        local_dedicated_root=tmp_path / "worker-runtime",
         worker_port=8766,
         shared_storage_root="/app/shared-storage",
         extra_env={},

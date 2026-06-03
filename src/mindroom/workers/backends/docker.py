@@ -665,7 +665,7 @@ class DockerWorkerBackend:
 
         if not self._container_env_matches(
             container,
-            expected_env=self._container_env(metadata.worker_key, paths=paths),
+            expected_env=self._container_env(metadata.worker_key),
         ):
             return False
 
@@ -705,7 +705,7 @@ class DockerWorkerBackend:
                 command=["/app/run-sandbox-runner.sh"],
                 name=metadata.container_name,
                 detach=True,
-                environment=self._container_env(metadata.worker_key, paths=paths),
+                environment=self._container_env(metadata.worker_key),
                 volumes=self._container_volumes(
                     paths,
                     worker_key=metadata.worker_key,
@@ -790,12 +790,11 @@ class DockerWorkerBackend:
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, container, now=now, paths=paths)
 
-    def _container_env(self, worker_key: str, *, paths: LocalWorkerStatePaths) -> dict[str, str]:
+    def _container_env(self, worker_key: str) -> dict[str, str]:
         dedicated_root = Path(self.config.storage_mount_path)
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
-            local_dedicated_root=paths.root,
         )
         env = {
             SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
@@ -851,7 +850,6 @@ class DockerWorkerBackend:
         *,
         worker_key: str,
         dedicated_root: Path,
-        local_dedicated_root: Path,
     ) -> RuntimePaths:
         return build_dedicated_worker_runtime_paths(
             runtime_paths=self._runtime_paths,
@@ -859,7 +857,6 @@ class DockerWorkerBackend:
             worker_key=worker_key,
             config_path=self._worker_runtime_config_path(),
             dedicated_root=dedicated_root,
-            local_dedicated_root=local_dedicated_root,
             worker_port=self.config.worker_port,
             shared_storage_root=_CONTAINER_SHARED_STORAGE_ROOT,
             extra_env=self.config.extra_env,

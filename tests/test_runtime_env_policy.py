@@ -41,7 +41,7 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
         "shell_passthrough_env": False,
     },
     "GOOGLE_APPLICATION_CREDENTIALS": {
-        "public_worker_startup_env": True,
+        "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
@@ -180,8 +180,8 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
     }
 
 
-def test_public_runtime_paths_keep_only_worker_local_file_secret_paths(tmp_path: Path) -> None:
-    """Copied worker-local file-secret paths are public only inside the worker storage root."""
+def test_public_runtime_paths_do_not_reintroduce_worker_local_file_secret_paths(tmp_path: Path) -> None:
+    """Public startup serialization never re-admits ambient file-secret env vars."""
     storage_root = tmp_path / "worker"
     projected_secret = storage_root / ".runtime" / "file-secrets" / "OPENAI_API_KEY_FILE" / "openai.key"
     stray_secret = tmp_path / "other" / ".runtime" / "file-secrets" / "GITHUB_TOKEN_FILE" / "token"
@@ -201,10 +201,7 @@ def test_public_runtime_paths_keep_only_worker_local_file_secret_paths(tmp_path:
 
     public_runtime = constants.serialize_public_runtime_paths(runtime_paths)
 
-    assert public_runtime["process_env"] == {
-        "MATRIX_HOMESERVER": "https://matrix.example.invalid",
-        "OPENAI_API_KEY_FILE": str(projected_secret),
-    }
+    assert public_runtime["process_env"] == {"MATRIX_HOMESERVER": "https://matrix.example.invalid"}
 
 
 def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:

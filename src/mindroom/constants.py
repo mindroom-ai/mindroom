@@ -297,30 +297,10 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
-def _worker_projected_file_secret_env(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> dict[str, str]:
-    """Return worker-local file-secret paths safe to name in public startup payloads."""
-    file_secret_root = (runtime_paths.storage_root / ".runtime" / "file-secrets").resolve()
-    projected_env: dict[str, str] = {}
-    for name, raw_value in env.items():
-        if not name.endswith("_FILE"):
-            continue
-        path = Path(raw_value).expanduser()
-        if not path.is_absolute():
-            continue
-        try:
-            path.resolve().relative_to(file_secret_root)
-        except ValueError:
-            continue
-        projected_env[name] = raw_value
-    return projected_env
-
-
 def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = runtime_env_policy.public_worker_startup_env(runtime_paths.process_env)
     env_file_values = runtime_env_policy.public_worker_startup_env(runtime_paths.env_file_values)
-    process_env.update(_worker_projected_file_secret_env(runtime_paths, runtime_paths.process_env))
-    env_file_values.update(_worker_projected_file_secret_env(runtime_paths, runtime_paths.env_file_values))
     return {
         "config_path": str(runtime_paths.config_path),
         "storage_root": str(runtime_paths.storage_root),
@@ -600,7 +580,7 @@ def trusted_tool_runtime_env_values(
     for name in tuple(merged_env):
         if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
             continue
-        source_path = runtime_env_source_path(runtime_paths, name)
+        source_path = _runtime_env_source_path(runtime_paths, name)
         if source_path is None:
             continue
         merged_env[name] = str(source_path.resolve())
@@ -650,7 +630,7 @@ def shell_execution_runtime_env_values(
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
+def _runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     """Return one runtime env var as a lexical filesystem path without resolving symlinks."""
     raw_value = runtime_paths.env_value(name)
     if raw_value is None or not raw_value.strip():
@@ -709,7 +689,7 @@ def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    source_path = runtime_env_source_path(runtime_paths, name)
+    source_path = _runtime_env_source_path(runtime_paths, name)
     if source_path is None:
         return None
     return source_path.resolve()

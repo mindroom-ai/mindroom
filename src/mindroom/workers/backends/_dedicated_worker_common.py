@@ -4,28 +4,25 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom.constants import (
     RuntimePaths,
     deserialize_runtime_paths,
-    runtime_env_source_path,
     serialize_public_runtime_paths,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
-from mindroom.sensitivity import secret_name_suffixes
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workspaces import copy_validated_local_file_to_root, validate_local_copy_source_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from pathlib import Path
 
     from mindroom.agent_policy import ResolvedAgentPolicy
 
@@ -55,21 +52,6 @@ _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
         SHARED_CREDENTIALS_PATH_ENV,
     },
 )
-_DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES = frozenset(
-    {
-        "GITHUB_TOKEN",
-        "MINDROOM_API_KEY",
-        "MINDROOM_LOCAL_CLIENT_SECRET",
-    },
-)
-# Shared secret stems as `*_FILE` env vars plus credential/service-account files.
-_SOURCE_PROCESS_FILE_SECRET_SUFFIXES = (
-    *secret_name_suffixes(upper=True, file=True),
-    "_CREDENTIAL_FILE",
-    "_CREDENTIALS_FILE",
-    "_SERVICE_ACCOUNT_FILE",
-)
-_WORKER_FILE_SECRET_ROOT = Path(".runtime") / "file-secrets"
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,22 +104,12 @@ def validate_dedicated_worker_extra_env(
     raise WorkerBackendError(msg)
 
 
-def _blocked_worker_file_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
-    return frozenset(
-        env_name
-        for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
-        if env_name.endswith("_FILE")
-        and env_name.removesuffix("_FILE") in _DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES
-    )
-
-
 def _protected_dedicated_worker_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
-    protected_names = set(_blocked_worker_file_env_names(runtime_paths))
-    protected_names.update(
+    protected_names = {
         env_name
         for env_name in {*runtime_paths.process_env, *runtime_paths.env_file_values}
         if env_name.endswith("_FILE")
-    )
+    }
     if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
         protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
     return frozenset(protected_names)
@@ -166,7 +138,6 @@ def build_dedicated_worker_runtime_paths(
     worker_key: str,
     config_path: Path,
     dedicated_root: Path,
-    local_dedicated_root: Path,
     worker_port: int,
     shared_storage_root: str,
     extra_env: Mapping[str, str],
@@ -180,29 +151,7 @@ def build_dedicated_worker_runtime_paths(
 
     public_runtime_paths = deserialize_runtime_paths(serialize_public_runtime_paths(runtime_paths))
     process_env = dict(public_runtime_paths.process_env)
-    process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     env_file_values = dict(public_runtime_paths.env_file_values)
-    env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-    for blocked_env_name in _blocked_worker_file_env_names(runtime_paths):
-        process_env.pop(blocked_env_name, None)
-        env_file_values.pop(blocked_env_name, None)
-
-    if google_application_credentials := _worker_google_application_credentials_path(
-        runtime_paths=runtime_paths,
-        backend_name=backend_name,
-        dedicated_root=dedicated_root,
-        local_dedicated_root=local_dedicated_root,
-    ):
-        process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
-    _rewrite_worker_file_env_values(
-        runtime_paths=runtime_paths,
-        backend_name=backend_name,
-        dedicated_root=dedicated_root,
-        local_dedicated_root=local_dedicated_root,
-        source_process_env=runtime_paths.process_env,
-        process_env=process_env,
-        env_file_values=env_file_values,
-    )
 
     process_env.update(
         {
@@ -295,121 +244,3 @@ def validate_unique_worker_visible_paths(
         return
     msg = f"Duplicate {duplicate_label} generated for worker key: {worker_key}"
     raise WorkerBackendError(msg)
-
-
-def _worker_google_application_credentials_path(
-    *,
-    runtime_paths: RuntimePaths,
-    backend_name: str,
-    dedicated_root: Path,
-    local_dedicated_root: Path,
-) -> str | None:
-    """Return a worker-visible ADC path, copying the source into worker state when needed."""
-    raw_value = runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
-    if raw_value is None or not raw_value.strip():
-        return None
-
-    source_path = runtime_env_source_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
-        return None
-
-    field_name = f"{backend_name} worker GOOGLE_APPLICATION_CREDENTIALS"
-    try:
-        resolved_source_path = validate_local_copy_source_path(source_path, field_name=field_name)
-    except ValueError as exc:
-        raise WorkerBackendError(str(exc)) from exc
-    if not resolved_source_path.is_file():
-        return None
-
-    runtime_dir = local_dedicated_root / ".runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        copy_validated_local_file_to_root(
-            resolved_source_path,
-            destination_root=local_dedicated_root,
-            destination_relative_path=Path(".runtime") / resolved_source_path.name,
-            destination_field_name=f"{field_name} destination",
-            destination_root_label="worker state root",
-            mode=0o600,
-        )
-    except ValueError as exc:
-        raise WorkerBackendError(str(exc)) from exc
-    return str(dedicated_root / ".runtime" / resolved_source_path.name)
-
-
-def _rewrite_worker_file_env_values(
-    *,
-    runtime_paths: RuntimePaths,
-    backend_name: str,
-    dedicated_root: Path,
-    local_dedicated_root: Path,
-    source_process_env: Mapping[str, str],
-    process_env: dict[str, str],
-    env_file_values: dict[str, str],
-) -> None:
-    blocked_file_env_names = _blocked_worker_file_env_names(runtime_paths)
-    source_process_file_env_names = {
-        env_name for env_name in source_process_env if env_name.endswith(_SOURCE_PROCESS_FILE_SECRET_SUFFIXES)
-    }
-    candidate_env_names = {
-        *source_process_file_env_names,
-        *process_env,
-        *env_file_values,
-        *runtime_paths.env_file_values,
-    }
-    for env_name in sorted(candidate_env_names):
-        if not env_name.endswith("_FILE"):
-            continue
-        if env_name in blocked_file_env_names:
-            continue
-        process_env.pop(env_name, None)
-        env_file_values.pop(env_name, None)
-        worker_visible_path = _worker_file_env_path(
-            runtime_paths=runtime_paths,
-            env_name=env_name,
-            backend_name=backend_name,
-            dedicated_root=dedicated_root,
-            local_dedicated_root=local_dedicated_root,
-        )
-        if worker_visible_path is None:
-            continue
-        process_env[env_name] = worker_visible_path
-
-
-def _worker_file_env_path(
-    *,
-    runtime_paths: RuntimePaths,
-    env_name: str,
-    backend_name: str,
-    dedicated_root: Path,
-    local_dedicated_root: Path,
-) -> str | None:
-    raw_value = runtime_paths.env_value(env_name)
-    if raw_value is None or not raw_value.strip():
-        return None
-
-    source_path = runtime_env_source_path(runtime_paths, env_name)
-    if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
-        return None
-
-    field_name = f"{backend_name} worker {env_name}"
-    try:
-        resolved_source_path = validate_local_copy_source_path(source_path, field_name=field_name)
-    except ValueError as exc:
-        raise WorkerBackendError(str(exc)) from exc
-    if not resolved_source_path.is_file():
-        return None
-
-    destination_relative_path = _WORKER_FILE_SECRET_ROOT / env_name / resolved_source_path.name
-    try:
-        copy_validated_local_file_to_root(
-            resolved_source_path,
-            destination_root=local_dedicated_root,
-            destination_relative_path=destination_relative_path,
-            destination_field_name=f"{field_name} destination",
-            destination_root_label="worker state root",
-            mode=0o600,
-        )
-    except ValueError as exc:
-        raise WorkerBackendError(str(exc)) from exc
-    return str(dedicated_root / destination_relative_path)

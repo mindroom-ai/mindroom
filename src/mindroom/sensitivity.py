@@ -6,13 +6,13 @@ Several worker-isolation paths must decide whether a *name* denotes a secret:
   worker-visible snapshot (:mod:`mindroom.workers.backends.docker_projection`);
 - public worker startup-env filtering keeps secret env vars out of worker
   manifests (:mod:`mindroom.runtime_env_policy`);
-- file-secret handling routes ``*_FILE`` env vars that point at secret files
-  (:mod:`mindroom.workers.backends._dedicated_worker_common`).
+- dedicated-worker extra-env validation protects existing file-secret names from
+  accidental override (:mod:`mindroom.workers.backends._dedicated_worker_common`).
 
 They share the same core secret-name *stems*, so a new secret pattern only has to
 be added here. Each call site layers its own extras on top of the shared core
 (``runtime_env_policy`` also treats ``_API_KEYS`` / ``_DATABASE_URL`` as secret;
-the file-secret path also recognises credential and service-account files).
+dedicated worker setup also treats all existing ``*_FILE`` names as protected).
 """
 
 from __future__ import annotations

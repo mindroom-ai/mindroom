@@ -1400,15 +1400,13 @@ def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
     assert committed_runtime.env_value("BROWSER_EXECUTABLE_PATH") == "/usr/bin/chromium"
-    assert (
-        committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == "/app/worker/.runtime/google-credentials.json"
-    )
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
     assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
     assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
-    assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+    assert not local_credentials_path.exists()
 
 
 def test_docker_backend_excludes_internal_file_secrets_from_worker_payload(
@@ -1458,11 +1456,11 @@ def test_docker_backend_excludes_internal_file_secrets_from_worker_payload(
     assert not (worker_runtime_root / ".runtime" / "file-secrets" / "MINDROOM_LOCAL_CLIENT_SECRET_FILE").exists()
 
 
-def test_docker_backend_commits_relative_file_backed_secrets_into_worker_payload(
+def test_docker_backend_excludes_relative_file_backed_secrets_from_worker_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dedicated Docker workers should preserve relative *_FILE secrets by copying them into worker state."""
+    """Dedicated Docker workers must not ambient-copy config-adjacent *_FILE secrets."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -1497,18 +1495,15 @@ def test_docker_backend_commits_relative_file_backed_secrets_into_worker_payload
         / "openai.key"
     )
 
-    assert (
-        committed_runtime.env_value("OPENAI_API_KEY_FILE")
-        == "/app/worker/.runtime/file-secrets/OPENAI_API_KEY_FILE/openai.key"
-    )
-    assert local_secret_copy.read_text(encoding="utf-8") == "sk-relative\n"
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") is None
+    assert not local_secret_copy.exists()
 
 
-def test_docker_backend_commits_relative_process_file_backed_secrets_into_worker_payload(
+def test_docker_backend_excludes_relative_process_file_backed_secrets_from_worker_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dedicated Docker workers should preserve relative *_FILE secrets supplied by process env."""
+    """Dedicated Docker workers must not ambient-copy process *_FILE secrets."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -1546,11 +1541,8 @@ def test_docker_backend_commits_relative_process_file_backed_secrets_into_worker
         / "openai.key"
     )
 
-    assert (
-        committed_runtime.env_value("OPENAI_API_KEY_FILE")
-        == "/app/worker/.runtime/file-secrets/OPENAI_API_KEY_FILE/openai.key"
-    )
-    assert local_secret_copy.read_text(encoding="utf-8") == "sk-process-relative\n"
+    assert committed_runtime.env_value("OPENAI_API_KEY_FILE") is None
+    assert not local_secret_copy.exists()
 
 
 def test_docker_backend_preserves_container_config_path_without_host_projection(
@@ -1618,11 +1610,11 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
     assert committed_runtime.config_path == Path("/app/config-host/config.yaml")
 
 
-def test_docker_backend_rejects_symlinked_google_application_credentials_path(
+def test_docker_backend_ignores_symlinked_google_application_credentials_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Explicit ADC handoff should reject symlinked host paths for consistency with other worker copies."""
+    """Ambient ADC paths are not shared with Docker workers, so no host path copy is attempted."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -1642,7 +1634,7 @@ def test_docker_backend_rejects_symlinked_google_application_credentials_path(
         storage_path=runtime_storage,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(symlinked_credentials_path)},
     )
-    backend, _fake_client, _sync_calls = _backend(
+    backend, fake_client, _sync_calls = _backend(
         monkeypatch,
         tmp_path,
         config_text=config_text,
@@ -1651,18 +1643,20 @@ def test_docker_backend_rejects_symlinked_google_application_credentials_path(
         host_config_path=config_path,
     )
 
-    with pytest.raises(
-        WorkerBackendError,
-        match="Docker worker GOOGLE_APPLICATION_CREDENTIALS must not contain symlinks",
-    ):
-        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
 
 
-def test_docker_backend_rejects_symlinked_google_application_credentials_destination(
+def test_docker_backend_does_not_overwrite_google_application_credentials_destination(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Explicit ADC handoff should reject worker-owned destination symlinks."""
+    """Ambient ADC paths must not create or overwrite worker-owned secret files."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -1685,7 +1679,7 @@ def test_docker_backend_rejects_symlinked_google_application_credentials_destina
         storage_path=runtime_storage,
         process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
     )
-    backend, _fake_client, _sync_calls = _backend(
+    backend, fake_client, _sync_calls = _backend(
         monkeypatch,
         tmp_path,
         config_text=config_text,
@@ -1694,12 +1688,14 @@ def test_docker_backend_rejects_symlinked_google_application_credentials_destina
         host_config_path=config_path,
     )
 
-    with pytest.raises(
-        WorkerBackendError,
-        match="Docker worker GOOGLE_APPLICATION_CREDENTIALS destination must stay within the worker state root",
-    ):
-        backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
+    assert destination_path.is_symlink()
     assert victim_path.read_text(encoding="utf-8") == "victim\n"
 
 
@@ -1971,7 +1967,6 @@ def test_build_dedicated_worker_runtime_paths_rejects_reserved_extra_env_names(t
             worker_key=_TEST_UNSCOPED_WORKER_KEY,
             config_path=Path("/app/config-host/config.yaml"),
             dedicated_root=Path("/app/worker"),
-            local_dedicated_root=tmp_path / "worker-root",
             worker_port=8766,
             shared_storage_root="/app/shared-storage",
             extra_env={"MINDROOM_STORAGE_PATH": str((tmp_path / "escape").resolve())},
@@ -2006,7 +2001,6 @@ def test_build_dedicated_worker_runtime_paths_rejects_secret_path_override_extra
             worker_key=_TEST_UNSCOPED_WORKER_KEY,
             config_path=Path("/app/config-host/config.yaml"),
             dedicated_root=Path("/app/worker"),
-            local_dedicated_root=tmp_path / "worker-root",
             worker_port=8766,
             shared_storage_root="/app/shared-storage",
             extra_env={
@@ -2052,7 +2046,6 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
         worker_key=_TEST_UNSCOPED_WORKER_KEY,
         config_path=projection.root / "config.yaml",
         dedicated_root=worker_paths.root,
-        local_dedicated_root=worker_paths.root,
         worker_port=8766,
         shared_storage_root=str(worker_paths.root),
         extra_env={},

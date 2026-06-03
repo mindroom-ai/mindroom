@@ -989,13 +989,11 @@ class KubernetesResourceManager:
             for key, value in self.runtime_paths.process_env.items()
             if not is_kubernetes_worker_backend_config_env_name(key)
         }
-        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         env_file_values = {
             key: value
             for key, value in self.runtime_paths.env_file_values.items()
             if not is_kubernetes_worker_backend_config_env_name(key)
         }
-        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         process_env.update(
             {
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",

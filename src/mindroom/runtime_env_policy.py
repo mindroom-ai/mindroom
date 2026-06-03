@@ -156,7 +156,6 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "AZURE_OPENAI_API_VERSION",
         "AZURE_OPENAI_DEPLOYMENT",
         "AZURE_OPENAI_ENDPOINT",
-        "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_CLOUD_PROJECT",
         "OLLAMA_HOST",
@@ -317,7 +316,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
-    if is_runtime_database_url_env_name(name):
+    if is_runtime_database_url_env_name(name) or name.endswith("_FILE"):
         return False
     if name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX) and name not in _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES:
         return False
