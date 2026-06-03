@@ -278,7 +278,8 @@ def _context_messages_from_visible_messages(
         body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
         if not body:
             continue
-        capped_message = replace_visible_message(message, body=body)
+        capped_body = body
+        capped_message = replace_visible_message(message, body=capped_body)
         if max_message_length is not None:
             capped_body = _cap_visible_message_body(body, max_message_length)
             if not capped_body:
@@ -289,7 +290,7 @@ def _context_messages_from_visible_messages(
                 capped_message,
                 response_sender_id=response_sender_id,
                 missing_sender_label=missing_sender_label,
-                body=capped_body if max_message_length is not None else body,
+                body=capped_body,
             ),
         )
     return tuple(context_messages)
