@@ -125,7 +125,6 @@ _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.mindroom.ai/name"
 _LABEL_NAME_VALUE = "mindroom-docker-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
-_LABEL_WORKER_KEY = "mindroom.ai/worker-key"
 _LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
 _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 

@@ -3146,24 +3146,26 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     first_storage_path = (tmp_path / "runtime-a").resolve()
     second_storage_path = (tmp_path / "runtime-b").resolve()
 
-    first_manager = workers_runtime_module.get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=None,
-        proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
-    )
+    try:
+        first_manager = workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=_TEST_AUTH_TOKEN,
+            storage_root=first_storage_path,
+        )
 
-    second_manager = workers_runtime_module.get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=None,
-        proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=second_storage_path,
-    )
+        second_manager = workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=_TEST_AUTH_TOKEN,
+            storage_root=second_storage_path,
+        )
 
-    assert built_storage_paths == [first_storage_path, second_storage_path]
-    assert built_runtime_paths == [runtime_paths, runtime_paths]
-    assert first_manager is not second_manager
-    workers_runtime_module._reset_primary_worker_manager()
+        assert built_storage_paths == [first_storage_path, second_storage_path]
+        assert built_runtime_paths == [runtime_paths, runtime_paths]
+        assert first_manager is not second_manager
+    finally:
+        workers_runtime_module._reset_primary_worker_manager()
 
 
 def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None:
