@@ -172,7 +172,10 @@ def _redact_secret_assignment(match: re.Match[str]) -> str:
 
 
 def _redact_url(value: str) -> str:
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return value
     if parsed.scheme not in {"http", "https"}:
         return value
 
