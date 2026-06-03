@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -78,6 +79,7 @@ __all__ = [
     "clean_partial_reply_text",
     "is_interrupted_partial_reply",
     "send_streaming_response",
+    "strip_visible_tool_markers",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -88,6 +90,40 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
+
+
+def strip_visible_tool_markers(text: str) -> str:
+    """Remove display-only tool marker lines before text re-enters model context."""
+    lines = text.splitlines()
+    filtered_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
+            filtered_lines.append(line)
+            index += 1
+            continue
+
+        index += 1
+        spacer_lines: list[str] = []
+        while index < len(lines) and not lines[index].strip():
+            spacer_lines.append(lines[index])
+            index += 1
+
+        # Tool markers rendered by MindRoom are often followed by a markdown
+        # separator. Remove the separator with the marker, but preserve ordinary
+        # blank-line spacing so surrounding prose does not get smashed together.
+        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
+            filtered_lines.extend(spacer_lines)
+            index += 1
+            if index < len(lines) and not lines[index].strip():
+                index += 1
+            continue
+
+        filtered_lines.extend(spacer_lines)
+    return "\n".join(filtered_lines).rstrip()
 
 
 class StreamingDeliveryError(Exception):

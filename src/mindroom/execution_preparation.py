@@ -38,7 +38,7 @@ from mindroom.history import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
+from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -213,20 +213,25 @@ def _context_message_from_visible_message(
     *,
     response_sender_id: str | None,
     missing_sender_label: str | None = None,
+    body: str | None = None,
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
+    # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
+    # Those markers are display chrome, not conversation content; if we replay
+    # them to the model it can continue the pattern as plain text with no trace.
+    body = strip_visible_tool_markers(message.body) if body is None else body
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
         and not _is_relayed_user_message(message)
     ):
-        return Message(role="assistant", content=message.body)
+        return Message(role="assistant", content=body)
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
         speaker_label = missing_sender_label
     if speaker_label:
-        return Message(role="user", content=f"{speaker_label}: {message.body}")
-    return Message(role="user", content=message.body)
+        return Message(role="user", content=f"{speaker_label}: {body}")
+    return Message(role="user", content=body)
 
 
 def _context_messages_from_visible_messages(
@@ -241,11 +246,14 @@ def _context_messages_from_visible_messages(
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
     context_messages: list[Message] = []
     for message in visible_messages:
-        if not message.body:
+        # Strip before length capping so display-only markers do not consume the
+        # model-context budget or leave marker-only turns behind.
+        body = strip_visible_tool_markers(message.body)
+        if not body:
             continue
-        capped_message = message
+        capped_message = replace_visible_message(message, body=body)
         if max_message_length is not None:
-            capped_body = _cap_visible_message_body(message.body, max_message_length)
+            capped_body = _cap_visible_message_body(body, max_message_length)
             if not capped_body:
                 continue
             capped_message = replace_visible_message(message, body=capped_body)
@@ -254,6 +262,7 @@ def _context_messages_from_visible_messages(
                 capped_message,
                 response_sender_id=response_sender_id,
                 missing_sender_label=missing_sender_label,
+                body=capped_body if max_message_length is not None else body,
             ),
         )
     return tuple(context_messages)

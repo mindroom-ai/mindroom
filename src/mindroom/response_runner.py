@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -54,6 +53,7 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     clean_partial_reply_text,
+    strip_visible_tool_markers,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -106,8 +106,6 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
-_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 
 def _merge_response_extra_content(
@@ -133,35 +131,6 @@ def _split_delivery_tool_trace(
         else:
             interrupted.append(trace_entry)
     return completed, interrupted
-
-
-def _strip_visible_tool_markers(text: str) -> str:
-    """Remove Matrix-visible tool markers from streamed text before replay persistence."""
-    lines = text.splitlines()
-    filtered_lines: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
-            filtered_lines.append(line)
-            index += 1
-            continue
-
-        index += 1
-        spacer_lines: list[str] = []
-        while index < len(lines) and not lines[index].strip():
-            spacer_lines.append(lines[index])
-            index += 1
-
-        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
-            filtered_lines.extend(spacer_lines)
-            index += 1
-            if index < len(lines) and not lines[index].strip():
-                index += 1
-            continue
-
-        filtered_lines.extend(spacer_lines)
-    return "\n".join(filtered_lines).rstrip()
 
 
 def _materialize_matrix_run_metadata(
@@ -506,7 +475,7 @@ class ResponseRunner:
         tool_trace: Sequence[ToolTraceEntry],
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
-        partial_text = clean_partial_reply_text(_strip_visible_tool_markers(accumulated_text))
+        partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
             partial_text = recorder.assistant_text

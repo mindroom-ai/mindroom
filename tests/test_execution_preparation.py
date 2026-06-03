@@ -48,6 +48,71 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[1].content == "Current request"
 
 
+def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:
+    """Visible Matrix tool markers should not train the model to echo fake tool calls."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_code:localhost",
+                body=(
+                    "Checking status.\n\n"
+                    "🔧 `run_shell_command` [1]\n\n"
+                    "Still checking.\n\n"
+                    "🔧 `read_file` [2]\n\n"
+                    "---\n\n"
+                    "Done."
+                ),
+                event_id="$assistant",
+            ),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        config=_config(),
+    )
+
+    assert messages[0].role == "assistant"
+    assert messages[0].content == "Checking status.\n\n\nStill checking.\n\n\nDone."
+    assert "🔧" not in str(messages[0].content)
+
+
+def test_fallback_thread_history_drops_marker_only_messages_from_context() -> None:
+    """Marker-only visible messages should not become empty assistant context turns."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_code:localhost",
+                body="🔧 `run_shell_command` [1]\n\n🔧 `read_file` [2]",
+                event_id="$markers",
+            ),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        config=_config(),
+    )
+
+    assert len(messages) == 1
+    assert messages[0].content == "Current request"
+
+
+def test_fallback_thread_history_strips_visible_tool_markers_from_user_labeled_context() -> None:
+    """Tool marker syntax should also be stripped when another sender is replayed as user context."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="Please see:\n\n🔧 `run_shell_command` [1]\n\nActual content",
+                event_id="$user",
+            ),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        config=_config(),
+    )
+
+    assert messages[0].role == "user"
+    assert messages[0].content == "@alice:localhost: Please see:\n\n\nActual content"
+
+
 def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
     """A tool-relayed user message from the agent account should remain user context."""
     thread_history = [

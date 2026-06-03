@@ -105,10 +105,9 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     ResponseRunnerDeps,
-    _strip_visible_tool_markers,
     prepare_memory_and_model_context,
 )
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryError, strip_visible_tool_markers
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -1385,7 +1384,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 def test_strip_visible_tool_markers_handles_blank_lined_markers() -> None:
     """The tool-marker stripper should leave bodies intact when markers are followed by blank lines."""
     text = "Intro\n\n🔧 `run_shell_command` [1]\n\n---\n\nBody"
-    assert _strip_visible_tool_markers(text) == "Intro\n\n\nBody"
+    assert strip_visible_tool_markers(text) == "Intro\n\n\nBody"
 
 
 @pytest.mark.asyncio
