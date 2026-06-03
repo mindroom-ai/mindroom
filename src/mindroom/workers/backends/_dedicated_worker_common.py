@@ -15,6 +15,7 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.sensitivity import secret_name_suffixes
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
@@ -61,14 +62,12 @@ _DEDICATED_WORKER_BLOCKED_FILE_ENV_BASE_NAMES = frozenset(
         "MINDROOM_LOCAL_CLIENT_SECRET",
     },
 )
+# Shared secret stems as `*_FILE` env vars plus credential/service-account files.
 _SOURCE_PROCESS_FILE_SECRET_SUFFIXES = (
-    "_API_KEY_FILE",
+    *secret_name_suffixes(upper=True, file=True),
     "_CREDENTIAL_FILE",
     "_CREDENTIALS_FILE",
-    "_PASSWORD_FILE",
-    "_SECRET_FILE",
     "_SERVICE_ACCOUNT_FILE",
-    "_TOKEN_FILE",
 )
 _WORKER_FILE_SECRET_ROOT = Path(".runtime") / "file-secrets"
 

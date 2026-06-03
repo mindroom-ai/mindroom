@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from mindroom.constants import config_relative_path, resolve_config_relative_path
+from mindroom.sensitivity import is_sensitive_config_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
     resolve_agent_owned_path,
@@ -44,21 +45,6 @@ _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
 _WORKER_CONFIG_STATE_DIRNAME = ".mindroom-worker-config-state"
 PROJECTED_CONFIGS_DIRNAME = _PROJECTED_CONFIGS_DIRNAME
 _PROJECTION_READY_FILENAME = ".projection-ready"
-_SENSITIVE_CONFIG_KEYS = frozenset(
-    {
-        "access_token",
-        "api_key",
-        "client_secret",
-        "long_lived_token",
-        "password",
-        "private_key",
-        "refresh_token",
-        "secret",
-        "token",
-    },
-)
-_SENSITIVE_CONFIG_KEY_SUFFIXES = ("_api_key", "_password", "_secret", "_token")
-_NON_SECRET_SENSITIVE_SUFFIX_EXCEPTIONS = frozenset({"no_reply_token", "token_uri"})
 _SENSITIVE_HEADER_KEYS = frozenset({"authorization", "proxy_authorization"})
 
 
@@ -112,29 +98,15 @@ def _plugin_uses_filesystem_path(plugin_path: str, *, runtime_paths: RuntimePath
     return unresolved.is_absolute() or plugin_path.startswith((".", "~")) or "/" in plugin_path or "\\" in plugin_path
 
 
-def _normalized_config_key(raw_key: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", raw_key.strip().lower()).strip("_")
-
-
-def _config_key_is_sensitive(raw_key: str) -> bool:
-    normalized_key = _normalized_config_key(raw_key)
-    if normalized_key in _NON_SECRET_SENSITIVE_SUFFIX_EXCEPTIONS:
-        return False
-    if normalized_key in _SENSITIVE_CONFIG_KEYS:
-        return True
-    return any(normalized_key.endswith(suffix) for suffix in _SENSITIVE_CONFIG_KEY_SUFFIXES)
-
-
 def _config_key_is_header_container(raw_key: str | None) -> bool:
     if raw_key is None:
         return False
-    normalized_key = _normalized_config_key(raw_key)
+    normalized_key = normalize_config_key(raw_key)
     return normalized_key == "headers" or normalized_key.endswith("_headers")
 
 
 def _header_key_is_sensitive(raw_key: str) -> bool:
-    normalized_key = _normalized_config_key(raw_key)
-    return normalized_key in _SENSITIVE_HEADER_KEYS or _config_key_is_sensitive(raw_key)
+    return normalize_config_key(raw_key) in _SENSITIVE_HEADER_KEYS or is_sensitive_config_key(raw_key)
 
 
 def _strip_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
@@ -143,7 +115,7 @@ def _strip_sensitive_config_values(value: object, *, parent_key: str | None = No
         inside_header_mapping = _config_key_is_header_container(parent_key)
         for key, item in value.items():
             if isinstance(key, str) and (
-                _header_key_is_sensitive(key) if inside_header_mapping else _config_key_is_sensitive(key)
+                _header_key_is_sensitive(key) if inside_header_mapping else is_sensitive_config_key(key)
             ):
                 continue
             redacted[key] = _strip_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
