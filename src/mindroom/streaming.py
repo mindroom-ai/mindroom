@@ -97,6 +97,9 @@ _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 def strip_visible_tool_markers(text: str) -> str:
     """Remove display-only tool marker lines before text re-enters model context."""
     lines = text.splitlines()
+    if not any(_VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) for line in lines):
+        return text
+
     filtered_lines: list[str] = []
     index = 0
     while index < len(lines):

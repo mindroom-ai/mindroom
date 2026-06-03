@@ -1387,6 +1387,12 @@ def test_strip_visible_tool_markers_handles_blank_lined_markers() -> None:
     assert strip_visible_tool_markers(text) == "Intro\n\n\nBody"
 
 
+def test_strip_visible_tool_markers_preserves_marker_free_text_byte_for_byte() -> None:
+    """Marker-free text should not be normalized while checking for display chrome."""
+    text = "Intro\r\n---\r\nBody with trailing spaces  \r\n\r\n"
+    assert strip_visible_tool_markers(text) == text
+
+
 @pytest.mark.asyncio
 async def test_process_and_respond_streaming_delivery_failure_with_visible_tools_replays_tool_trace_once(
     tmp_path: Path,
