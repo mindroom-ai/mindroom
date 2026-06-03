@@ -17,12 +17,18 @@ _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_SHARED_CREDENTIALS_",
     "MINDROOM_WORKER_BACKEND",
 )
-_POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(runtime_env_policy.VERTEXAI_CLAUDE_ENV_BY_KEY.values())
+_POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(
+    {
+        *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
+        *runtime_env_policy.VERTEXAI_CLAUDE_ENV_BY_KEY.values(),
+    },
+)
 _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
 )
 _PROJECTION_MATRIX_ENV_NAMES = (
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
+    *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_SERVICE_ACCOUNT_FILE",
     "GOOGLE_DELEGATED_USER",
@@ -39,6 +45,48 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": False,
+    },
+    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"]: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"]: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
     },
     "GOOGLE_APPLICATION_CREDENTIALS": {
         "public_worker_startup_env": True,
@@ -158,6 +206,12 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "AGNO_TELEMETRY": "false",
         "POD_NAMESPACE": "mindroom",
         "CUSTOMER_ID": "customer-123",
+        "AWS_ACCESS_KEY_ID": "aws-access-id",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+        "AWS_SESSION_TOKEN": "aws-session",
+        "AWS_REGION": "us-east-1",
+        "AWS_DEFAULT_REGION": "us-west-2",
+        "AWS_PROFILE": "dev-profile",
     }
 
     result = runtime_env_policy.public_worker_startup_env(env)
@@ -170,6 +224,9 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "AGNO_TELEMETRY": "false",
         "POD_NAMESPACE": "mindroom",
         "CUSTOMER_ID": "customer-123",
+        "AWS_REGION": "us-east-1",
+        "AWS_DEFAULT_REGION": "us-west-2",
+        "AWS_PROFILE": "dev-profile",
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
         "MINDROOM_SANDBOX_RUNNER_PORT": "8766",

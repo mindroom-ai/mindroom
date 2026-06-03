@@ -658,6 +658,11 @@ def _find_missing_env_keys(
             provider_models = [model for model in config.models.values() if model.provider == provider]
             if any((model.extra_kwargs or {}).get("aws_region") for model in provider_models):
                 continue
+            if any((model.extra_kwargs or {}).get("aws_profile") for model in provider_models) or get_secret_from_env(
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+                runtime_paths=runtime_paths,
+            ):
+                continue
             region_keys = (
                 AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
                 AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],

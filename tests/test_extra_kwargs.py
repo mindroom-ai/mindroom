@@ -353,6 +353,58 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     assert model.extended_cache_time is True
 
 
+def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bedrock Claude should respect configured aws_profile over env static keys."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AWS_ACCESS_KEY_ID=env-access\nAWS_SECRET_ACCESS_KEY=env-secret\nAWS_REGION=us-east-1\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "bedrock_model": ModelConfig(
+                provider="bedrock_claude",
+                id="anthropic.claude-opus-4-8",
+                context_window=1_000_000,
+                extra_kwargs={"aws_profile": "my-explicit-profile"},
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "bedrock_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    class MockSession:
+        def __init__(self, **kwargs: object) -> None:
+            self.profile_name = kwargs.get("profile_name")
+            self.region_name = kwargs.get("region_name")
+
+    monkeypatch.setattr("boto3.session.Session", MockSession)
+
+    model = get_model_instance(config, runtime_paths, "bedrock_model")
+
+    assert isinstance(model, AwsBedrockClaude)
+    assert isinstance(model.session, MockSession)
+    assert model.session.profile_name == "my-explicit-profile"
+    assert model.session.region_name == "us-east-1"
+    assert model.aws_access_key is None
+    assert model.aws_secret_key is None
+
+
 def test_bedrock_claude_provider_auto_installs_boto3(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -74,45 +74,67 @@ def _populate_azure_openai_runtime_kwargs(
             extra_kwargs["azure_deployment"] = azure_deployment
 
 
-def _populate_bedrock_claude_runtime_kwargs(  # noqa: C901
+def _populate_bedrock_claude_runtime_kwargs(
     extra_kwargs: dict[str, Any],
     runtime_paths: RuntimePaths,
 ) -> None:
     """Populate AWS Bedrock Claude client settings from the active runtime env."""
-    if "aws_access_key" not in extra_kwargs:
-        aws_access_key = get_secret_from_env(
-            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"],
-            runtime_paths=runtime_paths,
-        ) or get_secret_from_env("AWS_ACCESS_KEY", runtime_paths=runtime_paths)
-        if aws_access_key:
-            extra_kwargs["aws_access_key"] = aws_access_key
-    if "aws_secret_key" not in extra_kwargs:
-        aws_secret_key = get_secret_from_env(
-            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"],
-            runtime_paths=runtime_paths,
-        ) or get_secret_from_env("AWS_SECRET_KEY", runtime_paths=runtime_paths)
-        if aws_secret_key:
-            extra_kwargs["aws_secret_key"] = aws_secret_key
-    if "aws_session_token" not in extra_kwargs:
-        aws_session_token = get_secret_from_env(
-            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"],
-            runtime_paths=runtime_paths,
-        )
-        if aws_session_token:
-            extra_kwargs["aws_session_token"] = aws_session_token
+    explicit_profile = extra_kwargs.pop("aws_profile", None)
+    if "session" in extra_kwargs:
+        return
+
     if "aws_region" not in extra_kwargs:
-        aws_region = runtime_paths.env_value(AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]) or runtime_paths.env_value(
+        aws_region = get_secret_from_env(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+            runtime_paths=runtime_paths,
+        ) or get_secret_from_env(
             AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
+            runtime_paths=runtime_paths,
         )
         if aws_region:
             extra_kwargs["aws_region"] = aws_region
 
-    aws_profile = extra_kwargs.pop("aws_profile", None) or runtime_paths.env_value(
-        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
-    )
-    if "session" in extra_kwargs or extra_kwargs.get("aws_access_key") or extra_kwargs.get("aws_secret_key"):
+    has_explicit_static_credentials = "aws_access_key" in extra_kwargs or "aws_secret_key" in extra_kwargs
+    if has_explicit_static_credentials:
+        _populate_bedrock_claude_static_credentials(extra_kwargs, runtime_paths)
+        if explicit_profile:
+            logger.debug("bedrock_claude_profile_ignored_with_static_credentials")
         return
 
+    if explicit_profile:
+        _set_bedrock_claude_session(extra_kwargs, str(explicit_profile))
+        return
+
+    _populate_bedrock_claude_static_credentials(extra_kwargs, runtime_paths)
+    if extra_kwargs.get("aws_access_key") or extra_kwargs.get("aws_secret_key"):
+        return
+
+    env_profile = get_secret_from_env(
+        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+        runtime_paths=runtime_paths,
+    )
+    _set_bedrock_claude_session(extra_kwargs, env_profile)
+
+
+def _populate_bedrock_claude_static_credentials(
+    extra_kwargs: dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Populate Bedrock static credentials from standard AWS env names."""
+    for config_key, env_key in (
+        ("aws_access_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]),
+        ("aws_secret_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]),
+        ("aws_session_token", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]),
+    ):
+        if config_key in extra_kwargs:
+            continue
+        value = get_secret_from_env(env_key, runtime_paths=runtime_paths)
+        if value:
+            extra_kwargs[config_key] = value
+
+
+def _set_bedrock_claude_session(extra_kwargs: dict[str, Any], aws_profile: str | None) -> None:
+    """Create a boto3 session for profile or ambient IAM-role credential resolution."""
     session_kwargs: dict[str, str] = {}
     if aws_profile:
         session_kwargs["profile_name"] = str(aws_profile)

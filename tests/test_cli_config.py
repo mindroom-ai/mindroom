@@ -1594,6 +1594,8 @@ class TestConfigValidate:
         monkeypatch.delenv("AWS_REGION_FILE", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE_FILE", raising=False)
 
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
@@ -1623,6 +1625,60 @@ class TestConfigValidate:
         monkeypatch.delenv("AWS_REGION_FILE", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
+    def test_validate_accepts_bedrock_claude_profile_in_extra_kwargs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should accept a Bedrock AWS profile without explicit region."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: bedrock_claude\n"
+            "    id: anthropic.claude-opus-4-8\n"
+            "    extra_kwargs:\n"
+            "      aws_profile: dev-profile\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_PROFILE_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
+    def test_validate_accepts_bedrock_claude_profile_from_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should accept Bedrock AWS_PROFILE without explicit region."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+        monkeypatch.setenv("AWS_PROFILE", "dev-profile")
 
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
