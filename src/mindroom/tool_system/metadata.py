@@ -341,6 +341,21 @@ def sanitize_tool_init_overrides(
     }
 
 
+def safe_tool_init_override_fields(
+    tool_name: str,
+    *,
+    tool_metadata: Mapping[str, ToolMetadata] | None = None,
+) -> frozenset[str]:
+    """Return the config fields a tool exposes as safe runtime init overrides."""
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
+    if metadata is None:
+        return frozenset()
+    return frozenset(
+        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
+    )
+
+
 def coerce_optional_finite_number(value: object) -> int | float | None:
     """Normalize an optional finite number from runtime config text or JSON values."""
     if value is None:

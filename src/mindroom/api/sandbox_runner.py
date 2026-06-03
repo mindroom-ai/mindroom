@@ -49,6 +49,7 @@ from mindroom.tool_system.catalog import (
     deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
     get_tool_by_name,
+    safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
@@ -329,22 +330,10 @@ def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozen
 
 
 def _filter_runtime_tool_init_overrides(tool_name: str, runtime_overrides: dict[str, object]) -> dict[str, object]:
-    """Keep only runtime init overrides declared by the target tool."""
-    metadata = TOOL_METADATA.get(tool_name)
-    if metadata is None or not metadata.config_fields:
-        return {}
-    allowed_field_names = {field.name for field in metadata.config_fields}
-    supported_runtime_overrides: dict[str, object] = {}
-    for name, value in runtime_overrides.items():
-        if name not in allowed_field_names:
-            continue
-        try:
-            sanitized_override = sanitize_tool_init_overrides(tool_name, {name: value})
-        except ToolInitOverrideError:
-            continue
-        if sanitized_override:
-            supported_runtime_overrides.update(sanitized_override)
-    return supported_runtime_overrides
+    """Keep only the safe runtime init overrides declared by the target tool."""
+    safe_fields = safe_tool_init_override_fields(tool_name)
+    safe_overrides = {name: value for name, value in runtime_overrides.items() if name in safe_fields}
+    return sanitize_tool_init_overrides(tool_name, safe_overrides) or {}
 
 
 def _request_runtime_overrides(
