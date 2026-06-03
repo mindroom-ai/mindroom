@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.models.anthropic import Claude
@@ -22,7 +23,12 @@ from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
+from mindroom.runtime_env_policy import (
+    AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
+    AZURE_OPENAI_ENV_BY_KEY,
+    VERTEXAI_CLAUDE_ENV_BY_KEY,
+)
+from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
@@ -36,6 +42,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["get_model_instance"]
+
+_BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 
 
 def _canonical_provider(provider: str) -> str:
@@ -66,7 +74,55 @@ def _populate_azure_openai_runtime_kwargs(
             extra_kwargs["azure_deployment"] = azure_deployment
 
 
-def _create_model_for_provider(  # noqa: C901, PLR0912
+def _populate_bedrock_claude_runtime_kwargs(  # noqa: C901
+    extra_kwargs: dict[str, Any],
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Populate AWS Bedrock Claude client settings from the active runtime env."""
+    if "aws_access_key" not in extra_kwargs:
+        aws_access_key = get_secret_from_env(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"],
+            runtime_paths=runtime_paths,
+        ) or get_secret_from_env("AWS_ACCESS_KEY", runtime_paths=runtime_paths)
+        if aws_access_key:
+            extra_kwargs["aws_access_key"] = aws_access_key
+    if "aws_secret_key" not in extra_kwargs:
+        aws_secret_key = get_secret_from_env(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"],
+            runtime_paths=runtime_paths,
+        ) or get_secret_from_env("AWS_SECRET_KEY", runtime_paths=runtime_paths)
+        if aws_secret_key:
+            extra_kwargs["aws_secret_key"] = aws_secret_key
+    if "aws_session_token" not in extra_kwargs:
+        aws_session_token = get_secret_from_env(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"],
+            runtime_paths=runtime_paths,
+        )
+        if aws_session_token:
+            extra_kwargs["aws_session_token"] = aws_session_token
+    if "aws_region" not in extra_kwargs:
+        aws_region = runtime_paths.env_value(AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]) or runtime_paths.env_value(
+            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
+        )
+        if aws_region:
+            extra_kwargs["aws_region"] = aws_region
+
+    aws_profile = extra_kwargs.pop("aws_profile", None) or runtime_paths.env_value(
+        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+    )
+    if "session" in extra_kwargs or extra_kwargs.get("aws_access_key") or extra_kwargs.get("aws_secret_key"):
+        return
+
+    session_kwargs: dict[str, str] = {}
+    if aws_profile:
+        session_kwargs["profile_name"] = str(aws_profile)
+    if aws_region := extra_kwargs.get("aws_region"):
+        session_kwargs["region_name"] = str(aws_region)
+    session_module = import_module("boto3.session")
+    extra_kwargs["session"] = session_module.Session(**session_kwargs)
+
+
+def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
     provider: str,
     model_id: str,
     model_config: ModelConfig,
@@ -78,7 +134,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     canonical_provider = _canonical_provider(provider)
 
     if (
-        canonical_provider not in {"ollama", "vertexai_claude", "codex", "openai_codex"}
+        canonical_provider not in {"ollama", "vertexai_claude", "codex", "openai_codex", _BEDROCK_CLAUDE_PROVIDER}
         and "api_key" not in extra_kwargs
     ):
         api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
@@ -109,7 +165,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     if canonical_provider == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)
 
-    if canonical_provider in {"anthropic", "vertexai_claude"}:
+    if canonical_provider in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)
         extra_kwargs.setdefault("extended_cache_time", True)
 
@@ -133,6 +189,19 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             if prompt_cache_key is not None:
                 extra_kwargs["prompt_cache_key"] = prompt_cache_key
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+
+    if canonical_provider == _BEDROCK_CLAUDE_PROVIDER:
+        extra_kwargs.pop("api_key", None)
+        ensure_optional_deps(
+            ["boto3"],
+            "aws_bedrock",
+            runtime_paths,
+            missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
+        )
+        _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
+        aws_bedrock_module = import_module("agno.models.aws.claude")
+        aws_bedrock_claude = cast("type[Model]", aws_bedrock_module.Claude)
+        return aws_bedrock_claude(id=model_id, **extra_kwargs)
 
     provider_map: dict[str, type[Any]] = {
         "openai": OpenAIChat,

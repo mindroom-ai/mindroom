@@ -424,7 +424,7 @@ Mix and match:
 ### Technical Stack
 - **Matrix**: Any homeserver (Synapse, Conduit, Dendrite, etc.)
 - **Agents**: Python with matrix-nio
-- **AI Models**: OpenAI, Anthropic, Ollama, or any provider
+- **AI Models**: OpenAI, Anthropic, Amazon Bedrock Claude, Ollama, or any provider
 - **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
 - **UI**: Web dashboard + any Matrix client
 

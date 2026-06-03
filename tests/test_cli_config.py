@@ -962,6 +962,39 @@ class TestConfigInit:
         assert "Azure OpenAI" in output
         assert "deployment" in output
 
+    def test_init_bedrock_claude_preset_uses_opus_model(self, tmp_path: Path) -> None:
+        """Config init --provider bedrock_claude uses Amazon Bedrock Claude Opus defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "bedrock_claude"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "bedrock_claude"
+        assert config["models"]["default"]["id"] == "anthropic.claude-opus-4-8"
+        assert config["models"]["default"]["context_window"] == 1_000_000
+
+        config_text = target.read_text(encoding="utf-8")
+        assert "# sonnet:" in config_text
+        assert "#   id: global.anthropic.claude-sonnet-4-6" in config_text
+        assert "# haiku:" in config_text
+        assert "#   id: global.anthropic.claude-haiku-4-5" in config_text
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "AWS_REGION=us-east-1" in env_content
+        assert "# AWS_ACCESS_KEY_ID=your-access-key-id" in env_content
+        assert "# AWS_SECRET_ACCESS_KEY=your-secret-access-key" in env_content
+        assert "# AWS_PROFILE=your-profile" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+
+    @pytest.mark.parametrize("provider", ["bedrock", "aws_bedrock", "aws-bedrock", "bedrock-claude"])
+    def test_init_rejects_bedrock_claude_provider_aliases(self, tmp_path: Path, provider: str) -> None:
+        """Config init should expose only the canonical Bedrock Claude preset name."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", provider])
+        assert result.exit_code == 1
+        assert "Invalid --provider value" in normalize_console_output(result.output)
+
     def test_provider_env_template_uses_canonical_provider_env_key(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1545,6 +1578,57 @@ class TestConfigValidate:
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
 
+    def test_validate_warns_for_missing_bedrock_claude_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should warn about missing Bedrock region settings."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" in result.output
+        assert "bedrock_claude" in result.output
+        assert "AWS_REGION" in result.output
+
+    def test_validate_accepts_bedrock_claude_region_in_extra_kwargs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should accept Bedrock region configured on the model."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: bedrock_claude\n"
+            "    id: anthropic.claude-opus-4-8\n"
+            "    extra_kwargs:\n"
+            "      aws_region: us-west-2\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_REGION_FILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
     def test_validate_uses_active_config_sibling_env_from_exported_config_path(self, tmp_path: Path) -> None:
         """Config validate should honor the sibling .env of the exported active config path."""
         cfg = tmp_path / "config.yaml"
@@ -1605,7 +1689,9 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "No config found" in result.output
         assert "mindroom config init" in result.output
-        provider_guidance = "mindroom config init --provider {openrouter,ollama,openai,azure,codex,claude"
+        provider_guidance = (
+            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,claude"
+        )
         assert provider_guidance in result.output
         mock_main.assert_not_awaited()
         assert not cfg.exists()

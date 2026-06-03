@@ -80,6 +80,9 @@ baidusearch = [
   "baidusearch",
   "pycountry",
 ]
+aws_bedrock = [
+  "boto3>=1.40.8",
+]
 bitbucket = [
   "requests",
 ]

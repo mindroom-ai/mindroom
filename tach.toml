@@ -183,6 +183,7 @@ depends_on = [
     "mindroom.google_adc",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
+    "mindroom.tool_system.dependencies",
     "mindroom.vertex_claude_prompt_cache",
 ]
 visibility = [

@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = (
+    "AWS_BEDROCK_CLAUDE_OPUS",
     "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
     "CODEX_GPT",
     "CONFIG_INIT_MODEL_ALTERNATIVES",
@@ -70,6 +71,9 @@ class ModelPreset:
 _ANTHROPIC_OPUS = "claude-opus-4-8"
 _ANTHROPIC_SONNET = "claude-sonnet-4-6"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
+AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-4-8"
+_AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-4-6"
+_AWS_BEDROCK_CLAUDE_HAIKU = "global.anthropic.claude-haiku-4-5"
 CODEX_GPT = "gpt-5.5"
 _OPENAI_GPT = "gpt-5.5"
 OPENAI_GPT_MINI = "gpt-5.4-mini"
@@ -126,6 +130,7 @@ DEEPSEEK_REASONER = "deepseek-reasoner"
 CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
+        "bedrock_claude": ModelPreset("bedrock_claude", AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
         "codex": ModelPreset("codex", CODEX_GPT, 258_000),
         "llama_cpp": ModelPreset("openai", LLAMA_CPP_GEMMA, 128_000),
@@ -141,6 +146,10 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
         "anthropic": (
             ("opus", ModelPreset("anthropic", _ANTHROPIC_OPUS, 1_000_000)),
             ("haiku", ModelPreset("anthropic", _ANTHROPIC_HAIKU, 200_000)),
+        ),
+        "bedrock_claude": (
+            ("sonnet", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_SONNET, 1_000_000)),
+            ("haiku", ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_HAIKU, 200_000)),
         ),
         "openai": (
             ("openai_mini", ModelPreset("openai", OPENAI_GPT_MINI, 400_000)),

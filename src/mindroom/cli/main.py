@@ -40,7 +40,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom config init[/cyan]   Create a starter config
   [cyan]mindroom run[/cyan]           Start the system\
 """
-_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,azure,codex,claude,llama.cpp,vertexai_claude}"
+_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,azure,bedrock_claude,codex,claude,llama.cpp,vertexai_claude}"
 
 app = typer.Typer(
     help=_HELP,

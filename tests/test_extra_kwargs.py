@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from agno.models.aws.claude import Claude as AwsBedrockClaude
 from agno.models.azure import AzureOpenAI
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -302,6 +303,94 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_bedrock_claude_provider_uses_runtime_env() -> None:
+    """Bedrock Claude provider should create Agno AWS Claude with runtime .env settings."""
+    runtime_root = Path(tempfile.mkdtemp())
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AWS_ACCESS_KEY_ID=aws-access\n"
+        "AWS_SECRET_ACCESS_KEY=aws-secret\n"
+        "AWS_SESSION_TOKEN=aws-session\n"
+        "AWS_REGION=us-east-1\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "bedrock_model": ModelConfig(
+                provider="bedrock_claude",
+                id="anthropic.claude-opus-4-8",
+                context_window=1_000_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "bedrock_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "bedrock_model")
+
+    assert isinstance(model, AwsBedrockClaude)
+    assert model.id == "anthropic.claude-opus-4-8"
+    assert model.provider == "AwsBedrock"
+    assert model.aws_access_key == "aws-access"
+    assert model.aws_secret_key == "aws-secret"  # noqa: S105
+    assert model.aws_session_token == "aws-session"  # noqa: S105
+    assert model.aws_region == "us-east-1"
+    assert model.cache_system_prompt is True
+    assert model.extended_cache_time is True
+
+
+def test_bedrock_claude_provider_auto_installs_boto3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bedrock Claude should use the optional dependency installer instead of a base dependency."""
+    config_data = {
+        "models": {
+            "bedrock_model": {
+                "provider": "bedrock_claude",
+                "id": "anthropic.claude-opus-4-8",
+                "extra_kwargs": {
+                    "aws_access_key": "aws-access",
+                    "aws_secret_key": "aws-secret",
+                    "aws_region": "us-east-1",
+                },
+            },
+        },
+        "defaults": {"markdown": True},
+        "router": {"model": "bedrock_model"},
+        "memory": {
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        "agents": {},
+    }
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    calls: list[tuple[list[str], str]] = []
+
+    def ensure(dependencies: list[str], extra_name: str, *_args: object, **_kwargs: object) -> bool:
+        calls.append((dependencies, extra_name))
+        return False
+
+    monkeypatch.setattr("mindroom.model_loading.ensure_optional_deps", ensure)
+
+    get_model_instance(config, runtime_paths, "bedrock_model")
+
+    assert calls == [(["boto3"], "aws_bedrock")]
 
 
 def test_azure_openai_provider_uses_runtime_env() -> None:

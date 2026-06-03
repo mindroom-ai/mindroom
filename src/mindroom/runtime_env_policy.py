@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
     "AZURE_OPENAI_ENV_BY_KEY",
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
@@ -46,6 +47,16 @@ CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
 CREDENTIALS_ENCRYPTION_KEY_ENV = "MINDROOM_CREDENTIALS_ENCRYPTION_KEY"
 SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
+AWS_BEDROCK_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "access_key": "AWS_ACCESS_KEY_ID",
+        "secret_key": "AWS_SECRET_ACCESS_KEY",
+        "session_token": "AWS_SESSION_TOKEN",
+        "region": "AWS_REGION",
+        "default_region": "AWS_DEFAULT_REGION",
+        "profile": "AWS_PROFILE",
+    },
+)
 VERTEXAI_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "project_id": "ANTHROPIC_VERTEX_PROJECT_ID",
@@ -150,6 +161,8 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
     {
         "ACCOUNT_ID",
         "ANTHROPIC_VERTEX_BASE_URL",
+        "AWS_ACCESS_KEY",
+        *AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
         "CUSTOMER_ID",
         "AZURE_OPENAI_API_VERSION",
         "AZURE_OPENAI_DEPLOYMENT",
