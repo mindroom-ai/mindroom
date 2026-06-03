@@ -3250,13 +3250,13 @@ def test_docker_worker_manager_retires_obsolete_cached_manager_until_lease_relea
         assert build_order == [str(first_storage_path), str(second_storage_path)]
         assert first_manager is not second_manager
         assert second_manager is repeated_second_manager
-        assert first_manager.backend.shutdown_calls == 0
-        assert second_manager.backend.shutdown_calls == 0
+        assert first_manager.shutdown_calls == 0
+        assert second_manager.shutdown_calls == 0
 
-    assert first_manager.backend.shutdown_calls == 1
+    assert first_manager.shutdown_calls == 1
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     workers_runtime_module._reset_primary_worker_manager()
-    assert second_manager.backend.shutdown_calls == 1
+    assert second_manager.shutdown_calls == 1
 
 
 def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_until_release(
@@ -3319,11 +3319,11 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
 
     assert workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY is None
     assert [lease._entry] == workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES
-    assert manager.backend.shutdown_calls == 0
+    assert manager.shutdown_calls == 0
 
     lease.release()
 
-    assert manager.backend.shutdown_calls == 1
+    assert manager.shutdown_calls == 1
     assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
 
 
@@ -3411,9 +3411,9 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
 
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     assert repeated_first_manager is first_manager
-    assert first_manager.backend.shutdown_calls == 0
+    assert first_manager.shutdown_calls == 0
     workers_runtime_module._reset_primary_worker_manager()
-    assert first_manager.backend.shutdown_calls == 1
+    assert first_manager.shutdown_calls == 1
 
 
 def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_would_raise(
@@ -3480,7 +3480,7 @@ def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_wo
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=first_storage_path,
     ) as first_manager:
-        first_manager.backend.raise_on_shutdown = True
+        first_manager.raise_on_shutdown = True
 
         second_manager = workers_runtime_module.get_primary_worker_manager(
             second_runtime_paths,
@@ -3496,10 +3496,10 @@ def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_wo
         )
 
         assert second_manager is repeated_second_manager
-        assert first_manager.backend.shutdown_calls == 0
-        assert second_manager.backend.shutdown_calls == 0
+        assert first_manager.shutdown_calls == 0
+        assert second_manager.shutdown_calls == 0
 
-    assert first_manager.backend.shutdown_calls == 1
+    assert first_manager.shutdown_calls == 1
     assert (
         workers_runtime_module.get_primary_worker_manager(
             second_runtime_paths,
@@ -3510,10 +3510,10 @@ def test_docker_worker_manager_replacement_succeeds_even_if_previous_shutdown_wo
         is second_manager
     )
 
-    first_manager.backend.raise_on_shutdown = False
+    first_manager.raise_on_shutdown = False
     workers_runtime_module._reset_primary_worker_manager()
-    assert first_manager.backend.shutdown_calls == 1
-    assert second_manager.backend.shutdown_calls == 1
+    assert first_manager.shutdown_calls == 1
+    assert second_manager.shutdown_calls == 1
 
 
 def test_docker_worker_manager_build_does_not_hold_cache_lock(
@@ -3659,7 +3659,7 @@ def test_docker_worker_manager_replacement_does_not_hold_cache_lock_during_retir
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=first_storage_path,
     )
-    first_manager.backend.block_shutdown = True
+    first_manager.block_shutdown = True
 
     thread_result: dict[str, object] = {}
 

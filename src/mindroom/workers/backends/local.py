@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING
 
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
-from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backend import (
+    WorkerBackend,
+    WorkerBackendError,
+    effective_idle_status,
+    filter_and_sort_worker_handles,
+)
 from mindroom.workers.backends._lifecycle import (
     initial_worker_lifecycle_state,
     mark_worker_failed,
@@ -28,7 +33,6 @@ from mindroom.workers.backends._metadata_store import (
     load_worker_metadata,
     save_worker_metadata,
 )
-from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 if TYPE_CHECKING:
@@ -389,12 +393,12 @@ class _LocalWorkerBackend:
         )
 
 
-_local_worker_manager: WorkerManager | None = None
+_local_worker_manager: WorkerBackend | None = None
 _local_worker_manager_config: tuple[str, str, float] | None = None
 _local_worker_manager_lock = threading.Lock()
 
 
-def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerManager:
+def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerBackend:
     """Return the local sandbox worker manager for the current config."""
     global _local_worker_manager, _local_worker_manager_config
 
@@ -405,12 +409,10 @@ def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerManager:
 
     with _local_worker_manager_lock:
         if _local_worker_manager is None or _local_worker_manager_config != config:
-            _local_worker_manager = WorkerManager(
-                _LocalWorkerBackend(
-                    worker_root=worker_root,
-                    api_root=api_root,
-                    idle_timeout_seconds=idle_timeout_seconds,
-                ),
+            _local_worker_manager = _LocalWorkerBackend(
+                worker_root=worker_root,
+                api_root=api_root,
+                idle_timeout_seconds=idle_timeout_seconds,
             )
             _local_worker_manager_config = config
 

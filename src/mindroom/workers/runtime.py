@@ -17,7 +17,6 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.docker import DockerWorkerBackend, docker_backend_config_signature
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
-from mindroom.workers.manager import WorkerManager
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,7 +50,7 @@ _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 @dataclass(slots=True)
 class _WorkerManagerEntry:
-    manager: WorkerManager
+    manager: WorkerBackend
     config_signature: tuple[str, ...]
     active_leases: int = 0
     retired: bool = False
@@ -65,11 +64,11 @@ class PrimaryWorkerManagerLease:
     _released: bool = False
 
     @property
-    def manager(self) -> WorkerManager:
+    def manager(self) -> WorkerBackend:
         """Return the leased worker manager."""
         return self._entry.manager
 
-    def __enter__(self) -> WorkerManager:
+    def __enter__(self) -> WorkerBackend:
         """Enter the lease context and return the borrowed manager."""
         return self.manager
 
@@ -297,27 +296,23 @@ def _build_primary_worker_manager(
     storage_root: Path | None,
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
-) -> WorkerManager:
+) -> WorkerBackend:
     backend_name = primary_worker_backend_name(runtime_paths)
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
     if backend_name == "static_runner":
-        return WorkerManager(
-            StaticSandboxRunnerBackend(
-                api_root=normalize_static_runner_api_root(proxy_url or ""),
-                auth_token=proxy_token,
-            ),
+        return StaticSandboxRunnerBackend(
+            api_root=normalize_static_runner_api_root(proxy_url or ""),
+            auth_token=proxy_token,
         )
     if backend_name == "docker":
-        return WorkerManager(
-            cast(
-                "WorkerBackend",
-                DockerWorkerBackend.from_runtime(
-                    runtime_paths,
-                    auth_token=proxy_token,
-                    storage_path=resolved_storage_root,
-                    worker_grantable_credentials=_resolve_worker_grantable_credentials(
-                        worker_grantable_credentials,
-                    ),
+        return cast(
+            "WorkerBackend",
+            DockerWorkerBackend.from_runtime(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_path=resolved_storage_root,
+                worker_grantable_credentials=_resolve_worker_grantable_credentials(
+                    worker_grantable_credentials,
                 ),
             ),
         )
@@ -325,17 +320,15 @@ def _build_primary_worker_manager(
         if storage_root is None:
             msg = "Kubernetes worker backend requires an explicit runtime storage root."
             raise WorkerBackendError(msg)
-        return WorkerManager(
-            KubernetesWorkerBackend.from_runtime(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_root=resolved_storage_root,
-                tool_validation_snapshot=_require_kubernetes_tool_validation_snapshot(
-                    kubernetes_tool_validation_snapshot,
-                ),
-                worker_grantable_credentials=_resolve_worker_grantable_credentials(
-                    worker_grantable_credentials,
-                ),
+        return KubernetesWorkerBackend.from_runtime(
+            runtime_paths,
+            auth_token=proxy_token,
+            storage_root=resolved_storage_root,
+            tool_validation_snapshot=_require_kubernetes_tool_validation_snapshot(
+                kubernetes_tool_validation_snapshot,
+            ),
+            worker_grantable_credentials=_resolve_worker_grantable_credentials(
+                worker_grantable_credentials,
             ),
         )
     msg = f"Unsupported worker backend: {backend_name}"
@@ -343,7 +336,7 @@ def _build_primary_worker_manager(
 
 
 def _shutdown_worker_manager_now(
-    manager: WorkerManager,
+    manager: WorkerBackend,
     *,
     suppress_errors: bool,
     log_message: str,
@@ -358,10 +351,10 @@ def _shutdown_worker_manager_now(
     return None
 
 
-def _drain_retired_entries_locked() -> list[WorkerManager]:
+def _drain_retired_entries_locked() -> list[WorkerBackend]:
     global _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES
 
-    ready_managers: list[WorkerManager] = []
+    ready_managers: list[WorkerBackend] = []
     pending_entries: list[_WorkerManagerEntry] = []
     for entry in _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
         if entry.active_leases == 0:
@@ -381,7 +374,7 @@ def _resolve_primary_worker_manager_entry(
     acquire_lease: bool,
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
-) -> tuple[_WorkerManagerEntry, list[WorkerManager], WorkerManager | None]:
+) -> tuple[_WorkerManagerEntry, list[WorkerBackend], WorkerBackend | None]:
     global _PRIMARY_WORKER_MANAGER_ENTRY
 
     config_signature = _primary_worker_backend_config_signature(
@@ -466,7 +459,7 @@ def get_primary_worker_manager(
     storage_root: Path | None = None,
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
-) -> WorkerManager:
+) -> WorkerBackend:
     """Return the current primary worker manager snapshot for the current backend config."""
     entry, managers_to_shutdown, discarded_manager = _resolve_primary_worker_manager_entry(
         runtime_paths,

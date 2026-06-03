@@ -50,7 +50,6 @@ from mindroom.workers.backends.docker_projection import (
     DockerProjectionManager,
 )
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
-from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -1133,11 +1132,11 @@ def test_docker_backend_accepts_manager_progress_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """WorkerManager should be able to pass progress sinks to every backend."""
+    """The backend should be able to receive progress sinks during ensure."""
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     progress_events: list[WorkerReadyProgress] = []
 
-    handle = WorkerManager(backend).ensure_worker(
+    handle = backend.ensure_worker(
         WorkerSpec(_TEST_UNSCOPED_WORKER_KEY),
         now=10.0,
         progress_sink=progress_events.append,

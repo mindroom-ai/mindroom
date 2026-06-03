@@ -19,7 +19,7 @@ from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
-    from mindroom.workers.manager import WorkerManager
+    from mindroom.workers.backend import WorkerBackend
 
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
 _SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
@@ -113,7 +113,7 @@ def _record_proxy_exception_for_worker(
     exc: Exception,
     *,
     worker_handle: WorkerHandle | None,
-    worker_manager: WorkerManager,
+    worker_manager: WorkerBackend,
 ) -> None:
     """Classify one proxy exception as either worker-health or request-level failure."""
     if worker_handle is None:
@@ -146,7 +146,7 @@ def _is_request_level_proxy_http_error(exc: Exception) -> bool:
 def record_proxy_response_failure_for_worker(
     *,
     worker_handle: WorkerHandle | None,
-    worker_manager: WorkerManager,
+    worker_manager: WorkerBackend,
     error: str,
     failure_kind: object,
 ) -> None:
@@ -164,7 +164,7 @@ def post_worker_proxy_json(
     config: WorkerProxyClientConfig,
     payload: dict[str, object],
     worker_handle: WorkerHandle | None,
-    worker_manager: WorkerManager,
+    worker_manager: WorkerBackend,
     proxy_path: str,
     worker_operation: Literal["execute", "save-attachment"],
     surface_proxy_http_detail: bool = False,
@@ -209,7 +209,7 @@ def execute_worker_proxy_request(
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
     worker_handle: WorkerHandle | None,
-    worker_manager: WorkerManager,
+    worker_manager: WorkerBackend,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker."""

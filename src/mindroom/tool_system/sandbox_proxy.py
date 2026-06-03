@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.workers.manager import WorkerManager
+    from mindroom.workers.backend import WorkerBackend
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
@@ -294,7 +294,7 @@ def _build_worker_routing_payload(  # noqa: C901, PLR0912
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
     progress_sink: ProgressSink | None = None,
-    worker_manager: WorkerManager | None = None,
+    worker_manager: WorkerBackend | None = None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     proxy_config = sandbox_proxy_config(runtime_paths)
     resolved_worker_manager = worker_manager or _get_worker_manager(runtime_paths, proxy_config)
@@ -428,7 +428,7 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
 def _get_worker_manager(
     runtime_paths: RuntimePaths,
     proxy_config: _SandboxProxyConfig,
-) -> WorkerManager:
+) -> WorkerBackend:
     manager_context = _primary_worker_manager_context(runtime_paths)
     return get_primary_worker_manager(
         runtime_paths,
@@ -479,7 +479,7 @@ def attachment_save_uses_worker(
 def _record_worker_save_failure(
     *,
     worker_handle: WorkerHandle | None,
-    worker_manager: WorkerManager,
+    worker_manager: WorkerBackend,
     error: str,
 ) -> None:
     """Record a worker save protocol/integrity failure against worker health."""
@@ -494,7 +494,7 @@ def _validated_worker_save_receipt(
     byte_count: int,
     sha256: str,
     worker_handle: WorkerHandle | None,
-    worker_manager: WorkerManager,
+    worker_manager: WorkerBackend,
 ) -> WorkerAttachmentSaveReceipt:
     result = _validate_attachment_save_receipt(
         data,
