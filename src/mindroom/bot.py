@@ -1129,12 +1129,12 @@ class AgentBot:
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
     ) -> None:
         """Run sync-response side effects that must poison certification on failure."""
+        if room_member_join_hook_plan.record_state_seen:
+            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
         if room_member_join_hook_plan.emit_timeline:
             await self._emit_room_member_joined_sync_timeline_hooks(response)
         if room_member_join_hook_plan.emit_state:
             await self._emit_room_member_joined_sync_state_hooks(response)
-        if room_member_join_hook_plan.record_state_seen:
-            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
