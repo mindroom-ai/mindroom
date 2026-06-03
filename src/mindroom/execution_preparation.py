@@ -19,6 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    TOOL_TRACE_CONTENT_KEY,
     RuntimePaths,
 )
 from mindroom.entity_resolution import entity_identity_registry
@@ -184,6 +185,32 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
     return isinstance(original_sender, str) and bool(original_sender)
 
 
+def _should_strip_visible_tool_markers(
+    message: ResolvedVisibleMessage,
+    *,
+    response_sender_id: str | None,
+) -> bool:
+    """Return whether visible marker lines are known MindRoom display chrome."""
+    if isinstance(message.content.get(TOOL_TRACE_CONTENT_KEY), dict):
+        return True
+    return (
+        response_sender_id is not None
+        and message.sender == response_sender_id
+        and not _is_relayed_user_message(message)
+    )
+
+
+def _context_body_from_visible_message(
+    message: ResolvedVisibleMessage,
+    *,
+    response_sender_id: str | None,
+) -> str:
+    """Return the model-facing body for one visible Matrix message."""
+    if _should_strip_visible_tool_markers(message, response_sender_id=response_sender_id):
+        return strip_visible_tool_markers(message.body)
+    return message.body
+
+
 def _cap_visible_message_body(body: str, max_length: int | None) -> str:
     """Return a body capped for fallback context while marking truncated text."""
     if max_length is None or len(body) <= max_length:
@@ -219,7 +246,7 @@ def _context_message_from_visible_message(
     # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
     # Those markers are display chrome, not conversation content; if we replay
     # them to the model it can continue the pattern as plain text with no trace.
-    body = strip_visible_tool_markers(message.body) if body is None else body
+    body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
@@ -248,7 +275,7 @@ def _context_messages_from_visible_messages(
     for message in visible_messages:
         # Strip before length capping so display-only markers do not consume the
         # model-context budget or leave marker-only turns behind.
-        body = strip_visible_tool_markers(message.body)
+        body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
         if not body:
             continue
         capped_message = replace_visible_message(message, body=body)
