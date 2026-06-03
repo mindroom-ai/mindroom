@@ -210,7 +210,7 @@ jobs:
       - name: Dispatch tap workflow
         env:
           # Token needs write access to mindroom-ai/homebrew-tap.
-          # Fine-grained tokens need Actions: write on that repo.
+          # Fine-grained tokens need Contents: write on that repo.
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN || secrets.PAT }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
