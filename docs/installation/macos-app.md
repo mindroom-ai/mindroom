@@ -15,7 +15,7 @@ MindRoom config, secrets, and runtime state stay in `~/.mindroom`, so the app an
 Install the signed app release with Homebrew.
 
 ```bash
-brew install --cask mindroom-ai/mindroom/mindroom
+brew install --cask mindroom-ai/tap/mindroom
 ```
 
 Open **MindRoom** from `/Applications` or Spotlight.

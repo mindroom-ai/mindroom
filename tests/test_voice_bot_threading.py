@@ -1334,15 +1334,22 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
     bot = mock_home_bot
     bot.config.agents["home"].thread_mode = "room"
     room = _threaded_room()
-    _install_test_coalescing_gate(bot, debounce_seconds=0.02)
+    _install_test_coalescing_gate(bot, debounce_seconds=5.0)
 
     first_voice = _make_threaded_voice_event(event_id="$voice1", server_timestamp=1_712_350_000_001)
     second_voice = _make_threaded_voice_event(event_id="$voice2", server_timestamp=1_712_350_000_002)
+    prepared_event_ids: set[str] = set()
+    both_prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
     dispatches: list[list[str]] = []
 
     async def prepare_voice_event(
         request: inbound_turn_normalizer.VoiceNormalizationRequest,
     ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        prepared_event_ids.add(request.event.event_id)
+        if prepared_event_ids == {"$voice1", "$voice2"}:
+            both_prepare_started.set()
+        await release_prepare.wait()
         return _normalized_voice_result(
             event=request.event,
             text=f"room transcript {request.event.event_id}",
@@ -1359,21 +1366,35 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
     ) -> None:
         dispatches.append(_handled_source_event_ids(handled_turn))
 
-    with (
-        patch.object(
-            bot._turn_controller.deps.normalizer,
-            "prepare_voice_event",
-            new=AsyncMock(side_effect=prepare_voice_event),
-        ),
-        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-    ):
-        await asyncio.gather(
-            bot._on_media_message(room, first_voice),
-            bot._on_media_message(room, second_voice),
-        )
-        await drain_coalescing(bot)
+    voice_tasks: list[asyncio.Task[None]] = []
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            voice_tasks = [
+                asyncio.create_task(bot._on_media_message(room, first_voice)),
+                asyncio.create_task(bot._on_media_message(room, second_voice)),
+            ]
+            await asyncio.wait_for(both_prepare_started.wait(), timeout=1.0)
+            await asyncio.gather(*voice_tasks)
+            assert dispatches == []
+
+            release_prepare.set()
+            await drain_coalescing(bot)
+    finally:
+        release_prepare.set()
+        for voice_task in voice_tasks:
+            if not voice_task.done():
+                voice_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await voice_task
 
     assert dispatches == [["$voice1", "$voice2"]]
 

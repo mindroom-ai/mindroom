@@ -8,6 +8,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+README = ROOT / "README.md"
+MACOS_APP_DOC = ROOT / "docs" / "installation" / "macos-app.md"
 
 
 @pytest.fixture(scope="module")
@@ -43,3 +45,33 @@ def test_release_metadata_push_uses_explicit_force_with_lease(release_workflow: 
     )
     assert '--force-with-lease="refs/heads/${RELEASE_METADATA_BRANCH}:"' in release_workflow
     assert 'git push "${FORCE_WITH_LEASE[@]}"' in release_workflow
+
+
+def test_release_workflow_dispatches_homebrew_tap_update(release_workflow: str) -> None:
+    """The main release workflow should notify the dedicated Homebrew tap repo."""
+    assert "HOMEBREW_TAP_DISPATCH_TOKEN" in release_workflow
+    assert "repos/mindroom-ai/homebrew-tap/dispatches" in release_workflow
+    assert "-f event_type=mindroom-release" in release_workflow
+    assert '-F "client_payload[tag_name]=$TAG_NAME"' in release_workflow
+    assert (
+        '-F "client_payload[asset_url]=https://github.com/mindroom-ai/mindroom/releases/download/${TAG_NAME}/MindRoom.dmg"'
+        in release_workflow
+    )
+
+
+def test_release_workflow_no_longer_updates_in_repo_cask(release_workflow: str) -> None:
+    """The cask should live in mindroom-ai/homebrew-tap, not this source repo."""
+    assert "Casks/mindroom.rb" not in release_workflow
+    assert "update_mindroom_cask.py" not in release_workflow
+    assert "Homebrew cask version and SHA256" not in release_workflow
+
+
+def test_docs_use_dedicated_homebrew_tap_command() -> None:
+    """User-facing install docs should point at the dedicated tap."""
+    install_command = "brew install --cask mindroom-ai/tap/mindroom"
+    old_command = "brew install --cask mindroom-ai/mindroom/mindroom"
+
+    for path in (README, MACOS_APP_DOC):
+        text = path.read_text(encoding="utf-8")
+        assert install_command in text
+        assert old_command not in text

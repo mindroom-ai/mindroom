@@ -589,7 +589,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: len(calls) == 1)
+        await bot._coalescing_gate.drain_all()
 
     assert calls == [
         (
