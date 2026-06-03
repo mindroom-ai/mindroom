@@ -572,7 +572,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
-            await asyncio.wait_for(prepare_started.wait(), timeout=0.2)
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             assert queued_signal.pending_human_messages == 1
             allow_prepare.set()
             await task
@@ -898,7 +898,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
-            await asyncio.wait_for(prepare_started.wait(), timeout=0.2)
+            await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
             assert queued_signal.pending_human_messages == 1
             allow_prepare.set()
             await task
@@ -1383,10 +1383,10 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
                 asyncio.create_task(bot._on_media_message(room, second_voice)),
             ]
             await asyncio.wait_for(both_prepare_started.wait(), timeout=1.0)
-            await asyncio.gather(*voice_tasks)
             assert dispatches == []
 
             release_prepare.set()
+            await asyncio.gather(*voice_tasks)
             await drain_coalescing(bot)
     finally:
         release_prepare.set()

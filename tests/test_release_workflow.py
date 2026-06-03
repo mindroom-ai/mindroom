@@ -49,7 +49,11 @@ def test_release_metadata_push_uses_explicit_force_with_lease(release_workflow: 
 
 def test_release_workflow_dispatches_homebrew_tap_update(release_workflow: str) -> None:
     """The main release workflow should notify the dedicated Homebrew tap repo."""
+    assert "update_homebrew_tap:" in release_workflow
+    assert "needs: build_macos_app" in release_workflow
     assert "HOMEBREW_TAP_DISPATCH_TOKEN" in release_workflow
+    assert "Token needs write access to mindroom-ai/homebrew-tap." in release_workflow
+    assert "Fine-grained tokens need Actions: write on that repo." in release_workflow
     assert "repos/mindroom-ai/homebrew-tap/dispatches" in release_workflow
     assert "-f event_type=mindroom-release" in release_workflow
     assert '-F "client_payload[tag_name]=$TAG_NAME"' in release_workflow

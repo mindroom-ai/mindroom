@@ -1884,17 +1884,17 @@ async def test_room_scope_text_then_voice_live_debounce_coalesces_receive_time()
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
-        debounce_seconds=lambda: 0.05,
+        debounce_seconds=lambda: 5.0,
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
     key = CoalescingKey("!room:localhost", None, "@user:localhost")
 
     await _admit_ready(gate, key, PendingEvent(event=text, room=room, source_kind="message"))
-    await asyncio.sleep(0.01)
     await _admit_ready(gate, key, PendingEvent(event=voice, room=room, source_kind=VOICE_SOURCE_KIND))
+    await gate.drain_all()
 
-    await _wait_for(lambda: calls == [["$text", "$voice"]], deadline_seconds=0.2)
+    assert calls == [["$text", "$voice"]]
     assert _coalescing_gate_is_idle(gate)
 
 

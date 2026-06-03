@@ -200,8 +200,17 @@ jobs:
               --title "Update MindRoom release metadata to ${TAG_NAME}" \
               --body-file "$PR_BODY"
           fi
-      - name: Trigger Homebrew tap update
+  update_homebrew_tap:
+    name: Trigger Homebrew tap update
+    needs: build_macos_app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch tap workflow
         env:
+          # Token needs write access to mindroom-ai/homebrew-tap.
+          # Fine-grained tokens need Actions: write on that repo.
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN || secrets.PAT }}
           TAG_NAME: ${{ inputs.release_ref }}
         run: |
