@@ -40,6 +40,9 @@ _SENSITIVE_CONFIG_KEYS = frozenset(
 # Keys that end in a secret stem but are not actually secrets.
 _NON_SECRET_CONFIG_KEY_EXCEPTIONS = frozenset({"no_reply_token", "token_uri"})
 
+# HTTP header names whose value always carries a credential.
+_SENSITIVE_HEADER_KEYS = frozenset({"authorization", "proxy_authorization"})
+
 
 def normalize_config_key(raw_key: str) -> str:
     """Normalize a config key to lowercase-underscore form for classification."""
@@ -73,3 +76,8 @@ def is_sensitive_config_key(raw_key: str) -> bool:
     if normalized_key in _SENSITIVE_CONFIG_KEYS:
         return True
     return normalized_key.endswith(secret_name_suffixes())
+
+
+def is_sensitive_header_key(raw_key: str) -> bool:
+    """Return whether an HTTP header name carries a credential to be redacted."""
+    return normalize_config_key(raw_key) in _SENSITIVE_HEADER_KEYS or is_sensitive_config_key(raw_key)

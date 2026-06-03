@@ -10,14 +10,14 @@ import re
 import shutil
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 import yaml
 
 from mindroom.constants import config_relative_path, resolve_config_relative_path
-from mindroom.sensitivity import is_sensitive_config_key, normalize_config_key
+from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
     normalize_worker_key_part,
     resolve_agent_owned_path,
@@ -45,7 +45,6 @@ _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
 _WORKER_CONFIG_STATE_DIRNAME = ".mindroom-worker-config-state"
 PROJECTED_CONFIGS_DIRNAME = _PROJECTED_CONFIGS_DIRNAME
 _PROJECTION_READY_FILENAME = ".projection-ready"
-_SENSITIVE_HEADER_KEYS = frozenset({"authorization", "proxy_authorization"})
 
 
 def _container_config_dir(config_path: str) -> str:
@@ -105,17 +104,13 @@ def _config_key_is_header_container(raw_key: str | None) -> bool:
     return normalized_key == "headers" or normalized_key.endswith("_headers")
 
 
-def _header_key_is_sensitive(raw_key: str) -> bool:
-    return normalize_config_key(raw_key) in _SENSITIVE_HEADER_KEYS or is_sensitive_config_key(raw_key)
-
-
 def _strip_sensitive_config_values(value: object, *, parent_key: str | None = None) -> object:
     if isinstance(value, dict):
         redacted: dict[object, object] = {}
         inside_header_mapping = _config_key_is_header_container(parent_key)
         for key, item in value.items():
             if isinstance(key, str) and (
-                _header_key_is_sensitive(key) if inside_header_mapping else is_sensitive_config_key(key)
+                is_sensitive_header_key(key) if inside_header_mapping else is_sensitive_config_key(key)
             ):
                 continue
             redacted[key] = _strip_sensitive_config_values(item, parent_key=key if isinstance(key, str) else None)
@@ -346,21 +341,11 @@ class DockerProjectionManager:
             assets=tuple(assets),
             ready=False,
         )
-        projection = _DockerProjectedConfig(
-            root=projection.root,
-            projected_yaml=projection.projected_yaml,
-            assets=projection.assets,
-            ready=self._projection_ready(projection),
-        )
+        projection = replace(projection, ready=self._projection_ready(projection))
         if materialize:
             self._write_projected_config(projection)
             self.prune_projected_configs(paths, keep=projection.root)
-            return _DockerProjectedConfig(
-                root=projection.root,
-                projected_yaml=projection.projected_yaml,
-                assets=projection.assets,
-                ready=True,
-            )
+            return replace(projection, ready=True)
         return projection
 
     def worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
