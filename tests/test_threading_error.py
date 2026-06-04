@@ -9209,11 +9209,11 @@ class TestThreadingBehavior:
         assert observed_targets[0].resolved_thread_id is None
 
     @pytest.mark.asyncio
-    async def test_degraded_dispatch_history_is_not_policy_grade_history(
+    async def test_degraded_dispatch_history_uses_strict_history_before_policy(
         self,
         bot: AgentBot,
     ) -> None:
-        """Degraded dispatch history can prove targets but not planning context."""
+        """Degraded proven-thread dispatch history must be refreshed before policy."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -9249,8 +9249,10 @@ class TestThreadingBehavior:
             observed_policy_targets.append(dispatch.target)
             assert dispatch.context.is_thread is True
             assert dispatch.context.thread_id == "$thread_root:localhost"
-            assert dispatch.context.planning_thread_history == ()
-            assert dispatch.context.planning_thread_history_unavailable is True
+            assert dispatch.context.thread_history == full_history
+            assert dispatch.context.planning_thread_history == tuple(full_history)
+            assert dispatch.context.planning_thread_history_unavailable is False
+            assert dispatch.context.requires_model_history_refresh is False
             return _DispatchPlan(kind="ignore")
 
         with (
@@ -9258,11 +9260,26 @@ class TestThreadingBehavior:
                 bot._conversation_cache,
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=degraded_history),
-            ),
+            ) as mock_dispatch_history,
+            patch.object(
+                bot._conversation_cache,
+                "get_strict_thread_history",
+                AsyncMock(return_value=full_history),
+            ) as mock_strict_history,
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)) as mock_plan,
         ):
             await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
+        mock_dispatch_history.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            caller_label="dispatch_context",
+        )
+        mock_strict_history.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            caller_label="dispatch_context_strict_thread_fallback",
+        )
         mock_plan.assert_awaited_once()
         assert observed_policy_targets[0].resolved_thread_id == "$thread_root:localhost"
 

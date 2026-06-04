@@ -574,6 +574,7 @@ class ConversationResolver:
             ThreadReadMode.ADVISORY_FULL: self.deps.conversation_cache.get_thread_history,
             ThreadReadMode.DISPATCH_SNAPSHOT: self.deps.conversation_cache.get_dispatch_thread_snapshot,
             ThreadReadMode.DISPATCH_FULL: self.deps.conversation_cache.get_dispatch_thread_history,
+            ThreadReadMode.STRICT_FULL: self.deps.conversation_cache.get_strict_thread_history,
         }[mode]
         return await read_thread(room_id, thread_id, caller_label=caller_label)
 
@@ -634,6 +635,13 @@ class ConversationResolver:
                 mode=mode,
                 caller_label=caller_label,
             )
+        if mode.dispatch_safe and is_thread_history_degraded(thread_messages):
+            thread_messages = await self._read_thread_messages(
+                room_id,
+                thread_id,
+                mode=ThreadReadMode.STRICT_FULL,
+                caller_label=f"{caller_label}_strict_thread_fallback",
+            )
         return _ThreadContextLookup.proven_thread(
             thread_id,
             thread_messages,
@@ -648,7 +656,7 @@ class ConversationResolver:
         mode: ThreadReadMode = ThreadReadMode.DISPATCH_FULL,
         caller_label: str = "dispatch_context",
     ) -> DispatchContextResult:
-        """Extract bounded dispatch context using the requested thread read mode."""
+        """Extract dispatch context using strict history when dispatch-safe thread reads degrade."""
         context, thread_context = await self._extract_message_context_parts(
             room,
             event,

@@ -20,6 +20,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
 from mindroom.matrix.cache import (
     ConversationEventCache,
     event_normalization,
@@ -30,13 +31,23 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import fetch_thread_history
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import (
+    agent_response_should_respond,
+    bind_runtime_paths,
+    create_mock_room,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -540,6 +551,111 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     assert "dispatch_fetch_wait_ms" in result.diagnostics
     coordinator.wait_for_thread_idle.assert_awaited_once()
     coordinator.run_thread_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A proven thread must fall back to strict history before dispatch planning."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "primary": AgentConfig(display_name="Primary", rooms=["!room:localhost"]),
+                "secondary": AgentConfig(display_name="Secondary", rooms=["!room:localhost"]),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    route_paths = runtime_paths_for(config)
+    route_ids = entity_ids(config, route_paths)
+    runtime = BotRuntimeState(
+        client=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=MagicMock(),
+        event_cache_write_coordinator=None,
+    )
+    resolver = ConversationResolver(
+        ConversationResolverDeps(
+            runtime=runtime,
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="primary",
+            matrix_id=route_ids["primary"],
+            conversation_cache=MagicMock(),
+        ),
+    )
+    degraded_history = thread_history_result(
+        [],
+        is_full_history=False,
+        diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+    )
+    strict_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender=route_ids["primary"].full_id,
+                body="I can handle this.",
+                event_id="$agent-reply",
+                thread_id="$thread:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@requester:localhost",
+                body="Please continue.",
+                event_id="$user-follow-up",
+                thread_id="$thread:localhost",
+            ),
+        ],
+        is_full_history=True,
+    )
+    event_info = MagicMock(spec=EventInfo)
+
+    with (
+        patch.object(
+            resolver,
+            "_explicit_thread_id_for_event",
+            AsyncMock(return_value=_ThreadIdLookup(thread_id="$thread:localhost", thread_history=degraded_history)),
+        ),
+        patch.object(
+            resolver,
+            "_read_thread_messages",
+            AsyncMock(return_value=strict_history),
+        ) as read_thread_messages,
+    ):
+        result = await resolver._resolve_thread_context(
+            "!room:localhost",
+            "$incoming:localhost",
+            event_info,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+            caller_label="dispatch_context",
+        )
+
+    assert result.is_thread is True
+    assert result.thread_id == "$thread:localhost"
+    assert result.thread_history == strict_history
+    assert result.requires_model_history_refresh is False
+    assert result.replay_guard_degraded is False
+    read_thread_messages.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread:localhost",
+        mode=ThreadReadMode.STRICT_FULL,
+        caller_label="dispatch_context_strict_thread_fallback",
+    )
+    assert agent_response_should_respond(
+        agent_name="primary",
+        am_i_mentioned=False,
+        is_thread=True,
+        room=create_mock_room("!room:localhost", ["primary", "secondary"], config),
+        thread_history=result.thread_history,
+        config=config,
+        runtime_paths=route_paths,
+        sender_id="@requester:localhost",
+        available_responders_in_room=[route_ids["primary"], route_ids["secondary"]],
+    )
 
 
 @pytest.mark.asyncio
