@@ -20,7 +20,7 @@ _SANDBOX_RUNNER_SCRIPT = _REPO_ROOT / "run-sandbox-runner.sh"
 def _apt_install_packages(dockerfile_text: str) -> set[str]:
     match = re.search(r"apt-get install -y (?P<packages>.*?)\\\s*&&", dockerfile_text, re.DOTALL)
     assert match is not None
-    return {package for package in match.group("packages").split() if not package.startswith("-")}
+    return {package for package in match.group("packages").split() if not package.startswith("-") and package != "\\"}
 
 
 def _assert_command_starts_with_tini(template_text: str, command: str) -> None:
@@ -29,6 +29,17 @@ def _assert_command_starts_with_tini(template_text: str, command: str) -> None:
     inline_list_pattern = rf"command:\s*\[\s*\"tini\"\s*,\s*\"--\"\s*,\s*\"{escaped_command}\""
 
     assert re.search(block_list_pattern, template_text) or re.search(inline_list_pattern, template_text)
+
+
+def test_apt_install_packages_ignores_flags_and_line_continuations() -> None:
+    """Dockerfile package parsing should tolerate multiline apt install formatting."""
+    text = """RUN apt-get update && apt-get install -y --no-install-recommends \\
+    bash \\
+    git \\
+    && apt-get clean
+"""
+
+    assert _apt_install_packages(text) == {"bash", "git"}
 
 
 def test_mindroom_runtime_images_run_under_tini() -> None:
