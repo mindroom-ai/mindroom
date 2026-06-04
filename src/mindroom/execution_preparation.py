@@ -606,28 +606,6 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
-    if fallback_thread_history is not None:
-        fallback_thread_history = _sanitize_thread_history_for_replay(
-            fallback_thread_history,
-            response_sender_id=response_sender_id,
-            active_event_ids=active_event_ids,
-        )
-    replay_fallback_messages = _build_thread_history_messages(
-        prompt,
-        fallback_thread_history,
-        response_sender_id=response_sender_id,
-        current_sender_id=current_sender_id,
-        config=config,
-        max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
-        max_message_length=(thread_history_render_limits.max_message_length if thread_history_render_limits else None),
-        missing_sender_label=(
-            thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
-        ),
-        static_token_budget=fallback_static_token_budget,
-        estimate_static_tokens_fn=estimate_static_tokens_fn,
-        render_messages_text_fn=render_messages_text_fn,
-    )
 
     provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id, config=config)
     if reply_to_event_id and thread_history:
@@ -668,7 +646,31 @@ async def _prepare_execution_context_common(
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
-    if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
+    if not prepared_history.replays_persisted_history and thread_history:
+        fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+        if fallback_thread_history is not None:
+            fallback_thread_history = _sanitize_thread_history_for_replay(
+                fallback_thread_history,
+                response_sender_id=response_sender_id,
+                active_event_ids=active_event_ids,
+            )
+        replay_fallback_messages = _build_thread_history_messages(
+            prompt,
+            fallback_thread_history,
+            response_sender_id=response_sender_id,
+            current_sender_id=current_sender_id,
+            config=config,
+            max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
+            max_message_length=(
+                thread_history_render_limits.max_message_length if thread_history_render_limits else None
+            ),
+            missing_sender_label=(
+                thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
+            ),
+            static_token_budget=fallback_static_token_budget,
+            estimate_static_tokens_fn=estimate_static_tokens_fn,
+            render_messages_text_fn=render_messages_text_fn,
+        )
         final_messages = replay_fallback_messages
         fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
         if prepared_history.replay_plan is not None:
