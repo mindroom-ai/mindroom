@@ -1049,6 +1049,26 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     mark_startup_runtime_support_ready.assert_awaited_once()
 
 
+def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:
+    """Startup maintenance replay should keep router before other running bots."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+
+    router_bot = MagicMock()
+    router_bot.running = True
+    general_bot = MagicMock()
+    general_bot.running = True
+    stopped_bot = MagicMock()
+    stopped_bot.running = False
+
+    orchestrator.agent_bots = {
+        "general": general_bot,
+        "stopped": stopped_bot,
+        "router": router_bot,
+    }
+
+    assert orchestrator._running_startup_maintenance_bots() == [router_bot, general_bot]
+
+
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for sync task management
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
