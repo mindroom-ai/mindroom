@@ -81,7 +81,10 @@ def _default_thread_export_dir(runtime_paths: RuntimePaths) -> Path:
 
 def _safe_path_segment(value: str) -> str:
     """Return one filesystem-safe path segment while keeping Matrix IDs reversible."""
-    return quote(value.strip() or "unknown", safe="")
+    encoded = quote(value.strip() or "unknown", safe="")
+    if encoded in {".", ".."}:
+        return encoded.replace(".", "%2E")
+    return encoded
 
 
 def _timestamp_iso(timestamp_ms: int) -> str | None:

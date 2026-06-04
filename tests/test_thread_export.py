@@ -12,7 +12,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixRoom, MatrixState
-from mindroom.thread_export import _export_rooms, _export_threads_for_client, _fsync_directory, export_threads_once
+from mindroom.thread_export import (
+    _export_rooms,
+    _export_threads_for_client,
+    _fsync_directory,
+    _safe_path_segment,
+    export_threads_once,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -65,6 +71,13 @@ def test_fsync_directory_ignores_unsupported_directory_fsync(tmp_path: Path) -> 
     open_directory.assert_called_once()
     fsync_directory.assert_called_once_with(123)
     close_directory.assert_called_once_with(123)
+
+
+def test_safe_path_segment_blocks_dot_directory_segments() -> None:
+    """Path segments should not allow current or parent directory traversal."""
+    assert _safe_path_segment(".") == "%2E"
+    assert _safe_path_segment("..") == "%2E%2E"
+    assert _safe_path_segment("%2E") == "%252E"
 
 
 @pytest.mark.asyncio
