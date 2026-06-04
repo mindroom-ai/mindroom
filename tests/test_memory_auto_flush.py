@@ -938,6 +938,7 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
 ) -> None:
     """Private auto-flush should rebind the persisted requester scope for memory writes."""
     config = _private_auto_flush_config(tmp_path)
+    config.memory.search.mode = "semantic"
     alice_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="mind",
@@ -977,6 +978,13 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
         "mindroom.memory.auto_flush._extract_memory_summary",
         _fake_extract_memory_summary,
     )
+    scheduled_identities: list[object] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, _base_id: str, **kwargs: object) -> None:
+            scheduled_identities.append(kwargs["execution_identity"])
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     worker = MemoryAutoFlushWorker(
         storage_path=tmp_path,
@@ -987,6 +995,7 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
 
     assert seen_execution_identities
     assert all(identity == alice_identity for identity in seen_execution_identities)
+    assert scheduled_identities == [alice_identity]
 
     worker_key = resolve_worker_key("user", alice_identity, agent_name="mind")
     assert worker_key is not None

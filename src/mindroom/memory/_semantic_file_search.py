@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemorySearchConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 _SOURCE_PATH_KEY = "source_path"
@@ -82,6 +83,7 @@ def schedule_semantic_file_memory_refresh(
     config: Config,
     runtime_paths: RuntimePaths,
     search_config: MemorySearchConfig,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> bool:
     """Schedule a best-effort semantic refresh for one file-memory scope."""
     base_id = _memory_knowledge_base_id(root, scope_user_id)
@@ -92,7 +94,12 @@ def schedule_semantic_file_memory_refresh(
         search_config=search_config,
     )
     try:
-        _memory_refresh_scheduler.schedule_refresh(base_id, config=knowledge_config, runtime_paths=runtime_paths)
+        _memory_refresh_scheduler.schedule_refresh(
+            base_id,
+            config=knowledge_config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
     except Exception:
         logger.exception("Could not schedule semantic file-memory refresh")
         return False
@@ -139,6 +146,7 @@ async def search_semantic_file_memories(
     runtime_paths: RuntimePaths,
     search_config: MemorySearchConfig,
     limit: int,
+    execution_identity: ToolExecutionIdentity | None = None,
     timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search one file-memory scope through the published knowledge index pipeline."""
@@ -164,13 +172,19 @@ async def search_semantic_file_memories(
         return []
 
     access_start = time.monotonic()
-    resolution = resolve_knowledge_base_access(base_id, knowledge_config, runtime_paths)
+    resolution = resolve_knowledge_base_access(
+        base_id,
+        knowledge_config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     refresh_scheduled = schedule_semantic_file_memory_refresh(
         scope_user_id=scope_user_id,
         root=root,
         config=config,
         runtime_paths=runtime_paths,
         search_config=search_config,
+        execution_identity=execution_identity,
     )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.published_index_access",

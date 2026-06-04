@@ -281,7 +281,14 @@ async def test_semantic_memory_search_uses_knowledge_published_index(
 
     access_base_ids: list[str] = []
 
-    def resolve_access(base_id: str, access_config: Config, access_runtime_paths: object) -> object:
+    def resolve_access(
+        base_id: str,
+        access_config: Config,
+        access_runtime_paths: object,
+        *,
+        execution_identity: object = None,
+    ) -> object:
+        del execution_identity
         access_base_ids.append(base_id)
         assert access_runtime_paths == runtime_paths
         base_config = access_config.knowledge_bases[base_id]
@@ -617,21 +624,96 @@ async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_
     config.memory.backend = "file"
     config.memory.search.mode = "semantic"
     config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
 
-    scheduled: list[tuple[str, Config, object]] = []
+    scheduled: list[tuple[str, Config, object, object]] = []
 
     class FakeScheduler:
         def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"]))
+            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"], kwargs["execution_identity"]))
 
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
-    await add_agent_memory("Semantic refresh memory", "general", storage_path, config)
+    with tool_execution_identity(identity):
+        await add_agent_memory("Semantic refresh memory", "general", storage_path, config)
+
+    assert len(scheduled) == 1
+    base_id, scheduled_config, scheduled_runtime_paths, scheduled_identity = scheduled[0]
+    assert scheduled_runtime_paths == runtime_paths_for(config)
+    assert scheduled_identity == identity
+    scheduled_path = scheduled_config.knowledge_bases[base_id].path
+    assert "private_instances" in scheduled_path
+    assert scheduled_path.endswith("mind_data")
+
+
+@pytest.mark.asyncio
+async def test_file_backend_update_and_delete_schedule_semantic_refresh_when_semantic_search_enabled(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[str] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            scheduled.append(base_id)
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await add_agent_memory("Original semantic memory", "general", storage_path, config)
+    memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+
+    scheduled.clear()
+    await update_agent_memory(memory_id, "Updated semantic memory", "general", storage_path, config)
+    assert len(scheduled) == 1
+
+    scheduled.clear()
+    await delete_agent_memory(memory_id, "general", storage_path, config)
+    assert len(scheduled) == 1
+
+
+@pytest.mark.asyncio
+async def test_file_backend_store_conversation_memory_schedules_semantic_refresh_when_semantic_search_enabled(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[tuple[str, Config]] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
+            scheduled.append((base_id, kwargs["config"]))
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await store_conversation_memory(
+        "Conversation semantic memory",
+        "general",
+        storage_path,
+        "session-general",
+        config,
+    )
 
     workspace = agent_workspace_root_path(storage_path, "general")
     assert len(scheduled) == 1
-    base_id, scheduled_config, scheduled_runtime_paths = scheduled[0]
-    assert scheduled_runtime_paths == runtime_paths_for(config)
+    base_id, scheduled_config = scheduled[0]
     assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
 
 
@@ -706,6 +788,7 @@ async def test_file_backend_private_semantic_search_uses_requester_root(
     root = semantic_search.call_args.kwargs["root"]
     assert "private_instances" in str(root)
     assert str(root).endswith("mind_data")
+    assert semantic_search.call_args.kwargs["execution_identity"] == identity
 
 
 @pytest.mark.asyncio
