@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import pytest
+from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
+
+from mindroom import execution_preparation
 from mindroom.config.main import Config
+from mindroom.config.models import CompactionConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
     _build_thread_history_messages,
     _build_unseen_context_messages,
     _fallback_static_token_budget,
+    _prepare_execution_context_common,
+    render_prepared_messages_text,
 )
+from mindroom.history import (
+    HistoryPolicy,
+    HistoryScope,
+    PreparedScopeHistory,
+    ResolvedHistorySettings,
+)
+from mindroom.history.policy import resolve_history_execution_plan
+from mindroom.history.runtime import _ResolvedPreparationInputs
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_visible_message
 
@@ -25,12 +43,96 @@ def _tool_trace_content() -> dict[str, object]:
     return content
 
 
+def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="runs", limit=1),
+        max_tool_calls_from_history=None,
+    )
+    compaction_config = CompactionConfig(enabled=False, reserve_tokens=100)
+    execution_plan = resolve_history_execution_plan(
+        config=_config(),
+        compaction_config=compaction_config,
+        has_authored_compaction_config=False,
+        active_model_name="test-model",
+        active_context_window=10_000,
+        static_prompt_tokens=10,
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = AgentSession(
+        session_id="thread-session",
+        agent_id="test_agent",
+        runs=[
+            RunOutput(
+                run_id="run-1",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                messages=[
+                    Message(role="user", content="persisted question"),
+                    Message(role="assistant", content="persisted answer"),
+                ],
+            ),
+        ],
+        created_at=1,
+        updated_at=1,
+    )
+    return PreparedScopeHistory(
+        scope=scope,
+        session=session,
+        resolved_inputs=_ResolvedPreparationInputs(
+            history_settings=history_settings,
+            compaction_config=compaction_config,
+            has_authored_compaction_config=False,
+            active_model_name="test-model",
+            active_context_window=10_000,
+            static_prompt_tokens=10,
+            execution_plan=execution_plan,
+        ),
+    )
+
+
 def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
     """Fallback static budgeting should keep missing and reserve-clamped bounds."""
     assert _fallback_static_token_budget(context_window=None, reserve_tokens=100) is None
     assert _fallback_static_token_budget(context_window=0, reserve_tokens=100) is None
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=800) == 500
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=100) == 900
+
+
+@pytest.mark.asyncio
+async def test_prepare_execution_context_skips_fallback_replay_when_persisted_history_replays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted replay should avoid building unused Matrix fallback context."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    def fail_if_fallback_context_is_built(*_args: object, **_kwargs: object) -> tuple[Message, ...]:
+        message = "unused Matrix fallback context was built"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(execution_preparation, "_build_thread_history_messages", fail_if_fallback_context_is_built)
+
+    prepared = await _prepare_execution_context_common(
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        reply_to_event_id="$current",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert prepared.replays_persisted_history is True
+    assert prepared.context_messages[0].content == "@alice:localhost: older context"
 
 
 def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:
