@@ -1895,6 +1895,17 @@ class TestVersionAndHelp:
         assert result.exit_code == 0
         assert "config" in result.output
         assert "avatars" in result.output
+        assert "threads" in result.output
+
+    def test_threads_export_help_shows_export_flags(self) -> None:
+        """Thread export help should expose the one-shot and watch controls."""
+        result = runner.invoke(app, ["threads", "export", "--help"])
+        assert result.exit_code == 0
+        output = normalize_console_output(result.output)
+        assert "--watch" in output
+        assert "--interval" in output
+        assert "--room" in output
+        assert "--output" in output
 
 
 # ---------------------------------------------------------------------------

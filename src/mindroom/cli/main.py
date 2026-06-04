@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.thread_export import ThreadExportStats
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -52,9 +53,11 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
+threads_app = typer.Typer(help="Export Matrix threads to local files.")
 config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(avatars_app, name="avatars")
+app.add_typer(threads_app, name="threads")
 app.add_typer(service_app, name="service")
 
 
@@ -285,6 +288,118 @@ def avatars_sync(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+@threads_app.command("export")
+def _threads_export_command(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data.",
+    ),
+    output: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--output",
+        "-o",
+        help="Output directory. Defaults to <storage>/thread_exports.",
+    ),
+    room: str | None = typer.Option(
+        None,
+        "--room",
+        "-r",
+        help="Export only one room by room key, alias, name, or Matrix room ID.",
+    ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        help="Repeat the export forever on a fixed interval.",
+    ),
+    interval: int = typer.Option(
+        300,
+        "--interval",
+        help="Watch interval in seconds.",
+    ),
+    max_thread_roots: int = typer.Option(
+        2000,
+        "--max-thread-roots",
+        help="Maximum thread roots to enumerate per room.",
+    ),
+) -> None:
+    """Export Matrix threads to YAML files for grep/ripgrep search."""
+    asyncio.run(
+        _threads_export(
+            config_path=config_path,
+            storage_path=storage_path,
+            output=output,
+            room=room,
+            watch=watch,
+            interval=interval,
+            max_thread_roots=max_thread_roots,
+        ),
+    )
+
+
+def _print_thread_export_stats(stats: ThreadExportStats) -> None:
+    """Print one export-pass summary."""
+    console.print(
+        f"Exported {stats.threads_exported}/{stats.threads_seen} threads "
+        f"from {stats.rooms_exported} room(s) to {stats.output_dir}",
+    )
+    if stats.truncated_rooms:
+        console.print(f"[yellow]Warning:[/yellow] {stats.truncated_rooms} room(s) hit the thread enumeration limit")
+    for failure in stats.failed_items:
+        target = failure.thread_id or failure.room_id
+        console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
+
+
+async def _threads_export(
+    *,
+    config_path: Path | None,
+    storage_path: Path | None,
+    output: Path | None,
+    room: str | None,
+    watch: bool,
+    interval: int,
+    max_thread_roots: int,
+) -> None:
+    """Run one thread export command."""
+    from mindroom.thread_export import export_threads_once  # noqa: PLC0415
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
+    if interval < 1:
+        console.print("[red]Error:[/red] --interval must be at least 1 second")
+        raise typer.Exit(1)
+    if max_thread_roots < 1:
+        console.print("[red]Error:[/red] --max-thread-roots must be at least 1")
+        raise typer.Exit(1)
+
+    while True:
+        try:
+            stats = await export_threads_once(
+                config=config,
+                runtime_paths=runtime_paths,
+                output_dir=output,
+                room_filter=room,
+                max_thread_roots=max_thread_roots,
+            )
+        except RuntimeError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from None
+
+        _print_thread_export_stats(stats)
+        if not watch:
+            if stats.failures:
+                raise typer.Exit(1)
+            return
+        await asyncio.sleep(interval)
 
 
 @app.command()
