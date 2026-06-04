@@ -636,6 +636,7 @@ class ConversationResolver:
                 caller_label=caller_label,
             )
         if mode.dispatch_safe and is_thread_history_degraded(thread_messages):
+            # Proven threads must not plan from cold-cache/degraded history; wait for Matrix-backed refill.
             thread_messages = await self._read_thread_messages(
                 room_id,
                 thread_id,
