@@ -275,10 +275,6 @@ class _MultiAgentOrchestrator:
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _startup_maintenance_task: asyncio.Task | None = field(default=None, init=False)
     _startup_cutoff_ms: int | None = field(default=None, init=False)
-    _startup_router_ready_for_approval_cleanup: bool = field(default=False, init=False)
-    _startup_runtime_support_ready_for_approval_cleanup: bool = field(default=False, init=False)
-    _startup_approval_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _startup_approval_cleanup_done: bool = field(default=False, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -500,12 +496,6 @@ class _MultiAgentOrchestrator:
         if not bots:
             return
         self._start_startup_maintenance(bots, config, self._startup_cutoff_ms)
-
-    def _reset_startup_approval_cleanup_state(self) -> None:
-        """Reset one-shot approval cleanup gates for a fresh runtime start."""
-        self._startup_router_ready_for_approval_cleanup = False
-        self._startup_runtime_support_ready_for_approval_cleanup = False
-        self._startup_approval_cleanup_done = False
 
     @staticmethod
     def _log_startup_phase_started(phase: str) -> float:
@@ -1290,32 +1280,6 @@ class _MultiAgentOrchestrator:
             self._log_startup_phase_finished(phase, phase_started)
             return True
 
-    async def _run_startup_approval_cleanup_if_ready(self) -> None:
-        """Run one-shot approval cleanup after router first sync and runtime support are ready."""
-        if (
-            self._startup_approval_cleanup_done
-            or not self._startup_router_ready_for_approval_cleanup
-            or not self._startup_runtime_support_ready_for_approval_cleanup
-        ):
-            return
-        async with self._startup_approval_cleanup_lock:
-            if (
-                self._startup_approval_cleanup_done
-                or not self._startup_router_ready_for_approval_cleanup
-                or not self._startup_runtime_support_ready_for_approval_cleanup
-            ):
-                return
-            router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-            if router_bot is None:
-                return
-            await self._approval_transport.handle_bot_ready(router_bot)
-            self._startup_approval_cleanup_done = True
-
-    async def _mark_startup_runtime_support_ready_for_approval_cleanup(self) -> None:
-        """Mark runtime support ready and run startup approval cleanup if the router synced."""
-        self._startup_runtime_support_ready_for_approval_cleanup = True
-        await self._run_startup_approval_cleanup_if_ready()
-
     async def _run_startup_maintenance(
         self,
         started_bots: list[AgentBot | TeamBot],
@@ -1353,7 +1317,7 @@ class _MultiAgentOrchestrator:
             failure_message="Startup runtime support maintenance failed",
         )
         if runtime_support_ready:
-            await self._mark_startup_runtime_support_ready_for_approval_cleanup()
+            await self._approval_transport.mark_startup_runtime_support_ready()
 
     def _start_startup_maintenance(
         self,
@@ -1370,15 +1334,12 @@ class _MultiAgentOrchestrator:
 
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
-        if bot.agent_name != ROUTER_AGENT_NAME:
-            return
-        self._startup_router_ready_for_approval_cleanup = True
-        await self._run_startup_approval_cleanup_if_ready()
+        await self._approval_transport.handle_bot_ready(bot)
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
-        self._reset_startup_approval_cleanup_state()
+        self._approval_transport.reset_startup_cleanup_gate()
         phase_started = self._log_startup_phase_started("wait_for_matrix_homeserver")
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
         self._log_startup_phase_finished("wait_for_matrix_homeserver", phase_started)
@@ -1689,7 +1650,7 @@ class _MultiAgentOrchestrator:
                     start_watcher=self.running,
                     previous_config=current_config,
                 )
-                await self._mark_startup_runtime_support_ready_for_approval_cleanup()
+                await self._approval_transport.mark_startup_runtime_support_ready()
                 await self._emit_config_reloaded(
                     new_config=new_config,
                     changed_entities=set(),
@@ -1719,7 +1680,7 @@ class _MultiAgentOrchestrator:
                 start_watcher=self.running,
                 previous_config=current_config,
             )
-            await self._mark_startup_runtime_support_ready_for_approval_cleanup()
+            await self._approval_transport.mark_startup_runtime_support_ready()
             await self._emit_config_reloaded(
                 new_config=new_config,
                 changed_entities=changed_entities,

@@ -15004,6 +15004,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         call_order: list[str] = []
+        startup_discarded = asyncio.Event()
 
         async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
             call_order.append("wait_for_homeserver")
@@ -15017,6 +15018,7 @@ class TestMultiAgentOrchestrator:
         async def _discard_pending_on_startup(*, lookback_hours: int) -> int:
             assert lookback_hours == 240
             call_order.append("startup_discard")
+            startup_discarded.set()
             return 2
 
         async def _sync_forever_with_restart(started_bot: object) -> None:
@@ -15034,6 +15036,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
         ):
             await _run_orchestrator_start_until_ready(orchestrator)
+            await asyncio.wait_for(startup_discarded.wait(), timeout=1.0)
 
         assert call_order == [
             "wait_for_homeserver",
@@ -15064,6 +15067,124 @@ class TestMultiAgentOrchestrator:
             await orchestrator.handle_bot_ready(bot)
 
         expire_orphaned_approval_cards_on_startup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_approval_transport_waits_for_runtime_support_before_startup_discard(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router first sync alone must not discard startup approval cards before runtime support is ready."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        with patch(
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(return_value=1),
+        ) as expire_orphaned_approval_cards_on_startup:
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await orchestrator.handle_bot_ready(bot)
+            expire_orphaned_approval_cards_on_startup.assert_not_awaited()
+
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
+
+    @pytest.mark.asyncio
+    async def test_approval_transport_waits_for_router_ready_before_startup_discard(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Runtime support readiness alone must not discard startup approval cards before router first sync."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        with patch(
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(return_value=1),
+        ) as expire_orphaned_approval_cards_on_startup:
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            expire_orphaned_approval_cards_on_startup.assert_not_awaited()
+
+            await orchestrator.handle_bot_ready(bot)
+
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
+
+    @pytest.mark.asyncio
+    async def test_approval_transport_concurrent_startup_gates_discard_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router-ready and runtime-ready races must still run startup discard once."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        with patch(
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(return_value=1),
+        ) as expire_orphaned_approval_cards_on_startup:
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await asyncio.gather(
+                orchestrator.handle_bot_ready(bot),
+                orchestrator._approval_transport.mark_startup_runtime_support_ready(),
+            )
+
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=168)
+
+    @pytest.mark.asyncio
+    async def test_approval_transport_reset_allows_fresh_startup_discard(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A fresh runtime start must be able to run startup discard after the previous run did."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = []
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator.agent_bots = {"router": bot}
+
+        with patch(
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(return_value=1),
+        ) as expire_orphaned_approval_cards_on_startup:
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await orchestrator.handle_bot_ready(bot)
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+
+            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            await orchestrator.handle_bot_ready(bot)
+
+        assert expire_orphaned_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
