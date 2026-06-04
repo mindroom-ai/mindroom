@@ -60,6 +60,14 @@ class _KnowledgeResolution:
     unavailable: Mapping[str, KnowledgeAvailabilityDetail] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class KnowledgeBaseAccessResolution:
+    """Resolved access for one configured knowledge base."""
+
+    knowledge: Knowledge | None
+    availability: KnowledgeAvailability
+
+
 class _KnowledgeVectorDb(Protocol):
     """Subset of vector DB interface this module requires."""
 
@@ -428,6 +436,29 @@ def resolve_agent_knowledge_access(
         missing=tuple(missing_base_ids),
         unavailable=unavailable_bases,
     )
+
+
+def resolve_knowledge_base_access(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeBaseAccessResolution:
+    """Resolve one knowledge base without going through an agent assignment."""
+    lookup = _lookup_knowledge_for_base(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    if lookup is not None and availability is KnowledgeAvailability.READY:
+        availability = _ready_index_effective_availability(lookup, config)
+    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
+    if knowledge is not None:
+        _apply_knowledge_metadata(base_id, knowledge, config)
+    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability)
 
 
 def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:

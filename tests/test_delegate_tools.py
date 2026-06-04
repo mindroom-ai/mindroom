@@ -68,6 +68,8 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
         include_extensions="",
         exclude_extensions="()",
     )

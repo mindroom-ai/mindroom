@@ -238,6 +238,8 @@ def _test_indexing_settings(base_id: str = "docs") -> knowledge_manager_module.I
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
         include_extensions="",
         exclude_extensions="()",
     )
@@ -1362,6 +1364,42 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
     assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local include globs should avoid walking unrelated source trees."""
+    docs_path = tmp_path / "workspace"
+    memory_dir = docs_path / "memory"
+    unrelated_dir = docs_path / "docs" / "deep"
+    memory_dir.mkdir(parents=True)
+    unrelated_dir.mkdir(parents=True)
+    memory_file = memory_dir / "2026-06-02.md"
+    unrelated_file = unrelated_dir / "runbook.md"
+    memory_file.write_text("Indexed memory.\n", encoding="utf-8")
+    unrelated_file.write_text("Unrelated markdown.\n", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"] = KnowledgeBaseConfig(
+        path=str(docs_path),
+        include_extensions=[".md"],
+        include_patterns=["memory/**/*.md"],
+    )
+
+    walked_roots: list[Path] = []
+    original_walk = knowledge_manager_module.os.walk
+
+    def recording_walk(top: object, *args: object, **kwargs: object) -> object:
+        walked_roots.append(Path(top))
+        return original_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(knowledge_manager_module.os, "walk", recording_walk)
+
+    files = list_knowledge_files(config, "docs", docs_path)
+
+    assert files == [memory_file.resolve()]
+    assert walked_roots == [memory_dir.resolve()]
 
 
 @pytest.mark.asyncio

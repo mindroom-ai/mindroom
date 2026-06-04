@@ -21,7 +21,7 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
-from ._semantic_file_search import search_semantic_file_memories
+from ._semantic_file_search import SemanticFileMemoryIndexUnavailableError, search_semantic_file_memories
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
@@ -665,7 +665,11 @@ async def search_file_agent_memories(
                 runtime_paths=runtime_paths,
                 search_config=search_config,
                 limit=limit,
+                timing_scope=timing_scope,
             )
+        except SemanticFileMemoryIndexUnavailableError:
+            logger.debug("File-memory semantic index unavailable; falling back to keyword search", agent=agent_name)
+            results = keyword_results()
         except Exception:
             logger.exception("File-memory semantic search failed; falling back to keyword search", agent=agent_name)
             results = keyword_results()

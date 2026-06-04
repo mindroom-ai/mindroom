@@ -71,6 +71,7 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_COMPLETE,
 }
 _INDEXING_MODES: set[str] = {"semantic", "files"}
+_GLOB_CHARS = frozenset("*?[")
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
     ".markdown",
@@ -148,13 +149,15 @@ class IndexingSettings:
     git_skip_hidden: str
     git_include_patterns: str
     git_exclude_patterns: str
+    include_patterns: str
+    exclude_patterns: str
     include_extensions: str
     exclude_extensions: str
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
         """Build typed settings from the persisted JSON object."""
-        if set(settings) != {
+        required_keys = {
             "base_id",
             "storage_root",
             "knowledge_path",
@@ -173,7 +176,9 @@ class IndexingSettings:
             "git_exclude_patterns",
             "include_extensions",
             "exclude_extensions",
-        }:
+        }
+        optional_keys = {"include_patterns", "exclude_patterns"}
+        if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
@@ -195,6 +200,8 @@ class IndexingSettings:
             git_skip_hidden=settings["git_skip_hidden"],
             git_include_patterns=settings["git_include_patterns"],
             git_exclude_patterns=settings["git_exclude_patterns"],
+            include_patterns=settings.get("include_patterns", ""),
+            exclude_patterns=settings.get("exclude_patterns", ""),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
         )
@@ -218,6 +225,8 @@ class IndexingSettings:
             "git_skip_hidden": self.git_skip_hidden,
             "git_include_patterns": self.git_include_patterns,
             "git_exclude_patterns": self.git_exclude_patterns,
+            "include_patterns": self.include_patterns,
+            "exclude_patterns": self.exclude_patterns,
             "include_extensions": self.include_extensions,
             "exclude_extensions": self.exclude_extensions,
         }
@@ -235,7 +244,9 @@ class IndexingSettings:
             self.embedder_dimensions,
         )
 
-    def corpus_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str]:
+    def corpus_compatibility_key(
+        self,
+    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
         """Return fields that must match for safe source-corpus reuse."""
         return (
             self.base_id,
@@ -248,6 +259,8 @@ class IndexingSettings:
             self.git_skip_hidden,
             self.git_include_patterns,
             self.git_exclude_patterns,
+            self.include_patterns,
+            self.exclude_patterns,
             self.include_extensions,
             self.exclude_extensions,
         )
@@ -307,6 +320,12 @@ class _PersistedIndexState:
 @dataclass
 class _CandidatePublishState:
     index_published: bool = False
+
+
+@dataclass(frozen=True)
+class _ListingTarget:
+    path: Path
+    mode: Literal["file", "dir", "walk"]
 
 
 def _raise_cancelled() -> NoReturn:
@@ -387,6 +406,48 @@ def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
 
 
+def _split_pattern_parts(pattern: str) -> tuple[str, ...]:
+    normalized = pattern.replace("\\", "/").strip().removeprefix("./").strip("/")
+    if not normalized:
+        return ()
+    return tuple(part for part in normalized.split("/") if part and part != ".")
+
+
+def _part_has_glob(part: str) -> bool:
+    return any(char in part for char in _GLOB_CHARS)
+
+
+def _listing_targets_for_pattern(resolved_root: Path, pattern: str) -> list[_ListingTarget]:
+    parts = _split_pattern_parts(pattern)
+    if not parts:
+        return []
+    first_glob_index = next((index for index, part in enumerate(parts) if _part_has_glob(part)), len(parts))
+    if first_glob_index == len(parts):
+        return [_ListingTarget(resolved_root.joinpath(*parts), "file")]
+
+    base = resolved_root.joinpath(*parts[:first_glob_index]) if first_glob_index else resolved_root
+    remaining_parts = parts[first_glob_index:]
+    if len(remaining_parts) == 1 and remaining_parts[0] != "**":
+        return [_ListingTarget(base, "dir")]
+    return [_ListingTarget(base, "walk")]
+
+
+def _listing_targets(resolved_root: Path, patterns: list[str]) -> list[_ListingTarget]:
+    if not patterns:
+        return [_ListingTarget(resolved_root, "walk")]
+
+    deduped: list[_ListingTarget] = []
+    seen: set[tuple[Path, str]] = set()
+    for pattern in patterns:
+        for target in _listing_targets_for_pattern(resolved_root, pattern):
+            key = (target.path, target.mode)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(target)
+    return deduped
+
+
 def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
@@ -430,6 +491,8 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         git_skip_hidden=str(git_config.skip_hidden) if git_config is not None else "",
         git_include_patterns=_filter_settings_key(git_config.include_patterns) if git_config is not None else "",
         git_exclude_patterns=_filter_settings_key(git_config.exclude_patterns) if git_config is not None else "",
+        include_patterns=_filter_settings_key(base_config.include_patterns),
+        exclude_patterns=_filter_settings_key(base_config.exclude_patterns),
         include_extensions=include_extensions,
         exclude_extensions=exclude_extensions,
     )
@@ -568,6 +631,13 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
+    if base_config.include_patterns and not any(
+        matches_root_glob(relative_path, pattern) for pattern in base_config.include_patterns
+    ):
+        return False
+    if any(matches_root_glob(relative_path, pattern) for pattern in base_config.exclude_patterns):
+        return False
+
     git_config = base_config.git
     if git_config is not None and git_config.skip_hidden and _is_hidden_relative_path(path_obj):
         return False
@@ -575,12 +645,11 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
     if git_config is None:
         return True
 
-    if git_config.include_patterns and not any(
+    git_included = not git_config.include_patterns or any(
         matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
-    ):
-        return False
-
-    return not any(matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+    )
+    git_excluded = any(matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+    return git_included and not git_excluded
 
 
 def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
@@ -641,6 +710,53 @@ def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, 
     return include_knowledge_relative_path(config, base_id, relative_path.as_posix())
 
 
+def _add_listed_knowledge_file(
+    config: Config,
+    base_id: str,
+    root: Path,
+    path: Path,
+    *,
+    files: list[Path],
+    seen_paths: set[Path],
+) -> None:
+    if not _include_knowledge_file(config, base_id, root, path):
+        return
+    resolved_path = path.resolve()
+    if resolved_path in seen_paths:
+        return
+    seen_paths.add(resolved_path)
+    files.append(resolved_path)
+
+
+def _collect_listing_target_files(
+    config: Config,
+    base_id: str,
+    root: Path,
+    target: _ListingTarget,
+    *,
+    files: list[Path],
+    seen_paths: set[Path],
+) -> None:
+    def add_file(path: Path) -> None:
+        _add_listed_knowledge_file(config, base_id, root, path, files=files, seen_paths=seen_paths)
+
+    if target.mode == "file":
+        add_file(target.path)
+        return
+    if not target.path.is_dir() or _path_is_symlink_or_under_symlink(root, target.path):
+        return
+    if target.mode == "dir":
+        for path in target.path.iterdir():
+            if path.is_file():
+                add_file(path)
+        return
+    for dirpath, dirnames, filenames in os.walk(target.path, followlinks=False):
+        current_dir = Path(dirpath)
+        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
+        for filename in filenames:
+            add_file(current_dir / filename)
+
+
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
     """List managed files without constructing a knowledge manager."""
     root = knowledge_root.resolve()
@@ -648,13 +764,10 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
         return []
 
     files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        current_dir = Path(dirpath)
-        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
-        for filename in filenames:
-            path = current_dir / filename
-            if _include_knowledge_file(config, base_id, root, path):
-                files.append(path)
+    seen_paths: set[Path] = set()
+    include_patterns = config.get_knowledge_base_config(base_id).include_patterns
+    for target in _listing_targets(root, include_patterns):
+        _collect_listing_target_files(config, base_id, root, target, files=files, seen_paths=seen_paths)
     return sorted(files)
 
 
