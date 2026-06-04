@@ -21,7 +21,11 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
-from ._semantic_file_search import SemanticFileMemoryIndexUnavailableError, search_semantic_file_memories
+from ._semantic_file_search import (
+    SemanticFileMemoryIndexUnavailableError,
+    schedule_semantic_file_memory_refresh,
+    search_semantic_file_memories,
+)
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
@@ -196,6 +200,25 @@ def _match_score(query_tokens: set[str], text: str) -> float:
 def _format_entry_line(memory_id: str, content: str) -> str:
     normalized_content = " ".join(content.strip().split())
     return f"- [id={memory_id}] {normalized_content}"
+
+
+def _schedule_agent_semantic_refresh(
+    agent_name: str,
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    search_config = config.get_agent_memory_search(agent_name)
+    if search_config.mode != "semantic":
+        return
+    schedule_semantic_file_memory_refresh(
+        scope_user_id=scope_user_id,
+        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=search_config,
+    )
 
 
 def _append_scope_memory_entry(
@@ -553,7 +576,9 @@ def add_file_agent_memory(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    _append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
+    scope_user_id = agent_scope_user_id(agent_name)
+    _append_scope_memory_entry(scope_user_id, content, resolution, config)
+    _schedule_agent_semantic_refresh(agent_name, scope_user_id, resolution, config, runtime_paths)
     logger.info("File memory added", agent=agent_name)
 
 
@@ -578,13 +603,15 @@ def append_agent_daily_file_memory(
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
+    scope_user_id = agent_scope_user_id(agent_name)
     result = _append_scope_memory_entry(
-        agent_scope_user_id(agent_name),
+        scope_user_id,
         content,
         resolution,
         config,
         target_relative_path=daily_relative_path,
     )
+    _schedule_agent_semantic_refresh(agent_name, scope_user_id, resolution, config, runtime_paths)
     logger.info("File daily memory added", agent=agent_name, date=current_date)
     return result
 

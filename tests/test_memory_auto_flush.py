@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -335,6 +336,54 @@ async def test_worker_flush_unscoped_uses_canonical_agent_workspace_memory_path(
     assert "important decision" in canonical_daily_files[0].read_text(encoding="utf-8")
     assert not list((tmp_path / "shared-memory").rglob("*.md"))
     assert not list((tmp_path / "memory_files").rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_worker_daily_file_memory_schedules_semantic_refresh_when_semantic_search_enabled(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-flush writes should warm the semantic file-memory index in the background."""
+    config.memory.search.mode = "semantic"
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this important decision")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._load_agent_session",
+        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+
+    scheduled: list[tuple[str, Config, object]] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
+            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"]))
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    wrote_memory = await worker._flush_session(
+        config,
+        agent_name="general",
+        session_id="session-general",
+    )
+
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    assert wrote_memory is True
+    assert len(scheduled) == 1
+    base_id, scheduled_config, scheduled_runtime_paths = scheduled[0]
+    assert scheduled_runtime_paths == runtime_paths_for(config)
+    assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
 
 
 @pytest.mark.asyncio

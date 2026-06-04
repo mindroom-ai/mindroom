@@ -609,6 +609,56 @@ async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error
 
 
 @pytest.mark.asyncio
+async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[tuple[str, Config, object]] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
+            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"]))
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await add_agent_memory("Semantic refresh memory", "general", storage_path, config)
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    assert len(scheduled) == 1
+    base_id, scheduled_config, scheduled_runtime_paths = scheduled[0]
+    assert scheduled_runtime_paths == runtime_paths_for(config)
+    assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
+
+
+@pytest.mark.asyncio
+async def test_file_backend_add_skips_semantic_refresh_when_search_mode_is_keyword(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "keyword"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[str] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            scheduled.append(base_id)
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await add_agent_memory("Keyword mode memory", "general", storage_path, config)
+
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
 async def test_file_backend_private_semantic_search_uses_requester_root(
     storage_path: Path,
     config: Config,

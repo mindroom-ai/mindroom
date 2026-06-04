@@ -75,6 +75,30 @@ def _memory_knowledge_config(
     return knowledge_config
 
 
+def schedule_semantic_file_memory_refresh(
+    *,
+    scope_user_id: str,
+    root: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    search_config: MemorySearchConfig,
+) -> bool:
+    """Schedule a best-effort semantic refresh for one file-memory scope."""
+    base_id = _memory_knowledge_base_id(root, scope_user_id)
+    knowledge_config = _memory_knowledge_config(
+        config,
+        base_id=base_id,
+        root=root,
+        search_config=search_config,
+    )
+    try:
+        _memory_refresh_scheduler.schedule_refresh(base_id, config=knowledge_config, runtime_paths=runtime_paths)
+    except Exception:
+        logger.exception("Could not schedule semantic file-memory refresh")
+        return False
+    return True
+
+
 async def _list_memory_knowledge_files(config: Config, base_id: str, root: Path) -> list[Path]:
     return await asyncio.to_thread(list_knowledge_files, config, base_id, root)
 
@@ -141,13 +165,19 @@ async def search_semantic_file_memories(
 
     access_start = time.monotonic()
     resolution = resolve_knowledge_base_access(base_id, knowledge_config, runtime_paths)
-    _memory_refresh_scheduler.schedule_refresh(base_id, config=knowledge_config, runtime_paths=runtime_paths)
+    refresh_scheduled = schedule_semantic_file_memory_refresh(
+        scope_user_id=scope_user_id,
+        root=root,
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=search_config,
+    )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.published_index_access",
         access_start,
         timing_scope=timing_scope,
         availability=resolution.availability.value,
-        refresh_scheduled=True,
+        refresh_scheduled=refresh_scheduled,
     )
     if resolution.knowledge is None:
         msg = "Semantic file-memory index is not ready"
