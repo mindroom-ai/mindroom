@@ -939,7 +939,10 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
 
     setup_started = asyncio.Event()
     setup_can_finish = asyncio.Event()
-    sync_started = asyncio.Event()
+    sync_started_by_entity = {
+        "router": asyncio.Event(),
+        "general": asyncio.Event(),
+    }
     call_order: list[str] = []
 
     async def blocked_setup(_: list[object]) -> None:
@@ -950,7 +953,7 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
 
     def start_sync_task(entity_name: str, _bot: object) -> None:
         call_order.append(f"sync_started:{entity_name}")
-        sync_started.set()
+        sync_started_by_entity[entity_name].set()
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
@@ -969,10 +972,13 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
             await asyncio.wait_for(setup_started.wait(), timeout=1.0)
-            await asyncio.wait_for(sync_started.wait(), timeout=0.1)
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in sync_started_by_entity.values())),
+                timeout=1.0,
+            )
 
             assert "setup_finished" not in call_order
-            assert any(item.startswith("sync_started:") for item in call_order)
+            assert {"sync_started:router", "sync_started:general"} <= set(call_order)
         finally:
             setup_can_finish.set()
             await orchestrator.stop()
@@ -1019,34 +1025,41 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         await maintenance_released.wait()
 
     old_maintenance_task = asyncio.create_task(blocked_startup_maintenance())
-    orchestrator._startup_maintenance.task = old_maintenance_task
-    await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
+    try:
+        orchestrator._startup_maintenance.task = old_maintenance_task
+        await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-    def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
-        replayed.append((bots, config, startup_cutoff_ms))
+        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
+            replayed.append((bots, config, startup_cutoff_ms))
 
-    with (
-        patch("mindroom.orchestrator.load_config", return_value=new_config),
-        patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
-        patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
-        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
-        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-        patch.object(orchestrator._startup_maintenance, "start", side_effect=replay_startup_maintenance),
-        patch.object(
-            orchestrator._approval_transport,
-            "mark_startup_runtime_support_ready",
-            new=AsyncMock(),
-        ) as mark_startup_runtime_support_ready,
-    ):
-        updated = await orchestrator.update_config()
+        with (
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
+            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+            patch.object(orchestrator._startup_maintenance, "start", side_effect=replay_startup_maintenance),
+            patch.object(
+                orchestrator._approval_transport,
+                "mark_startup_runtime_support_ready",
+                new=AsyncMock(),
+            ) as mark_startup_runtime_support_ready,
+        ):
+            updated = await orchestrator.update_config()
 
-    assert updated is False
-    assert old_maintenance_task.cancelled()
-    assert replayed == [([router_bot], new_config, 123456)]
-    mark_startup_runtime_support_ready.assert_awaited_once()
+        assert updated is False
+        assert old_maintenance_task.cancelled()
+        assert replayed == [([router_bot], new_config, 123456)]
+        mark_startup_runtime_support_ready.assert_awaited_once()
+    finally:
+        maintenance_released.set()
+        if not old_maintenance_task.done():
+            old_maintenance_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await old_maintenance_task
 
 
 def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -> None:
