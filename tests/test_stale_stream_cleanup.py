@@ -195,6 +195,7 @@ async def _run_cleanup(
     joined_rooms: list[str],
     bot_user_ids: set[str] | None = None,
     now_ms: int = NOW_MS,
+    startup_cutoff_ms: int | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     with (
@@ -210,6 +211,7 @@ async def _run_cleanup(
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=startup_cutoff_ms,
         )
 
 
@@ -486,6 +488,54 @@ async def test_cleanup_skips_messages_older_than_restart_window(tmp_path: Path) 
     assert cleaned == 0
     assert interrupted == []
     mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_streaming_messages_at_or_after_startup_cutoff(tmp_path: Path) -> None:
+    """Post-sync cleanup must ignore messages that could have been created by this process."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    startup_cutoff_ms = NOW_MS - 120_000
+    before_cutoff_message = _make_message_event(
+        event_id="$before-cutoff",
+        body="Previous process partial",
+        timestamp_ms=startup_cutoff_ms - 1,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    at_cutoff_message = _make_message_event(
+        event_id="$at-cutoff",
+        body="Current process partial",
+        timestamp_ms=startup_cutoff_ms,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    after_cutoff_message = _make_message_event(
+        event_id="$after-cutoff",
+        body="Current process newer partial",
+        timestamp_ms=startup_cutoff_ms + 1,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(
+        before_cutoff_message,
+        at_cutoff_message,
+        after_cutoff_message,
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            startup_cutoff_ms=startup_cutoff_ms,
+        )
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert mock_edit.await_count == 1
+    assert mock_edit.await_args.args[2] == "$before-cutoff"
 
 
 @pytest.mark.asyncio
