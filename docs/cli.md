@@ -50,6 +50,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
 │ config              Manage MindRoom configuration files.                               │
 │ avatars             Generate and sync managed avatar assets.                           │
+│ threads             Export Matrix threads to local files.                              │
 │ service             Install and manage MindRoom as a background user service.          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
