@@ -67,6 +67,18 @@ def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
     assert {"chromium", "ffmpeg", "fonts-liberation", "nodejs"} <= packages
 
 
+def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends() -> None:
+    """Git-over-SSH needs an explicit SSH client when apt recommendations are disabled."""
+    for dockerfile in _MINDROOM_DOCKERFILES:
+        text = dockerfile.read_text(encoding="utf-8")
+        install_args_match = re.search(r"apt-get install -y (?P<args>.*?)\\\s*&&", text, re.DOTALL)
+        assert install_args_match is not None
+        install_args = install_args_match.group("args").split()
+
+        if "--no-install-recommends" in install_args:
+            assert "openssh-client" in _apt_install_packages(text)
+
+
 def test_kubernetes_command_overrides_run_under_tini() -> None:
     """Kubernetes command overrides bypass image entrypoints, so add tini explicitly."""
     runtime_template = _RUNTIME_DEPLOYMENT_TEMPLATE.read_text(encoding="utf-8")

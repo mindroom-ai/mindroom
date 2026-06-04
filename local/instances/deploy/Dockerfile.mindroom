@@ -52,13 +52,13 @@ WORKDIR /app
 
 # Install runtime dependencies:
 # - curl for health checks
-# - git and git-lfs for remote knowledge base cloning/sync
+# - git, git-lfs, and openssh-client for remote knowledge base cloning/sync
 # - bash and tmux for shell tooling and detached interactive CLI flows
 # - tini to reap orphaned subprocesses when MindRoom runs as PID 1
 # - chromium, browser fonts, and ffmpeg for browser/voice-capable worker tools
 # - nodejs for agent workspace scripts that expect a standard JS runtime
 # - common small CLI utilities used by headless auth/install workflows
-RUN apt-get update && apt-get install -y --no-install-recommends bash bzip2 chromium curl ffmpeg fonts-liberation git git-lfs jq nano nodejs procps ripgrep tini tmux unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends bash bzip2 chromium curl ffmpeg fonts-liberation git git-lfs jq nano nodejs openssh-client procps ripgrep tini tmux unzip \
     && printf 'set-option -g exit-empty off\n' > /etc/tmux.conf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
