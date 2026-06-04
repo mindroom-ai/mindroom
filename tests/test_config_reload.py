@@ -28,7 +28,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
 from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
-from mindroom.orchestration.runtime import create_logged_task
+from mindroom.orchestration.runtime import create_logged_task, log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _ConfigReloadDrainState, _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -59,6 +59,25 @@ def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     bot.client = mock_client
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
+
+
+def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup phase logging helpers should emit one stable structured event pair."""
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestration.runtime.logger", logger_mock)
+
+    with patch("mindroom.orchestration.runtime.time.monotonic", side_effect=[10.0, 10.1234]):
+        started_at = log_startup_phase_started("phase.name")
+        log_startup_phase_finished("phase.name", started_at, status="failed")
+
+    assert started_at == 10.0
+    logger_mock.info.assert_any_call("startup_phase_started", phase="phase.name")
+    logger_mock.info.assert_any_call(
+        "startup_phase_finished",
+        phase="phase.name",
+        status="failed",
+        elapsed_ms=123.4,
+    )
 
 
 @pytest.mark.asyncio

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.orchestration.runtime import cancel_logged_task, create_logged_task
+from mindroom.orchestration.runtime import (
+    cancel_logged_task,
+    create_logged_task,
+    log_startup_phase_finished,
+    log_startup_phase_started,
+)
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
@@ -101,31 +105,15 @@ class StartupMaintenanceController:
         *,
         failure_message: str,
     ) -> bool:
-        phase_started = self._log_phase_started(phase)
+        phase_started = log_startup_phase_started(phase)
         try:
             await operation()
         except asyncio.CancelledError:
-            self._log_phase_finished(phase, phase_started, status="cancelled")
+            log_startup_phase_finished(phase, phase_started, status="cancelled")
             raise
         except Exception:
-            self._log_phase_finished(phase, phase_started, status="failed")
+            log_startup_phase_finished(phase, phase_started, status="failed")
             logger.warning(failure_message, exc_info=True)
             return False
-        self._log_phase_finished(phase, phase_started)
+        log_startup_phase_finished(phase, phase_started)
         return True
-
-    @staticmethod
-    def _log_phase_started(phase: str) -> float:
-        """Log and time one startup maintenance phase."""
-        logger.info("startup_phase_started", phase=phase)
-        return time.monotonic()
-
-    @staticmethod
-    def _log_phase_finished(phase: str, started_at: float, *, status: str = "completed") -> None:
-        """Log elapsed time for one startup maintenance phase."""
-        logger.info(
-            "startup_phase_finished",
-            phase=phase,
-            status=status,
-            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
-        )

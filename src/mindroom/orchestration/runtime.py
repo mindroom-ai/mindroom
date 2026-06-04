@@ -69,6 +69,8 @@ __all__ = [
     "is_sync_restart_cancel",
     "log_cancelled_response",
     "log_cancelled_response_source",
+    "log_startup_phase_finished",
+    "log_startup_phase_started",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
     "retry_delay_seconds",
@@ -353,6 +355,22 @@ def create_logged_task(
     task = asyncio.create_task(coro, name=name)
     task.add_done_callback(partial(_log_detached_task_result, message=failure_message))
     return task
+
+
+def log_startup_phase_started(phase: str) -> float:
+    """Log and time one startup phase."""
+    logger.info("startup_phase_started", phase=phase)
+    return time.monotonic()
+
+
+def log_startup_phase_finished(phase: str, started_at: float, *, status: str = "completed") -> None:
+    """Log elapsed time for one startup phase."""
+    logger.info(
+        "startup_phase_finished",
+        phase=phase,
+        status=status,
+        elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+    )
 
 
 async def run_with_retry(

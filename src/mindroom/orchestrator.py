@@ -99,6 +99,8 @@ from .orchestration.runtime import (
     cancel_task,
     create_logged_task,
     is_permanent_startup_error,
+    log_startup_phase_finished,
+    log_startup_phase_started,
     retry_delay_seconds,
     run_with_retry,
     stop_entities,
@@ -176,22 +178,6 @@ def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
     logger.error("fatal_orchestrator_exit", reason=reason)
     msg = "MindRoom orchestrator exited unexpectedly"
     raise RuntimeError(msg)
-
-
-def _log_startup_phase_started(phase: str) -> float:
-    """Log and time one startup phase."""
-    logger.info("startup_phase_started", phase=phase)
-    return time.monotonic()
-
-
-def _log_startup_phase_finished(phase: str, started_at: float, *, status: str = "completed") -> None:
-    """Log elapsed time for one startup phase."""
-    logger.info(
-        "startup_phase_finished",
-        phase=phase,
-        status=status,
-        elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
-    )
 
 
 @dataclass
@@ -1268,26 +1254,26 @@ class _MultiAgentOrchestrator:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._approval_transport.reset_startup_cleanup_gate()
-        phase_started = _log_startup_phase_started("wait_for_matrix_homeserver")
+        phase_started = log_startup_phase_started("wait_for_matrix_homeserver")
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
-        _log_startup_phase_finished("wait_for_matrix_homeserver", phase_started)
+        log_startup_phase_finished("wait_for_matrix_homeserver", phase_started)
 
         if not self.agent_bots:
-            phase_started = _log_startup_phase_started("initialize_runtime")
+            phase_started = log_startup_phase_started("initialize_runtime")
             await self.initialize()
-            _log_startup_phase_finished("initialize_runtime", phase_started)
+            log_startup_phase_finished("initialize_runtime", phase_started)
 
-        phase_started = _log_startup_phase_started("start_router_bot")
+        phase_started = log_startup_phase_started("start_router_bot")
         router_bot = await self._start_router_bot()
-        _log_startup_phase_finished("start_router_bot", phase_started)
+        log_startup_phase_finished("start_router_bot", phase_started)
 
         set_runtime_starting("Starting remaining Matrix bot accounts")
-        phase_started = _log_startup_phase_started("start_remaining_bots")
+        phase_started = log_startup_phase_started("start_remaining_bots")
         start_results = await self._start_entities_once(
             [entity_name for entity_name in self.agent_bots if entity_name != ROUTER_AGENT_NAME],
             start_sync_tasks=False,
         )
-        _log_startup_phase_finished("start_remaining_bots", phase_started)
+        log_startup_phase_finished("start_remaining_bots", phase_started)
 
         started_bots = [router_bot, *start_results.started_bots]
         self._log_degraded_startup(
@@ -1296,20 +1282,20 @@ class _MultiAgentOrchestrator:
 
         config = self._require_config()
         self._resolve_bot_room_aliases(started_bots, config)
-        phase_started = _log_startup_phase_started("bind_runtime_support")
+        phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)
-        _log_startup_phase_finished("bind_runtime_support", phase_started)
+        log_startup_phase_finished("bind_runtime_support", phase_started)
 
         self.running = True
 
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
         startup_cutoff_ms = int(time.time() * 1000)
-        phase_started = _log_startup_phase_started("start_matrix_sync_loops")
+        phase_started = log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
                 self._start_sync_task(entity_name, bot)
-        _log_startup_phase_finished("start_matrix_sync_loops", phase_started)
+        log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
         self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
 
