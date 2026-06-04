@@ -274,6 +274,7 @@ class _MultiAgentOrchestrator:
     _config_reload_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_requested_at: float | None = field(default=None, init=False)
     _startup_maintenance_task: asyncio.Task | None = field(default=None, init=False)
+    _startup_cutoff_ms: int | None = field(default=None, init=False)
     _startup_router_ready_for_approval_cleanup: bool = field(default=False, init=False)
     _startup_runtime_support_ready_for_approval_cleanup: bool = field(default=False, init=False)
     _startup_approval_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -472,11 +473,33 @@ class _MultiAgentOrchestrator:
         for entity_name in tuple(self._bot_start_tasks):
             await self._cancel_bot_start_task(entity_name)
 
-    async def _cancel_startup_maintenance_task(self) -> None:
+    async def _cancel_startup_maintenance_task(self) -> bool:
         """Cancel the detached initial startup maintenance task, if any."""
         task = self._startup_maintenance_task
         self._startup_maintenance_task = None
+        should_replay = task is not None and not task.done()
         await cancel_logged_task(task)
+        return should_replay
+
+    def _running_startup_maintenance_bots(self) -> list[AgentBot | TeamBot]:
+        """Return currently running bots in startup-maintenance order."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        bots: list[AgentBot | TeamBot] = []
+        if router_bot is not None and router_bot.running:
+            bots.append(router_bot)
+        bots.extend(
+            bot for entity_name, bot in self.agent_bots.items() if entity_name != ROUTER_AGENT_NAME and bot.running
+        )
+        return bots
+
+    def _restart_startup_maintenance_after_config_reload(self, config: Config) -> None:
+        """Replay canceled initial startup maintenance after a config reload attempt."""
+        if self._startup_cutoff_ms is None or self._startup_maintenance_task is not None:
+            return
+        bots = self._running_startup_maintenance_bots()
+        if not bots:
+            return
+        self._start_startup_maintenance(bots, config, self._startup_cutoff_ms)
 
     def _reset_startup_approval_cleanup_state(self) -> None:
         """Reset one-shot approval cleanup gates for a fresh runtime start."""
@@ -1288,6 +1311,11 @@ class _MultiAgentOrchestrator:
             await self._approval_transport.handle_bot_ready(router_bot)
             self._startup_approval_cleanup_done = True
 
+    async def _mark_startup_runtime_support_ready_for_approval_cleanup(self) -> None:
+        """Mark runtime support ready and run startup approval cleanup if the router synced."""
+        self._startup_runtime_support_ready_for_approval_cleanup = True
+        await self._run_startup_approval_cleanup_if_ready()
+
     async def _run_startup_maintenance(
         self,
         started_bots: list[AgentBot | TeamBot],
@@ -1325,8 +1353,7 @@ class _MultiAgentOrchestrator:
             failure_message="Startup runtime support maintenance failed",
         )
         if runtime_support_ready:
-            self._startup_runtime_support_ready_for_approval_cleanup = True
-            await self._run_startup_approval_cleanup_if_ready()
+            await self._mark_startup_runtime_support_ready_for_approval_cleanup()
 
     def _start_startup_maintenance(
         self,
@@ -1389,6 +1416,7 @@ class _MultiAgentOrchestrator:
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
         startup_cutoff_ms = int(time.time() * 1000)
+        self._startup_cutoff_ms = startup_cutoff_ms
         phase_started = self._log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
@@ -1601,7 +1629,6 @@ class _MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        await self._cancel_startup_maintenance_task()
         new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
 
         if not self.config:
@@ -1620,88 +1647,95 @@ class _MultiAgentOrchestrator:
             plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(self.agent_bots))
 
         await self._prepare_accounts_for_config_update(new_config, plan)
+        replay_startup_maintenance = await self._cancel_startup_maintenance_task()
 
-        if plugin_changes:
-            pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
-                current_config=current_config,
-                new_config=new_config,
-                changed_server_ids=plan.changed_mcp_servers,
+        try:
+            if plugin_changes:
+                pre_stopped_mcp_entities = await self._apply_plugin_changes_for_config_update(
+                    current_config=current_config,
+                    new_config=new_config,
+                    changed_server_ids=plan.changed_mcp_servers,
+                )
+            else:
+                pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
+                    current_config,
+                    new_config,
+                    plan.changed_mcp_servers,
+                )
+                # Only apply the new config after validation and account checks succeed.
+                self.config = new_config
+                self._sync_plugin_watch_roots(new_config)
+                self._activate_hook_registry(self.hook_registry)
+                clear_worker_validation_snapshot_cache()
+            changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
+            await self._sync_event_cache_service(new_config)
+            logger.info(
+                "updating_config_authorization",
+                authorized_user_ids=new_config.authorization.global_users,
             )
-        else:
-            pre_stopped_mcp_entities = await self._stop_entities_before_mcp_sync(
-                current_config,
-                new_config,
-                plan.changed_mcp_servers,
-            )
-            # Only apply the new config after validation and account checks succeed.
-            self.config = new_config
-            self._sync_plugin_watch_roots(new_config)
-            self._activate_hook_registry(self.hook_registry)
-            clear_worker_validation_snapshot_cache()
-        changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
-        await self._sync_event_cache_service(new_config)
-        logger.info(
-            "updating_config_authorization",
-            authorized_user_ids=new_config.authorization.global_users,
-        )
-        if changed_runtime_mcp_servers:
-            plan = replace(
+            if changed_runtime_mcp_servers:
+                plan = replace(
+                    plan,
+                    entities_to_restart=plan.entities_to_restart
+                    | new_config.get_entities_referencing_tools(
+                        {mcp_tool_name(server_id) for server_id in changed_runtime_mcp_servers},
+                    ),
+                )
+            await self._update_unchanged_bots(plan)
+
+            if plan.only_support_service_changes:
+                await self._sync_runtime_support_services(
+                    new_config,
+                    start_watcher=self.running,
+                    previous_config=current_config,
+                )
+                await self._mark_startup_runtime_support_ready_for_approval_cleanup()
+                await self._emit_config_reloaded(
+                    new_config=new_config,
+                    changed_entities=set(),
+                    added_entities=plan.added_entities,
+                    removed_entities=plan.removed_entities,
+                    plugin_changes=plugin_changes,
+                )
+                return False
+
+            changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(
                 plan,
-                entities_to_restart=plan.entities_to_restart
-                | new_config.get_entities_referencing_tools(
-                    {mcp_tool_name(server_id) for server_id in changed_runtime_mcp_servers},
-                ),
+                already_stopped_entities=pre_stopped_mcp_entities,
             )
-        await self._update_unchanged_bots(plan)
+            await self._reconcile_post_update_rooms(plan, changed_entities)
 
-        if plan.only_support_service_changes:
+            for entity_name in retryable_entities:
+                await self._schedule_bot_start_retry(entity_name)
+
+            if permanently_failed_entities:
+                logger.warning(
+                    "Configuration update left some bots disabled due to permanent startup errors",
+                    agent_names=permanently_failed_entities,
+                )
+
             await self._sync_runtime_support_services(
                 new_config,
                 start_watcher=self.running,
                 previous_config=current_config,
             )
+            await self._mark_startup_runtime_support_ready_for_approval_cleanup()
             await self._emit_config_reloaded(
                 new_config=new_config,
-                changed_entities=set(),
+                changed_entities=changed_entities,
                 added_entities=plan.added_entities,
                 removed_entities=plan.removed_entities,
                 plugin_changes=plugin_changes,
             )
-            return False
 
-        changed_entities, retryable_entities, permanently_failed_entities = await self._restart_changed_entities(
-            plan,
-            already_stopped_entities=pre_stopped_mcp_entities,
-        )
-        await self._reconcile_post_update_rooms(plan, changed_entities)
-
-        for entity_name in retryable_entities:
-            await self._schedule_bot_start_retry(entity_name)
-
-        if permanently_failed_entities:
-            logger.warning(
-                "Configuration update left some bots disabled due to permanent startup errors",
-                agent_names=permanently_failed_entities,
+            logger.info(
+                "configuration_update_complete",
+                affected_bot_count=len(plan.entities_to_restart) + len(plan.new_entities),
             )
-
-        await self._sync_runtime_support_services(
-            new_config,
-            start_watcher=self.running,
-            previous_config=current_config,
-        )
-        await self._emit_config_reloaded(
-            new_config=new_config,
-            changed_entities=changed_entities,
-            added_entities=plan.added_entities,
-            removed_entities=plan.removed_entities,
-            plugin_changes=plugin_changes,
-        )
-
-        logger.info(
-            "configuration_update_complete",
-            affected_bot_count=len(plan.entities_to_restart) + len(plan.new_entities),
-        )
-        return True
+            return True
+        finally:
+            if replay_startup_maintenance and self.running and self.config is not None:
+                self._restart_startup_maintenance_after_config_reload(self.config)
 
     def _router_bot(self) -> AgentBot | TeamBot | None:
         """Return the router bot when it exists and has an active client."""

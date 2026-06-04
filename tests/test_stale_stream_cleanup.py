@@ -2265,6 +2265,7 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
     call_order: list[str] = []
+    resume_finished = asyncio.Event()
 
     async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
         call_order.append("wait")
@@ -2287,6 +2288,7 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
 
     async def _resume(_: list[InterruptedThread], __: Config) -> None:
         call_order.append("resume")
+        resume_finished.set()
 
     ready = asyncio.Event()
 
@@ -2308,10 +2310,7 @@ async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: P
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
-            for _ in range(50):
-                if "resume" in call_order:
-                    break
-                await asyncio.sleep(0.01)
+            await asyncio.wait_for(resume_finished.wait(), timeout=1.0)
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:
