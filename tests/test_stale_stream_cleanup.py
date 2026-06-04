@@ -2248,8 +2248,8 @@ async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: Path) -> None:
-    """Startup should clean stale streams and queue resumes before sync loops begin."""
+async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: Path) -> None:
+    """Startup should clean stale streams and queue resumes in post-sync maintenance."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
@@ -2272,7 +2272,8 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     async def _setup_rooms(_: list[object]) -> None:
         call_order.append("setup")
 
-    async def _cleanup(_: list[object], __: Config) -> list[InterruptedThread]:
+    async def _cleanup(_: list[object], __: Config, startup_cutoff_ms: int | None = None) -> list[InterruptedThread]:
+        assert startup_cutoff_ms is not None
         call_order.append("cleanup")
         return [
             InterruptedThread(
@@ -2292,18 +2293,25 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     def _mark_ready() -> None:
         ready.set()
 
+    def _start_sync_task(_: str, __: object) -> None:
+        call_order.append("sync")
+
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
         patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_start_sync_task", side_effect=_start_sync_task),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
     ):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
+            for _ in range(50):
+                if "resume" in call_order:
+                    break
+                await asyncio.sleep(0.01)
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:
@@ -2312,7 +2320,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
-    assert call_order == ["wait", "setup", "cleanup", "resume"]
+    assert call_order == ["wait", "sync", "setup", "cleanup", "resume"]
 
 
 @pytest.mark.asyncio

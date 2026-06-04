@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -272,6 +273,11 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_task: asyncio.Task | None = field(default=None, init=False)
     _config_reload_requested_at: float | None = field(default=None, init=False)
+    _startup_maintenance_task: asyncio.Task | None = field(default=None, init=False)
+    _startup_router_ready_for_approval_cleanup: bool = field(default=False, init=False)
+    _startup_runtime_support_ready_for_approval_cleanup: bool = field(default=False, init=False)
+    _startup_approval_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _startup_approval_cleanup_done: bool = field(default=False, init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _mcp_catalog_change_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _plugin_reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -380,6 +386,12 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             self._bind_runtime_support_services(bot)
 
+    def _bind_started_runtime_support_services(self, bots: list[AgentBot | TeamBot]) -> None:
+        """Bind current runtime support objects needed by live callbacks."""
+        for bot in bots:
+            self._bind_runtime_support_services(bot)
+        self._configure_approval_store_transport()
+
     async def _sync_event_cache_service(self, config: Config) -> None:
         """Ensure the runtime has one initialized shared event-cache service."""
         self._runtime_support = await sync_owned_runtime_support(
@@ -460,6 +472,34 @@ class _MultiAgentOrchestrator:
         for entity_name in tuple(self._bot_start_tasks):
             await self._cancel_bot_start_task(entity_name)
 
+    async def _cancel_startup_maintenance_task(self) -> None:
+        """Cancel the detached initial startup maintenance task, if any."""
+        task = self._startup_maintenance_task
+        self._startup_maintenance_task = None
+        await cancel_logged_task(task)
+
+    def _reset_startup_approval_cleanup_state(self) -> None:
+        """Reset one-shot approval cleanup gates for a fresh runtime start."""
+        self._startup_router_ready_for_approval_cleanup = False
+        self._startup_runtime_support_ready_for_approval_cleanup = False
+        self._startup_approval_cleanup_done = False
+
+    @staticmethod
+    def _log_startup_phase_started(phase: str) -> float:
+        """Log and time one startup phase."""
+        logger.info("startup_phase_started", phase=phase)
+        return time.monotonic()
+
+    @staticmethod
+    def _log_startup_phase_finished(phase: str, started_at: float, *, status: str = "completed") -> None:
+        """Log elapsed time for one startup phase."""
+        logger.info(
+            "startup_phase_finished",
+            phase=phase,
+            status=status,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+        )
+
     def _start_sync_task(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
         """Ensure one sync task exists for a running bot."""
         existing_task = self._sync_tasks.get(entity_name)
@@ -516,6 +556,11 @@ class _MultiAgentOrchestrator:
                 if start_status:
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
+                    self._bind_started_runtime_support_services([bot])
+                    config = self.config
+                    if config is not None:
+                        self._resolve_bot_room_aliases(bots_to_setup, config)
+                    self._start_sync_task(entity_name, bot)
                     if bots_to_setup:
                         await run_with_retry(
                             f"Updating Matrix room memberships for {entity_name}",
@@ -523,7 +568,6 @@ class _MultiAgentOrchestrator:
                             permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
-                    self._start_sync_task(entity_name, bot)
                     return
 
                 attempt += 1
@@ -1134,8 +1178,9 @@ class _MultiAgentOrchestrator:
         self,
         bots: list[AgentBot | TeamBot],
         config: Config,
+        startup_cutoff_ms: int | None = None,
     ) -> list[InterruptedThread]:
-        """Cleanup stale streams for started bots before sync loops begin."""
+        """Cleanup stale streams for started bots after restart."""
         bot_user_ids = {bot.agent_user.user_id for bot in bots if bot.client is not None and bot.agent_user.user_id}
         if not bot_user_ids:
             return []
@@ -1153,6 +1198,7 @@ class _MultiAgentOrchestrator:
                     config=config,
                     runtime_paths=self.runtime_paths,
                     conversation_cache=bot._conversation_cache,
+                    startup_cutoff_ms=startup_cutoff_ms,
                 )
                 cleaned_count += bot_cleaned_count
                 interrupted_threads.extend(bot_interrupted_threads)
@@ -1193,50 +1239,163 @@ class _MultiAgentOrchestrator:
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
+    def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
+        """Resolve currently known room aliases into each bot's configured room IDs."""
+        for bot in bots:
+            room_aliases = get_rooms_for_entity(bot.agent_name, config)
+            bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self.runtime_paths)
+
+    async def _run_startup_maintenance_phase(
+        self,
+        phase: str,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        failure_message: str,
+    ) -> bool:
+        """Run one post-sync startup maintenance phase without stopping sync loops."""
+        phase_started = self._log_startup_phase_started(phase)
+        try:
+            await operation()
+        except asyncio.CancelledError:
+            self._log_startup_phase_finished(phase, phase_started, status="cancelled")
+            raise
+        except Exception:
+            self._log_startup_phase_finished(phase, phase_started, status="failed")
+            logger.warning(failure_message, exc_info=True)
+            return False
+        else:
+            self._log_startup_phase_finished(phase, phase_started)
+            return True
+
+    async def _run_startup_approval_cleanup_if_ready(self) -> None:
+        """Run one-shot approval cleanup after router first sync and runtime support are ready."""
+        if (
+            self._startup_approval_cleanup_done
+            or not self._startup_router_ready_for_approval_cleanup
+            or not self._startup_runtime_support_ready_for_approval_cleanup
+        ):
+            return
+        async with self._startup_approval_cleanup_lock:
+            if (
+                self._startup_approval_cleanup_done
+                or not self._startup_router_ready_for_approval_cleanup
+                or not self._startup_runtime_support_ready_for_approval_cleanup
+            ):
+                return
+            router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+            if router_bot is None:
+                return
+            await self._approval_transport.handle_bot_ready(router_bot)
+            self._startup_approval_cleanup_done = True
+
+    async def _run_startup_maintenance(
+        self,
+        started_bots: list[AgentBot | TeamBot],
+        config: Config,
+        startup_cutoff_ms: int,
+    ) -> None:
+        """Run slow restart maintenance after live Matrix sync has started."""
+        await self._run_startup_maintenance_phase(
+            "startup_maintenance.rooms_and_memberships",
+            lambda: run_with_retry(
+                "Setting up Matrix rooms and memberships",
+                lambda: self._setup_rooms_and_memberships(started_bots),
+                permanent_error_check=is_permanent_startup_error,
+                update_runtime_state=False,
+            ),
+            failure_message="Startup room and membership maintenance failed",
+        )
+
+        async def cleanup_and_resume() -> None:
+            interrupted_threads = await self._cleanup_stale_streams_after_restart(
+                started_bots,
+                config,
+                startup_cutoff_ms,
+            )
+            await self._auto_resume_after_restart(interrupted_threads, config)
+
+        await self._run_startup_maintenance_phase(
+            "startup_maintenance.stale_stream_cleanup",
+            cleanup_and_resume,
+            failure_message="Startup stale stream maintenance failed",
+        )
+        runtime_support_ready = await self._run_startup_maintenance_phase(
+            "startup_maintenance.runtime_support",
+            lambda: self._sync_runtime_support_services(config, start_watcher=True),
+            failure_message="Startup runtime support maintenance failed",
+        )
+        if runtime_support_ready:
+            self._startup_runtime_support_ready_for_approval_cleanup = True
+            await self._run_startup_approval_cleanup_if_ready()
+
+    def _start_startup_maintenance(
+        self,
+        started_bots: list[AgentBot | TeamBot],
+        config: Config,
+        startup_cutoff_ms: int,
+    ) -> None:
+        """Schedule detached startup maintenance."""
+        self._startup_maintenance_task = create_logged_task(
+            self._run_startup_maintenance(started_bots, config, startup_cutoff_ms),
+            name="startup_maintenance",
+            failure_message="Startup maintenance task failed",
+        )
+
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
-        await self._approval_transport.handle_bot_ready(bot)
+        if bot.agent_name != ROUTER_AGENT_NAME:
+            return
+        self._startup_router_ready_for_approval_cleanup = True
+        await self._run_startup_approval_cleanup_if_ready()
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
+        self._reset_startup_approval_cleanup_state()
+        phase_started = self._log_startup_phase_started("wait_for_matrix_homeserver")
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
-        if not self.agent_bots:
-            await self.initialize()
+        self._log_startup_phase_finished("wait_for_matrix_homeserver", phase_started)
 
+        if not self.agent_bots:
+            phase_started = self._log_startup_phase_started("initialize_runtime")
+            await self.initialize()
+            self._log_startup_phase_finished("initialize_runtime", phase_started)
+
+        phase_started = self._log_startup_phase_started("start_router_bot")
         router_bot = await self._start_router_bot()
+        self._log_startup_phase_finished("start_router_bot", phase_started)
+
         set_runtime_starting("Starting remaining Matrix bot accounts")
+        phase_started = self._log_startup_phase_started("start_remaining_bots")
         start_results = await self._start_entities_once(
             [entity_name for entity_name in self.agent_bots if entity_name != ROUTER_AGENT_NAME],
             start_sync_tasks=False,
         )
+        self._log_startup_phase_finished("start_remaining_bots", phase_started)
+
         started_bots = [router_bot, *start_results.started_bots]
         self._log_degraded_startup(
             [*start_results.retryable_entities, *start_results.permanently_failed_entities],
         )
 
         config = self._require_config()
-
-        # Setup rooms and have all bots join them before potentially heavy
-        # knowledge indexing, so new rooms and invites are not delayed by embeddings.
-        await run_with_retry(
-            "Setting up Matrix rooms and memberships",
-            lambda: self._setup_rooms_and_memberships(started_bots),
-            permanent_error_check=is_permanent_startup_error,
-        )
-        interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
-        await self._auto_resume_after_restart(interrupted_threads, config)
+        self._resolve_bot_room_aliases(started_bots, config)
+        phase_started = self._log_startup_phase_started("bind_runtime_support")
+        self._bind_started_runtime_support_services(started_bots)
+        self._log_startup_phase_finished("bind_runtime_support", phase_started)
 
         self.running = True
 
-        set_runtime_starting("Starting background workers")
-        await self._sync_runtime_support_services(config, start_watcher=True)
-
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
+        startup_cutoff_ms = int(time.time() * 1000)
+        phase_started = self._log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
                 self._start_sync_task(entity_name, bot)
+        self._log_startup_phase_finished("start_matrix_sync_loops", phase_started)
+
+        self._start_startup_maintenance(started_bots, config, startup_cutoff_ms)
 
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
@@ -1442,6 +1601,7 @@ class _MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
+        await self._cancel_startup_maintenance_task()
         new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
 
         if not self.config:
@@ -1565,9 +1725,7 @@ class _MultiAgentOrchestrator:
 
         # Resolve room aliases now that any missing rooms have been created.
         config = self._require_config()
-        for bot in bots:
-            room_aliases = get_rooms_for_entity(bot.agent_name, config)
-            bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self.runtime_paths)
+        self._resolve_bot_room_aliases(bots, config)
 
         async def _ensure_internal_user_memberships() -> None:
             all_rooms = load_rooms(runtime_paths=self.runtime_paths)
@@ -1791,6 +1949,7 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         await shutdown_approval_runtime()
         await self._cancel_config_reload_task()
+        await self._cancel_startup_maintenance_task()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()

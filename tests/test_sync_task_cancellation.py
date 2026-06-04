@@ -912,6 +912,76 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
+async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tmp_path: Path) -> None:
+    """Initial sync loops must not wait for room reconciliation or restart maintenance."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+
+    config = MagicMock(spec=Config)
+    config.agents = {"general": MagicMock()}
+    config.teams = {}
+    config.mcp_servers = {}
+    config.cache = MagicMock()
+    config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
+    orchestrator.config = config
+
+    router_bot = AsyncMock()
+    router_bot.agent_name = "router"
+    router_bot.running = True
+    router_bot.stop = AsyncMock()
+
+    general_bot = AsyncMock()
+    general_bot.agent_name = "general"
+    general_bot.running = True
+    general_bot.stop = AsyncMock()
+
+    orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+
+    setup_started = asyncio.Event()
+    setup_can_finish = asyncio.Event()
+    sync_started = asyncio.Event()
+    call_order: list[str] = []
+
+    async def blocked_setup(_: list[object]) -> None:
+        call_order.append("setup_started")
+        setup_started.set()
+        await setup_can_finish.wait()
+        call_order.append("setup_finished")
+
+    def start_sync_task(entity_name: str, _bot: object) -> None:
+        call_order.append(f"sync_started:{entity_name}")
+        sync_started.set()
+
+    with (
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
+        patch.object(
+            orchestrator,
+            "_start_entities_once",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+        ),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
+        patch.object(orchestrator, "_cleanup_stale_streams_after_restart", new=AsyncMock(return_value=[])),
+        patch.object(orchestrator, "_auto_resume_after_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
+    ):
+        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        try:
+            await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+            await asyncio.wait_for(sync_started.wait(), timeout=0.1)
+
+            assert "setup_finished" not in call_order
+            assert any(item.startswith("sync_started:") for item in call_order)
+        finally:
+            setup_can_finish.set()
+            await orchestrator.stop()
+            if not runtime_task.done():
+                runtime_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(runtime_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for sync task management
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> None:
