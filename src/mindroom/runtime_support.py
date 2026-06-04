@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, cast
@@ -15,7 +16,10 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
+_STARTUP_PREWARM_ROOM_CONCURRENCY = 1
+
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     import structlog
@@ -27,9 +31,10 @@ if TYPE_CHECKING:
 class StartupThreadPrewarmRegistry:
     """Track one startup-wave claim set for room-level thread prewarm."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, room_concurrency: int = _STARTUP_PREWARM_ROOM_CONCURRENCY) -> None:
         self._lock = asyncio.Lock()
         self._claimed_room_ids: set[str] = set()
+        self._room_slots = asyncio.Semaphore(max(1, room_concurrency))
 
     async def try_claim(self, room_id: str) -> bool:
         """Claim one room for this startup wave unless another bot already did."""
@@ -43,6 +48,15 @@ class StartupThreadPrewarmRegistry:
         """Release one room claim so another bot may retry during the same startup wave."""
         async with self._lock:
             self._claimed_room_ids.discard(room_id)
+
+    @asynccontextmanager
+    async def room_slot(self) -> AsyncIterator[None]:
+        """Limit concurrent room-level startup prewarm work across all bots."""
+        await self._room_slots.acquire()
+        try:
+            yield
+        finally:
+            self._room_slots.release()
 
 
 @dataclass(frozen=True, slots=True)

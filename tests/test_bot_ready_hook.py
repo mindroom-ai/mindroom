@@ -29,6 +29,7 @@ from mindroom.hooks import (
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -664,6 +665,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
     bot = _agent_bot(tmp_path)
     bot._conversation_cache.logger = MagicMock()
     thread_ids = [f"$thread-{index}:localhost" for index in range(40)]
+    expected_concurrency = 4
     all_concurrent_refreshes_started = asyncio.Event()
     release_refreshes = asyncio.Event()
     started_thread_ids: list[str] = []
@@ -676,7 +678,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
         active_refreshes += 1
         max_active_refreshes = max(max_active_refreshes, active_refreshes)
         started_thread_ids.append(thread_id)
-        if len(started_thread_ids) == 32:
+        if len(started_thread_ids) == expected_concurrency:
             all_concurrent_refreshes_started.set()
         await release_refreshes.wait()
         active_refreshes -= 1
@@ -698,7 +700,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
         )
         try:
             await asyncio.wait_for(all_concurrent_refreshes_started.wait(), timeout=1.0)
-            assert started_thread_ids == thread_ids[:32]
+            assert started_thread_ids == thread_ids[:expected_concurrency]
             release_refreshes.set()
             assert await prewarm_task
         finally:
@@ -706,7 +708,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
             await asyncio.gather(prewarm_task, return_exceptions=True)
 
     assert started_thread_ids == thread_ids
-    assert max_active_refreshes == 32
+    assert max_active_refreshes == expected_concurrency
     bot._conversation_cache.logger.info.assert_any_call(
         "startup_thread_prewarm_complete",
         room_id="!room:localhost",
@@ -714,6 +716,50 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
         threads_failed=0,
         elapsed_ms=ANY,
     )
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_limits_room_work_across_bots(tmp_path: Path) -> None:
+    """Startup prewarm should not let many enabled bots warm different rooms at the same time."""
+    first_bot = _agent_bot(tmp_path, agent_name="router")
+    second_bot = _agent_bot(tmp_path, agent_name="research")
+    shared_registry = StartupThreadPrewarmRegistry()
+    first_bot.startup_thread_prewarm_registry = shared_registry
+    second_bot.startup_thread_prewarm_registry = shared_registry
+    first_bot._get_startup_thread_prewarm_joined_rooms = AsyncMock(return_value=["!first:localhost"])
+    second_bot._get_startup_thread_prewarm_joined_rooms = AsyncMock(return_value=["!second:localhost"])
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    active_rooms = 0
+    max_active_rooms = 0
+    warmed_rooms: list[str] = []
+
+    async def prewarm_room(room_id: str, *, is_shutting_down: object) -> bool:
+        nonlocal active_rooms, max_active_rooms
+        del is_shutting_down
+        active_rooms += 1
+        max_active_rooms = max(max_active_rooms, active_rooms)
+        warmed_rooms.append(room_id)
+        if room_id == "!first:localhost":
+            first_started.set()
+            await release_first.wait()
+        active_rooms -= 1
+        return True
+
+    first_bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=prewarm_room)
+    second_bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=prewarm_room)
+
+    first_task = asyncio.create_task(first_bot._run_startup_thread_prewarm())
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+    second_task = asyncio.create_task(second_bot._run_startup_thread_prewarm())
+    await asyncio.sleep(0.05)
+
+    assert warmed_rooms == ["!first:localhost"]
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert warmed_rooms == ["!first:localhost", "!second:localhost"]
+    assert max_active_rooms == 1
 
 
 @pytest.mark.asyncio
