@@ -314,7 +314,7 @@ def _threads_export_command(
         None,
         "--room",
         "-r",
-        help="Export only one room by room key, alias, name, or Matrix room ID.",
+        help="Filter exported rooms by a substring of the room key, alias, name, or Matrix room ID.",
     ),
     watch: bool = typer.Option(
         False,
@@ -359,6 +359,21 @@ def _print_thread_export_stats(stats: ThreadExportStats) -> None:
         console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
 
 
+def _handle_thread_export_error(exc: RuntimeError | OSError, runtime_paths: RuntimePaths, *, watch: bool) -> None:
+    """Print one top-level export error and exit unless watch mode can retry."""
+    if isinstance(exc, ConnectionError) or _is_connection_os_error(exc):
+        _print_connection_error(exc, runtime_paths)
+    else:
+        console.print(f"[red]Error:[/red] {exc}")
+    if not watch:
+        raise typer.Exit(1) from None
+
+
+def _is_connection_os_error(exc: BaseException) -> bool:
+    """Return whether an OS error looks like a Matrix connection failure."""
+    return isinstance(exc, OSError) and ("connect" in str(exc).lower() or "refused" in str(exc).lower())
+
+
 async def _threads_export(
     *,
     config_path: Path | None,
@@ -390,15 +405,15 @@ async def _threads_export(
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
             )
-        except RuntimeError as exc:
-            console.print(f"[red]Error:[/red] {exc}")
-            raise typer.Exit(1) from None
+        except (OSError, RuntimeError) as exc:
+            _handle_thread_export_error(exc, runtime_paths, watch=watch)
+        else:
+            _print_thread_export_stats(stats)
+            if not watch:
+                if stats.failures:
+                    raise typer.Exit(1)
+                return
 
-        _print_thread_export_stats(stats)
-        if not watch:
-            if stats.failures:
-                raise typer.Exit(1)
-            return
         await asyncio.sleep(interval)
 
 

@@ -25,7 +25,7 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli import migrate as migrate_cli
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
-from mindroom.cli.main import _load_active_config_or_exit, app
+from mindroom.cli.main import _load_active_config_or_exit, _threads_export, app
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.handled_turns import HandledTurnLedger
@@ -43,6 +43,7 @@ from mindroom.model_defaults import (
     llama_cpp_server_command,
 )
 from mindroom.startup_errors import PermanentStartupError
+from mindroom.thread_export import ThreadExportStats
 from tests.conftest import load_config_yaml, normalize_console_output
 
 runner = CliRunner()
@@ -73,6 +74,17 @@ def _invoke_with_runtime(
     if env:
         command_env.update(env)
     return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
+
+
+def _write_minimal_runtime_config(path: Path) -> None:
+    path.write_text(
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+        "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
+        "router:\n  model: default\n"
+        "matrix_space:\n  enabled: false\n"
+        "authorization:\n  global_users: []\n",
+        encoding="utf-8",
+    )
 
 
 def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
@@ -1906,6 +1918,84 @@ class TestVersionAndHelp:
         assert "--interval" in output
         assert "--room" in output
         assert "--output" in output
+
+    def test_threads_export_runs_once_and_forwards_options(self, tmp_path: Path) -> None:
+        """Thread export command should invoke the exporter with CLI options."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "storage"
+        output_path = tmp_path / "exports"
+        _write_minimal_runtime_config(config_path)
+
+        with patch(
+            "mindroom.thread_export.export_threads_once",
+            new=AsyncMock(return_value=ThreadExportStats(output_dir=output_path)),
+        ) as export_threads_once:
+            result = _invoke_with_runtime(
+                [
+                    "threads",
+                    "export",
+                    "--output",
+                    str(output_path),
+                    "--room",
+                    "lob",
+                    "--interval",
+                    "7",
+                    "--max-thread-roots",
+                    "11",
+                ],
+                config_path,
+                storage_path=storage_path,
+            )
+
+        assert result.exit_code == 0
+        export_threads_once.assert_awaited_once()
+        export_kwargs = export_threads_once.await_args.kwargs
+        assert export_kwargs["output_dir"] == output_path
+        assert export_kwargs["room_filter"] == "lob"
+        assert export_kwargs["max_thread_roots"] == 11
+        assert export_kwargs["runtime_paths"].storage_root == storage_path.resolve()
+
+    @pytest.mark.asyncio
+    async def test_threads_export_watch_retries_runtime_errors(self, tmp_path: Path) -> None:
+        """Watch mode should keep running after a transient exporter error."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "storage"
+        output_path = tmp_path / "exports"
+        _write_minimal_runtime_config(config_path)
+        sleep_count = 0
+
+        async def sleep_once_then_stop(seconds: int) -> None:
+            nonlocal sleep_count
+            assert seconds == 7
+            sleep_count += 1
+            if sleep_count == 2:
+                raise typer.Exit(0)
+
+        export_results = [
+            RuntimeError("temporary"),
+            ThreadExportStats(output_dir=output_path),
+        ]
+        with (
+            patch(
+                "mindroom.thread_export.export_threads_once",
+                new=AsyncMock(side_effect=export_results),
+            ) as export_once,
+            patch("mindroom.cli.main.asyncio.sleep", new=sleep_once_then_stop),
+            pytest.raises(typer.Exit) as exit_info,
+        ):
+            await _threads_export(
+                config_path=config_path,
+                storage_path=storage_path,
+                output=output_path,
+                room=None,
+                watch=True,
+                interval=7,
+                max_thread_roots=11,
+            )
+
+        assert exit_info.value.exit_code == 0
+        assert export_once.await_count == 2
+        assert sleep_count == 2
 
 
 # ---------------------------------------------------------------------------

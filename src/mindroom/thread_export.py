@@ -171,7 +171,10 @@ def _fsync_directory(path: Path) -> None:
     except OSError:
         return
     try:
-        os.fsync(directory_fd)
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            return
     finally:
         os.close(directory_fd)
 
@@ -202,7 +205,12 @@ def _export_rooms(runtime_paths: RuntimePaths, room_filter: str | None) -> list[
 
 def _room_matches_filter(room_key: str, room: MatrixRoom, room_filter: str) -> bool:
     """Return whether one persisted room matches a CLI filter."""
-    return room_filter in {room_key, room.room_id, room.alias, room.name}
+    normalized_filter = room_filter.casefold()
+    return any(
+        normalized_filter in candidate.casefold()
+        for candidate in (room_key, room.room_id, room.alias, room.name)
+        if candidate
+    )
 
 
 def _trusted_sender_ids_for_export(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -228,6 +236,7 @@ async def _export_threads_for_client(
     rooms = _export_rooms(runtime_paths, room_filter)
     trusted_sender_ids = _trusted_sender_ids_for_export(config, runtime_paths)
     failures: list[_ThreadExportFailure] = []
+    rooms_exported = 0
     threads_seen = 0
     threads_exported = 0
     truncated_rooms = 0
@@ -250,6 +259,7 @@ async def _export_threads_for_client(
             )
             continue
 
+        rooms_exported += 1
         if truncated:
             truncated_rooms += 1
         threads_seen += len(thread_ids)
@@ -286,7 +296,7 @@ async def _export_threads_for_client(
 
     return ThreadExportStats(
         output_dir=resolved_output_dir,
-        rooms_exported=len(rooms),
+        rooms_exported=rooms_exported,
         threads_seen=threads_seen,
         threads_exported=threads_exported,
         truncated_rooms=truncated_rooms,
@@ -357,13 +367,14 @@ async def export_threads_once(
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
     export_user = _select_export_account(runtime_paths, homeserver)
     client = await login_agent_user(homeserver, export_user, runtime_paths)
-    support = build_owned_runtime_support(
-        cache_config=config.cache,
-        runtime_paths=runtime_paths,
-        logger=logger,
-        background_task_owner=object(),
-    )
+    support = None
     try:
+        support = build_owned_runtime_support(
+            cache_config=config.cache,
+            runtime_paths=runtime_paths,
+            logger=logger,
+            background_task_owner=object(),
+        )
         await support.event_cache.initialize()
         return await _export_threads_for_client(
             client=client,
@@ -375,5 +386,6 @@ async def export_threads_once(
             max_thread_roots=max_thread_roots,
         )
     finally:
-        await close_owned_runtime_support(support, logger=logger)
+        if support is not None:
+            await close_owned_runtime_support(support, logger=logger)
         await client.close()
