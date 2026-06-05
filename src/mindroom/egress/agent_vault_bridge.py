@@ -437,10 +437,16 @@ def _forward_headers(
 
 def _copy_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPResponse) -> None:
     handler.send_response(response.status, response.reason)
+    has_content_length = False
     for key, value in response.getheaders():
-        if key.lower() in _HOP_BY_HOP_HEADERS:
+        normalized_key = key.lower()
+        if normalized_key in _HOP_BY_HOP_HEADERS:
             continue
+        if normalized_key == "content-length":
+            has_content_length = True
         handler.send_header(key, value)
+    if not has_content_length:
+        handler.close_connection = True
     handler.end_headers()
     while chunk := response.read1(_HTTP_STREAM_CHUNK_BYTES):
         handler.wfile.write(chunk)

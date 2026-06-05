@@ -339,6 +339,45 @@ def test_adapter_streams_http_response_body_before_full_response_arrives() -> No
     assert body == b"firstsecond"
 
 
+def test_adapter_closes_http_response_when_upstream_uses_chunked_encoding() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+
+    def serve_chunked_response_proxy() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            _recv_until(connection, b"\r\n\r\n")
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            )
+
+    fake_proxy_thread = threading.Thread(target=serve_chunked_response_proxy, daemon=True)
+    fake_proxy_thread.start()
+    body = b""
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(5)
+                client.sendall(b"GET http://example.test/chunked HTTP/1.1\r\nHost: example.test\r\n\r\n")
+                response = _recv_until(client, b"\r\n\r\n")
+                header_bytes, _separator, body = response.partition(b"\r\n\r\n")
+                while True:
+                    chunk = client.recv(1024)
+                    if not chunk:
+                        break
+                    body += chunk
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert header_bytes.startswith(b"HTTP/1.0 200")
+    assert b"Transfer-Encoding" not in header_bytes
+    assert body == b"hello"
+
+
 def test_fake_agent_vault_rejects_requests_without_proxy_authorization() -> None:
     with (
         start_header_echo() as upstream,
