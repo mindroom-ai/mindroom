@@ -679,14 +679,16 @@ def test_forward_connect_does_not_write_http_error_after_tunnel_starts(
     monkeypatch.setattr(agent_vault_bridge, "_tunnel_sockets", fail_tunnel)
     handler = ConnectHandler()
 
-    agent_vault_bridge._forward_connect(
-        handler,
-        proxy_host="127.0.0.1",
-        proxy_port=proxy_port,
-        proxy_authorization="Bearer adapter-session",
-    )
-    fake_proxy.close()
-    fake_proxy_thread.join(timeout=5)
+    try:
+        agent_vault_bridge._forward_connect(
+            handler,
+            proxy_host="127.0.0.1",
+            proxy_port=proxy_port,
+            proxy_authorization="Bearer adapter-session",
+        )
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
 
     assert handler.responses == [(200, "Connection Established")]
     assert handler.errors == []
