@@ -325,6 +325,69 @@ async def test_semantic_memory_search_uses_knowledge_published_index(
     assert scheduled_base_ids == access_base_ids
 
 
+class _FakeSemanticTimingKnowledge:
+    def search(self, *, query: str, max_results: int) -> list[object]:
+        assert query == "semantic memory"
+        assert max_results == 5
+        return [
+            SimpleNamespace(
+                content="Published semantic memory.",
+                meta_data={"source_path": "memory/2026-06-02.md"},
+                reranking_score=0.8,
+            ),
+        ]
+
+
+class _FakeSemanticTimingScheduler:
+    def schedule_refresh(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_search_emits_nested_query_timings(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Published semantic memory.\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(config)
+    fake_knowledge = _FakeSemanticTimingKnowledge()
+
+    def resolve_access(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(knowledge=fake_knowledge, availability=KnowledgeAvailability.READY)
+
+    emitted: list[tuple[str, str | None]] = []
+
+    def emit_timing(label: str, _start: float, **event_data: object) -> None:
+        emitted.append((label, event_data.get("timing_scope")))
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args, **_kwargs: [memory_file.resolve()])
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", _FakeSemanticTimingScheduler())
+    monkeypatch.setattr(semantic_file_search, "emit_elapsed_timing", emit_timing)
+
+    results = await semantic_file_search.search_semantic_file_memories(
+        "semantic memory",
+        scope_user_id="agent_general",
+        root=root,
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=config.memory.search,
+        limit=5,
+        timing_scope="scope-123",
+    )
+
+    assert [result["memory"] for result in results] == ["Published semantic memory."]
+    assert ("system_prompt_assembly.memory_search.semantic.published_index.resolve", "scope-123") in emitted
+    assert ("system_prompt_assembly.memory_search.semantic.published_index.schedule_refresh", "scope-123") in emitted
+    assert ("system_prompt_assembly.memory_search.semantic.knowledge_search", "scope-123") in emitted
+    assert ("system_prompt_assembly.memory_search.semantic.vector_query", "scope-123") in emitted
+    assert ("system_prompt_assembly.memory_search.semantic.result_conversion", "scope-123") in emitted
+
+
 @pytest.mark.asyncio
 async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_raises_fallback(
     storage_path: Path,

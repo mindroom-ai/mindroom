@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.knowledge.document.base import Document
+    from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
     from mindroom.config.memory import MemorySearchConfig
@@ -28,6 +29,7 @@ _SOURCE_PATH_KEY = "source_path"
 _CHUNK_SIZE = 5000
 _CHUNK_OVERLAP = 0
 _MEMORY_KNOWLEDGE_PREFIX = "file_memory"
+_SEMANTIC_TIMING_PREFIX = "system_prompt_assembly.memory_search.semantic"
 _memory_refresh_scheduler = KnowledgeRefreshScheduler()
 
 
@@ -137,6 +139,24 @@ def _memory_results_from_documents(
     return results
 
 
+def _search_knowledge_with_timing(
+    knowledge: Knowledge,
+    *,
+    query: str,
+    limit: int,
+    timing_scope: str | None,
+) -> list[Document]:
+    search_start = time.monotonic()
+    documents = knowledge.search(query=query, max_results=limit)
+    emit_elapsed_timing(
+        f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
+        search_start,
+        timing_scope=timing_scope,
+        result_count=len(documents),
+    )
+    return documents
+
+
 async def search_semantic_file_memories(
     query: str,
     *,
@@ -172,12 +192,20 @@ async def search_semantic_file_memories(
         return []
 
     access_start = time.monotonic()
+    resolve_start = time.monotonic()
     resolution = resolve_knowledge_base_access(
         base_id,
         knowledge_config,
         runtime_paths,
         execution_identity=execution_identity,
     )
+    emit_elapsed_timing(
+        f"{_SEMANTIC_TIMING_PREFIX}.published_index.resolve",
+        resolve_start,
+        timing_scope=timing_scope,
+        availability=resolution.availability.value,
+    )
+    schedule_start = time.monotonic()
     refresh_scheduled = schedule_semantic_file_memory_refresh(
         scope_user_id=scope_user_id,
         root=root,
@@ -185,6 +213,12 @@ async def search_semantic_file_memories(
         runtime_paths=runtime_paths,
         search_config=search_config,
         execution_identity=execution_identity,
+    )
+    emit_elapsed_timing(
+        f"{_SEMANTIC_TIMING_PREFIX}.published_index.schedule_refresh",
+        schedule_start,
+        timing_scope=timing_scope,
+        refresh_scheduled=refresh_scheduled,
     )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.published_index_access",
@@ -198,11 +232,25 @@ async def search_semantic_file_memories(
         raise SemanticFileMemoryIndexUnavailableError(msg)
 
     query_start = time.monotonic()
-    documents: list[Document] = await asyncio.to_thread(resolution.knowledge.search, query=query, max_results=limit)
+    documents = await asyncio.to_thread(
+        _search_knowledge_with_timing,
+        resolution.knowledge,
+        query=query,
+        limit=limit,
+        timing_scope=timing_scope,
+    )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.vector_query",
         query_start,
         timing_scope=timing_scope,
         availability=resolution.availability.value,
     )
-    return _memory_results_from_documents(documents, scope_user_id=scope_user_id)
+    results_start = time.monotonic()
+    results = _memory_results_from_documents(documents, scope_user_id=scope_user_id)
+    emit_elapsed_timing(
+        f"{_SEMANTIC_TIMING_PREFIX}.result_conversion",
+        results_start,
+        timing_scope=timing_scope,
+        result_count=len(results),
+    )
+    return results
