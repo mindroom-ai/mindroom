@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import http.client
+import importlib.util
 import json
 import socket
 import threading
@@ -14,7 +15,9 @@ import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Self
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Self, cast
 from urllib.parse import urlsplit
 
 import pytest
@@ -85,6 +88,16 @@ def _recv_until(sock: socket.socket, marker: bytes) -> bytes:
             return data
         data += chunk
     return data
+
+
+def _load_live_smoke_module() -> ModuleType:
+    path = Path(__file__).parent / "manual" / "agent_vault_bridge_live_smoke.py"
+    spec = importlib.util.spec_from_file_location("agent_vault_bridge_live_smoke", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @dataclass(slots=True)
@@ -957,3 +970,18 @@ def test_cli_rejects_raw_session_token_argument() -> None:
                 "leaky-token",
             ],
         )
+
+
+def test_live_smoke_parses_worker_json_after_docker_pull_output() -> None:
+    smoke = cast("Any", _load_live_smoke_module())
+
+    headers = smoke._parse_worker_headers(
+        "Unable to find image 'python:3.13-alpine' locally\n"
+        "3.13-alpine: Pulling from library/python\n"
+        '{"Authorization": "Bearer fake-secret", "Host": "httpbin.org"}\n',
+    )
+
+    assert headers == {
+        "Authorization": "Bearer fake-secret",
+        "Host": "httpbin.org",
+    }

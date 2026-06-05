@@ -62,6 +62,28 @@ def _docker_port(container: str, private_port: int) -> int:
     return int(raw)
 
 
+def _parse_worker_headers(output: str) -> dict[str, str]:
+    for line in reversed(output.splitlines()):
+        raw_line = line.strip()
+        if not raw_line:
+            continue
+        try:
+            data = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        headers: dict[str, str] = {}
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                msg = f"Worker emitted non-string header data: {data}"
+                raise TypeError(msg)
+            headers[key] = value
+        return headers
+    msg = f"Worker did not emit JSON headers:\n{output}"
+    raise ValueError(msg)
+
+
 def _wait_for_health(api_port: int) -> None:
     url = f"http://127.0.0.1:{api_port}/health"
     deadline = time.monotonic() + 45
@@ -185,7 +207,7 @@ print(json.dumps(data["headers"], sort_keys=True))
             worker_code,
         ],
     )
-    return json.loads(result.stdout)
+    return _parse_worker_headers(result.stdout)
 
 
 def main() -> int:
