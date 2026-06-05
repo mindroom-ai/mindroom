@@ -8,11 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.constants import (
-    RuntimePaths,
-    deserialize_runtime_paths,
-    serialize_public_runtime_paths,
-)
+from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,

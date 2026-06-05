@@ -19,12 +19,7 @@ from mindroom.execution_preparation import (
     _prepare_execution_context_common,
     render_prepared_messages_text,
 )
-from mindroom.history import (
-    HistoryPolicy,
-    HistoryScope,
-    PreparedScopeHistory,
-    ResolvedHistorySettings,
-)
+from mindroom.history import HistoryPolicy, HistoryScope, PreparedScopeHistory, ResolvedHistorySettings
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import _ResolvedPreparationInputs
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
