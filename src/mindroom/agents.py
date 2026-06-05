@@ -123,6 +123,13 @@ _PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
 ] = WeakValueDictionary()
 
 
+class _UnsetToolRuntimeOverrides:
+    """Sentinel for runtime overrides that have not been resolved yet."""
+
+
+_UNSET_TOOL_RUNTIME_OVERRIDES = _UnsetToolRuntimeOverrides()
+
+
 def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
     """Resolve tool-call visibility for one agent from current config."""
     agent_config = config.agents.get(agent_name)
@@ -552,6 +559,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     session_id: str | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+    runtime_overrides: dict[str, object] | None | _UnsetToolRuntimeOverrides = _UNSET_TOOL_RUNTIME_OVERRIDES,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -677,6 +685,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         )
 
     worker_egress_broker = config.get_agent_worker_egress_broker(agent_name)
+    resolved_runtime_overrides = (
+        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths)
+        if runtime_overrides is _UNSET_TOOL_RUNTIME_OVERRIDES
+        else cast("dict[str, object] | None", runtime_overrides)
+    )
     return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
@@ -691,7 +704,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.is_private,
         execution_identity,
-        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),
+        resolved_runtime_overrides,
         worker_egress_broker.execution_env if worker_egress_broker is not None else None,
     )
 
@@ -721,6 +734,8 @@ def _resolve_runtime_worker_tools(
     config: Config,
     runtime_paths: constants.RuntimePaths,
     runtime_tool_names: list[str],
+    *,
+    tool_registry_preloaded: bool = False,
 ) -> list[str]:
     """Return worker-routed tools for one concrete runtime tool selection."""
     agent_config = config.get_agent(agent_name)
@@ -732,7 +747,8 @@ def _resolve_runtime_worker_tools(
 
     from mindroom.tool_system.catalog import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
 
-    ensure_tool_registry_loaded(runtime_paths, config)
+    if not tool_registry_preloaded:
+        ensure_tool_registry_loaded(runtime_paths, config)
     return default_worker_routed_tools(runtime_tool_names)
 
 
@@ -936,6 +952,13 @@ def _resolve_agent_culture(
 @timed("system_prompt_assembly.agent_create.load_plugins")
 def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
+
+
+@timed("system_prompt_assembly.agent_create.tool_registry_sync")
+def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+    from mindroom.tool_system.catalog import ensure_tool_registry_loaded  # noqa: PLC0415
+
+    ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
 
 
 @timed("system_prompt_assembly.agent_create.hook_bridge")
@@ -1146,6 +1169,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     defaults = config.defaults
 
     plugins = _load_agent_plugins(config, runtime_paths)
+    _sync_agent_tool_registry(config, runtime_paths)
     tool_hook_bridge = _build_agent_tool_hook_bridge(
         hook_registry=hook_registry,
         plugins=plugins,
@@ -1183,11 +1207,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config,
         runtime_paths,
         list(resolved_tool_configs),
+        tool_registry_preloaded=True,
     )
     workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
     for tool_name in resolved_tool_configs:
         try:
+            runtime_overrides = config.get_agent_tool_runtime_overrides(agent_name, tool_name)
             toolkit = build_agent_toolkit(
                 tool_name,
                 agent_name=agent_name,
@@ -1200,6 +1226,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
+                runtime_overrides=runtime_overrides,
             )
             if toolkit:
                 toolkit = _prune_openai_approval_gated_tools(

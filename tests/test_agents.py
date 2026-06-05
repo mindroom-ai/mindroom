@@ -599,6 +599,25 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_does_not_bootstrap_tool_registry_once_per_registered_tool(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agent construction should not reload plugin/MCP registry state per toolkit."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = _test_config()
+    config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
+    config.agents["general"].include_default_tools = False
+
+    with patch("mindroom.tool_system.catalog.ensure_tool_registry_loaded") as mock_ensure_registry:
+        _create_agent_for_test("general", config=config)
+
+    assert len(mock_get_tool_by_name.call_args_list) == 4
+    assert mock_ensure_registry.call_count <= 1
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
