@@ -41,6 +41,7 @@ class ResponseOutcome:
     thread_summary_room_id: str | None = None
     thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
+    thread_summary_entity_name: str | None = None
     memory_prompt: str | None = None
     memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
 
@@ -60,7 +61,7 @@ class PostResponseEffectsDeps:
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
-    queue_thread_summary: Callable[[str, str, int | None], None] | None = None
+    queue_thread_summary: Callable[[str, str, int | None, str | None], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ class PostResponseEffectsSupport:
         room_id: str,
         thread_id: str,
         message_count_hint: int | None,
+        entity_name: str | None,
     ) -> None:
         """Queue background thread summarization with timing instrumentation."""
         summary_coro = maybe_generate_thread_summary(
@@ -146,6 +148,7 @@ class PostResponseEffectsSupport:
             runtime_paths=self.runtime_paths,
             conversation_cache=self.conversation_cache,
             message_count_hint=message_count_hint,
+            entity_name=entity_name,
         )
         create_background_task(
             self._timed_thread_summary(
@@ -275,4 +278,5 @@ async def apply_post_response_effects(
             outcome.thread_summary_room_id,
             outcome.thread_summary_thread_id,
             outcome.thread_summary_message_count_hint,
+            outcome.thread_summary_entity_name,
         )

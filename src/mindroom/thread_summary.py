@@ -284,6 +284,8 @@ def _resolve_thread_summary_model_name(
     config: Config,
     runtime_paths: RuntimePaths,
     room_id: str | None,
+    *,
+    entity_name: str | None = None,
 ) -> str:
     """Return the model name for automatic thread summaries in one room."""
     if override := resolve_room_scoped_model_override(
@@ -293,6 +295,8 @@ def _resolve_thread_summary_model_name(
         allow_raw_room_id=True,
     ):
         return override
+    if entity_name and entity_name in config.room_thread_summary_models:
+        return config.room_thread_summary_models[entity_name]
     return config.defaults.thread_summary_model or "default"
 
 
@@ -489,6 +493,7 @@ async def maybe_generate_thread_summary(
     *,
     conversation_cache: ConversationCacheProtocol,
     message_count_hint: int | None = None,
+    entity_name: str | None = None,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
     async with _thread_summary_lock(room_id, thread_id):
@@ -511,7 +516,12 @@ async def maybe_generate_thread_summary(
         if message_count < threshold:
             return
         try:
-            model_name = _resolve_thread_summary_model_name(config, runtime_paths, room_id)
+            model_name = _resolve_thread_summary_model_name(
+                config,
+                runtime_paths,
+                room_id,
+                entity_name=entity_name,
+            )
             summary = await _timed_generate_summary(thread_history, config, runtime_paths, model_name=model_name)
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)

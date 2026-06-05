@@ -389,6 +389,37 @@ class TestResolveThreadSummaryModelName:
 
         assert result == "qwen"
 
+    def test_uses_entity_summary_model_for_unmanaged_room(self) -> None:
+        """Ad-hoc invited rooms can inherit the responding entity's summary model."""
+        config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
+        rp = _mock_runtime_paths()
+
+        with (
+            patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
+            patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=MagicMock(rooms={})),
+        ):
+            result = _resolve_thread_summary_model_name(
+                config,
+                rp,
+                "!adhoc:example",
+                entity_name="private",
+            )
+
+        assert result == "qwen"
+
+    def test_room_specific_summary_model_precedes_entity_fallback(self) -> None:
+        """An explicit room match should win over the responding entity fallback."""
+        config = _mock_config(
+            model_name="haiku",
+            room_thread_summary_models={"dev": "sonnet", "private": "qwen"},
+        )
+        rp = _mock_runtime_paths()
+
+        with patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value="dev"):
+            result = _resolve_thread_summary_model_name(config, rp, "!dev:example", entity_name="private")
+
+        assert result == "sonnet"
+
     def test_uses_full_matrix_room_alias_override(self) -> None:
         """Full Matrix aliases persisted in room state should resolve to overrides."""
         config = _mock_config(model_name="haiku", room_thread_summary_models={"#private:example": "qwen"})

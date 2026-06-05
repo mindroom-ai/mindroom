@@ -1383,6 +1383,7 @@ class ResponseRunner:
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
+                thread_summary_entity_name=self.deps.agent_name,
                 memory_prompt=_memory_prompt,
                 memory_thread_history=_memory_thread_history,
             ),
@@ -2348,6 +2349,7 @@ class ResponseRunner:
             thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
             thread_summary_thread_id=resolved_target.resolved_thread_id,
             thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
+            thread_summary_entity_name=self.deps.agent_name,
             memory_prompt=memory_prompt,
             memory_thread_history=memory_thread_history,
         )

@@ -799,6 +799,89 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
 
 
 @pytest.mark.asyncio
+async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_room(tmp_path: Path) -> None:
+    """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
+    config = _config(tmp_path)
+    config.room_thread_summary_models["general"] = "qwen"
+    config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
+    runtime_paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=make_event_cache_mock(),
+        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
+    )
+    conversation_cache = MagicMock()
+    support = PostResponseEffectsSupport(
+        runtime=runtime,
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        delivery_gateway=MagicMock(),
+        conversation_cache=conversation_cache,
+    )
+    deps = support.build_deps(
+        room_id="!adhoc:localhost",
+        interactive_agent_name="general",
+    )
+    thread_history = [
+        ResolvedVisibleMessage.synthetic(
+            sender=f"@user{i}:localhost",
+            body=f"Message {i}",
+            timestamp=i,
+            event_id=f"$message{i}",
+        )
+        for i in range(5)
+    ]
+    scheduled_tasks: list[asyncio.Task[None]] = []
+
+    def schedule_background_task(
+        coro: Coroutine[object, object, None],
+        *,
+        name: str,
+        error_handler: object | None = None,  # noqa: ARG001
+        owner: object | None = None,  # noqa: ARG001
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(coro, name=name)
+        scheduled_tasks.append(task)
+        return task
+
+    with (
+        patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
+        patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
+        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
+        patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
+        patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
+        patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
+        patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=MagicMock(rooms={})),
+    ):
+        await apply_post_response_effects(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="response",
+                delivery_kind="sent",
+            ),
+            ResponseOutcome(
+                thread_summary_room_id="!adhoc:localhost",
+                thread_summary_thread_id="$thread",
+                thread_summary_message_count_hint=4,
+                thread_summary_entity_name="general",
+            ),
+            deps,
+        )
+
+        assert scheduled_tasks
+        await asyncio.gather(*scheduled_tasks)
+
+    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="qwen")
+
+
+@pytest.mark.asyncio
 async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: Path) -> None:
     """A waiting human-authored turn should notify the active turn before blocking on the lock."""
     bot = _bot(tmp_path)
