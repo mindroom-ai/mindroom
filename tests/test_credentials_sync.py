@@ -464,15 +464,15 @@ class TestCredentialsSync:
             },
         )
 
-        public_runtime = constants_mod._serialize_public_runtime_paths(runtime_paths)
+        public_runtime = constants_mod.serialize_public_runtime_paths(runtime_paths)
         isolated_runtime = constants_mod.isolated_runtime_paths(runtime_paths)
         public_and_execution_envs = [
             public_runtime["process_env"],
             public_runtime["env_file_values"],
             constants_mod.trusted_tool_runtime_env_values(runtime_paths),
-            constants_mod.execution_tool_runtime_env_values(runtime_paths),
+            constants_mod.build_execution_tool_env("python", runtime_paths),
             constants_mod.trusted_tool_runtime_env_values(isolated_runtime),
-            constants_mod.execution_tool_runtime_env_values(isolated_runtime),
+            constants_mod.build_execution_tool_env("python", isolated_runtime),
         ]
 
         assert isolated_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) == "encryption-key-material"
@@ -853,6 +853,7 @@ class TestCredentialsSync:
         expected_services = {
             "OPENAI_API_KEY": "openai",
             "ANTHROPIC_API_KEY": "anthropic",
+            "AZURE_OPENAI_API_KEY": "azure",
             "GOOGLE_API_KEY": "google",
             "OPENROUTER_API_KEY": "openrouter",
             "DEEPSEEK_API_KEY": "deepseek",

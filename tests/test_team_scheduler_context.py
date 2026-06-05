@@ -14,6 +14,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -28,6 +30,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    message_origin,
     patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
@@ -57,7 +60,12 @@ def _response_envelope() -> MessageEnvelope:
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind="message",
+        source_kind=MESSAGE_SOURCE_KIND,
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
     )
 
 
@@ -138,9 +146,6 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
         ),
     ):
         await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
             payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="coordinate",
@@ -187,9 +192,6 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
         ),
     ):
         await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
             payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="coordinate",
@@ -240,9 +242,6 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
         ),
     ):
         await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
             payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="coordinate",
@@ -272,10 +271,15 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         response_function = kwargs["response_function"]
         await response_function(None)
 
-    async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
-        response_stream = args[6]
+    async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+        response_stream = args[4]
         chunks = [str(chunk) async for chunk in response_stream]
-        return "$stream_event", "".join(chunks)
+        return StreamTransportOutcome(
+            last_physical_stream_event_id="$stream_event",
+            terminal_status="completed",
+            rendered_body="".join(chunks),
+            visible_body_state="visible_body",
+        )
 
     async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         assert get_tool_runtime_context() is not None
@@ -301,9 +305,6 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         ),
     ):
         await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
             payload=DispatchPayload(prompt="Please collaborate and schedule a reminder"),
             team_agents=team_agents,
             team_mode="collaborate",
@@ -346,9 +347,6 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
     ):
         task = asyncio.create_task(
             bot._generate_team_response_helper(
-                room_id="!team:localhost",
-                reply_to_event_id="$user_event",
-                thread_id="$thread_root",
                 payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
                 team_agents=team_agents,
                 team_mode="coordinate",

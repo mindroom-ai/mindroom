@@ -9,6 +9,8 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `bedrock_claude` - Anthropic Claude models on Amazon Bedrock
+- `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
 - `google` or `gemini` - Google Gemini models
@@ -47,10 +49,21 @@ models:
     id: claude-haiku-4-5
     context_window: 200000
 
+  # Anthropic Claude on Amazon Bedrock
+  bedrock_opus:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
+
+  # Azure OpenAI
+  azure:
+    provider: azure
+    id: your-azure-openai-deployment
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -135,6 +148,42 @@ Live testing against the Codex subscription endpoint reported `cached_tokens` on
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 
+## Azure OpenAI
+
+Use `provider: azure` when your model is deployed through Azure OpenAI.
+The `id` field should be your Azure OpenAI deployment name, not necessarily the upstream model name.
+MindRoom reads Azure OpenAI credentials and endpoint values from the config-adjacent `.env` file or exported environment.
+
+```yaml
+models:
+  default:
+    provider: azure
+    id: your-azure-openai-deployment
+```
+
+Azure deployment limits vary, so starter configs do not set `context_window` for Azure.
+Set `context_window` to the limit of your deployment when you know it.
+Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
+For starter config generation, use `mindroom config init --provider azure`.
+
+## Amazon Bedrock Claude
+
+Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
+MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
+Use Opus when you want the highest Claude tier available through Bedrock.
+
+```yaml
+models:
+  default:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+```
+
+MindRoom reads AWS settings from the config-adjacent `.env` file, exported environment, local AWS profile, or runtime IAM role.
+For starter config generation, use `mindroom config init --provider bedrock_claude`.
+
 ## Context Window
 
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
@@ -181,12 +230,28 @@ API keys are read from environment variables:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+# Optional, only when overriding Agno's default Azure OpenAI API version:
+# AZURE_OPENAI_API_VERSION=2024-10-21
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
+```
+
+For Amazon Bedrock Claude, use standard AWS credential resolution:
+
+```bash
+AWS_REGION=us-east-1
+# Optional static credentials:
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...
+# Optional local profile instead:
+AWS_PROFILE=...
 ```
 
 For Ollama, you can also set:

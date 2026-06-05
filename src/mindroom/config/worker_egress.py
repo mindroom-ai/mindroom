@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -43,6 +44,16 @@ class WorkerEgressBrokerConfig(BaseModel):
             msg = "Worker egress broker values must not be empty"
             raise ValueError(msg)
         return stripped
+
+    @field_validator("proxy_url")
+    @classmethod
+    def validate_proxy_url_scheme(cls, value: str) -> str:
+        """Reject proxy URLs that common HTTP clients cannot parse."""
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            msg = "proxy_url must include an http:// or https:// scheme"
+            raise ValueError(msg)
+        return value
 
     def execution_env(self) -> dict[str, str]:
         """Return process env overlay for worker execution tools."""

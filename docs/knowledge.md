@@ -4,15 +4,15 @@ icon: lucide/book-open
 
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
-Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
+Knowledge bases give your agents access to your own documents through semantic RAG or direct file-tool search.
+Drop files into a folder, point a knowledge base at it, and choose whether MindRoom should index it or let workspace-aware agents inspect the files themselves.
 
 ## How It Works
 
 1. You configure a knowledge base pointing to a folder of documents
-2. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
-3. Agents assigned to that knowledge base get a search tool that queries the indexed documents
-4. When the agent uses the tool, relevant document chunks are included in its context
+2. In `semantic` mode, MindRoom indexes the files into a vector database (ChromaDB) using an embedder
+3. Agents assigned to a semantic knowledge base get a search tool that queries the indexed documents
+4. In `files` mode, MindRoom skips embeddings and exposes the source under `knowledge/<base_id>` when that source is reachable from the agent workspace
 
 ```
 Indexing (scheduled refresh):
@@ -40,6 +40,7 @@ Add a knowledge base and assign it to an agent:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and internal operating procedures
+    mode: semantic
     path: ./knowledge_docs
     watch: false
     chunk_size: 5000
@@ -59,6 +60,34 @@ When `watch: false`, direct external file edits require explicit reindex, while 
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
 
+### Files-Only Knowledge Base
+
+Use `mode: files` when you want agents to search, grep, list, and read the source files directly without paying for embeddings.
+
+```yaml
+knowledge_bases:
+  source_docs:
+    description: Source documents the agent should inspect directly
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/assistant/workspace/source_docs
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful assistant with direct file access to source docs
+    memory_backend: file
+    tools: [file, shell]
+    knowledge_bases: [source_docs]
+```
+
+File mode does not create a ChromaDB collection.
+It does not call the embedder.
+It does not expose `search_knowledge_base` for that base.
+`memory_backend: file` creates the shared agent workspace at `${MINDROOM_STORAGE_PATH}/agents/assistant/workspace`.
+Because the example source path is inside that workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
+Targets outside the workspace are not advertised for direct file-tool access because the default tools enforce workspace containment after symlinks are resolved.
+Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refreshes publish only lightweight source metadata instead of a vector index.
+
 ## Configuration
 
 ### Basic Knowledge Base
@@ -67,6 +96,7 @@ Use a non-empty single path component such as `docs` or `company_docs`, not `""`
 knowledge_bases:
   my_docs:
     description: Product documentation, support notes, and internal operating procedures
+    mode: semantic                    # "semantic" builds a vector search index; "files" skips embeddings
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000                  # Max characters per chunk
@@ -75,7 +105,8 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `description` | string | `""` | Short description of what the knowledge base contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
+| `description` | string | `""` | Short description of what the knowledge base contains for semantic search metadata and file-mode workspace-path instructions |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
@@ -83,7 +114,8 @@ knowledge_bases:
 | `git` | object | `null` | Optional Git repository sync settings |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
-If chunking is too large, indexing retries will fail with embedder 500 errors.
+`chunk_size` and `chunk_overlap` only affect semantic mode.
+If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
 
 ### Private Agent Knowledge
 
@@ -178,7 +210,7 @@ agents:
     knowledge_bases: [legal]
 ```
 
-When an agent has multiple knowledge bases, results are interleaved fairly so no single base dominates the top results.
+When an agent has multiple semantic knowledge bases, results are interleaved fairly so no single base dominates the top results.
 
 ## Git-Backed Knowledge Bases
 
@@ -225,10 +257,11 @@ Bundled container images already include it.
 
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
-- Explicit dashboard/API reindex runs Git sync first for Git-backed bases and then rebuilds a candidate index.
+- Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
+- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
-- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
+- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
@@ -305,7 +338,8 @@ Accepted credential fields:
 
 ## Embedder Configuration
 
-Knowledge bases use the same embedder configured in the `memory` section:
+Semantic knowledge bases use the same embedder configured in the `memory` section.
+File-mode knowledge bases do not use an embedder.
 
 ```yaml
 memory:
@@ -325,10 +359,11 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
-Each successful refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
+Semantic knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
+Each successful semantic refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
 The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path.
 For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
+File-mode refreshes may write lightweight source metadata, but local file-only bases do not need a vector database.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -337,10 +372,11 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 The web dashboard provides a Knowledge tab for managing knowledge bases without editing YAML:
 
 - Create, edit, and delete knowledge bases
+- Choose semantic search or files-only access
 - Configure chunk size and overlap per knowledge base
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
-- Trigger a full reindex on demand
+- Trigger a full reindex or Git sync on demand
 - Monitor indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 

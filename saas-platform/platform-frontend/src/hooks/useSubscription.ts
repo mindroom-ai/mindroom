@@ -9,7 +9,7 @@ import { logger } from '@/lib/logger'
 export interface Subscription {
   id: string
   account_id: string
-  tier: 'free' | 'starter' | 'professional' | 'enterprise'
+  tier: 'free' | 'byok' | 'hobby' | 'pro' | 'enterprise'
   status: 'active' | 'cancelled' | 'past_due' | 'trialing' | 'paused' | 'incomplete'
   stripe_subscription_id: string | null
   stripe_customer_id: string | null

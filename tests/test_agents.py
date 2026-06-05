@@ -26,6 +26,7 @@ from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
+    _load_context_files,
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
@@ -513,7 +514,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.get_agent_tools("summary") == [
+    assert config.get_agent_available_tools("summary") == [
         "openclaw_compat",
         "shell",
         "coding",
@@ -539,7 +540,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.get_agent_tools("summary") == [
+    assert config.get_agent_available_tools("summary") == [
         "browser",
         "openclaw_compat",
         "shell",
@@ -570,7 +571,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.get_agent_tools("summary")
+    assert looked_up_tools == config.get_agent_available_tools("summary")
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1670,7 +1671,7 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
@@ -1685,7 +1686,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -1695,7 +1696,7 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
 
 
@@ -1705,7 +1706,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_tools("summary")
+    effective_tools = config.get_agent_available_tools("summary")
     assert effective_tools.count("attachments") == 1
 
 
@@ -2167,6 +2168,34 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert "Updated canonical soul context." not in deleted_agent.role
 
 
+def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
+    tmp_path: Path,
+) -> None:
+    """Projected worker assets should stay authoritative even if writable workspace state shadows the same path."""
+    storage_path = tmp_path / "storage"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(storage_path, config_path=config_path)
+    workspace_context = agent_workspace_root_path(storage_path, "general") / ".mindroom-worker-assets" / "note.md"
+    workspace_context.parent.mkdir(parents=True, exist_ok=True)
+    workspace_context.write_text("workspace\n", encoding="utf-8")
+    projected_context = config_dir / ".mindroom-worker-assets" / "note.md"
+    projected_context.parent.mkdir(parents=True, exist_ok=True)
+    projected_context.write_text("config\n", encoding="utf-8")
+
+    loaded = _load_context_files(
+        [".mindroom-worker-assets/note.md"],
+        runtime_paths,
+        agent_name="general",
+        storage_path=storage_path,
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].body == "config"
+
+
 @patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
     _mock_storage: MagicMock,  # noqa: PT019
@@ -2193,13 +2222,6 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                     "TOOLS.md",
                     "HEARTBEAT.md",
                 ],
-                knowledge_bases=["mind_memory"],
-            ),
-        },
-        knowledge_bases={
-            "mind_memory": KnowledgeBaseConfig(
-                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
-                watch=True,
             ),
         },
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
@@ -2475,6 +2497,24 @@ def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(
     secret_file = tmp_path / "secret.txt"
     secret_file.write_text("secret\n", encoding="utf-8")
     (template_dir / "linked.txt").symlink_to(secret_file)
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
+        _bind_runtime_paths(config, _runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
+
+
+def test_bind_runtime_paths_rejects_private_template_dir_when_template_root_is_symlink(tmp_path: Path) -> None:
+    """Private templates must reject symlinked template roots before dereferencing them."""
+    real_template_dir = tmp_path / "real_template"
+    real_template_dir.mkdir(parents=True, exist_ok=True)
+    (real_template_dir / "README.md").write_text("template\n", encoding="utf-8")
+    (tmp_path / "mind_template").symlink_to(real_template_dir, target_is_directory=True)
 
     config = _test_config()
     config.agents["general"].private = AgentPrivateConfig(
@@ -2831,6 +2871,41 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
         )
 
 
+def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:
+    """Removed agent toolkit knobs should point users to expand presets before lazy flags."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Agent field 'allowed_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+            "tools before applying per-tool defer flags in tools.",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "allowed_toolkits": ["shell"],
+                },
+            },
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Agent field 'initial_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
+            "tools before applying per-tool initial flags in tools.",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "initial_toolkits": ["shell"],
+                },
+            },
+        )
+
+
 def test_config_rejects_duplicate_agent_knowledge_base_assignment() -> None:
     """Each agent knowledge base assignment should be unique."""
     with pytest.raises(ValidationError, match="Duplicate knowledge bases are not allowed: research"):
@@ -2950,6 +3025,45 @@ def test_knowledge_base_config_preserves_description() -> None:
     )
 
     assert config.knowledge_bases["research"].description == ("Research plans, experiment notes, and decision records.")
+
+
+def test_knowledge_base_config_defaults_to_semantic_mode() -> None:
+    """Existing knowledge bases should keep semantic search unless configured otherwise."""
+    config = Config(
+        agents={"calculator": AgentConfig(display_name="Calculator", knowledge_bases=["research"])},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path="./knowledge_docs/research",
+            ),
+        },
+    )
+
+    assert config.knowledge_bases["research"].mode == "semantic"
+
+
+def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Path) -> None:
+    """File-only knowledge should tell workspace-aware agents where to use grep/read tools."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    workspace_root = tmp_path / "agents" / "general" / "workspace"
+    knowledge_root = workspace_root / "research"
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].knowledge_bases = ["research"]
+    config.knowledge_bases["research"] = KnowledgeBaseConfig(
+        description="Research notes and decision records.",
+        path=str(knowledge_root),
+        mode="files",
+    )
+
+    agent = _create_agent_for_test("general", config)
+
+    rendered_instructions = "\n".join(str(instruction) for instruction in agent.instructions)
+    assert "File-only knowledge bases are available in the workspace." in rendered_instructions
+    assert "- research: `knowledge/research`" in rendered_instructions
+    assert "Research notes and decision records." in rendered_instructions
+    assert "search_knowledge_base" in rendered_instructions
 
 
 def test_agent_knowledge_search_tool_description_lists_configured_sources(

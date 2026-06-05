@@ -178,8 +178,8 @@ def test_complete_local_pairing_flags_malformed_owner_user_id() -> None:
     assert result.namespace == "a1b2c3d4"
 
 
-def test_complete_local_pairing_derives_namespace_when_missing() -> None:
-    """Missing namespace should derive a stable fallback from client_id."""
+def test_complete_local_pairing_uses_empty_namespace_when_missing() -> None:
+    """Missing namespace should preserve the unnamespaced install default."""
 
     def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
         return httpx.Response(
@@ -200,5 +200,60 @@ def test_complete_local_pairing_derives_namespace_when_missing() -> None:
         post_request=_fake_post,
     )
 
-    assert result.namespace == cli_connect._derive_namespace("client-123")
+    assert result.namespace == ""
     assert result.namespace_invalid is False
+
+
+@pytest.mark.parametrize("namespace", [None, 123, ["a1b2c3d4"], {"value": "a1b2c3d4"}])
+def test_complete_local_pairing_uses_empty_namespace_when_non_string(namespace: object) -> None:
+    """Non-string namespaces should be treated like the unnamespaced install default."""
+
+    def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "namespace": namespace,
+                "owner_user_id": "@alice:mindroom.chat",
+            },
+        )
+
+    result = cli_connect.complete_local_pairing(
+        provisioning_url="https://provisioning.example",
+        pair_code="ABCD-EFGH",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        post_request=_fake_post,
+    )
+
+    assert result.namespace == ""
+    assert result.namespace_invalid is False
+
+
+def test_complete_local_pairing_uses_empty_namespace_when_malformed() -> None:
+    """Malformed namespace should be ignored instead of inventing a new install namespace."""
+
+    def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "namespace": "bad_namespace",
+                "owner_user_id": "@alice:mindroom.chat",
+            },
+        )
+
+    result = cli_connect.complete_local_pairing(
+        provisioning_url="https://provisioning.example",
+        pair_code="ABCD-EFGH",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        post_request=_fake_post,
+    )
+
+    assert result.namespace == ""
+    assert result.namespace_invalid is True

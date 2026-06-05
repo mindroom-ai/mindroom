@@ -138,12 +138,14 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` runs argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
+`shell` runs command strings or argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
 
 ### What It Does
 
 `shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` expects a list of arguments, not a shell-parsed string.
+`run_shell_command()` accepts either a natural shell command string or a list of argv strings.
+Plain command strings and single-item argv lists that look shell-like run through `bash -lc`.
+Explicit multi-item argv lists run directly without shell parsing.
 If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
@@ -179,6 +181,7 @@ agents:
 ```
 
 ```python
+run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
 check_shell_command("shell:abcd1234")
@@ -189,6 +192,7 @@ kill_shell_command("shell:abcd1234")
 
 - `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
   MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
+- Use explicit argv lists for commands that need exact argument boundaries.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.

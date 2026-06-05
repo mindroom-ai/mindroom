@@ -23,7 +23,7 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
 )
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_identifiers import agent_username_localpart
+from mindroom.matrix_identifiers import agent_username_localpart, unnamespaced_agent_name_from_username_localpart
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
@@ -238,6 +238,13 @@ class TestMatrixID:
 
         assert _entity_name(f"@actual_calculator:{domain}", config, runtime_paths) == "calculator"
         assert _entity_name(f"@mindroom_calculator:{domain}", config, runtime_paths) is None
+
+    def test_unnamespaced_agent_name_from_username_localpart(self) -> None:
+        """Generated unnamespaced agent localparts can be inverted."""
+        assert unnamespaced_agent_name_from_username_localpart("mindroom_calculator") == "calculator"
+        assert unnamespaced_agent_name_from_username_localpart("MINDROOM_calculator") == "calculator"
+        assert unnamespaced_agent_name_from_username_localpart("calculator") is None
+        assert unnamespaced_agent_name_from_username_localpart("mindroom_") is None
 
 
 class TestThreadStateKey:

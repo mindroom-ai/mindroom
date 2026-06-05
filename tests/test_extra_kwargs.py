@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from agno.models.aws.claude import Claude as AwsBedrockClaude
+from agno.models.azure import AzureOpenAI
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
@@ -185,7 +187,7 @@ def test_different_providers_with_extra_kwargs() -> None:
             },
             "anthropic_model": {
                 "provider": "anthropic",
-                "id": "claude-3-opus",
+                "id": "claude-opus-4-8",
                 "extra_kwargs": {
                     "temperature": 0.2,
                     "max_tokens": 2048,
@@ -301,6 +303,234 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
+
+
+def test_bedrock_claude_provider_uses_runtime_env() -> None:
+    """Bedrock Claude provider should create Agno AWS Claude with runtime .env settings."""
+    runtime_root = Path(tempfile.mkdtemp())
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AWS_ACCESS_KEY_ID=aws-access\n"
+        "AWS_SECRET_ACCESS_KEY=aws-secret\n"
+        "AWS_SESSION_TOKEN=aws-session\n"
+        "AWS_REGION=us-east-1\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "bedrock_model": ModelConfig(
+                provider="bedrock_claude",
+                id="anthropic.claude-opus-4-8",
+                context_window=1_000_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "bedrock_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "bedrock_model")
+
+    assert isinstance(model, AwsBedrockClaude)
+    assert model.id == "anthropic.claude-opus-4-8"
+    assert model.provider == "AwsBedrock"
+    assert model.aws_access_key == "aws-access"
+    assert model.aws_secret_key == "aws-secret"  # noqa: S105
+    assert model.aws_session_token == "aws-session"  # noqa: S105
+    assert model.aws_region == "us-east-1"
+    assert model.cache_system_prompt is True
+    assert model.extended_cache_time is True
+
+
+def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bedrock Claude should respect configured aws_profile over env static keys."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "AWS_ACCESS_KEY_ID=env-access\nAWS_SECRET_ACCESS_KEY=env-secret\nAWS_REGION=us-east-1\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "bedrock_model": ModelConfig(
+                provider="bedrock_claude",
+                id="anthropic.claude-opus-4-8",
+                context_window=1_000_000,
+                extra_kwargs={"aws_profile": "my-explicit-profile"},
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "bedrock_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    class MockSession:
+        def __init__(self, **kwargs: object) -> None:
+            self.profile_name = kwargs.get("profile_name")
+            self.region_name = kwargs.get("region_name")
+
+    monkeypatch.setattr("boto3.session.Session", MockSession)
+
+    model = get_model_instance(config, runtime_paths, "bedrock_model")
+
+    assert isinstance(model, AwsBedrockClaude)
+    assert isinstance(model.session, MockSession)
+    assert model.session.profile_name == "my-explicit-profile"
+    assert model.session.region_name == "us-east-1"
+    assert model.aws_access_key is None
+    assert model.aws_secret_key is None
+
+
+def test_bedrock_claude_provider_auto_installs_boto3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bedrock Claude should use the optional dependency installer instead of a base dependency."""
+    config_data = {
+        "models": {
+            "bedrock_model": {
+                "provider": "bedrock_claude",
+                "id": "anthropic.claude-opus-4-8",
+                "extra_kwargs": {
+                    "aws_access_key": "aws-access",
+                    "aws_secret_key": "aws-secret",
+                    "aws_region": "us-east-1",
+                },
+            },
+        },
+        "defaults": {"markdown": True},
+        "router": {"model": "bedrock_model"},
+        "memory": {
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        "agents": {},
+    }
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    calls: list[tuple[list[str], str]] = []
+
+    def ensure(dependencies: list[str], extra_name: str, *_args: object, **_kwargs: object) -> bool:
+        calls.append((dependencies, extra_name))
+        return False
+
+    monkeypatch.setattr("mindroom.model_loading.ensure_optional_deps", ensure)
+
+    get_model_instance(config, runtime_paths, "bedrock_model")
+
+    assert calls == [(["boto3"], "aws_bedrock")]
+
+
+def test_azure_openai_provider_uses_runtime_env() -> None:
+    """Azure provider should create Agno AzureOpenAI with runtime .env settings."""
+    runtime_root = Path(tempfile.mkdtemp())
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        "AZURE_OPENAI_ENDPOINT=https://example-resource.openai.azure.com\n"
+        "AZURE_OPENAI_API_VERSION=2024-10-21\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "azure_model": ModelConfig(
+                provider="azure",
+                id="team-chat-deployment",
+                context_window=258_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "azure_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "azure_model")
+
+    assert isinstance(model, AzureOpenAI)
+    assert model.id == "team-chat-deployment"
+    assert model.api_key == "sk-azure"
+    assert model.azure_endpoint == "https://example-resource.openai.azure.com"
+    assert model.api_version == "2024-10-21"
+
+
+def test_azure_openai_provider_uses_endpoint_file_and_canonical_runtime_env() -> None:
+    """Azure provider should support *_FILE endpoint secrets and Azure-specific overrides."""
+    runtime_root = Path(tempfile.mkdtemp())
+    endpoint_file = runtime_root / "azure-endpoint.txt"
+    endpoint_file.write_text("https://file-resource.openai.azure.com\n", encoding="utf-8")
+    env_path = runtime_root / ".env"
+    env_path.write_text(
+        "AZURE_OPENAI_API_KEY=sk-azure\n"
+        f"AZURE_OPENAI_ENDPOINT_FILE={endpoint_file}\n"
+        "OPENAI_API_VERSION=2023-01-01\n"
+        "AZURE_OPENAI_DEPLOYMENT=env-chat-deployment\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "azure_model": ModelConfig(
+                provider="azure",
+                id="config-chat-deployment",
+                context_window=258_000,
+            ),
+        },
+        defaults={"markdown": True},
+        router={"model": "azure_model"},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+            },
+        },
+        agents={},
+    )
+
+    model = get_model_instance(config, runtime_paths, "azure_model")
+
+    assert isinstance(model, AzureOpenAI)
+    assert model.azure_endpoint == "https://file-resource.openai.azure.com"
+    assert model.azure_deployment == "env-chat-deployment"
+    assert model.api_version != "2023-01-01"
 
 
 def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:

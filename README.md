@@ -158,6 +158,21 @@ Native Matrix tools include `matrix_message`, `matrix_room`, `thread_tags`, and 
 
 ## Quick Start
 
+### macOS Menu Bar App
+
+MindRoom also ships as a macOS menu bar app for running the local MindRoom service without keeping a terminal open.
+The app bundles `uv`, installs the `mindroom` CLI with `uv tool install`, uses `~/.mindroom` for normal config and state, and manages the existing `mindroom service` launchd service.
+
+```bash
+brew install --cask mindroom-ai/tap/mindroom
+```
+
+Open **MindRoom** from `/Applications` or Spotlight.
+Use the menu bar item to install the MindRoom runtime, initialize the hosted `chat.mindroom.chat` config, pair with a code from the hosted chat UI, install the service, and open the dashboard.
+Self-hosted config and local-stack setup remain available from the same menu.
+
+See [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
+
 ### Prerequisites
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv) for Python package management
@@ -294,6 +309,7 @@ defaults:
 Add the `thread_summary` tool to an agent when you want it to write or refresh the one-line summary shown for a Matrix thread.
 `set_thread_summary` uses the current resolved thread context by default.
 Outside a resolved thread context, pass `thread_id` explicitly.
+Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 
 `compress_tool_results` now defaults to `false`.
 On Anthropic and Vertex Claude models, enabling it can mutate replayed tool messages and invalidate prompt-cache prefixes.
@@ -408,7 +424,7 @@ Mix and match:
 ### Technical Stack
 - **Matrix**: Any homeserver (Synapse, Conduit, Dendrite, etc.)
 - **Agents**: Python with matrix-nio
-- **AI Models**: OpenAI, Anthropic, Ollama, or any provider
+- **AI Models**: OpenAI, Anthropic, Amazon Bedrock Claude, Ollama, or any provider
 - **Memory**: Mem0 + ChromaDB vector storage (persistent on disk)
 - **UI**: Web dashboard + any Matrix client
 

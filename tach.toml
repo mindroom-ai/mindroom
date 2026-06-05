@@ -23,6 +23,22 @@
 exclude = ["**/*__pycache__", "**/*egg-info", "**/docs", "**/tests", "**/venv"]
 source_roots = ["src"]
 
+[[modules]]
+path = "mindroom.chunking"
+depends_on = []
+
+[[modules]]
+path = "mindroom.embedding_factory"
+depends_on = [
+    "mindroom.credentials_sync",
+    "mindroom.embeddings",
+    "mindroom.model_defaults",
+]
+
+[[modules]]
+path = "mindroom.path_globs"
+depends_on = []
+
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
 [[modules]]
@@ -112,7 +128,10 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_storage"
-depends_on = ["mindroom.runtime_resolution"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.runtime_resolution",
+]
 visibility = [
     "mindroom.agents",
     "mindroom.conversation_state_writer",
@@ -164,6 +183,7 @@ depends_on = [
     "mindroom.google_adc",
     "mindroom.llm_request_logging",
     "mindroom.logging_config",
+    "mindroom.tool_system.dependencies",
     "mindroom.vertex_claude_prompt_cache",
 ]
 visibility = [
@@ -466,6 +486,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.sandbox_env_assembly"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.constants",
+]
+
+[[modules]]
 path = "mindroom.api.sandbox_exec"
 depends_on = [
     "mindroom.constants",
@@ -487,6 +514,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_protocol",
     "mindroom.api.sandbox_worker_prep",
@@ -611,6 +639,15 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.thread_tags"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.subagents"
 depends_on = [
     "mindroom.agent_descriptions",
@@ -619,6 +656,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.responder_availability",
+    "mindroom.thread_tags",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
 ]
@@ -658,14 +696,27 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.attachment_media"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.logging_config",
+    "mindroom.timing",
+]
+
+[[modules]]
 path = "mindroom.history"
 depends_on = [
+    "mindroom.history.agno_team_patch",
     "mindroom.history.compaction",
     "mindroom.history.policy",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
 ]
+
+[[modules]]
+path = "mindroom.history.agno_team_patch"
+depends_on = ["mindroom.attachment_media"]
 
 [[modules]]
 path = "mindroom.history.compaction"
@@ -728,6 +779,7 @@ visibility = [
 path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.constants",
     "mindroom.history.compaction",
     "mindroom.history.policy",
     "mindroom.history.storage",
@@ -904,6 +956,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
@@ -917,7 +970,11 @@ depends_on = [
     "mindroom.post_response_effects",
     "mindroom.tool_system.runtime_context",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = [
+    "mindroom.response_runner",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
+]
 
 [[modules]]
 path = "mindroom.response_attempt"
@@ -997,7 +1054,7 @@ visibility = [
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = []
+depends_on = ["mindroom.path_globs"]
 
 [[modules]]
 path = "mindroom.config.main"
@@ -1083,6 +1140,7 @@ visibility = [
     "mindroom.memory._mem0_backend",
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
+    "mindroom.memory._semantic_file_search",
     "mindroom.memory.functions",
 ]
 
@@ -1105,9 +1163,20 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.memory._policy",
     "mindroom.memory._shared",
+    "mindroom.memory._semantic_file_search",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory.functions"]
+
+[[modules]]
+path = "mindroom.memory._semantic_file_search"
+depends_on = [
+    "mindroom.knowledge",
+    "mindroom.logging_config",
+    "mindroom.memory._shared",
+    "mindroom.timing",
+]
+visibility = ["mindroom.memory._file_backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_backend"
@@ -1158,6 +1227,7 @@ path = "mindroom.mcp.manager"
 depends_on = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
 ]
 
 [[modules]]
@@ -1447,7 +1517,9 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.client_room_admin"
-depends_on = []
+depends_on = [
+    "mindroom.thread_tags",
+]
 visibility = [
     "mindroom.api.matrix_operations",
     "mindroom.bot",
@@ -1496,6 +1568,7 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.response_runner",
     "mindroom.routing",
+    "mindroom.thread_export",
 ]
 
 [[modules]]
@@ -1540,9 +1613,33 @@ depends_on = [
 visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
+    "mindroom.custom_tools.thread_tags",
+    "mindroom.thread_tags",
     "mindroom.matrix.client",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
+    "mindroom.thread_export",
+]
+
+[[modules]]
+path = "mindroom.thread_export"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.state",
+    "mindroom.matrix.users",
+    "mindroom.matrix_identifiers",
+    "mindroom.runtime_support",
+]
+
+[[modules]]
+path = "mindroom.thread_tags"
+depends_on = [
+    "mindroom.matrix.client_thread_history",
 ]
 
 [[modules]]
@@ -1643,6 +1740,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.scheduling",
     "mindroom.teams",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_approval",
@@ -1714,6 +1812,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.cli.migrate"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.constants",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.cli.service"
 depends_on = [
     "mindroom.services.config",
@@ -1730,12 +1836,14 @@ depends_on = [
     "mindroom.cli.connect",
     "mindroom.cli.doctor",
     "mindroom.cli.local_stack",
+    "mindroom.cli.migrate",
     "mindroom.cli.service",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.error_handling",
     "mindroom.frontend_assets",
     "mindroom.orchestrator",
+    "mindroom.thread_export",
 ]
 
 [[modules]]
@@ -1943,6 +2051,19 @@ depends_on = [
     "mindroom.constants",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.worker_proxy_client",
+]
+
+[[modules]]
+path = "mindroom.tool_system.worker_proxy_client"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.runtime_env_policy",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.workers.models",
+]
+visibility = [
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
@@ -1977,6 +2098,7 @@ depends_on = []
 path = "mindroom.thread_summary"
 depends_on = [
     "mindroom.ai_runtime",
+    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.model_loading",
 ]
@@ -2035,6 +2157,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.hooks.sender"
 depends_on = [
+    "mindroom.constants",
     "mindroom.hooks.types",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
@@ -2049,6 +2172,28 @@ depends_on = [
     "mindroom.handled_turns",
     "mindroom.thread_utils",
 ]
+
+[[modules]]
+path = "mindroom.prompt_ingress_reservation"
+depends_on = ["mindroom.coalescing"]
+visibility = ["mindroom.turn_controller"]
+
+[[modules]]
+path = "mindroom.text_ingress_dispatch"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.commands.parsing",
+    "mindroom.constants",
+    "mindroom.dispatch_handoff",
+    "mindroom.dispatch_source",
+    "mindroom.handled_turns",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.media",
+    "mindroom.matrix.rooms",
+    "mindroom.response_lifecycle",
+    "mindroom.timing",
+]
+visibility = ["mindroom.turn_controller"]
 
 [[modules]]
 path = "mindroom.turn_controller"
@@ -2068,8 +2213,12 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
+    "mindroom.metadata_merge",
+    "mindroom.prompt_ingress_reservation",
+    "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.routing",
+    "mindroom.text_ingress_dispatch",
     "mindroom.turn_store",
     "mindroom.turn_policy",
 ]
@@ -2103,6 +2252,7 @@ depends_on = [
     "mindroom.attachment_media",
     "mindroom.attachments",
     "mindroom.coalescing",
+    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
@@ -2135,15 +2285,12 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_scheduler",
+    "mindroom.knowledge.status",
     "mindroom.knowledge.utils",
 ]
 
 [[modules]]
 path = "mindroom.knowledge.availability"
-depends_on = []
-
-[[modules]]
-path = "mindroom.knowledge.chunking"
 depends_on = []
 
 [[modules]]
@@ -2161,15 +2308,18 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
+    "mindroom.chunking",
     "mindroom.constants",
-    "mindroom.knowledge.chunking",
+    "mindroom.embedding_factory",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.redaction",
+    "mindroom.path_globs",
 ]
 
 [[modules]]
@@ -2306,6 +2456,7 @@ expose = [
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_knowledge_binding",
+    "resolve_knowledge_owner_bindings",
 ]
 from = ["mindroom.runtime_resolution"]
 
@@ -2326,6 +2477,7 @@ from = ["mindroom.model_loading"]
 [[interfaces]]
 expose = [
     "KnowledgeAccessSupport",
+    "KnowledgeBaseAccessResolution",
     "KnowledgeManager",
     "KnowledgeRefreshScheduler",
     "format_knowledge_availability_notice",
@@ -2333,9 +2485,12 @@ expose = [
     "KnowledgeAvailability",
     "KnowledgeAvailabilityDetail",
     "KnowledgeResolution",
+    "list_knowledge_files",
     "OrchestratorKnowledgeRefreshScheduler",
     "PerBindingKnowledgeRefreshScheduler",
+    "reconcile_knowledge_mode_transition_states",
     "resolve_agent_knowledge_access",
+    "resolve_knowledge_base_access",
     "StandaloneKnowledgeRefreshScheduler",
 ]
 from = ["mindroom.knowledge"]
@@ -2350,6 +2505,8 @@ expose = [
     "MemoryAutoFlushConfig",
     "MemoryBackend",
     "MemoryConfig",
+    "MemorySearchConfig",
+    "AgentMemorySearchConfig",
 ]
 from = ["mindroom.config.memory"]
 
@@ -2496,6 +2653,7 @@ expose = [
     "add_room_to_space",
     "create_room",
     "edit_message_result",
+    "ensure_room_admin_power_levels",
     "ensure_thread_tags_power_level",
     "get_joined_rooms",
     "get_room_members",
@@ -2525,6 +2683,7 @@ expose = [
     "add_room_to_space",
     "create_room",
     "create_space",
+    "ensure_room_admin_power_levels",
     "ensure_room_directory_visibility",
     "ensure_room_join_rule",
     "ensure_room_name",
@@ -2582,6 +2741,7 @@ expose = [
     "fetch_thread_event_sources_via_room_messages",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
+    "enumerate_room_thread_root_ids",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
@@ -2631,6 +2791,7 @@ expose = [
     "ToolCategory",
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
+    "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
     "ToolStatus",
@@ -2644,6 +2805,7 @@ expose = [
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
+    "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
     "validate_authored_tool_entry_overrides",
@@ -2667,6 +2829,7 @@ expose = [
     "ToolCategory",
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
+    "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
     "ToolStatus",
@@ -2681,6 +2844,7 @@ expose = [
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
+    "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
     "validate_authored_tool_entry_overrides",
@@ -2846,6 +3010,7 @@ expose = [
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
+    "has_pending_force_compaction_scope",
     "manual_compaction_unavailable_message",
     "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
@@ -2919,11 +3084,15 @@ expose = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "ScheduleFiredContext",
+    "SenderKind",
     "SessionHookContext",
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
+    "TurnIntent",
+    "TurnOrigin",
+    "TurnTrust",
     "build_hook_message_sender",
     "build_hook_matrix_admin",
     "build_hook_room_state_putter",
@@ -2944,7 +3113,6 @@ expose = [
     "render_system_enrichment_block",
     "send_and_track_message",
     "send_hook_message",
-    "should_handle_interactive_text_response",
     "validate_event_name",
 ]
 from = ["mindroom.hooks"]
@@ -3052,13 +3220,17 @@ from = ["mindroom.tool_system.skills"]
 
 [[interfaces]]
 expose = [
-    "DynamicToolkitConflictError",
-    "DynamicToolkitSelection",
-    "get_loaded_toolkits_for_session",
-    "merge_runtime_tool_configs",
-    "resolve_dynamic_toolkit_selection",
-    "resolve_special_tool_names",
-    "save_loaded_toolkits_for_session",
+    "LoadToolResult",
+    "LoadToolValidationFailure",
+    "VisibleToolSurface",
+    "deferred_tool_catalog_entries",
+    "get_loaded_tools_for_session",
+    "has_deferred_tools",
+    "load_tool_for_session",
+    "resolve_dynamic_tool_selection",
+    "save_loaded_tools_for_session",
+    "unload_tool_for_session",
+    "visible_tool_surface",
 ]
 from = ["mindroom.tool_system.dynamic_toolkits"]
 

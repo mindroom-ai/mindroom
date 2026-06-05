@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
@@ -30,6 +30,7 @@ from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDel
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
+from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -37,10 +38,15 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.media_fallback import reset_model_media_capability_cache
+from mindroom.message_target import MessageTarget
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
+from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
 from tests.identity_helpers import persist_entity_accounts
@@ -52,6 +58,7 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "agent_response_should_respond",
     "aioresponse",
     "bind_mock_config_cache",
     "bind_runtime_paths",
@@ -74,6 +81,7 @@ __all__ = [
     "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
+    "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
@@ -86,8 +94,8 @@ __all__ = [
     "replace_turn_controller_deps",
     "replace_turn_policy_deps",
     "replace_turn_store_deps",
+    "request_envelope",
     "requires_linux",
-    "resolve_response_thread_root_for_test",
     "runtime_paths_for",
     "sync_bot_runtime_state",
     "test_runtime_paths",
@@ -118,6 +126,90 @@ def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation
             degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
             thread_id=dispatch.target.resolved_thread_id,
         ),
+    )
+
+
+def agent_response_should_respond(
+    agent_name: str,
+    am_i_mentioned: bool,
+    is_thread: bool,
+    room: nio.MatrixRoom,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    mentioned_agents: list[MatrixID] | None = None,
+    has_non_agent_mentions: bool = False,
+    *,
+    sender_id: str,
+    available_responders_in_room: list[MatrixID] | None = None,
+    agents_in_thread: Sequence[MatrixID] | None = None,
+) -> bool:
+    """Return the boolean projection of the agent response decision for tests."""
+    return decide_agent_response(
+        agent_name,
+        am_i_mentioned,
+        is_thread,
+        room,
+        thread_history,
+        config,
+        runtime_paths,
+        mentioned_agents,
+        has_non_agent_mentions,
+        sender_id=sender_id,
+        available_responders_in_room=available_responders_in_room,
+        agents_in_thread=agents_in_thread,
+    ).should_respond
+
+
+def message_origin(
+    *,
+    sender_id: str = "@user:localhost",
+    requester_id: str | None = None,
+    sender_entity_name: str | None = None,
+    requester_entity_name: str | None = None,
+    source_kind: str = "message",
+    original_sender: str | None = None,
+    trusted_user_relay: bool = False,
+) -> TurnOrigin:
+    """Build canonical origin metadata for manually constructed test envelopes."""
+    return classify_turn_origin(
+        transport_sender_id=sender_id,
+        requester_id=requester_id or sender_id,
+        sender_entity_name=sender_entity_name,
+        requester_entity_name=requester_entity_name,
+        source_kind=source_kind,
+        original_sender=original_sender,
+        trusted_user_relay=trusted_user_relay,
+    )
+
+
+def request_envelope(
+    *,
+    room_id: str = "!test:localhost",
+    reply_to_event_id: str = "$event",
+    thread_id: str | None = None,
+    prompt: str = "Hello",
+    user_id: str | None = "@user:localhost",
+    target: MessageTarget | None = None,
+    agent_name: str = "test_agent",
+    source_kind: str = "message",
+    attachment_ids: tuple[str, ...] = (),
+) -> MessageEnvelope:
+    """Build a canonical response envelope for direct ResponseRequest tests."""
+    resolved_user_id = user_id or "@user:localhost"
+    resolved_target = target or MessageTarget.resolve(room_id, thread_id, reply_to_event_id)
+    return MessageEnvelope(
+        source_event_id=reply_to_event_id,
+        room_id=room_id,
+        target=resolved_target,
+        requester_id=resolved_user_id,
+        sender_id=resolved_user_id,
+        body=prompt,
+        attachment_ids=attachment_ids,
+        mentioned_agents=(),
+        agent_name=agent_name,
+        source_kind=source_kind,
+        origin=message_origin(sender_id=resolved_user_id, requester_id=resolved_user_id, source_kind=source_kind),
     )
 
 
@@ -708,20 +800,6 @@ def make_visible_message(
     )
 
 
-def resolve_response_thread_root_for_test(
-    thread_id: str | None,
-    _reply_to_event_id: str | None,
-    *,
-    room_id: str,
-    response_envelope: object | None = None,
-) -> str | None:
-    """Resolve thread roots like the bot seam helpers used by response tests."""
-    del room_id
-    if response_envelope is not None:
-        return response_envelope.target.resolved_thread_id
-    return thread_id
-
-
 def unwrap_extracted_collaborator[T](collaborator: T) -> T:
     """Return the real extracted collaborator behind one test wrapper."""
     if isinstance(collaborator, MagicMock):
@@ -902,37 +980,27 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
-    """Route visible delivery through one legacy-style send-response mock."""
+    """Route visible delivery through one target-explicit send-response mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
 
     async def _send_text(request: SendTextRequest) -> str | None:
         return await send_response(
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.response_text,
-            request.target.resolved_thread_id,
-            reply_to_event=None,
+            target=request.target,
+            response_text=request.response_text,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=None,
-            target=request.target,
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
 
     async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         event_id = await send_response(
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.response_text,
-            request.target.resolved_thread_id,
-            reply_to_event=None,
+            target=request.target,
+            response_text=request.response_text,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=None,
-            target=request.target,
         )
         delivery_kind = "edited" if request.existing_event_id is not None else "sent"
         if event_id is None:
@@ -964,7 +1032,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
 
 
 def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock) -> None:
-    """Route response execution through one legacy-style generate-response mock."""
+    """Route response execution through one envelope-explicit generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
 
     def _resolved_event_id_from_test_result(
@@ -982,10 +1050,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
                 raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         result = await generate_response(
-            room_id=request.room_id,
             prompt=request.prompt,
-            reply_to_event_id=request.reply_to_event_id,
-            thread_id=request.thread_id,
             thread_history=request.thread_history,
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
@@ -996,7 +1061,6 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             system_enrichment_items=request.system_enrichment_items,
             response_envelope=request.response_envelope,
             correlation_id=request.correlation_id,
-            target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
         )
         return _resolved_event_id_from_test_result(result)
@@ -1006,7 +1070,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
 
 
 def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
-    """Route Matrix edits through one legacy-style edit-message mock."""
+    """Route Matrix edits through one argument-expanded edit-message mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
 
     async def _edit_text(request: EditTextRequest) -> bool:
@@ -1082,6 +1146,14 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _reset_model_media_capabilities() -> Generator[None, None, None]:
+    """Keep process-local learned media support isolated per test."""
+    reset_model_media_capability_cache()
+    yield
+    reset_model_media_capability_cache()
 
 
 @pytest.fixture(autouse=True)

@@ -77,7 +77,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
 defaults:
   tools: [scheduler]
@@ -115,7 +115,7 @@ mindroom run
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
 | **Memory** | Mem0-inspired memory system with agent and team scopes |
-| **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
+| **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
 | **Scheduling** | Schedule tasks with cron expressions or natural language |
@@ -159,7 +159,7 @@ mindroom run
 - [Skills](https://docs.mindroom.chat/skills/) - OpenClaw-compatible skills system
 - [Plugins](https://docs.mindroom.chat/plugins/) - Extend with custom tools, OAuth providers, and skills
 - [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure RAG-backed document indexing
+- [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure semantic indexing or files-only knowledge access
 - [Memory System](https://docs.mindroom.chat/memory/) - How agent memory works
 - [Scheduling](https://docs.mindroom.chat/scheduling/) - Schedule tasks with cron or natural language
 - [Voice Messages](https://docs.mindroom.chat/voice/) - Voice message transcription
@@ -215,6 +215,9 @@ Use `--provider` to select a different provider preset:
 # Use Anthropic Claude
 uvx mindroom config init --provider anthropic
 
+# Use Azure OpenAI
+uvx mindroom config init --provider azure
+
 # Use Codex CLI ChatGPT subscription auth
 uvx mindroom config init --provider codex
 
@@ -231,6 +234,9 @@ uvx mindroom config init --provider vertexai_claude
 Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
 Use `--provider` for the model provider.
 Run `codex login` before starting MindRoom when using `--provider codex`.
+
+`--provider azure` uses Azure OpenAI through your deployment name.
+Set `models.default.id` to the Azure deployment name you created.
 
 `--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
 Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
@@ -250,6 +256,7 @@ $EDITOR ~/.mindroom/.env
 For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
+- `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI subscription auth: run `codex login`.
@@ -380,7 +387,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
 
 defaults:
   tools: [scheduler]
@@ -581,12 +588,13 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 ### Knowledge
 
-Manage file-backed RAG knowledge bases:
+Manage file-backed semantic or files-only knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `description`, `path`, and refresh-on-access `watch` settings
+- **Create/edit/delete knowledge bases** with `description`, `mode`, `path`, and refresh-on-access `watch` settings
+- **Choose semantic search or files-only access** depending on whether a base should build embeddings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
-- **Reindex** a knowledge base on demand
+- **Reindex or sync** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
 
@@ -595,8 +603,8 @@ Git-backed knowledge bases are managed from the dashboard, but file mutations st
 - The dashboard hides upload, dropzone, and per-file delete controls for Git-backed bases.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
-- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
-- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and reindex instead.
+- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases, then rebuilds semantic indexes or publishes files-mode source metadata.
+- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and sync or reindex instead.
 - Chat/runtime requests use last successfully published indexes and do not wait for indexing or Git sync.
 
 ### Credentials
@@ -867,6 +875,9 @@ Set the API key for each provider you use in `config.yaml`:
 | Variable | Provider |
 |----------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic (Claude) |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint |
+| `AZURE_OPENAI_API_VERSION` | Optional Azure OpenAI API version override |
 | `OPENAI_API_KEY` | OpenAI |
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
@@ -897,7 +908,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
-| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner` or `kubernetes`) | `static_runner` |
+| `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
 ### OpenAI-Compatible API
 
@@ -981,6 +992,11 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
+    memory_search:                 # Optional: Per-agent file-memory search override
+      mode: semantic               # keyword or semantic; omitted fields inherit memory.search
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
       - SOUL.md
@@ -1009,10 +1025,10 @@ agents:
 # Model configurations (at least a "default" model is recommended)
 models:
   default:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
-    provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
+    provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
     id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
@@ -1092,9 +1108,11 @@ defaults:
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
+Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
 Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
@@ -1136,6 +1154,11 @@ memory:
   file:                            # File-backed memory settings (when backend: file)
     path: null                     # Optional: fallback root for file memory paths
     max_entrypoint_lines: 200      # Default: 200 (max lines preloaded from MEMORY.md)
+  search:                          # File-backed memory search settings
+    mode: keyword                  # Default: keyword (keyword or semantic)
+    include:                       # Root-relative globs below the effective file-memory root
+      - memory/**/*.md             # Default: dated daily memory files
+    include_entrypoint: false      # Default: false (MEMORY.md is already preloaded)
   auto_flush:                      # Background memory auto-flush (file backend only)
     enabled: false                 # Default: false (enable background flush worker)
     flush_interval_seconds: 1800   # Default: 1800 (loop interval)
@@ -1167,6 +1190,9 @@ memory:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and operating procedures
+    # Default: semantic.
+    # Use files to skip embeddings and expose workspace files.
+    mode: semantic
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
@@ -1216,10 +1242,23 @@ authorization:
   aliases: {}                      # Map canonical Matrix user IDs to bridge aliases (see authorization docs)
   agent_reply_permissions: {}      # Per-agent/team/router (or '*') reply allowlists; supports globs like '*:example.com'
 
+# Managed room metadata (optional)
+# Keys are managed room aliases.
+# Rooms listed here are created even before agents or teams are assigned.
+rooms:
+  lobby:
+    display_name: Lobby
+    description: Main assistant room
+
 # Room-specific model overrides (optional)
-# Keys are room aliases, values are model names from the models section
+# Keys are room aliases, values are model names from the models section.
 # Example: room_models: {dev: sonnet, lobby: gpt4o}
 room_models: {}
+
+# Room-specific automatic thread summary model overrides (optional)
+# Keys are room aliases or raw Matrix room IDs, values are model names from the models section.
+# Example: room_thread_summary_models: {lobby: haiku}
+room_thread_summary_models: {}
 
 # Non-MindRoom bot accounts to exclude from multi-human detection (optional)
 # These accounts won't trigger the mention requirement in threads
@@ -1241,6 +1280,13 @@ matrix_delivery:
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+When `matrix_space.enabled` is `true`, MindRoom grants root Space admin power to concrete users in `authorization.global_users`.
+If `mindroom_user` is configured and its account exists, MindRoom grants that internal account root Space admin power too.
+Room-specific `authorization.room_permissions` users are invited only through their room permissions and do not become root Space admins unless they are also global users.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 `matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
 Leave it `false` to preserve Matrix E2EE device-trust checks.
@@ -1366,9 +1412,9 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
-- [Toolkits](https://docs.mindroom.chat/configuration/toolkits/) - Configure dynamic tool bundles that agents load on demand
 - [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Configure optional tools that agents load on demand
 - [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
 - [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
@@ -1388,6 +1434,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
+- `memory.search` controls file-backed `search_memories`, and `agents.<name>.memory_search` overrides it per agent
 - `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
@@ -1403,7 +1450,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 
 # Agent Configuration
 
-Agents are the core building blocks of MindRoom. Each agent is a specialized AI actor with specific capabilities.
+Agents are the core building blocks of MindRoom.
+Each agent is a specialized AI actor with specific capabilities.
 
 ## Basic Agent
 
@@ -1545,8 +1593,9 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
+| `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
+| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -1563,11 +1612,14 @@ agents:
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
+See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
+`agents.<name>.memory_search` can override `mode`, `include`, and `include_entrypoint` when the effective memory backend is `file`.
+Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
@@ -1725,11 +1777,20 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
+Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
+Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
+Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
+A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-The shared-only integrations require `worker_scope` unset or `shared`.
-That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
-Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
+That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
+Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+`gmail`, `google_calendar`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
 
@@ -1807,6 +1868,11 @@ agents:
     tools: [file, shell]
     worker_tools: [file, shell]
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     private:
       per: user
       root: mind_data
@@ -1927,9 +1993,11 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+Agents can delegate tasks to other agents using the `delegate_to` field.
+When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
+The delegated agent runs as a fresh, one-shot instance with no shared session or history.
+It executes the task and returns its response as the tool result.
 
 ```yaml
 agents:
@@ -1969,7 +2037,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for all agents.
+Any agent that omits a setting inherits the value from here.
 
 ```yaml
 defaults:
@@ -2024,6 +2093,8 @@ Models define the AI providers and model IDs used by agents.
 ## Supported Providers
 
 - `anthropic` - Claude models (Anthropic)
+- `bedrock_claude` - Anthropic Claude models on Amazon Bedrock
+- `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT subscription login
 - `google` or `gemini` - Google Gemini models
@@ -2062,10 +2133,21 @@ models:
     id: claude-haiku-4-5
     context_window: 200000
 
+  # Anthropic Claude on Amazon Bedrock
+  bedrock_opus:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.5
+
+  # Azure OpenAI
+  azure:
+    provider: azure
+    id: your-azure-openai-deployment
 
   # OpenAI via Codex CLI subscription
   codex:
@@ -2150,6 +2232,42 @@ Live testing against the Codex subscription endpoint reported `cached_tokens` on
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 
+## Azure OpenAI
+
+Use `provider: azure` when your model is deployed through Azure OpenAI.
+The `id` field should be your Azure OpenAI deployment name, not necessarily the upstream model name.
+MindRoom reads Azure OpenAI credentials and endpoint values from the config-adjacent `.env` file or exported environment.
+
+```yaml
+models:
+  default:
+    provider: azure
+    id: your-azure-openai-deployment
+```
+
+Azure deployment limits vary, so starter configs do not set `context_window` for Azure.
+Set `context_window` to the limit of your deployment when you know it.
+Set `AZURE_OPENAI_API_VERSION` only when you need to override Agno's default API version.
+For starter config generation, use `mindroom config init --provider azure`.
+
+## Amazon Bedrock Claude
+
+Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
+MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
+Use Opus when you want the highest Claude tier available through Bedrock.
+
+```yaml
+models:
+  default:
+    provider: bedrock_claude
+    id: anthropic.claude-opus-4-8
+    context_window: 1000000
+```
+
+MindRoom reads AWS settings from the config-adjacent `.env` file, exported environment, local AWS profile, or runtime IAM role.
+For starter config generation, use `mindroom config init --provider bedrock_claude`.
+
 ## Context Window
 
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
@@ -2196,12 +2314,28 @@ API keys are read from environment variables:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+# Optional, only when overriding Agno's default Azure OpenAI API version:
+# AZURE_OPENAI_API_VERSION=2024-10-21
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 GROQ_API_KEY=...
 OPENROUTER_API_KEY=...
 CEREBRAS_API_KEY=...
 DEEPSEEK_API_KEY=...
+```
+
+For Amazon Bedrock Claude, use standard AWS credential resolution:
+
+```bash
+AWS_REGION=us-east-1
+# Optional static credentials:
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...
+# Optional local profile instead:
+AWS_PROFILE=...
 ```
 
 For Ollama, you can also set:
@@ -2604,176 +2738,6 @@ When one human and one agent or team are already talking in a thread, continuing
 Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
 
-# Toolkit Configuration
-
-Dynamic toolkits are groups of tools that agents can load and unload at runtime.
-Define toolkit bundles in the top-level `toolkits` section and grant agents access via `allowed_toolkits` and `initial_toolkits`.
-
-See [Dynamic Toolkits](https://docs.mindroom.chat/tools/dynamic-toolkits/) for the user-facing guide covering how agents interact with toolkits at runtime.
-
-## Top-Level `toolkits` Section
-
-```yaml
-toolkits:
-  devops:
-    description: Docker, AWS, and GitHub tools for infrastructure work
-    tools:
-      - docker
-      - aws_lambda
-      - github
-  research:
-    description: Web search and academic paper tools
-    tools:
-      - duckduckgo
-      - arxiv
-      - wikipedia
-  data:
-    description: Data analysis and visualization
-    tools:
-      - pandas
-      - csv
-      - visualization
-      - sql:
-          db_url: postgresql://localhost/analytics
-```
-
-Each toolkit has:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `description` | string | `""` | Short description shown to agents when they call `list_toolkits()` |
-| `tools` | list | `[]` | Tool entries in the same format as agent `tools` (plain strings or single-key dicts with inline config overrides) |
-
-## Per-Agent Settings
-
-Agents opt into dynamic toolkits with two fields:
-
-```yaml
-agents:
-  assistant:
-    display_name: Assistant
-    role: A general-purpose helper
-    model: sonnet
-    tools: [file, shell]
-    allowed_toolkits: [devops, research, data]
-    initial_toolkits: [research]
-    rooms: [lobby]
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowed_toolkits` | list | `[]` | Toolkit names this agent may load at runtime. Each name must match a key in the top-level `toolkits` section |
-| `initial_toolkits` | list | `[]` | Toolkits loaded automatically when a new session starts. Must be a subset of `allowed_toolkits`. These are sticky — the agent cannot unload them |
-
-When `allowed_toolkits` is non-empty, MindRoom automatically adds the `dynamic_tools` meta-toolkit to the agent.
-You do not need to add `dynamic_tools` to the agent's `tools` list.
-
-## Validation Rules
-
-MindRoom validates toolkit configuration at startup and rejects invalid configs with clear error messages.
-
-### Reference Validation
-
-- Every entry in `allowed_toolkits` and `initial_toolkits` must match a key in the top-level `toolkits` section.
-- `initial_toolkits` must be a subset of `allowed_toolkits`.
-
-### Reserved Tools
-
-Toolkit definitions cannot include these reserved control-plane tools:
-
-- `delegate`
-- `dynamic_tools`
-- `self_config`
-
-These tools are managed by MindRoom internally and injected automatically when needed.
-
-### Tool Registry
-
-All tools listed in a toolkit must resolve through the normal tool registry.
-Plugin-provided tools work as long as they are registered before config validation runs.
-
-### Duplicate Tools
-
-Each tool name must appear at most once within a single toolkit definition.
-Duplicate entries within one toolkit are rejected.
-
-### Scope Compatibility
-
-Some integrations are restricted to shared or unscoped execution (see [Worker Routing](https://docs.mindroom.chat/configuration/agents/#worker-routing)).
-If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit containing a shared-only integration, MindRoom rejects the config at startup.
-
-The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
-
-`spotify`, `homeassistant`
-
-## Conflict Detection
-
-When an agent loads a toolkit at runtime, MindRoom checks for tool name collisions.
-If a toolkit tool is already present in the agent's active set (from static tools or another loaded toolkit) with different config overrides, the load is rejected with a conflict error.
-Identical duplicate tools are silently deduplicated.
-
-## Full Example
-
-```yaml
-models:
-  default:
-    provider: anthropic
-    id: claude-sonnet-4-6
-
-toolkits:
-  devops:
-    description: Infrastructure and deployment tools
-    tools:
-      - docker
-      - aws_lambda
-      - github
-  research:
-    description: Web search and academic sources
-    tools:
-      - duckduckgo
-      - arxiv
-      - wikipedia
-  data:
-    description: Data analysis and visualization
-    tools:
-      - pandas
-      - csv
-      - visualization
-
-agents:
-  assistant:
-    display_name: Assistant
-    role: A versatile helper that loads tools on demand
-    model: default
-    tools:
-      - file
-      - shell
-    allowed_toolkits: [devops, research, data]
-    initial_toolkits: [research]
-    rooms: [lobby]
-
-  researcher:
-    display_name: Researcher
-    role: Deep research specialist
-    model: default
-    tools:
-      - duckduckgo
-      - arxiv
-    allowed_toolkits: [data]
-    rooms: [lobby]
-
-defaults:
-  tools:
-    - scheduler
-```
-
-In this example:
-
-- `assistant` starts with `file`, `shell`, `scheduler` (from defaults), and the `research` toolkit tools.
-  It can load `devops` or `data` on demand, and cannot unload `research` because it is in `initial_toolkits`.
-- `researcher` starts with `duckduckgo`, `arxiv`, and `scheduler`.
-  It can load `data` on demand for analysis work.
-
 # Tools
 
 MindRoom includes 100+ built-in tools and presets that agents can use to work with files, services, external APIs, and Matrix-native workflows.
@@ -2827,6 +2791,7 @@ See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and nami
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 
@@ -2847,7 +2812,14 @@ Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use 
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
 `thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only.
-`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag. Both can be combined. Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+Both can be combined.
+Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+`include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+The response includes `include_untagged: bool` and `truncated: bool`.
+Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
 `thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
@@ -2861,7 +2833,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+The current shared-only integrations are `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+OAuth-backed remote MCP tools are requester-scoped and can be used with isolating worker scopes.
 
 ## Automatic Dependency Installation
 
@@ -2877,116 +2850,49 @@ Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable that behavior.
 - [Scheduling](https://docs.mindroom.chat/scheduling/) - Chat command scheduling and task behavior.
 - [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) - `openclaw_compat` preset and workspace portability.
 
-# Dynamic Toolkits
+# Dynamic Tools
 
-Dynamic toolkits let agents load and unload groups of tools at runtime without restarting MindRoom.
-This reduces context overhead by keeping rarely used tools out of the agent's active tool set until they are actually needed.
+Dynamic tools let an agent keep rarely used tools out of the provider-visible schema list until it needs them.
+The loading unit is one authored entry in the agent's `tools:` list.
+MindRoom performs the schema gating in its runtime, so the feature works across model providers.
 
-## Why Dynamic Toolkits
+## Configuration
 
-Every tool in an agent's active set adds to the system prompt and consumes context window tokens.
-An agent with 20+ tools pays that cost on every request, even when most tools go unused.
-Dynamic toolkits solve this by letting the agent start with a minimal tool set and pull in additional capabilities on demand.
-
-For example, a general-purpose assistant might start with `file` and `shell`, then load a `devops` toolkit (containing `docker`, `aws_lambda`, `github`) only when the user asks about infrastructure.
-
-## The Three Meta-Tools
-
-When an agent has `allowed_toolkits` configured, MindRoom automatically adds a `dynamic_tools` toolkit with three tools:
-
-### `list_toolkits()`
-
-Returns all allowed toolkits for the agent with their descriptions, tool names, and current loaded state.
-The agent calls this when it is unsure which toolkit contains a needed capability.
-
-### `load_tools(toolkit)`
-
-Loads one allowed toolkit by name.
-The tools in that toolkit become available on the **next request** in the same session, not later in the current model run.
-
-### `unload_tools(toolkit)`
-
-Removes one loaded toolkit by name.
-Like `load_tools`, the change takes effect on the **next request** in the same session.
-Toolkits listed in `initial_toolkits` are sticky and cannot be unloaded.
-
-## Next-Request Activation
-
-Tool changes do not take effect immediately.
-When an agent calls `load_tools("devops")`, the devops tools are not available in the same response — they appear on the next message in the same conversation thread.
-This is a fundamental design constraint: the model's tool list is fixed for the duration of one request.
-
-The agent receives a confirmation message like:
-
-```
-Toolkit 'devops' will be available on the next request in this session.
-```
-
-## Session State
-
-Dynamic toolkit state is persisted per agent per session in the agent's SQLite session database.
-When a session starts, `initial_toolkits` are loaded automatically.
-On subsequent requests, MindRoom reads the persisted loaded-toolkit set from the session and merges the corresponding tools into the agent's runtime tool list.
-
-If the config changes between requests (a toolkit is removed or an agent's `allowed_toolkits` is modified), MindRoom sanitizes the persisted state and drops any toolkits that are no longer valid.
-
-## Conflict Detection
-
-When loading a toolkit, MindRoom checks for tool name collisions with the agent's existing tools.
-If a toolkit contains a tool that is already active (from the agent's static tools or another loaded toolkit) and the two definitions have different config overrides, the load is rejected with a conflict error.
-Identical duplicate tools are allowed — the existing definition is kept.
-
-## V1 Limitation: Per-Agent State
-
-In V1, dynamic toolkit state is per-agent, not shared across team members.
-When an agent participates in a team conversation, each team member manages its own loaded toolkits independently.
-Loading a toolkit for one member does not load it for the others.
-
-## Example: Agent Using Dynamic Toolkits
-
-Given this configuration:
+Add `defer: true` to a tool entry to make it lazy.
+Add `initial: true` with `defer: true` when the tool should start loaded for every new session and remain sticky.
+The `initial` flag is rejected unless `defer` is also true.
+Lazy loading is per-agent, so `defaults.tools` does not accept `defer` or `initial`.
+Tool presets such as `openclaw_compat` also do not accept `defer` or `initial`; configure the individual member tools directly when they need lazy loading.
 
 ```yaml
-toolkits:
-  devops:
-    description: Docker, AWS, and GitHub tools for infrastructure work
-    tools: [docker, aws_lambda, github]
-  research:
-    description: Web search and academic paper tools
-    tools: [duckduckgo, arxiv, wikipedia]
-
 agents:
   assistant:
     display_name: Assistant
-    role: A general-purpose helper
-    model: sonnet
-    tools: [file, shell]
-    allowed_toolkits: [devops, research]
-    initial_toolkits: [research]
-    rooms: [lobby]
+    role: Help in chat
+    tools:
+      - shell
+      - coding: {defer: true, initial: true, restrict_to_base_dir: false}
+      - searxng: {defer: true, host: https://search.example.test, fixed_max_results: 10}
+      - name: serper
+        defer: true
+        overrides: {num_results: 10}
 ```
 
-The assistant starts each new session with `file`, `shell`, and the `research` tools (`duckduckgo`, `arxiv`, `wikipedia`) already loaded.
-The `research` toolkit is sticky because it is in `initial_toolkits` and cannot be unloaded.
+No flags means the tool is eager and appears in every request.
+`defer: true` hides the tool schema until the agent loads that authored tool for the current session.
+`defer: true, initial: true` loads the tool at session start and prevents unloading.
 
-A typical conversation might look like:
+## Runtime Tools
 
-1. **User**: "What papers exist on transformer architectures?"
-   - Agent uses `arxiv` (already loaded via `research` toolkit) to search.
+When an agent has at least one deferred tool and a stable session id, MindRoom injects the `dynamic_tools` manager.
+The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
+Search is plain keyword and exact-name lookup only.
+Loading or unloading takes effect on the next request in the same session.
 
-2. **User**: "Now deploy the demo app to AWS."
-   - Agent calls `list_toolkits()` to check available toolkits.
-   - Agent calls `load_tools("devops")` to load infrastructure tools.
-   - Agent responds: "I've loaded the devops toolkit. I'll have Docker, AWS Lambda, and GitHub tools available on your next message."
+## State Scope
 
-3. **User**: "Go ahead."
-   - Agent now has `docker`, `aws_lambda`, and `github` available and proceeds with the deployment.
-
-## See Also
-
-- [Toolkit Configuration](https://docs.mindroom.chat/configuration/toolkits/) — config reference for the `toolkits` section and per-agent settings
-- [Tools Overview](https://docs.mindroom.chat/tools/) — enabling and configuring tools
-- [Built-in Tools](https://docs.mindroom.chat/tools/builtin/) — complete list of available tools
+Loaded state is keyed by the exact `(agent, session_id)` pair.
+Two agents in the same Matrix thread do not share loaded tools.
 
 # Execution & Coding
 
@@ -3124,12 +3030,14 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 ## [`shell`]
 
-`shell` runs argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
+`shell` runs command strings or argv-style commands and is MindRoom's most configurable execution tool for sandboxed command-line work.
 
 ### What It Does
 
 `shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
-`run_shell_command()` expects a list of arguments, not a shell-parsed string.
+`run_shell_command()` accepts either a natural shell command string or a list of argv strings.
+Plain command strings and single-item argv lists that look shell-like run through `bash -lc`.
+Explicit multi-item argv lists run directly without shell parsing.
 If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
@@ -3165,6 +3073,7 @@ agents:
 ```
 
 ```python
+run_shell_command("git status --short", tail=50)
 run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
 check_shell_command("shell:abcd1234")
@@ -3175,6 +3084,7 @@ kill_shell_command("shell:abcd1234")
 
 - `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
   MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
+- Use explicit argv lists for commands that need exact argument boundaries.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -4825,6 +4735,9 @@ read_url("https://docs.mindroom.chat")
 #### Notes
 
 - `website` is the simplest default when you just need to read one page.
+- Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
+- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
+- Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
 - The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
 - If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
 
@@ -6603,6 +6516,7 @@ agents:
 tag_thread("blocked")
 untag_thread("blocked")
 list_thread_tags(thread_id="$threadRootEvent")
+list_thread_tags(exclude_tag="resolved", include_untagged=True)
 ```
 
 ### Notes
@@ -6610,6 +6524,14 @@ list_thread_tags(thread_id="$threadRootEvent")
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
+- `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+- Both filters can be combined.
+- For full filter semantics, see [`tools`](https://docs.mindroom.chat/tools/).
+- `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+- `include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+- It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+- The response includes `include_untagged: bool` and `truncated: bool`.
+- Callers must check `truncated` before claiming the unresolved list is complete.
 
 ## [`thread_summary`]
 
@@ -6755,6 +6677,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 
@@ -8026,10 +7949,15 @@ The tool always uses the current agent's configured MindRoom memory backend, so 
 Agents with `memory_backend: none` do not receive this tool.
 Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
+For file-backed memory, `search_memories()` follows `memory.search.mode`.
+Keyword mode scans markdown files directly.
+Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Result metadata includes `search_mode` so callers can tell which path produced the result.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
+Use `memory.search` or `agents.<name>.memory_search` to configure file-backed search behavior.
 
 ### Example
 
@@ -8464,7 +8392,8 @@ This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom 
 
 ### Configuration
 
-This preset has no inline configuration fields.
+This preset has no inline configuration fields and cannot use `defer` or `initial`.
+Configure individual member tools directly when they need lazy loading.
 
 ### Example
 
@@ -9157,6 +9086,7 @@ MindRoom adds important runtime behavior here by loading scoped credentials, enf
 | --- | --- | --- | --- | --- |
 | `HOMEASSISTANT_URL` | `url` | `yes` | `null` | Dashboard field label for the Home Assistant base URL. The dedicated integration flow stores the normalized value as `instance_url`. |
 | `HOMEASSISTANT_TOKEN` | `password` | `yes` | `null` | Dashboard field label for a long-lived access token. OAuth setup stores `access_token` and `refresh_token` instead. |
+| `HOMEASSISTANT_ALLOW_PRIVATE_URL` | `boolean` | `no` | `false` | Allows a trusted self-hosted Home Assistant URL on a private, local, or loopback network. The dedicated integration flow stores this as `allow_private_url`. |
 
 ### Example
 
@@ -9183,6 +9113,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 - `homeassistant`, `gmail`, `google_calendar`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
+- Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
 - The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.
 
 ## Related Docs
@@ -9309,6 +9240,8 @@ For `streamable-http` servers, `url` is required.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
+Static `headers` are process-global and shared by every requester.
+Use the OAuth `auth` block for remote MCP servers that need a different bearer token per requester.
 
 ## Per-Server Options
 
@@ -9322,6 +9255,7 @@ MindRoom resolves those placeholders from the current runtime environment when i
 | `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Optional remote transport headers; supports `${ENV_VAR}` placeholders |
+| `auth` | object | `null` | Optional OAuth configuration for requester-scoped remote MCP access |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names |
 | `include_tools` | list[string] | `[]` | Optional allowlist of remote tool names to expose |
 | `exclude_tools` | list[string] | `[]` | Optional denylist of remote tool names to hide |
@@ -9374,9 +9308,87 @@ agents:
 These per-agent overrides filter the already discovered catalog for that agent assignment.
 They are useful when one server exposes many tools but one agent should see only a focused subset.
 
-MCP integrations are treated as shared-only integrations.
-Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use `mcp_<server_id>` tools.
-Use unscoped execution or `worker_scope: shared` instead.
+Non-OAuth MCP integrations are treated as shared-only integrations.
+Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use non-OAuth `mcp_<server_id>` tools.
+Use unscoped execution or `worker_scope: shared` for unauthenticated MCP servers and static-header MCP servers.
+OAuth-backed remote MCP servers are the exception because MindRoom loads a scoped OAuth token for the current requester at tool-call time.
+
+## OAuth-Backed Remote MCP
+
+Use `auth.type: oauth` for a remote MCP server that requires a requester-owned OAuth bearer token.
+OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
+
+```yaml
+mcp_servers:
+  example:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    tool_prefix: example
+    auth:
+      type: oauth
+      provider_id: mcp_example
+      display_name: Example MCP
+      resource: https://mcp.example.com/mcp
+      discovery: auto
+      token_endpoint_auth_method: none
+      pkce_code_challenge_method: S256
+      dynamic_client_registration: true
+      scopes: []
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: Use requester-scoped MCP tools
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - mcp_example
+```
+
+MindRoom registers a generated OAuth provider for the server.
+If `provider_id` is omitted, the provider ID defaults to `mcp_<server_id>`.
+When the provider ID starts with `mcp_`, OAuth tokens are stored under `<provider_id>_oauth`, and OAuth client configuration is read from `<provider_id>_oauth_client` unless you specify `client_config_services` or `shared_client_config_services`.
+When a custom provider ID does not start with `mcp_`, MindRoom prefixes `mcp_` for the generated credential service names so the tokens remain classified as MCP-owned runtime credentials.
+
+OAuth-backed MCP servers always expose a stable bridge surface:
+
+- `<prefix>_connection_status`
+- `<prefix>_list_tools`
+- `<prefix>_call_tool`
+
+The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-specific tool catalog.
+When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
+After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
+After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
+
+`discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
+MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
+It then reads the advertised authorization server and fetches OAuth authorization-server metadata.
+The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
+
+If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
+The generated client registration is stored in the generated OAuth client config service and reused for later users.
+Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
+Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
+
+Use `discovery: manual` when the provider does not publish metadata or when you want to pin endpoints explicitly:
+
+```yaml
+mcp_servers:
+  example_manual:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    auth:
+      type: oauth
+      discovery: manual
+      authorization_url: https://mcp.example.com/oauth/authorize
+      token_url: https://mcp.example.com/oauth/token
+      registration_url: https://mcp.example.com/oauth/register
+      token_endpoint_auth_method: none
+```
+
+OAuth discovery requires HTTPS by default and does not follow redirects.
+For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs, and set `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
 
 ## Tool Naming
 
@@ -9562,7 +9574,9 @@ If the catalog changed, MindRoom restarts the agents and teams that reference th
 
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
-- MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
+- Non-OAuth MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
+- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and can be used with isolating worker scopes.
+- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
 
@@ -9635,7 +9649,7 @@ agents:
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write/update the relevant file directly.
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external/public actions and destructive operations.
-      - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
+      - Before answering prior-history questions, search memory files first with `search_memories`.
 
     context_files:
       - SOUL.md
@@ -9645,23 +9659,22 @@ agents:
       - TOOLS.md
       - HEARTBEAT.md
 
-    knowledge_bases: [openclaw_memory]
-
     tools:
       - openclaw_compat
+      - memory
       - python
 
     skills:
       - transcribe
 
-knowledge_bases:
-  openclaw_memory:
-    path: ${MINDROOM_STORAGE_PATH}/agents/openclaw/workspace/memory
-    watch: false
-
 memory:
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
   auto_flush:
     enabled: true
 ```
@@ -9669,10 +9682,9 @@ memory:
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
-Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` read the same canonical workspace.
-This example sets `watch: false`, so direct external file edits require explicit reindex, while dashboard/API mutations still schedule refresh after a successful mutation.
-For shared local non-Git knowledge bases, `watch: true` still starts a live filesystem watcher.
-If `openclaw_memory` is Git-backed, update the repository and reindex instead of using dashboard upload or delete actions.
+Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
+Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
 
@@ -9703,8 +9715,8 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory_backend: file` on an individual agent to override the global default
 - `memory_backend: none` on an individual agent to keep that agent stateless
 - agents that use file memory store it under `agents/<name>/workspace/`, not under the shared global `memory.file.path` tree
-- `context_files` and OpenClaw-style knowledge paths should point into that same canonical workspace if you want one consistent file-first workflow
-- optional `knowledge_bases` for semantic recall over arbitrary workspace folders
+- `context_files` should point into that same canonical workspace if you want one consistent file-first workflow
+- optional `knowledge_bases` for semantic recall over arbitrary non-memory workspace folders
 
 Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical workspace layout and `memory.auto_flush.enabled: true`.
 
@@ -11010,6 +11022,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
+    origin: TurnOrigin,
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
     dispatch_policy_source_kind: str | None = None,
@@ -11018,9 +11031,31 @@ MessageEnvelope(
 # target.thread_id preserves the raw inbound thread ID.
 # target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
 # target.session_id is the canonical persistence key for the conversation.
+# origin is keyword-only in the dataclass constructor and is required.
+# Hook handlers normally inspect ctx.envelope.origin rather than constructing MessageEnvelope themselves.
+# Internal code and tests that construct MessageEnvelope must pass a TurnOrigin built by MindRoom's origin classifier.
 # dispatch_policy_source_kind is usually None.
 # When it is "active_thread_follow_up", source_kind still preserves the original modality such as "message" or "voice".
 # ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND and TRUSTED_INTERNAL_RELAY_SOURCE_KIND are exported from mindroom.hooks for comparisons.
+
+TurnOrigin(
+    transport_sender_id: str,
+    requester_id: str,
+    sender_entity_name: str | None,
+    requester_entity_name: str | None,
+    sender_kind: SenderKind,
+    requester_kind: SenderKind,
+    intent: TurnIntent,
+    source_kind: str,
+    trust: TurnTrust,
+)
+
+# TurnOrigin, TurnIntent, SenderKind, and TurnTrust are exported from mindroom.hooks for type comparisons.
+# sender_kind and requester_kind are "user" or "managed_entity".
+# intent is "user_message", "managed_message", "router_handoff", "router_notice", "scheduled_fire", "hook_message", "hook_dispatch", or "trusted_internal_relay".
+# trust is "external", "trusted_internal", or "trusted_user_relay".
+# origin.may_answer_interactive_prompt is true only for human-requested user messages and trusted human relays.
+# origin.may_dispatch_without_mention is true only for the synthetic turns that explicitly bypass the managed-sender mention gate.
 
 ResponseDraft(
     response_text: str,
@@ -11259,7 +11294,8 @@ Client config services are local-only deployment configuration and cannot be mir
 Generic credential responses redact `client_secret` for client config services.
 Generic credential saves preserve the existing `client_secret` only when the saved `client_id` is unchanged.
 Changing `client_id` requires submitting the matching new `client_secret`.
-First-time client config saves require both fields to be non-empty.
+First-time confidential client config saves require both fields to be non-empty.
+Public OAuth clients that use `token_endpoint_auth_method: none` require `client_id` and may omit `client_secret`.
 Client config services cannot be copied through the generic copy route.
 Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
 
@@ -11276,17 +11312,27 @@ Each provider has minimal service-specific scopes, stores OAuth tokens under its
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
 The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.
 
+OAuth-backed remote MCP servers also use the generic framework.
+MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth` config entry and exposes it through the same `/api/oauth/{provider}/*` routes.
+Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
+Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
+These token services stay in the primary runtime credential store.
+The matching MCP toolkit loads the token for the current requester before opening the remote MCP transport, so the transport sends a requester-scoped bearer token instead of a process-global static header.
+Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
+Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
+If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
+
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
-Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
+Knowledge bases give your agents access to your own documents through semantic RAG or direct file-tool search.
+Drop files into a folder, point a knowledge base at it, and choose whether MindRoom should index it or let workspace-aware agents inspect the files themselves.
 
 ## How It Works
 
 1. You configure a knowledge base pointing to a folder of documents
-2. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
-3. Agents assigned to that knowledge base get a search tool that queries the indexed documents
-4. When the agent uses the tool, relevant document chunks are included in its context
+2. In `semantic` mode, MindRoom indexes the files into a vector database (ChromaDB) using an embedder
+3. Agents assigned to a semantic knowledge base get a search tool that queries the indexed documents
+4. In `files` mode, MindRoom skips embeddings and exposes the source under `knowledge/<base_id>` when that source is reachable from the agent workspace
 
 ```
 Indexing (scheduled refresh):
@@ -11314,6 +11360,7 @@ Add a knowledge base and assign it to an agent:
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and internal operating procedures
+    mode: semantic
     path: ./knowledge_docs
     watch: false
     chunk_size: 5000
@@ -11333,6 +11380,34 @@ When `watch: false`, direct external file edits require explicit reindex, while 
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
 
+### Files-Only Knowledge Base
+
+Use `mode: files` when you want agents to search, grep, list, and read the source files directly without paying for embeddings.
+
+```yaml
+knowledge_bases:
+  source_docs:
+    description: Source documents the agent should inspect directly
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/assistant/workspace/source_docs
+
+agents:
+  assistant:
+    display_name: Assistant
+    role: A helpful assistant with direct file access to source docs
+    memory_backend: file
+    tools: [file, shell]
+    knowledge_bases: [source_docs]
+```
+
+File mode does not create a ChromaDB collection.
+It does not call the embedder.
+It does not expose `search_knowledge_base` for that base.
+`memory_backend: file` creates the shared agent workspace at `${MINDROOM_STORAGE_PATH}/agents/assistant/workspace`.
+Because the example source path is inside that workspace, MindRoom advertises it as `knowledge/source_docs` and the agent can use normal file-aware tools to inspect it.
+Targets outside the workspace are not advertised for direct file-tool access because the default tools enforce workspace containment after symlinks are resolved.
+Git-backed file-mode bases still sync during explicit refreshes or Git polling, but refreshes publish only lightweight source metadata instead of a vector index.
+
 ## Configuration
 
 ### Basic Knowledge Base
@@ -11341,6 +11416,7 @@ Use a non-empty single path component such as `docs` or `company_docs`, not `""`
 knowledge_bases:
   my_docs:
     description: Product documentation, support notes, and internal operating procedures
+    mode: semantic                    # "semantic" builds a vector search index; "files" skips embeddings
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000                  # Max characters per chunk
@@ -11349,7 +11425,8 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `description` | string | `""` | Short description of what the knowledge base contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
+| `description` | string | `""` | Short description of what the knowledge base contains for semantic search metadata and file-mode workspace-path instructions |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
@@ -11357,7 +11434,8 @@ knowledge_bases:
 | `git` | object | `null` | Optional Git repository sync settings |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
-If chunking is too large, indexing retries will fail with embedder 500 errors.
+`chunk_size` and `chunk_overlap` only affect semantic mode.
+If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
 
 ### Private Agent Knowledge
 
@@ -11452,7 +11530,7 @@ agents:
     knowledge_bases: [legal]
 ```
 
-When an agent has multiple knowledge bases, results are interleaved fairly so no single base dominates the top results.
+When an agent has multiple semantic knowledge bases, results are interleaved fairly so no single base dominates the top results.
 
 ## Git-Backed Knowledge Bases
 
@@ -11499,10 +11577,11 @@ Bundled container images already include it.
 
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
-- Explicit dashboard/API reindex runs Git sync first for Git-backed bases and then rebuilds a candidate index.
+- Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
+- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
-- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and reindex instead.
+- Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 
 ### File Filtering with Patterns
@@ -11579,7 +11658,8 @@ Accepted credential fields:
 
 ## Embedder Configuration
 
-Knowledge bases use the same embedder configured in the `memory` section:
+Semantic knowledge bases use the same embedder configured in the `memory` section.
+File-mode knowledge bases do not use an embedder.
 
 ```yaml
 memory:
@@ -11599,10 +11679,11 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
-Each successful refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
+Semantic knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
+Each successful semantic refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
 The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path.
 For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
+File-mode refreshes may write lightweight source metadata, but local file-only bases do not need a vector database.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -11611,10 +11692,11 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 The web dashboard provides a Knowledge tab for managing knowledge bases without editing YAML:
 
 - Create, edit, and delete knowledge bases
+- Choose semantic search or files-only access
 - Configure chunk size and overlap per knowledge base
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
-- Trigger a full reindex on demand
+- Trigger a full reindex or Git sync on demand
 - Monitor indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 
@@ -11764,11 +11846,25 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: keyword
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 ```
 
 `memory.file.path` is an optional fallback root for file-memory paths.
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
+`memory.search` controls how `search_memories` reads file-backed agent memory.
+`mode: keyword` scans markdown files directly.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
+`include` contains root-relative glob patterns below the effective file-memory root.
+The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+Semantic mode applies to the agent's own file-memory scope.
+Team-visible file memory is still keyword searched.
 
 Per-agent override example:
 
@@ -11781,7 +11877,14 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
 ```
+
+Omitted `memory_search` fields inherit from `memory.search`.
 
 For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
 For requester-private agents, file memory lives directly under the effective private root.
@@ -11866,6 +11969,7 @@ The Dashboard **Memory** page supports:
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `max_entrypoint_lines`)
+- search settings (`mode`, `include`, `include_entrypoint`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)
@@ -12517,7 +12621,7 @@ Changes are validated against the Pydantic config schema before applying.
 
 ```
 !config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-5.4
+!config set models.default.id gpt-5.5
 !config set defaults.markdown false
 !config set timezone America/New_York
 ```
@@ -13189,6 +13293,13 @@ matrix_space:
 
 When `enabled` is `true`, MindRoom creates a Space on startup and adds all managed rooms as children.
 Rooms created later (by agents joining new rooms or config changes) are automatically added to the Space.
+MindRoom grants root Space admin power to concrete Matrix users in `authorization.global_users`.
+MindRoom also grants root Space admin power to the configured `mindroom_user` when that internal account exists.
+Room-specific users in `authorization.room_permissions` are not root Space admins unless they are also listed in `authorization.global_users`.
+This lets owners add, remove, and reorder Space children in Matrix clients while keeping room-specific collaborators scoped to their rooms.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
 The `name` field controls the Space's display name and can be changed at any time.
@@ -13652,6 +13763,10 @@ matrix_space:
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
+Root Space admin power is granted before child links are written.
+The grant set is the concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` when that internal account exists.
+MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from `authorization.global_users`.
+Room-scoped authorization entries are intentionally not used for root Space admin grants.
 
 ## Delivery Policy
 
@@ -13852,6 +13967,7 @@ MindRoom can be deployed in various ways depending on your needs.
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Simplest setup: run only `uvx mindroom run` locally |
+| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while `shell`, `file`, and `python` execute in isolated Docker workers |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
@@ -13891,6 +14007,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
+If you want worker-routed tools, especially `shell`, `file`, and `python`, to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ### Full Stack (recommended)
 
@@ -14034,6 +14151,17 @@ MindRoom then:
 2. Creates/updates configured agent Matrix users
 3. Joins/creates configured rooms
 4. Starts processing messages
+
+## Optional: Docker worker isolation
+
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+That especially includes `shell`, `file`, and `python`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
+Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
+They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools even though the raw file is not mounted.
+Use credential leases or `MINDROOM_DOCKER_WORKER_ENV_JSON` for worker-specific secrets.
+Use `worker_scope: shared` when you want one persistent container per agent.
+Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
 
 ## Credential Model (Important)
 
@@ -14829,9 +14957,10 @@ Compromising one dedicated worker token does not authorize requests to another d
 For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
 
-MindRoom currently ships two worker backend shapes:
+MindRoom currently ships three worker backend shapes:
 
 - `static_runner`: one shared sandbox-runner process, usually a sidecar container or a local HTTP service.
+- `docker`: dedicated worker containers created on demand from the primary runtime, with one logical worker per worker key.
 - `kubernetes`: dedicated worker pods created on demand from the primary runtime, with one logical worker per worker key.
 
 ## Where Agent Data Lives
@@ -15010,13 +15139,81 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 >   /app/run-sandbox-runner.sh
 > ```
 
+### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
+
+Use this when you want the primary MindRoom runtime on the host, but you want worker-routed tools to execute in dedicated Docker workers.
+That most commonly means `shell`, `file`, and `python`, but other worker-safe tools can also be routed through workers when they only need worker state or config-referenced filesystem assets.
+The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
+This is the simplest way to get one persistent container per agent without running Kubernetes.
+MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
+MindRoom also sanitizes the projected worker `config.yaml`, removing sensitive config keys and authorization headers from the worker-visible snapshot before it is written.
+Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
+`worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
+Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
+MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools unless you remove them or override `execution_env`.
+If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
+
+MindRoom auto-installs the optional `docker` extra the first time this backend is used.
+If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it yourself with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
+If you are testing unreleased code from a source checkout, start MindRoom from that checkout instead of the published PyPI build.
+Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`.
+Use plain `uvx mindroom run` only after the version you want is published on PyPI.
+When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
+
+```bash
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
+```
+
+Set the backend environment in your shell or `.env`:
+
+```bash
+export MINDROOM_WORKER_BACKEND=docker
+export MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+export MINDROOM_SANDBOX_PROXY_TOKEN=replace-me-with-a-long-random-token
+
+# Optional but useful for local debugging.
+export MINDROOM_DOCKER_WORKER_NAME_PREFIX=mindroom-worker
+export MINDROOM_DOCKER_WORKER_PUBLISH_HOST=127.0.0.1
+export MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS=60
+```
+
+For released versions, you can point `MINDROOM_DOCKER_WORKER_IMAGE` at the matching published image tag instead.
+
+Then route the tools you want into workers and choose a worker scope:
+
+```yaml
+defaults:
+  worker_tools: [shell, file, python]
+  worker_scope: shared
+
+agents:
+  code:
+    tools: [shell, file, python]
+
+  research:
+    tools: [shell, file, python]
+```
+
+`worker_scope: shared` is the setting to use when you want one persistent Docker container per agent.
+`worker_scope: user_agent` creates one container per requester and agent.
+`worker_scope: user` does not give you per-agent isolation, because all agents for one requester share the same worker state.
+
+You can verify the setup by asking two different agents to run `hostname` and then checking Docker:
+
+```bash
+docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
+```
+
+In a live validation, separate `code` and `research` requests produced separate worker containers, and a second `code` request reused the original `code` container.
+
 ## Environment variable reference
 
 ### Primary MindRoom runtime (proxy client)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner` or `kubernetes` | `static_runner` |
+| `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — proxy disabled for `static_runner`)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
 | `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses proxy tools list)_ |
@@ -15026,9 +15223,27 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 
-When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints through the Kubernetes backend and does not use `MINDROOM_SANDBOX_PROXY_URL`.
+When `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints dynamically and does not use `MINDROOM_SANDBOX_PROXY_URL`.
 The Helm chart sets the Kubernetes backend environment variables automatically.
 If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
+
+### Dedicated Docker worker backend
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_DOCKER_WORKER_IMAGE` | Container image used for dedicated Docker workers | _(required when `MINDROOM_WORKER_BACKEND=docker`)_ |
+| `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the worker container | `8766` |
+| `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
+| `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the worker container | `/app/config-host/config.yaml` |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, masks `.env` inside the container, and removes sensitive config values plus auth headers from the worker-visible `config.yaml` | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle timeout before a worker container is eligible for cleanup | `1800` |
+| `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup | `60` |
+| `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |
+| `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` | Host interface used when publishing worker ports | `127.0.0.1` |
+| `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST` | Hostname the primary runtime uses to call published worker ports | Same value as `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` |
+| `MINDROOM_DOCKER_WORKER_USER` | Container user for workers, or empty to use the image default | Current host uid:gid on POSIX, image default otherwise |
+| `MINDROOM_DOCKER_WORKER_ENV_JSON` | JSON object of extra env vars injected into each worker container | `{}` |
+| `MINDROOM_DOCKER_WORKER_LABELS_JSON` | JSON object of extra Docker labels applied to each worker container | `{}` |
 
 ### Sandbox runner
 
@@ -15065,6 +15280,46 @@ If you don't want a value to reach shell commands, don't match it with `extra_en
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`.
 This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates.
 That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
+
+## Brokered worker egress
+
+For tools that should call external APIs without receiving the real upstream credential, configure a worker egress broker.
+MindRoom injects proxy and CA env into worker-routed `shell` and `python` requests; the worker process then uses the proxy for HTTP(S) traffic.
+This does not inspect command lines or match API URLs, so URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the broker.
+
+Example:
+
+```yaml
+worker_egress_brokers:
+  agent_vault:
+    proxy_url: http://agent-vault-bridge-adapter:18080
+    ca_bundle: /etc/ssl/agent-vault-ca.pem
+    no_proxy: localhost,127.0.0.1,.svc
+
+defaults:
+  worker_tools: [shell, python]
+  worker_scope: user_agent
+  worker_egress_broker: agent_vault
+
+agents:
+  code:
+    display_name: Code
+    tools: [shell, python]
+```
+
+For each brokered worker request MindRoom adds:
+
+- `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy`
+- `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `SSL_CERT_FILE` when `ca_bundle` is set
+- `NO_PROXY` and `no_proxy` when `no_proxy` is set
+
+Agent-level `worker_egress_broker` overrides `defaults.worker_egress_broker`.
+Set `worker_egress_broker: false` on an agent to disable an inherited broker.
+Unknown broker names fail config validation when the config is loaded.
+
+Broker profiles are backend-neutral: the same config works for Docker/static runners and dedicated Kubernetes workers as long as the worker can reach `proxy_url` and read the configured CA path.
+The proxy should be an adapter or broker that owns the real credential or broker session.
+Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
 
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
@@ -15127,7 +15382,9 @@ For an example, see `docs/tools/execution-and-coding.md`.
 
 ## Credential leases
 
-Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
+Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
+Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
+That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
 
 Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
 
@@ -15135,7 +15392,9 @@ Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_J
 export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
 ```
 
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls. Credentials are never stored in the runner — each lease is consumed on use and expires after the configured TTL.
+This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
+Credentials are never stored in the runner.
+Each lease is consumed on use and expires after the configured TTL.
 
 ## Security considerations
 
@@ -15165,9 +15424,9 @@ Credential leases are single-use: once consumed by an `/execute` call, the lease
 
 ## Per-agent configuration
 
-MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`.
-
-Per-agent tool config overrides (inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists) are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides.
+MindRoom owns the default local-versus-worker routing policy.
+You can override which tools are routed through the sandbox proxy per agent, or set a default for all agents, in `config.yaml`.
+Per-agent tool config overrides, such as inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists, are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides.
 See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full syntax.
 
 ```yaml
@@ -15197,8 +15456,9 @@ The `worker_tools` field has three states:
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect.
-With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
+With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
 ## Worker Scope
 
@@ -15206,6 +15466,7 @@ With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamic
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 You can set `worker_scope` per agent or in `defaults`:
 
@@ -15236,7 +15497,10 @@ The supported values are:
 | `user` | One runtime per user, shared across that user's agents |
 | `user_agent` | One runtime per user+agent pair |
 
-If `worker_scope` is unset, proxied tools still run in the sandbox, but each call gets a fresh runtime instead of a persistent one.
+If `worker_scope` is unset, proxied tools still use the sandbox runner and the request stays unscoped.
+With `MINDROOM_WORKER_BACKEND=static_runner`, no worker-specific storage root is selected.
+With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, MindRoom still provisions one unscoped worker per agent and tenant/account.
+`worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 **Important notes:**
 
@@ -15253,7 +15517,7 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 
 With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process.
 This is fine for development but not recommended for production deployments where agents run untrusted code.
-With `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
+With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
 
 # Kubernetes Deployment
 
@@ -15584,7 +15848,7 @@ Example provision request:
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
+  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
@@ -15672,6 +15936,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
 │ config              Manage MindRoom configuration files.                               │
 │ avatars             Generate and sync managed avatar assets.                           │
+│ threads             Export Matrix threads to local files.                              │
 │ service             Install and manage MindRoom as a background user service.          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -15742,6 +16007,9 @@ Start MindRoom with your configuration.
 │                                          ERROR)                                        │
 │                                          [env var: LOG_LEVEL]                          │
 │                                          [default: INFO]                               │
+│ --config        -c              PATH     Use this config file path. Defaults the       │
+│                                          storage location to the selected config       │
+│                                          directory unless --storage-path is set.       │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │ --api               --no-api             Start the bundled dashboard/API server        │
@@ -15863,6 +16131,87 @@ Use `--force` to replace them.
 
 <!-- OUTPUT:END -->
 
+## threads
+
+Export Matrix threads to local files.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["threads", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root threads [OPTIONS] COMMAND [ARGS]...
+
+ Export Matrix threads to local files.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ export   Export Matrix threads to YAML files for grep/ripgrep search.                  │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+## threads export
+
+Export Matrix threads to YAML files for grep/ripgrep search.
+The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
+By default it writes to `<storage>/thread_exports`.
+
+<!-- CODE:START -->
+<!-- from mindroom.cli.main import app -->
+<!-- from typer.testing import CliRunner -->
+<!-- runner = CliRunner() -->
+<!-- result = runner.invoke(app, ["threads", "export", "--help"]) -->
+<!-- print("```") -->
+<!-- print(result.output) -->
+<!-- print("```") -->
+<!-- CODE:END -->
+<!-- OUTPUT:START -->
+<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
+```
+
+ Usage: root threads export [OPTIONS]
+
+ Export Matrix threads to YAML files for grep/ripgrep search.
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --config            -c      PATH     Use this config file path.                        │
+│ --storage-path      -s      PATH     Base directory for persistent MindRoom data.      │
+│ --output            -o      PATH     Output directory. Defaults to                     │
+│                                      <storage>/thread_exports.                         │
+│ --room              -r      TEXT     Filter exported rooms by a substring of the room  │
+│                                      key, alias, name, or Matrix room ID.              │
+│ --watch                              Repeat the export forever on a fixed interval.    │
+│ --interval                  INTEGER  Watch interval in seconds. [default: 300]         │
+│ --max-thread-roots          INTEGER  Maximum thread roots to enumerate per room.       │
+│                                      [default: 2000]                                   │
+│ --help              -h               Show this message and exit.                       │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+```
+
+<!-- OUTPUT:END -->
+
+```bash
+mindroom threads export --storage-path mindroom_data --output /tmp/mindroom-thread-exports
+mindroom threads export --storage-path mindroom_data --room lobby
+mindroom threads export --storage-path mindroom_data --watch --interval 300
+```
+
 ## service
 
 Install and manage MindRoom as a background user service.
@@ -15903,6 +16252,7 @@ On Linux, MindRoom uses systemd user services.
 │ stop        Stop the installed MindRoom user service without removing it.              │
 │ restart     Restart the installed MindRoom user service.                               │
 │ status      Show MindRoom service status and recent logs.                              │
+│ logs        Follow MindRoom service logs.                                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -16079,6 +16429,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ edit       Open config.yaml in your default editor.                                    │
 │ validate   Validate config.yaml and check for common issues.                           │
 │ path       Show the resolved config file path and search locations.                    │
+│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

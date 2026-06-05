@@ -25,7 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Hashable, Mapping
 
     from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, Hashable | None], float] = {}
 _EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 
@@ -58,6 +58,14 @@ class _KnowledgeResolution:
     knowledge: Knowledge | None
     missing: tuple[str, ...] = ()
     unavailable: Mapping[str, KnowledgeAvailabilityDetail] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseAccessResolution:
+    """Resolved access for one configured knowledge base."""
+
+    knowledge: Knowledge | None
+    availability: KnowledgeAvailability
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -126,7 +134,7 @@ def _refresh_schedule_due(
     key: KnowledgeRefreshTarget,
     availability: KnowledgeAvailability,
     *,
-    settings: tuple[str, ...] | None = None,
+    settings: Hashable | None = None,
     cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     now = time.monotonic()
@@ -253,11 +261,11 @@ def _refresh_retry_settings(
     config: Config,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
-) -> tuple[str, ...] | None:
+) -> Hashable | None:
     if availability is KnowledgeAvailability.CONFIG_MISMATCH:
         return lookup.key.indexing_settings
     if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return lookup.key.indexing_settings + _failed_refresh_retry_fingerprint(lookup, config, runtime_paths)
+        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
     return None
 
 
@@ -357,6 +365,14 @@ def _schedule_refresh_for_availability(
     return availability
 
 
+def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
+    return tuple(
+        base_id
+        for base_id in config.get_agent_knowledge_base_ids(agent_name)
+        if config.get_knowledge_base_config(base_id).mode == "semantic"
+    )
+
+
 def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
@@ -396,7 +412,7 @@ def resolve_agent_knowledge_access(
         resolved_knowledge[base_id] = (knowledge, availability)
         return resolved_knowledge[base_id]
 
-    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
     if not base_ids:
         return _KnowledgeResolution(knowledge=None)
 
@@ -420,6 +436,29 @@ def resolve_agent_knowledge_access(
         missing=tuple(missing_base_ids),
         unavailable=unavailable_bases,
     )
+
+
+def resolve_knowledge_base_access(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeBaseAccessResolution:
+    """Resolve one knowledge base without going through an agent assignment."""
+    lookup = _lookup_knowledge_for_base(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    if lookup is not None and availability is KnowledgeAvailability.READY:
+        availability = _ready_index_effective_availability(lookup, config)
+    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
+    if knowledge is not None:
+        _apply_knowledge_metadata(base_id, knowledge, config)
+    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability)
 
 
 def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:

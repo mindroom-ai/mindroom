@@ -3,6 +3,8 @@ name: Create CalVer Release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - macos/appcast.xml
 
 permissions:
   actions: write

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import functools
 import math
 import os
@@ -324,9 +325,7 @@ def sanitize_tool_init_overrides(
     if metadata is None:
         msg = f"Unknown tool '{tool_name}'."
         raise ToolInitOverrideError(msg)
-    allowed_fields = {
-        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
-    }
+    allowed_fields = safe_tool_init_override_fields(tool_name, tool_metadata=metadata_by_name)
     unexpected_fields = sorted(set(tool_init_overrides) - allowed_fields)
     if unexpected_fields:
         allowed = ", ".join(sorted(allowed_fields)) or "none"
@@ -338,6 +337,21 @@ def sanitize_tool_init_overrides(
         name: _sanitize_safe_tool_init_override_value(tool_name, name, tool_init_overrides[name])
         for name in tool_init_overrides
     }
+
+
+def safe_tool_init_override_fields(
+    tool_name: str,
+    *,
+    tool_metadata: Mapping[str, ToolMetadata] | None = None,
+) -> frozenset[str]:
+    """Return the config fields a tool exposes as safe runtime init overrides."""
+    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
+    metadata = metadata_by_name.get(tool_name)
+    if metadata is None:
+        return frozenset()
+    return frozenset(
+        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
+    )
 
 
 def coerce_optional_finite_number(value: object) -> int | float | None:
@@ -741,6 +755,7 @@ class ToolValidationInfo:
     agent_override_fields: tuple[ConfigField, ...] = ()
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     runtime_loadable: bool = True
+    unavailable_due_to_plugin_load_error: bool = False
 
 
 @dataclass
@@ -766,6 +781,15 @@ class ToolMetadata:
     function_names: tuple[str, ...] = ()  # Optional explicit callable names for dispatch/error matching
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()  # Explicit MindRoom-managed constructor kwargs
     factory: Callable | None = None  # Factory function to create tool instance
+
+
+@dataclass(frozen=True)
+class _ResolvedToolState:
+    """Runtime-visible tool state plus validation-only skipped-plugin metadata."""
+
+    tool_registry: dict[str, Callable[[], type[Toolkit]]]
+    tool_metadata: dict[str, ToolMetadata]
+    unavailable_tool_metadata: dict[str, ToolMetadata]
 
 
 def register_tool_with_metadata(
@@ -935,7 +959,7 @@ def _resolved_tool_state_for_runtime(
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
-) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
+) -> _ResolvedToolState:
     """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
@@ -951,7 +975,7 @@ def _resolved_tool_state_for_runtime(
             mcp_registry,
             mcp_metadata,
         )
-        return builtin_registry, builtin_metadata
+        return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
     plugin_bases = plugin_module._collect_plugin_bases(
         plugin_entries,
@@ -962,6 +986,7 @@ def _resolved_tool_state_for_runtime(
     plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
+    unavailable_tool_metadata: dict[str, ToolMetadata] = {}
     active_plugins: list[tuple[str, str]] = []
     for plugin_base, plugin_entry, _ in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
@@ -1001,6 +1026,9 @@ def _resolved_tool_state_for_runtime(
             if not tolerate_plugin_load_errors:
                 raise
             plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+            unavailable_tool_metadata.update(
+                _unavailable_tool_metadata_from_failed_plugin(plugin_base, candidate_registrations),
+            )
             continue
 
         validation_registrations.update(candidate_registrations)
@@ -1014,7 +1042,26 @@ def _resolved_tool_state_for_runtime(
         mcp_registry,
         mcp_metadata,
     )
-    return desired_registry, desired_metadata
+    unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
+        unavailable_tool_metadata,
+        desired_registry,
+        desired_metadata,
+    )
+    return _ResolvedToolState(desired_registry, desired_metadata, unavailable_tool_metadata)
+
+
+def _unavailable_tool_metadata_without_resolved_tools(
+    unavailable_tool_metadata: Mapping[str, ToolMetadata],
+    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
+    tool_metadata: Mapping[str, ToolMetadata],
+) -> dict[str, ToolMetadata]:
+    """Drop skipped-plugin declarations that collide with available runtime tools."""
+    resolved_tool_names = {*tool_registry, *tool_metadata}
+    return {
+        tool_name: metadata
+        for tool_name, metadata in unavailable_tool_metadata.items()
+        if tool_name not in resolved_tool_names
+    }
 
 
 def _merge_mcp_tool_state(
@@ -1039,17 +1086,19 @@ def resolved_tool_metadata_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    _, desired_metadata = _resolved_tool_state_for_runtime(
+    resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    return desired_metadata
+    return resolved_state.tool_metadata
 
 
 def _tool_validation_snapshot_from_state(
     tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
     tool_metadata: Mapping[str, ToolMetadata],
+    *,
+    unavailable_plugin_tool_names: frozenset[str] = frozenset(),
 ) -> dict[str, ToolValidationInfo]:
     """Project runtime tool state into a validation-only snapshot."""
     return {
@@ -1059,9 +1108,71 @@ def _tool_validation_snapshot_from_state(
             agent_override_fields=tuple(metadata.agent_override_fields or ()),
             authored_override_validator=metadata.authored_override_validator,
             runtime_loadable=tool_name in tool_registry,
+            unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
         )
         for tool_name, metadata in tool_metadata.items()
     }
+
+
+def _declared_tool_metadata_from_broken_plugin_source(module_path: Path) -> dict[str, ToolMetadata]:
+    """Return literal tool declarations from a plugin module that failed before registration."""
+    try:
+        module_tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    except (OSError, SyntaxError, UnicodeError):
+        return {}
+
+    metadata_by_name: dict[str, ToolMetadata] = {}
+    for node in ast.walk(module_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not _is_register_tool_with_metadata_call(node.func):
+            continue
+        tool_name = _literal_string_keyword(node, "name")
+        if tool_name is None:
+            continue
+        metadata_by_name[tool_name] = ToolMetadata(
+            name=tool_name,
+            display_name=_literal_string_keyword(node, "display_name") or tool_name,
+            description=_literal_string_keyword(node, "description") or "Unavailable plugin tool",
+            category=ToolCategory.INTEGRATIONS,
+        )
+    return metadata_by_name
+
+
+def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "register_tool_with_metadata"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "register_tool_with_metadata"
+    return False
+
+
+def _literal_string_keyword(node: ast.Call, keyword_name: str) -> str | None:
+    for keyword in node.keywords:
+        if keyword.arg != keyword_name:
+            continue
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+            return keyword.value.value
+    return None
+
+
+def _unavailable_tool_metadata_from_failed_plugin(
+    plugin_base: plugin_module._PluginBase,
+    candidate_registrations: Mapping[str, dict[str, ToolMetadata]],
+) -> dict[str, ToolMetadata]:
+    """Return tools known to belong to one plugin that failed in tolerant startup mode."""
+    metadata_by_name: dict[str, ToolMetadata] = {}
+    for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path):
+        if module_path is not None:
+            metadata_by_name.update(_declared_tool_metadata_from_broken_plugin_source(module_path))
+    metadata_by_name.update(
+        {
+            tool_name: metadata
+            for registrations in candidate_registrations.values()
+            for tool_name, metadata in registrations.items()
+        },
+    )
+    return metadata_by_name
 
 
 def resolved_tool_validation_snapshot_for_runtime(
@@ -1071,12 +1182,20 @@ def resolved_tool_validation_snapshot_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolValidationInfo]:
     """Return validation-only tool state visible for one runtime config."""
-    tool_registry, desired_metadata = _resolved_tool_state_for_runtime(
+    resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    return _tool_validation_snapshot_from_state(tool_registry, desired_metadata)
+    validation_metadata = {
+        **resolved_state.tool_metadata,
+        **resolved_state.unavailable_tool_metadata,
+    }
+    return _tool_validation_snapshot_from_state(
+        resolved_state.tool_registry,
+        validation_metadata,
+        unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
+    )
 
 
 def serialize_tool_validation_snapshot(
@@ -1089,6 +1208,7 @@ def serialize_tool_validation_snapshot(
             "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
             "authored_override_validator": info.authored_override_validator.value,
             "runtime_loadable": info.runtime_loadable,
+            "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
         }
         for tool_name, info in sorted(tool_validation_snapshot.items())
     }
@@ -1142,6 +1262,13 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         if not isinstance(raw_runtime_loadable, bool):
             msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
             raise TypeError(msg)
+        raw_unavailable_due_to_plugin_load_error = raw_info_mapping.get("unavailable_due_to_plugin_load_error", False)
+        if not isinstance(raw_unavailable_due_to_plugin_load_error, bool):
+            msg = (
+                f"Tool validation snapshot entry for '{tool_name}' must set "
+                "unavailable_due_to_plugin_load_error to a boolean."
+            )
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1154,6 +1281,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
             ),
             authored_override_validator=authored_override_validator,
             runtime_loadable=raw_runtime_loadable,
+            unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
         )
     return snapshot
 

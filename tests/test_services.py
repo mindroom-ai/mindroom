@@ -21,6 +21,7 @@ from mindroom.services.config import (
     install_uv,
 )
 from mindroom.services.launchd import _generate_plist
+from mindroom.services.launchd import _get_log_args as _get_launchd_log_args
 from mindroom.services.launchd import _get_log_command as _get_launchd_log_command
 from mindroom.services.launchd import _restart_service as _restart_launchd_service
 from mindroom.services.launchd import _start_service as _start_launchd_service
@@ -28,6 +29,7 @@ from mindroom.services.launchd import _stop_service as _stop_launchd_service
 from mindroom.services.manager import get_service_manager
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
+from mindroom.services.systemd import _get_log_args as _get_systemd_log_args
 from mindroom.services.systemd import _restart_service as _restart_systemd_service
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
@@ -166,6 +168,20 @@ def test_launchd_log_command_uses_explicit_files() -> None:
     assert "*.log" not in command
     assert "stdout.log" in command
     assert "stderr.log" in command
+
+
+def test_launchd_log_args_use_explicit_files() -> None:
+    """The launchd log args execute the same explicit files without shell parsing."""
+    args = _get_launchd_log_args()
+
+    assert args[0:2] == ["tail", "-f"]
+    assert str(Path.home() / "Library" / "Logs" / "mindroom" / "stdout.log") in args
+    assert str(Path.home() / "Library" / "Logs" / "mindroom" / "stderr.log") in args
+
+
+def test_systemd_log_args_follow_user_unit() -> None:
+    """The systemd log args follow the MindRoom user unit."""
+    assert _get_systemd_log_args() == ["journalctl", "--user", "-u", "mindroom", "-f"]
 
 
 def test_resolve_service_environment_captures_active_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -446,6 +462,7 @@ def test_service_help_is_registered() -> None:
     assert "restart" in result.output
     assert "uninstall" in result.output
     assert "status" in result.output
+    assert "logs" in result.output
 
 
 @patch("mindroom.cli.service._get_service_manager")
@@ -518,6 +535,103 @@ def test_service_restart_command_succeeds(mock_get_manager: MagicMock) -> None:
     assert result.exit_code == 0
     assert "Service restarted" in result.output
     mock_manager.restart_service.assert_called_once_with()
+
+
+@patch("mindroom.cli.service.subprocess.run")
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_logs_command_follows_platform_logs(mock_get_manager: MagicMock, mock_run: MagicMock) -> None:
+    """Service logs follows the platform-specific log stream command."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_log_args.return_value = [
+        "tail",
+        "-f",
+        "/var/log/mindroom/stdout.log",
+        "/var/log/mindroom/stderr.log",
+    ]
+    mock_get_manager.return_value = mock_manager
+    mock_run.return_value = MagicMock(returncode=0)
+
+    result = runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0
+    mock_manager.get_log_args.assert_called_once_with()
+    mock_run.assert_called_once_with(
+        ["tail", "-f", "/var/log/mindroom/stdout.log", "/var/log/mindroom/stderr.log"],
+        check=False,
+    )
+
+
+@patch("mindroom.cli.service.subprocess.run")
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_logs_command_propagates_nonzero_exit_code(
+    mock_get_manager: MagicMock,
+    mock_run: MagicMock,
+) -> None:
+    """Service logs propagates non-zero exits from the log command."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_log_args.return_value = ["journalctl", "--user", "-u", "mindroom", "-f"]
+    mock_get_manager.return_value = mock_manager
+    mock_run.return_value = MagicMock(returncode=2)
+
+    result = runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 2
+    mock_manager.get_log_args.assert_called_once_with()
+    mock_run.assert_called_once_with(["journalctl", "--user", "-u", "mindroom", "-f"], check=False)
+
+
+@patch("mindroom.cli.service.subprocess.run")
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_logs_command_handles_keyboard_interrupt(
+    mock_get_manager: MagicMock,
+    mock_run: MagicMock,
+) -> None:
+    """Service logs exits cleanly when the user interrupts log following."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_log_args.return_value = ["tail", "-f", "/var/log/mindroom/stdout.log"]
+    mock_get_manager.return_value = mock_manager
+    mock_run.side_effect = KeyboardInterrupt
+
+    result = runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0
+    assert "Aborted" not in result.output
+
+
+@patch("mindroom.cli.service.subprocess.run")
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_logs_command_treats_sigint_return_code_as_clean_exit(
+    mock_get_manager: MagicMock,
+    mock_run: MagicMock,
+) -> None:
+    """Service logs exits cleanly when the child log process is interrupted."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_log_args.return_value = ["tail", "-f", "/var/log/mindroom/stdout.log"]
+    mock_get_manager.return_value = mock_manager
+    mock_run.return_value = MagicMock(returncode=-2)
+
+    result = runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0
+    assert "Aborted" not in result.output
+
+
+@patch("mindroom.cli.service.subprocess.run")
+@patch("mindroom.cli.service._get_service_manager")
+def test_service_logs_command_reports_spawn_failure(
+    mock_get_manager: MagicMock,
+    mock_run: MagicMock,
+) -> None:
+    """Service logs reports missing log executables without a traceback."""
+    mock_manager = MagicMock(spec=ServiceManager)
+    mock_manager.get_log_args.return_value = ["missing-tail", "-f", "/var/log/mindroom/stdout.log"]
+    mock_get_manager.return_value = mock_manager
+    mock_run.side_effect = FileNotFoundError("missing-tail")
+
+    result = runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 1
+    assert "Failed to run log command" in result.output
 
 
 @patch("mindroom.cli.service._get_service_manager")

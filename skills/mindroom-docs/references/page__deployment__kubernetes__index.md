@@ -327,7 +327,7 @@ Example provision request:
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
+  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.

@@ -13,28 +13,22 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.embedder.base import Embedder
-from agno.knowledge.embedder.ollama import OllamaEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 
+from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings import (
-    MindRoomOpenAIEmbedder,
-    create_sentence_transformers_embedder,
-    effective_knowledge_embedder_signature,
-)
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.embedding_factory import create_configured_embedder
+from mindroom.embeddings import effective_knowledge_embedder_signature
 from mindroom.knowledge.index_metadata import (
     load_index_metadata_payload,
     parse_index_metadata_fields,
@@ -48,14 +42,14 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from agno.knowledge.reader.base import Reader
 
-    from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.config.knowledge import KnowledgeBaseMode, KnowledgeGitConfig
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -76,6 +70,8 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
 }
+_INDEXING_MODES: set[str] = {"semantic", "files"}
+_GLOB_CHARS = frozenset("*?[")
 _TEXT_LIKE_EXTENSIONS = {
     ".md",
     ".markdown",
@@ -131,27 +127,143 @@ _TEXT_LIKE_EXTENSIONS = {
     ".proto",
 }
 _FileSignature = tuple[int, int, str]
-_INDEXING_SETTINGS_BASE_ID_INDEX = 0
-_INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
-_INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
-INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 7
-_INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 7
-_INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 8
-_INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 9
-INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
-    _INDEXING_SETTINGS_BASE_ID_INDEX,
-    _INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
-    _INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
-    _INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
-    10,
-    11,
-    12,
-    13,
-    14,
-    15,
-    16,
-)
-_INDEXING_SETTINGS_LAYOUT_LENGTH = 17
+
+
+@dataclass(frozen=True)
+class IndexingSettings:
+    """Typed schema for settings that determine knowledge index compatibility."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+    mode: KnowledgeBaseMode
+    embedder_provider: str
+    embedder_model: str
+    embedder_host: str
+    embedder_dimensions: str
+    chunk_size: str
+    chunk_overlap: str
+    repo_identity: str
+    git_branch: str
+    git_lfs: str
+    git_skip_hidden: str
+    git_include_patterns: str
+    git_exclude_patterns: str
+    include_patterns: str
+    exclude_patterns: str
+    include_extensions: str
+    exclude_extensions: str
+
+    @classmethod
+    def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
+        """Build typed settings from the persisted JSON object."""
+        required_keys = {
+            "base_id",
+            "storage_root",
+            "knowledge_path",
+            "mode",
+            "embedder_provider",
+            "embedder_model",
+            "embedder_host",
+            "embedder_dimensions",
+            "chunk_size",
+            "chunk_overlap",
+            "repo_identity",
+            "git_branch",
+            "git_lfs",
+            "git_skip_hidden",
+            "git_include_patterns",
+            "git_exclude_patterns",
+            "include_extensions",
+            "exclude_extensions",
+        }
+        optional_keys = {"include_patterns", "exclude_patterns"}
+        if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
+            return None
+        mode = settings["mode"]
+        if mode not in _INDEXING_MODES:
+            return None
+        return cls(
+            base_id=settings["base_id"],
+            storage_root=settings["storage_root"],
+            knowledge_path=settings["knowledge_path"],
+            mode=cast("KnowledgeBaseMode", mode),
+            embedder_provider=settings["embedder_provider"],
+            embedder_model=settings["embedder_model"],
+            embedder_host=settings["embedder_host"],
+            embedder_dimensions=settings["embedder_dimensions"],
+            chunk_size=settings["chunk_size"],
+            chunk_overlap=settings["chunk_overlap"],
+            repo_identity=settings["repo_identity"],
+            git_branch=settings["git_branch"],
+            git_lfs=settings["git_lfs"],
+            git_skip_hidden=settings["git_skip_hidden"],
+            git_include_patterns=settings["git_include_patterns"],
+            git_exclude_patterns=settings["git_exclude_patterns"],
+            include_patterns=settings.get("include_patterns", ""),
+            exclude_patterns=settings.get("exclude_patterns", ""),
+            include_extensions=settings["include_extensions"],
+            exclude_extensions=settings["exclude_extensions"],
+        )
+
+    def to_metadata(self) -> dict[str, str]:
+        """Return the JSON object persisted in index metadata."""
+        return {
+            "base_id": self.base_id,
+            "storage_root": self.storage_root,
+            "knowledge_path": self.knowledge_path,
+            "mode": self.mode,
+            "embedder_provider": self.embedder_provider,
+            "embedder_model": self.embedder_model,
+            "embedder_host": self.embedder_host,
+            "embedder_dimensions": self.embedder_dimensions,
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+            "repo_identity": self.repo_identity,
+            "git_branch": self.git_branch,
+            "git_lfs": self.git_lfs,
+            "git_skip_hidden": self.git_skip_hidden,
+            "git_include_patterns": self.git_include_patterns,
+            "git_exclude_patterns": self.git_exclude_patterns,
+            "include_patterns": self.include_patterns,
+            "exclude_patterns": self.exclude_patterns,
+            "include_extensions": self.include_extensions,
+            "exclude_extensions": self.exclude_extensions,
+        }
+
+    def query_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str]:
+        """Return fields that must match for safe vector queries."""
+        return (
+            self.base_id,
+            self.storage_root,
+            self.knowledge_path,
+            self.mode,
+            self.embedder_provider,
+            self.embedder_model,
+            self.embedder_host,
+            self.embedder_dimensions,
+        )
+
+    def corpus_compatibility_key(
+        self,
+    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+        """Return fields that must match for safe source-corpus reuse."""
+        return (
+            self.base_id,
+            self.storage_root,
+            self.knowledge_path,
+            self.mode,
+            self.repo_identity,
+            self.git_branch,
+            self.git_lfs,
+            self.git_skip_hidden,
+            self.git_include_patterns,
+            self.git_exclude_patterns,
+            self.include_patterns,
+            self.exclude_patterns,
+            self.include_extensions,
+            self.exclude_extensions,
+        )
 
 
 @runtime_checkable
@@ -196,7 +308,7 @@ class _CollectionExistenceEmbedder(Embedder):
 
 @dataclass(frozen=True)
 class _PersistedIndexState:
-    settings: tuple[str, ...]
+    settings: IndexingSettings
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
     last_published_at: str | None = None
@@ -208,6 +320,12 @@ class _PersistedIndexState:
 @dataclass
 class _CandidatePublishState:
     index_published: bool = False
+
+
+@dataclass(frozen=True)
+class _ListingTarget:
+    path: Path
+    mode: Literal["file", "dir", "walk"]
 
 
 def _raise_cancelled() -> NoReturn:
@@ -284,65 +402,104 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
 
 
-def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
-    embedder_config = config.memory.embedder.config
+def _filter_settings_key(values: Iterable[str]) -> str:
+    return str(tuple(sorted(values)))
+
+
+def _split_pattern_parts(pattern: str) -> tuple[str, ...]:
+    normalized = pattern.replace("\\", "/").strip().removeprefix("./").strip("/")
+    if not normalized:
+        return ()
+    return tuple(part for part in normalized.split("/") if part and part != ".")
+
+
+def _part_has_glob(part: str) -> bool:
+    return any(char in part for char in _GLOB_CHARS)
+
+
+def _listing_targets_for_pattern(resolved_root: Path, pattern: str) -> list[_ListingTarget]:
+    parts = _split_pattern_parts(pattern)
+    if not parts:
+        return []
+    first_glob_index = next((index for index, part in enumerate(parts) if _part_has_glob(part)), len(parts))
+    if first_glob_index == len(parts):
+        return [_ListingTarget(resolved_root.joinpath(*parts), "file")]
+
+    base = resolved_root.joinpath(*parts[:first_glob_index]) if first_glob_index else resolved_root
+    remaining_parts = parts[first_glob_index:]
+    if len(remaining_parts) == 1 and remaining_parts[0] != "**":
+        return [_ListingTarget(base, "dir")]
+    return [_ListingTarget(base, "walk")]
+
+
+def _listing_targets(resolved_root: Path, patterns: list[str]) -> list[_ListingTarget]:
+    if not patterns:
+        return [_ListingTarget(resolved_root, "walk")]
+
+    deduped: list[_ListingTarget] = []
+    seen: set[tuple[Path, str]] = set()
+    for pattern in patterns:
+        for target in _listing_targets_for_pattern(resolved_root, pattern):
+            key = (target.path, target.mode)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(target)
+    return deduped
+
+
+def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
     base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
-    settings = (
-        base_id,
-        str(storage_path.resolve()),
-        str(knowledge_path.resolve()),
-        *effective_knowledge_embedder_signature(
+    if base_config.mode == "semantic":
+        embedder_config = config.memory.embedder.config
+        embedder_provider, embedder_model, embedder_host, embedder_dimensions = effective_knowledge_embedder_signature(
             config.memory.embedder.provider,
             embedder_config.model,
             host=embedder_config.host,
             dimensions=embedder_config.dimensions,
-        ),
-        str(base_config.chunk_size),
-        str(base_config.chunk_overlap),
-        credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
-        git_config.branch if git_config is not None else "",
-        str(git_config.lfs) if git_config is not None else "",
-        str(git_config.skip_hidden) if git_config is not None else "",
-        str(tuple(git_config.include_patterns)) if git_config is not None else "",
-        str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
-        str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else "",
-        str(tuple(base_config.exclude_extensions)),
-    )
-    if len(settings) != _INDEXING_SETTINGS_LAYOUT_LENGTH:
-        msg = "Knowledge indexing settings layout constants must match _indexing_settings_key"
-        raise AssertionError(msg)
-    return settings
-
-
-def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
-    provider = config.memory.embedder.provider
-    embedder_config = config.memory.embedder.config
-
-    if provider == "openai":
-        return MindRoomOpenAIEmbedder(
-            id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
-            base_url=embedder_config.host,
-            dimensions=embedder_config.dimensions,
         )
-
-    if provider == "ollama":
-        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or OLLAMA_HOST_DEFAULT
-        return OllamaEmbedder(id=embedder_config.model, host=host)
-
-    if provider == "sentence_transformers":
-        return create_sentence_transformers_embedder(
-            runtime_paths,
-            embedder_config.model,
-            dimensions=embedder_config.dimensions,
+        chunk_size = str(base_config.chunk_size)
+        chunk_overlap = str(base_config.chunk_overlap)
+        include_extensions = (
+            _filter_settings_key(base_config.include_extensions) if base_config.include_extensions is not None else ""
         )
-
-    msg = (
-        f"Unsupported knowledge embedder provider: {provider}. "
-        "Supported providers: openai, ollama, sentence_transformers"
+        exclude_extensions = _filter_settings_key(base_config.exclude_extensions)
+    else:
+        embedder_provider = ""
+        embedder_model = ""
+        embedder_host = ""
+        embedder_dimensions = ""
+        chunk_size = ""
+        chunk_overlap = ""
+        include_extensions = ""
+        exclude_extensions = ""
+    return IndexingSettings(
+        base_id=base_id,
+        storage_root=str(storage_path.resolve()),
+        knowledge_path=str(knowledge_path.resolve()),
+        mode=base_config.mode,
+        embedder_provider=embedder_provider,
+        embedder_model=embedder_model,
+        embedder_host=embedder_host,
+        embedder_dimensions=embedder_dimensions,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        repo_identity=credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
+        git_branch=git_config.branch if git_config is not None else "",
+        git_lfs=str(git_config.lfs) if git_config is not None else "",
+        git_skip_hidden=str(git_config.skip_hidden) if git_config is not None else "",
+        git_include_patterns=_filter_settings_key(git_config.include_patterns) if git_config is not None else "",
+        git_exclude_patterns=_filter_settings_key(git_config.exclude_patterns) if git_config is not None else "",
+        include_patterns=_filter_settings_key(base_config.include_patterns),
+        exclude_patterns=_filter_settings_key(base_config.exclude_patterns),
+        include_extensions=include_extensions,
+        exclude_extensions=exclude_extensions,
     )
-    raise ValueError(msg)
+
+
+def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
+    return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
 def _authenticated_repo_url(
@@ -463,52 +620,6 @@ def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
     return merged or None
 
 
-def _split_posix_parts(value: str) -> tuple[str, ...]:
-    normalized = value.replace("\\", "/").strip()
-    normalized = normalized.removeprefix("./")
-    normalized = normalized.strip("/")
-    if not normalized:
-        return ()
-    return tuple(part for part in normalized.split("/") if part and part != ".")
-
-
-def _matches_root_glob(relative_path: str, pattern: str) -> bool:
-    """Return True when relative path matches the root-anchored glob pattern."""
-    path_parts = _split_posix_parts(relative_path)
-    pattern_parts = _split_posix_parts(pattern)
-    if not pattern_parts:
-        return False
-
-    cache: dict[tuple[int, int], bool] = {}
-
-    def _match(path_index: int, pattern_index: int) -> bool:
-        key = (path_index, pattern_index)
-        if key in cache:
-            return cache[key]
-
-        if pattern_index == len(pattern_parts):
-            result = path_index == len(path_parts)
-        else:
-            pattern_part = pattern_parts[pattern_index]
-            if pattern_part == "**":
-                next_index = pattern_index
-                while next_index < len(pattern_parts) and pattern_parts[next_index] == "**":
-                    next_index += 1
-                if next_index == len(pattern_parts):
-                    result = True
-                else:
-                    result = any(_match(next_path, next_index) for next_path in range(path_index, len(path_parts) + 1))
-            elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], pattern_part):
-                result = _match(path_index + 1, pattern_index + 1)
-            else:
-                result = False
-
-        cache[key] = result
-        return result
-
-    return _match(0, 0)
-
-
 def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
@@ -520,6 +631,13 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
+    if base_config.include_patterns and not any(
+        matches_root_glob(relative_path, pattern) for pattern in base_config.include_patterns
+    ):
+        return False
+    if any(matches_root_glob(relative_path, pattern) for pattern in base_config.exclude_patterns):
+        return False
+
     git_config = base_config.git
     if git_config is not None and git_config.skip_hidden and _is_hidden_relative_path(path_obj):
         return False
@@ -527,12 +645,11 @@ def _include_knowledge_relative_path(config: Config, base_id: str, relative_path
     if git_config is None:
         return True
 
-    if git_config.include_patterns and not any(
-        _matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
-    ):
-        return False
-
-    return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+    git_included = not git_config.include_patterns or any(
+        matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
+    )
+    git_excluded = any(matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
+    return git_included and not git_excluded
 
 
 def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
@@ -551,6 +668,13 @@ def include_semantic_knowledge_relative_path(config: Config, base_id: str, relat
     return suffix not in exclude_extensions
 
 
+def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+    """Return whether a relative path belongs to the active source set for one base."""
+    if config.get_knowledge_base_config(base_id).mode == "files":
+        return _include_knowledge_relative_path(config, base_id, relative_path)
+    return include_semantic_knowledge_relative_path(config, base_id, relative_path)
+
+
 def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
     try:
         relative_path = path.relative_to(root)
@@ -566,7 +690,7 @@ def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
 
 
 def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
-    """Return whether a file belongs to the managed semantic file set."""
+    """Return whether a file belongs to the active source set for one base."""
     root = knowledge_root.resolve()
     candidate = file_path if file_path.is_absolute() else root / file_path
     try:
@@ -583,27 +707,71 @@ def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, 
     if not candidate.is_file():
         return False
     relative_path = candidate.relative_to(root)
-    return include_semantic_knowledge_relative_path(config, base_id, relative_path.as_posix())
+    return include_knowledge_relative_path(config, base_id, relative_path.as_posix())
+
+
+def _add_listed_knowledge_file(
+    config: Config,
+    base_id: str,
+    root: Path,
+    path: Path,
+    *,
+    files: list[Path],
+    seen_paths: set[Path],
+) -> None:
+    if not _include_knowledge_file(config, base_id, root, path):
+        return
+    resolved_path = path.resolve()
+    if resolved_path in seen_paths:
+        return
+    seen_paths.add(resolved_path)
+    files.append(resolved_path)
+
+
+def _collect_listing_target_files(
+    config: Config,
+    base_id: str,
+    root: Path,
+    target: _ListingTarget,
+    *,
+    files: list[Path],
+    seen_paths: set[Path],
+) -> None:
+    def add_file(path: Path) -> None:
+        _add_listed_knowledge_file(config, base_id, root, path, files=files, seen_paths=seen_paths)
+
+    if target.mode == "file":
+        add_file(target.path)
+        return
+    if not target.path.is_dir() or _path_is_symlink_or_under_symlink(root, target.path):
+        return
+    if target.mode == "dir":
+        for path in target.path.iterdir():
+            if path.is_file():
+                add_file(path)
+        return
+    for dirpath, dirnames, filenames in os.walk(target.path, followlinks=False):
+        current_dir = Path(dirpath)
+        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
+        for filename in filenames:
+            add_file(current_dir / filename)
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
-    """List managed semantic files without constructing a knowledge manager."""
+    """List managed files without constructing a knowledge manager."""
     root = knowledge_root.resolve()
     if not root.is_dir():
         return []
 
     files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        current_dir = Path(dirpath)
-        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
-        for filename in filenames:
-            path = current_dir / filename
-            if _include_knowledge_file(config, base_id, root, path):
-                files.append(path)
+    seen_paths: set[Path] = set()
+    include_patterns = config.get_knowledge_base_config(base_id).include_patterns
+    for target in _listing_targets(root, include_patterns):
+        _collect_listing_target_files(config, base_id, root, target, files=files, seen_paths=seen_paths)
     return sorted(files)
 
 
-def _semantic_file_paths_from_relative_paths(
+def _knowledge_file_paths_from_relative_paths(
     config: Config,
     base_id: str,
     knowledge_root: Path,
@@ -655,9 +823,7 @@ def _git_tracked_relative_paths_from_checkout(
         raise RuntimeError(msg)
 
     return {
-        path
-        for path in result.stdout.split("\x00")
-        if path and include_semantic_knowledge_relative_path(config, base_id, path)
+        path for path in result.stdout.split("\x00") if path and include_knowledge_relative_path(config, base_id, path)
     }
 
 
@@ -668,11 +834,11 @@ def list_git_tracked_knowledge_files(
     *,
     timeout_seconds: float | None = None,
 ) -> list[Path]:
-    """List Git-tracked semantic files using the same source set as indexing."""
+    """List Git-tracked files using the active source set for one base."""
     root = knowledge_root.resolve()
     if not git_checkout_present(root, timeout_seconds=timeout_seconds):
         return []
-    return _semantic_file_paths_from_relative_paths(
+    return _knowledge_file_paths_from_relative_paths(
         config,
         base_id,
         root,
@@ -707,7 +873,7 @@ def knowledge_source_signature(
             if tracked_relative_paths is not None
             else _git_tracked_relative_paths_from_checkout(config, base_id, root)
         )
-        files = _semantic_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
+        files = _knowledge_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
     for path in files:
         try:
             stat = path.stat()
@@ -750,7 +916,7 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    _indexing_settings: tuple[str, ...] = field(init=False)
+    _indexing_settings: IndexingSettings = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
@@ -788,6 +954,10 @@ class KnowledgeManager:
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         persisted_state = self._load_persisted_index_state()
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            self._persisted_collection_missing_on_init = False
+            self._knowledge = Knowledge()
+            return
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
             persisted_state.collection
@@ -860,8 +1030,11 @@ class KnowledgeManager:
             indexed_count,
             source_signature,
         ) = fields
+        indexing_settings = IndexingSettings.from_metadata(settings)
+        if indexing_settings is None:
+            return None
         return _PersistedIndexState(
-            settings,
+            indexing_settings,
             cast('Literal["resetting", "indexing", "complete"]', status),
             collection=collection,
             last_published_at=last_published_at,
@@ -874,7 +1047,7 @@ class KnowledgeManager:
         self,
         status: Literal["resetting", "indexing", "complete"],
         *,
-        settings: tuple[str, ...] | None = None,
+        settings: IndexingSettings | None = None,
         collection: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,
@@ -883,7 +1056,7 @@ class KnowledgeManager:
     ) -> None:
         write_index_metadata_payload(
             self._indexing_settings_path,
-            settings=settings or self._indexing_settings,
+            settings=(settings or self._indexing_settings).to_metadata(),
             status=status,
             collection=collection,
             last_published_at=last_published_at,
@@ -939,14 +1112,8 @@ class KnowledgeManager:
             timeout_seconds=self._git_sync_timeout_seconds(),
         )
 
-    def _include_semantic_relative_path(self, relative_path: str) -> bool:
-        if not self._include_relative_path(relative_path):
-            return False
-
-        return include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path)
-
-    def _include_relative_path(self, relative_path: str) -> bool:
-        return _include_knowledge_relative_path(self.config, self.base_id, relative_path)
+    def _include_active_relative_path(self, relative_path: str) -> bool:
+        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     async def _run_git(
         self,
@@ -1056,7 +1223,7 @@ class KnowledgeManager:
     async def _git_list_tracked_files(self) -> set[str]:
         output = await self._run_git(["ls-files", "-z"])
         raw_paths = [entry for entry in output.split("\x00") if entry]
-        tracked_files = {path for path in raw_paths if self._include_semantic_relative_path(path)}
+        tracked_files = {path for path in raw_paths if self._include_active_relative_path(path)}
         self._git_tracked_relative_paths = set(tracked_files)
         return tracked_files
 
@@ -1140,7 +1307,7 @@ class KnowledgeManager:
             changed_paths = after_files
         else:
             diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_semantic_relative_path(path)}
+            changed_paths = {path for path in diff_output.splitlines() if self._include_active_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
@@ -1158,7 +1325,7 @@ class KnowledgeManager:
                     self.base_id,
                     knowledge_root,
                 )
-            return _semantic_file_paths_from_relative_paths(
+            return _knowledge_file_paths_from_relative_paths(
                 self.config,
                 self.base_id,
                 knowledge_root,
@@ -1243,7 +1410,7 @@ class KnowledgeManager:
             collection=collection_name,
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config, self.runtime_paths),
+            embedder=create_configured_embedder(self.config, self.runtime_paths),
         )
 
     def _build_knowledge(self, collection_name: str) -> Knowledge:
@@ -1536,6 +1703,10 @@ class KnowledgeManager:
 
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            self._last_refresh_error = None
+            return 0
+
         async with self._lock:
             self._last_refresh_error = None
             files = await asyncio.to_thread(self.list_files)

@@ -564,6 +564,7 @@ MessageEnvelope(
     mentioned_agents: tuple[str, ...],
     agent_name: str,
     source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
+    origin: TurnOrigin,
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
     dispatch_policy_source_kind: str | None = None,
@@ -572,9 +573,31 @@ MessageEnvelope(
 # target.thread_id preserves the raw inbound thread ID.
 # target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
 # target.session_id is the canonical persistence key for the conversation.
+# origin is keyword-only in the dataclass constructor and is required.
+# Hook handlers normally inspect ctx.envelope.origin rather than constructing MessageEnvelope themselves.
+# Internal code and tests that construct MessageEnvelope must pass a TurnOrigin built by MindRoom's origin classifier.
 # dispatch_policy_source_kind is usually None.
 # When it is "active_thread_follow_up", source_kind still preserves the original modality such as "message" or "voice".
 # ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND and TRUSTED_INTERNAL_RELAY_SOURCE_KIND are exported from mindroom.hooks for comparisons.
+
+TurnOrigin(
+    transport_sender_id: str,
+    requester_id: str,
+    sender_entity_name: str | None,
+    requester_entity_name: str | None,
+    sender_kind: SenderKind,
+    requester_kind: SenderKind,
+    intent: TurnIntent,
+    source_kind: str,
+    trust: TurnTrust,
+)
+
+# TurnOrigin, TurnIntent, SenderKind, and TurnTrust are exported from mindroom.hooks for type comparisons.
+# sender_kind and requester_kind are "user" or "managed_entity".
+# intent is "user_message", "managed_message", "router_handoff", "router_notice", "scheduled_fire", "hook_message", "hook_dispatch", or "trusted_internal_relay".
+# trust is "external", "trusted_internal", or "trusted_user_relay".
+# origin.may_answer_interactive_prompt is true only for human-requested user messages and trusted human relays.
+# origin.may_dispatch_without_mention is true only for the synthetic turns that explicitly bypass the managed-sender mention gate.
 
 ResponseDraft(
     response_text: str,

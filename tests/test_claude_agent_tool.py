@@ -425,14 +425,14 @@ async def test_claude_send_tool_model_overrides_agent_model(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
     """Explicit tool-config model should override the calling agent model id."""
-    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-4-6")
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-4-8")
     run_context = RunContext(run_id="run-1", session_id="session-1")
     agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
 
     await tools.claude_send("hello", run_context=run_context, agent=agent)
 
     options = _FakeClaudeSDKClient.instances[0].options
-    assert options.model == "claude-opus-4-6"
+    assert options.model == "claude-opus-4-8"
 
 
 @pytest.mark.asyncio
@@ -687,7 +687,7 @@ async def test_gateway_probe_posts_to_v1_messages_and_reuses_sdk_session(
         api_key="sk-test",
         anthropic_base_url=fake_anthropic_gateway["base_url"],
         anthropic_auth_token="gateway-token",  # noqa: S106
-        model="claude-opus-4-6",
+        model="claude-opus-4-8",
         disable_experimental_betas=True,
     )
     run_context = RunContext(run_id="run-1", session_id="session-1")
@@ -723,7 +723,7 @@ async def test_gateway_probe_can_include_anthropic_beta_header_when_not_disabled
         api_key="sk-test",
         anthropic_base_url=fake_anthropic_gateway["base_url"],
         anthropic_auth_token="gateway-token",  # noqa: S106
-        model="claude-opus-4-6",
+        model="claude-opus-4-8",
         disable_experimental_betas=False,
     )
     run_context = RunContext(run_id="run-1", session_id="session-1")
@@ -749,7 +749,7 @@ async def test_gateway_probe_error_is_propagated_and_session_is_closed(
         api_key="sk-test",
         anthropic_base_url=fake_anthropic_gateway["base_url"],
         anthropic_auth_token="gateway-token",  # noqa: S106
-        model="claude-opus-4-6",
+        model="claude-opus-4-8",
         disable_experimental_betas=True,
     )
     run_context = RunContext(run_id="run-1", session_id="session-1")

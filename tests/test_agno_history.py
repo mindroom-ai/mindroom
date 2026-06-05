@@ -57,6 +57,7 @@ from mindroom.execution_preparation import (
 from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
     _build_summary_input,
+    _compaction_replay_messages,
     _emit_compaction_hook,
     _estimate_history_messages_tokens,
     _estimate_tool_definition_tokens,
@@ -621,6 +622,46 @@ def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None
     assert agent.num_history_runs == 2
     assert agent.num_history_messages is None
     assert agent.store_history_messages is False
+
+
+def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="Current system prompt"),
+                    Message(role="developer", content="Current developer prompt"),
+                    Message(role="user", content="user request"),
+                    Message(role="assistant", content="assistant answer"),
+                    Message(role="tool", content="tool result"),
+                ],
+            ),
+        ],
+    )
+
+    storage.upsert_session(session)
+
+    assert session.runs is not None
+    assert [(message.role, message.content) for message in session.runs[0].messages or []] == [
+        ("system", "Current system prompt"),
+        ("developer", "Current developer prompt"),
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert [(message.role, message.content) for message in persisted.runs[0].messages or []] == [
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
 
 
 def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
@@ -2902,6 +2943,8 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         ],
     )
     storage.upsert_session(session)
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
     agent = _agent(db=storage)
 
     prepared = await prepare_history_for_run_for_test(
@@ -2913,7 +2956,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         config=config,
         execution_identity=None,
         storage=storage,
-        session=session,
+        session=persisted,
         history_settings=ResolvedHistorySettings(
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
@@ -3249,26 +3292,84 @@ def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -
     assert "<previous_summary>" in summary_input
 
 
-def test_build_summary_input_excludes_persisted_system_prompt() -> None:
+def test_build_summary_input_preserves_previous_summary_text() -> None:
+    run = _completed_run("run-1")
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary="Useful prior conversation.\n\n## Your Identity\nIDENTITY.md\nCurrent Date and Time",
+        compacted_runs=[run],
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "<previous_summary>" in summary_input
+    assert "Useful prior conversation" in summary_input
+    assert "IDENTITY.md" in summary_input
+    assert "Current Date and Time" in summary_input
+    assert "run-1 question" in summary_input
+    assert "run-1 answer" in summary_input
+
+
+def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="legacy system prompt"),
+            Message(role="developer", content="legacy developer prompt"),
+            Message(role="instructions", content="legacy custom prompt"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
+        ],
+    )
+
+    replay_messages = _compaction_replay_messages(
+        run,
+        ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="instructions",
+        ),
+    )
+
+    assert [(message.role, message.content) for message in replay_messages] == [
+        ("user", "user request"),
+        ("assistant", "assistant answer"),
+        ("tool", "tool result"),
+    ]
+
+
+def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
     run = _completed_run(
         "run-1",
         messages=[
             Message(role="system", content="Persisted system prompt that should not be summarized"),
+            Message(role="developer", content="Persisted developer prompt that should not be summarized"),
+            Message(role="instructions", content="Persisted custom prompt that should not be summarized"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
         ],
     )
 
     summary_input, included_runs = _build_summary_input(
         previous_summary=None,
         compacted_runs=[run],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            system_message_role="instructions",
+        ),
         max_input_tokens=1_000,
     )
 
     assert included_runs == [run]
     assert "Persisted system prompt" not in summary_input
+    assert "Persisted developer prompt" not in summary_input
+    assert "Persisted custom prompt" not in summary_input
     assert "user request" in summary_input
     assert "assistant answer" in summary_input
+    assert "tool result" in summary_input
 
 
 def test_build_summary_input_honors_tool_call_history_limit() -> None:
@@ -3308,6 +3409,47 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "second result" in summary_input
 
 
+def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
+    conversation_messages = [
+        Message(role="user", content="user request"),
+        Message(role="assistant", content="assistant answer"),
+        Message(role="tool", content="tool result"),
+    ]
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+        system_message_role="instructions",
+    )
+    contaminated_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="legacy system prompt " * 20),
+                    Message(role="developer", content="legacy developer prompt " * 20),
+                    Message(role="instructions", content="legacy custom prompt " * 20),
+                    *conversation_messages,
+                ],
+            ),
+        ],
+    )
+    clean_session = _session(
+        "session-1",
+        runs=[_completed_run("run-1", messages=conversation_messages)],
+    )
+
+    assert estimate_prompt_visible_history_tokens(
+        session=contaminated_session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    ) == estimate_prompt_visible_history_tokens(
+        session=clean_session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+    )
+
+
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
     session = _session(
         "session-1",
@@ -3315,7 +3457,6 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
             _completed_run(
                 "run-1",
                 messages=[
-                    Message(role="system", content="Persisted system"),
                     Message(role="user", content="old user"),
                     Message(
                         role="assistant",
@@ -3348,47 +3489,6 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
     )
 
     expected_messages = [
-        Message(role="user", content="new user"),
-        Message(role="assistant", content="new assistant"),
-    ]
-    assert estimated_tokens == _estimate_history_messages_tokens(expected_messages)
-
-
-def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_role() -> None:
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="developer", content="Persisted developer prompt"),
-                    Message(role="user", content="old user"),
-                    Message(role="assistant", content="old assistant"),
-                ],
-            ),
-            _completed_run(
-                "run-2",
-                messages=[
-                    Message(role="user", content="new user"),
-                    Message(role="assistant", content="new assistant"),
-                ],
-            ),
-        ],
-    )
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="messages", limit=3),
-        max_tool_calls_from_history=None,
-        system_message_role="developer",
-    )
-
-    estimated_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=history_settings,
-    )
-
-    expected_messages = [
-        Message(role="assistant", content="old assistant"),
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]

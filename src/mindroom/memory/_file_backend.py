@@ -21,6 +21,11 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
+from ._semantic_file_search import (
+    SemanticFileMemoryIndexUnavailableError,
+    schedule_semantic_file_memory_refresh,
+    search_semantic_file_memories,
+)
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
@@ -41,6 +46,13 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+
+def _tag_keyword_mode(result: MemoryResult) -> None:
+    metadata = result.get("metadata")
+    result["metadata"] = (
+        {**metadata, "search_mode": "keyword"} if isinstance(metadata, dict) else {"search_mode": "keyword"}
+    )
 
 
 def _file_memory_root(
@@ -188,6 +200,46 @@ def _match_score(query_tokens: set[str], text: str) -> float:
 def _format_entry_line(memory_id: str, content: str) -> str:
     normalized_content = " ".join(content.strip().split())
     return f"- [id={memory_id}] {normalized_content}"
+
+
+def _schedule_agent_semantic_refresh(
+    agent_name: str,
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    search_config = config.get_agent_memory_search(agent_name)
+    if search_config.mode != "semantic":
+        return
+    schedule_semantic_file_memory_refresh(
+        scope_user_id=scope_user_id,
+        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=search_config,
+        execution_identity=execution_identity,
+    )
+
+
+def _schedule_scope_semantic_refresh(
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is None:
+        return
+    _schedule_agent_semantic_refresh(
+        agent_name,
+        scope_user_id,
+        resolution,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
 
 def _append_scope_memory_entry(
@@ -503,8 +555,9 @@ def _mutate_file_memory_targets(
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int, list[FileMemoryResolution]]:
     updated_targets = 0
+    updated_resolutions: list[FileMemoryResolution] = []
     scope_user_id = anchor_result["user_id"]
     for target_storage_path in storage_paths_for_scope_user_id(
         scope_user_id,
@@ -526,7 +579,8 @@ def _mutate_file_memory_targets(
         ):
             if _replace_scope_memory_entry(scope_user_id, target_id, content, resolution, config):
                 updated_targets += 1
-    return scope_user_id, updated_targets
+                updated_resolutions.append(resolution)
+    return scope_user_id, updated_targets, updated_resolutions
 
 
 def add_file_agent_memory(
@@ -545,7 +599,16 @@ def add_file_agent_memory(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    _append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
+    scope_user_id = agent_scope_user_id(agent_name)
+    _append_scope_memory_entry(scope_user_id, content, resolution, config)
+    _schedule_agent_semantic_refresh(
+        agent_name,
+        scope_user_id,
+        resolution,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     logger.info("File memory added", agent=agent_name)
 
 
@@ -570,12 +633,21 @@ def append_agent_daily_file_memory(
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
+    scope_user_id = agent_scope_user_id(agent_name)
     result = _append_scope_memory_entry(
-        agent_scope_user_id(agent_name),
+        scope_user_id,
         content,
         resolution,
         config,
         target_relative_path=daily_relative_path,
+    )
+    _schedule_agent_semantic_refresh(
+        agent_name,
+        scope_user_id,
+        resolution,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
     )
     logger.info("File daily memory added", agent=agent_name, date=current_date)
     return result
@@ -619,7 +691,7 @@ def _search_team_file_scope_memories(
     )
 
 
-def search_file_agent_memories(
+async def search_file_agent_memories(
     query: str,
     agent_name: str,
     storage_path: Path,
@@ -638,14 +710,37 @@ def search_file_agent_memories(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    results = _search_agent_file_scope_memories(
-        query,
-        agent_name,
-        agent_resolution,
-        config,
-        limit,
-        timing_scope,
-    )
+
+    def keyword_results() -> list[MemoryResult]:
+        results = _search_agent_file_scope_memories(query, agent_name, agent_resolution, config, limit, timing_scope)
+        for result in results:
+            _tag_keyword_mode(result)
+        return results
+
+    search_config = config.get_agent_memory_search(agent_name)
+    if search_config.mode == "semantic":
+        scope_user_id = agent_scope_user_id(agent_name)
+        try:
+            results = await search_semantic_file_memories(
+                query,
+                scope_user_id=scope_user_id,
+                root=_scope_dir(scope_user_id, agent_resolution, config, create=False),
+                config=config,
+                runtime_paths=runtime_paths,
+                search_config=search_config,
+                limit=limit,
+                execution_identity=execution_identity,
+                timing_scope=timing_scope,
+            )
+        except SemanticFileMemoryIndexUnavailableError:
+            logger.debug("File-memory semantic index unavailable; falling back to keyword search", agent=agent_name)
+            results = keyword_results()
+        except Exception:
+            logger.exception("File-memory semantic search failed; falling back to keyword search", agent=agent_name)
+            results = keyword_results()
+    else:
+        results = keyword_results()
+
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
         for target_storage_path in storage_paths_for_scope_user_id(
@@ -662,19 +757,19 @@ def search_file_agent_memories(
                 original_storage_path=storage_path,
                 execution_identity=execution_identity,
             )
-            team_results = _search_team_file_scope_memories(
+            for memory in _search_team_file_scope_memories(
                 team_id,
                 query,
                 team_resolution,
                 config,
                 limit,
                 timing_scope,
-            )
-            for memory in team_results:
+            ):
                 memory_text = memory.get("memory", "")
                 if memory_text in existing_memories:
                     continue
                 existing_memories.add(memory_text)
+                _tag_keyword_mode(memory)
                 results.append(memory)
     results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     return results[:limit]
@@ -744,7 +839,7 @@ def update_file_agent_memory(
     ) is None:
         raise MemoryNotFoundError(memory_id)
 
-    scope_user_id, updated_targets = _mutate_file_memory_targets(
+    scope_user_id, updated_targets, updated_resolutions = _mutate_file_memory_targets(
         memory_id=memory_id,
         content=content,
         storage_path=storage_path,
@@ -754,6 +849,14 @@ def update_file_agent_memory(
         execution_identity=execution_identity,
     )
     if updated_targets > 0:
+        for resolution in updated_resolutions:
+            _schedule_scope_semantic_refresh(
+                scope_user_id,
+                resolution,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            )
         logger.info(
             "File memory updated",
             memory_id=memory_id,
@@ -785,7 +888,7 @@ def delete_file_agent_memory(
     ) is None:
         raise MemoryNotFoundError(memory_id)
 
-    scope_user_id, deleted_targets = _mutate_file_memory_targets(
+    scope_user_id, deleted_targets, deleted_resolutions = _mutate_file_memory_targets(
         memory_id=memory_id,
         content=None,
         storage_path=storage_path,
@@ -795,6 +898,14 @@ def delete_file_agent_memory(
         execution_identity=execution_identity,
     )
     if deleted_targets > 0:
+        for resolution in deleted_resolutions:
+            _schedule_scope_semantic_refresh(
+                scope_user_id,
+                resolution,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            )
         logger.info(
             "File memory deleted",
             memory_id=memory_id,
@@ -844,6 +955,15 @@ def store_file_conversation_memory(
             config,
             memory_id=team_memory_id,
         )
+        if isinstance(agent_name, str):
+            _schedule_agent_semantic_refresh(
+                agent_name,
+                scope_user_id,
+                resolution,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            )
 
     if isinstance(agent_name, list):
         logger.info(

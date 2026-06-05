@@ -26,11 +26,10 @@ nav = [
     { "Teams" = "configuration/teams.md" },
     { "Cultures" = "configuration/cultures.md" },
     { "Router" = "configuration/router.md" },
-    { "Toolkits" = "configuration/toolkits.md" },
   ] },
   { "Tools" = [
     { "Overview" = "tools/index.md" },
-    { "Dynamic Toolkits" = "tools/dynamic-toolkits.md" },
+    { "Dynamic Tools" = "tools/dynamic-tools.md" },
     { "Execution & Coding" = "tools/execution-and-coding.md" },
     { "Data & Databases" = "tools/data-and-databases.md" },
     { "Web Search" = "tools/web-search.md" },

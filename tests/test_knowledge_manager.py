@@ -25,13 +25,16 @@ import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
+from mindroom import file_locks
 from mindroom.api import config_lifecycle, main
+from mindroom.api import knowledge as knowledge_api
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     git_checkout_present,
@@ -133,7 +136,7 @@ class _VectorDb:
 
 
 class _Knowledge:
-    def __init__(self, vector_db: _VectorDb) -> None:
+    def __init__(self, vector_db: _VectorDb | None = None) -> None:
         self.vector_db = vector_db
 
     def insert(
@@ -187,7 +190,7 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     _VectorDb.collections = {}
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.manager._create_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
@@ -217,6 +220,31 @@ def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceRoot) -> No
     knowledge_refresh_runner._release_refresh_lock_for_key(key, entry)
 
 
+def _test_indexing_settings(base_id: str = "docs") -> knowledge_manager_module.IndexingSettings:
+    return knowledge_manager_module.IndexingSettings(
+        base_id=base_id,
+        storage_root="storage",
+        knowledge_path=f"knowledge/{base_id}",
+        mode="semantic",
+        embedder_provider="openai",
+        embedder_model="text-embedding-3-small",
+        embedder_host="",
+        embedder_dimensions="",
+        chunk_size="5000",
+        chunk_overlap="0",
+        repo_identity="",
+        git_branch="",
+        git_lfs="",
+        git_skip_hidden="",
+        git_include_patterns="",
+        git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
+        include_extensions="",
+        exclude_extensions="()",
+    )
+
+
 def _config(
     tmp_path: Path,
     *,
@@ -224,6 +252,7 @@ def _config(
     agent_bases: list[str],
     git_configs: dict[str, KnowledgeGitConfig] | None = None,
     watch: bool = False,
+    modes: dict[str, str] | None = None,
 ) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
@@ -235,6 +264,7 @@ def _config(
                     path=str(path),
                     watch=watch,
                     git=(git_configs or {}).get(base_id),
+                    mode=(modes or {}).get(base_id, "semantic"),
                 )
                 for base_id, path in bases.items()
             },
@@ -258,10 +288,29 @@ def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
     )
 
 
-def _identity(requester_id: str) -> ToolExecutionIdentity:
+def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: Path) -> None:
+    """Published file-mode metadata derives mode from indexing settings."""
+    metadata_path = tmp_path / "indexing_settings.json"
+    settings = replace(_test_indexing_settings(), mode="files")
+    write_index_metadata_payload(
+        metadata_path,
+        settings=settings.to_metadata(),
+        status="complete",
+        indexed_count=0,
+        source_signature="source-signature",
+    )
+
+    state = load_published_index_state(metadata_path)
+
+    assert state is not None
+    assert state.settings.mode == "files"
+    assert state.collection is None
+
+
+def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
-        agent_name="helper",
+        agent_name=agent_name,
         requester_id=requester_id,
         room_id="!room:localhost",
         thread_id=None,
@@ -363,6 +412,38 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     assert scheduler.schedule_refresh.call_args.kwargs["config"] is config
 
 
+def test_file_mode_knowledge_skips_semantic_lookup_and_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-only knowledge should not look up vectors or schedule embedding refreshes."""
+    config = _config(
+        tmp_path,
+        bases={"docs": tmp_path / "docs"},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    get_published_index = MagicMock(side_effect=AssertionError("semantic index lookup should be skipped"))
+    monkeypatch.setattr(knowledge_utils, "get_published_index", get_published_index)
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
+
+    resolution = resolve_agent_knowledge_access(
+        "helper",
+        config,
+        runtime_paths_for(config),
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    assert resolution.missing == ()
+    assert resolution.unavailable == {}
+    get_published_index.assert_not_called()
+    scheduler.is_refreshing.assert_not_called()
+    scheduler.schedule_refresh.assert_not_called()
+
+
 def test_initializing_knowledge_skips_duplicate_initial_load_when_scheduler_is_active(tmp_path: Path) -> None:
     """An active scheduler refresh is enough for initializing knowledge."""
     config = _config(
@@ -406,6 +487,187 @@ def test_refresh_scheduler_module_exports_one_concrete_scheduler_name() -> None:
     assert not hasattr(knowledge_refresh_scheduler, "StandaloneKnowledgeRefreshScheduler")
     assert not hasattr(knowledge_refresh_scheduler, "OrchestratorKnowledgeRefreshScheduler")
     assert not hasattr(knowledge_refresh_scheduler, "PerBindingKnowledgeRefreshScheduler")
+
+
+@pytest.mark.asyncio
+async def test_file_mode_refresh_publishes_source_metadata_without_vector_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refreshing file-only knowledge should avoid Chroma collections and embedders."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    embedder_factory = MagicMock(return_value=object())
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", embedder_factory)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+
+    assert result.indexed_count == 0
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert state is not None
+    assert state.status == "complete"
+    assert state.collection is None
+    assert state.indexed_count == 0
+    assert _VectorDb.collections == {}
+    embedder_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-only Git sync should stale semantic indexes that read the same checkout."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"semantic_docs": docs_path, "file_docs": docs_path},
+        agent_bases=["semantic_docs", "file_docs"],
+        git_configs={"semantic_docs": git_config, "file_docs": git_config},
+        modes={"file_docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    semantic_key = resolve_published_index_key("semantic_docs", config=config, runtime_paths=runtime_paths)
+    file_key = resolve_published_index_key("file_docs", config=config, runtime_paths=runtime_paths)
+    semantic_collection = KnowledgeManager(
+        "semantic_docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )._default_collection_name()
+    _VectorDb.collections[semantic_collection] = [
+        {"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}},
+    ]
+    knowledge_registry.save_published_index_state(
+        published_index_metadata_path(semantic_key),
+        knowledge_registry.PublishedIndexState(
+            settings=semantic_key.indexing_settings,
+            status="complete",
+            collection=semantic_collection,
+            indexed_count=1,
+            source_signature="old-source-signature",
+        ),
+    )
+    knowledge_registry.mark_published_index_refresh_succeeded(semantic_key)
+
+    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
+        assert self.base_id == "file_docs"
+        self._git_last_successful_commit = "rev-updated"
+        _set_git_tracked_files(self, "guide.md")
+        return {"updated": True, "changed_count": 1, "removed_count": 0}
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
+
+    result = await refresh_knowledge_binding("file_docs", config=config, runtime_paths=runtime_paths)
+    semantic_state = load_published_index_state(published_index_metadata_path(semantic_key))
+    file_state = load_published_index_state(published_index_metadata_path(file_key))
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert semantic_state is not None
+    assert knowledge_registry.published_index_refresh_state(semantic_state) == "stale"
+    assert file_state is not None
+    assert file_state.status == "complete"
+    assert file_state.settings.mode == "files"
+    assert knowledge_registry.published_index_refresh_state(file_state) == "none"
+
+
+@pytest.mark.asyncio
+async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete(tmp_path: Path) -> None:
+    """Cancellation recovery should not require vector state for file-only metadata."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    await knowledge_refresh_runner._reconcile_cancelled_refresh(
+        key,
+        initial_state=None,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    state = load_published_index_state(published_index_metadata_path(key))
+
+    assert state is not None
+    assert state.status == "complete"
+    assert state.settings.mode == "files"
+    assert state.collection is None
+    assert published_index_refresh_state(state) == "none"
+    assert state.reason is None
+
+
+@pytest.mark.asyncio
+async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_path: Path) -> None:
+    """File-only reindex no-ops should not leave stale manager-local errors."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    manager._last_refresh_error = "previous semantic failure"
+
+    assert await manager.reindex_all() == 0
+    assert manager._last_refresh_error is None
+
+
+def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
+    """File-only metadata should cover every managed file agents can inspect."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
+    diagram = docs_path / "diagram.png"
+    diagram.write_bytes(b"before")
+    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+        modes={"docs": "files"},
+    )
+
+    before = knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        tracked_relative_paths={"guide.md", "diagram.png"},
+    )
+    diagram.write_bytes(b"after")
+
+    assert (
+        knowledge_source_signature(
+            config,
+            "docs",
+            docs_path,
+            tracked_relative_paths={"guide.md", "diagram.png"},
+        )
+        != before
+    )
 
 
 def test_failed_notice_without_index_says_unavailable() -> None:
@@ -605,6 +867,44 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     assert unavailable_details == {}
 
     scheduler.schedule_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_mode_round_trip_marks_semantic_index_stale_after_file_mode_edits(tmp_path: Path) -> None:
+    """Config-only mode transitions must not silently revive stale semantic indexes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "doc.md"
+    doc.write_text("semantic old", encoding="utf-8")
+    semantic_config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=True)
+    file_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        watch=True,
+        modes={"docs": "files"},
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, semantic_config)
+
+    await refresh_knowledge_binding("docs", config=semantic_config, runtime_paths=runtime_paths)
+    ready_lookup = get_published_index("docs", config=semantic_config, runtime_paths=runtime_paths)
+    assert ready_lookup.availability is KnowledgeAvailability.READY
+
+    client = TestClient(main.app)
+    response = client.put("/api/config/save", json=file_config.authored_model_dump())
+    assert response.status_code == 200
+    doc.write_text("semantic new", encoding="utf-8")
+    response = client.put("/api/config/save", json=semantic_config.authored_model_dump())
+    assert response.status_code == 200
+
+    current_config, current_runtime_paths = config_lifecycle.read_app_committed_runtime_config(main.app)
+    stale_lookup = get_published_index("docs", config=current_config, runtime_paths=current_runtime_paths)
+
+    assert stale_lookup.availability is KnowledgeAvailability.STALE
+    assert stale_lookup.state is not None
+    assert published_index_refresh_state(stale_lookup.state) == "stale"
 
 
 @pytest.mark.asyncio
@@ -1066,6 +1366,42 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     assert list_knowledge_files(config, "docs", docs_path) == []
 
 
+def test_local_knowledge_file_listing_prunes_literal_include_prefixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local include globs should avoid walking unrelated source trees."""
+    docs_path = tmp_path / "workspace"
+    memory_dir = docs_path / "memory"
+    unrelated_dir = docs_path / "docs" / "deep"
+    memory_dir.mkdir(parents=True)
+    unrelated_dir.mkdir(parents=True)
+    memory_file = memory_dir / "2026-06-02.md"
+    unrelated_file = unrelated_dir / "runbook.md"
+    memory_file.write_text("Indexed memory.\n", encoding="utf-8")
+    unrelated_file.write_text("Unrelated markdown.\n", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    config.knowledge_bases["docs"] = KnowledgeBaseConfig(
+        path=str(docs_path),
+        include_extensions=[".md"],
+        include_patterns=["memory/**/*.md"],
+    )
+
+    walked_roots: list[Path] = []
+    original_walk = knowledge_manager_module.os.walk
+
+    def recording_walk(top: object, *args: object, **kwargs: object) -> object:
+        walked_roots.append(Path(top))
+        return original_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(knowledge_manager_module.os, "walk", recording_walk)
+
+    files = list_knowledge_files(config, "docs", docs_path)
+
+    assert files == [memory_file.resolve()]
+    assert walked_roots == [memory_dir.resolve()]
+
+
 @pytest.mark.asyncio
 async def test_index_metadata_without_source_signature_is_unavailable_and_schedules_refresh(
     tmp_path: Path,
@@ -1427,6 +1763,82 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_mark_stale_skips_file_mode_duplicate_physical_sources(tmp_path: Path) -> None:
+    """File-mode aliases do not maintain semantic indexes that need stale marking."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared source old", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"alpha": docs_path, "beta": docs_path},
+        agent_bases=["alpha", "beta"],
+        modes={"alpha": "semantic", "beta": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
+    beta_metadata_path = published_index_metadata_path(beta_key)
+    assert load_published_index_state(beta_metadata_path) is not None
+
+    doc.write_text("shared source new", encoding="utf-8")
+    marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
+        "alpha",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    beta_state = load_published_index_state(beta_metadata_path)
+
+    assert marked_base_ids == ("alpha",)
+    assert beta_state is not None
+    assert beta_state.status == "complete"
+    assert beta_state.collection is None
+    assert knowledge_registry.published_index_refresh_state(beta_state) == "none"
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_from_file_mode_alias_marks_semantic_duplicate_sources(tmp_path: Path) -> None:
+    """File-mode source mutations should stale semantic aliases that read the same folder."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared source old", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"alpha": docs_path, "beta": docs_path},
+        agent_bases=["alpha", "beta"],
+        modes={"alpha": "semantic", "beta": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    alpha_lookup = get_published_index("alpha", config=config, runtime_paths=runtime_paths)
+    assert alpha_lookup.index is not None
+    assert alpha_lookup.availability is KnowledgeAvailability.READY
+
+    doc.write_text("shared source new", encoding="utf-8")
+    marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
+        "beta",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    alpha_key = resolve_published_index_key("alpha", config=config, runtime_paths=runtime_paths)
+    beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
+    alpha_state = load_published_index_state(published_index_metadata_path(alpha_key))
+    beta_state = load_published_index_state(published_index_metadata_path(beta_key))
+    refreshed_alpha_lookup = get_published_index("alpha", config=config, runtime_paths=runtime_paths)
+
+    assert marked_base_ids == ("alpha",)
+    assert alpha_state is not None
+    assert knowledge_registry.published_index_refresh_state(alpha_state) == "stale"
+    assert refreshed_alpha_lookup.availability is KnowledgeAvailability.STALE
+    assert beta_state is not None
+    assert beta_state.collection is None
+    assert knowledge_registry.published_index_refresh_state(beta_state) == "none"
+
+
+@pytest.mark.asyncio
 async def test_async_source_changed_cancellation_waits_for_state_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1762,8 +2174,8 @@ def test_raw_git_url_index_metadata_is_config_mismatch(tmp_path: Path) -> None:
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    stale_settings = list(key.indexing_settings)
-    stale_settings[knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX] = raw_repo_url
+    stale_settings = key.indexing_settings.to_metadata()
+    stale_settings["repo_identity"] = raw_repo_url
     collection = "raw_git_metadata_collection"
     _VectorDb.collections[collection] = [
         {"content": "raw git metadata", "metadata": {"source_path": "doc.md"}},
@@ -1812,7 +2224,7 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": key.indexing_settings.to_metadata(),
                 "status": "complete",
                 "collection": collection,
                 "indexed_count": 1,
@@ -1867,7 +2279,7 @@ def test_metadata_state_alone_serves_published_index(tmp_path: Path) -> None:
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": key.indexing_settings.to_metadata(),
                 "status": "complete",
                 "collection": collection,
                 "indexed_count": 1,
@@ -1883,8 +2295,8 @@ def test_metadata_state_alone_serves_published_index(tmp_path: Path) -> None:
     assert lookup.availability is KnowledgeAvailability.READY
 
 
-def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -> None:
-    """Compatibility helpers must stay aligned with the indexing settings tuple layout."""
+def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
+    """Compatibility helpers must use explicit indexing setting names."""
     docs_path = tmp_path / "docs"
     config = _config(
         tmp_path,
@@ -1895,17 +2307,81 @@ def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
 
-    assert len(key.indexing_settings) == knowledge_manager_module._INDEXING_SETTINGS_LAYOUT_LENGTH
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_BASE_ID_INDEX] == "docs"
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_CHUNK_SIZE_INDEX] == "5000"
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX] == "0"
-    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX] == (
-        credential_free_url_identity("https://example.com/org/repo.git")
+    assert key.indexing_settings.base_id == "docs"
+    assert key.indexing_settings.chunk_size == "5000"
+    assert key.indexing_settings.chunk_overlap == "0"
+    assert key.indexing_settings.repo_identity == credential_free_url_identity("https://example.com/org/repo.git")
+    assert knowledge_manager_module.IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == (
+        key.indexing_settings
     )
-    assert (
-        knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX
-        in knowledge_manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES
+    changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
+    assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+
+
+def test_indexing_settings_filter_keys_are_order_insensitive(tmp_path: Path) -> None:
+    """Reordered filters should not change indexing compatibility settings."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://example.com/org/repo.git",
+        include_patterns=["z/*.md", "a/*.md"],
+        exclude_patterns=["drafts/*", "archive/*"],
     )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    config.knowledge_bases["docs"].include_extensions = [".py", ".md"]
+    config.knowledge_bases["docs"].exclude_extensions = [".png", ".jpg"]
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    reordered_config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url="https://example.com/org/repo.git",
+                include_patterns=["a/*.md", "z/*.md"],
+                exclude_patterns=["archive/*", "drafts/*"],
+            ),
+        },
+    )
+    reordered_config.knowledge_bases["docs"].include_extensions = [".md", ".py"]
+    reordered_config.knowledge_bases["docs"].exclude_extensions = [".jpg", ".png"]
+    reordered_key = resolve_published_index_key("docs", config=reordered_config, runtime_paths=runtime_paths)
+
+    assert reordered_key.indexing_settings == key.indexing_settings
+
+
+def test_file_mode_indexing_settings_ignore_semantic_only_settings(tmp_path: Path) -> None:
+    """File-only metadata compatibility should not depend on semantic scan settings."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        modes={"docs": "files"},
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    assert key.indexing_settings.embedder_provider == ""
+    assert key.indexing_settings.embedder_model == ""
+    assert key.indexing_settings.embedder_host == ""
+    assert key.indexing_settings.embedder_dimensions == ""
+    assert key.indexing_settings.chunk_size == ""
+    assert key.indexing_settings.chunk_overlap == ""
+    assert key.indexing_settings.include_extensions == ""
+    assert key.indexing_settings.exclude_extensions == ""
+
+    config.knowledge_bases["docs"].include_extensions = [".md"]
+    config.knowledge_bases["docs"].exclude_extensions = [".png"]
+    changed_key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+    assert changed_key.indexing_settings == key.indexing_settings
 
 
 @pytest.mark.asyncio
@@ -2530,39 +3006,40 @@ async def test_mutation_lock_uses_cross_process_source_lock(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_cross_process_file_lock_waiter_closes_unacquired_handle(
+async def test_cancelled_async_file_lock_waiter_closes_unacquired_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled file-lock waiter must not leak a handle that can later acquire the lock."""
-    source_root = knowledge_registry.KnowledgeSourceRoot(storage_root="/storage", knowledge_path="/storage/docs")
-    handle = object()
+    lock_path = Path("/storage/docs.lock")
     opened = asyncio.Event()
-    closed: list[object] = []
-    released: list[object] = []
+    closed: list[FakeLockFile] = []
+    released: list[int] = []
 
-    def _open(_source_root: knowledge_registry.KnowledgeSourceRoot) -> object:
+    class FakeLockFile:
+        def fileno(self) -> int:
+            return 123
+
+        def close(self) -> None:
+            closed.append(self)
+
+    handle = FakeLockFile()
+
+    def _open(_lock_path: Path) -> FakeLockFile:
         opened.set()
         return handle
 
-    def _try_acquire(_handle: object) -> bool:
-        assert _handle is handle
-        return False
-
-    def _close(_handle: object) -> None:
-        closed.append(_handle)
-
-    def _release(_handle: object) -> None:
-        released.append(_handle)
+    def _flock(file_descriptor: int, flags: int) -> None:
+        assert file_descriptor == 123
+        if flags & file_locks.fcntl.LOCK_EX:
+            raise BlockingIOError
+        released.append(flags)
 
     async def _wait_for_file_lock() -> None:
-        async with knowledge_refresh_runner._acquire_refresh_file_lock(source_root):
+        async with file_locks.async_exclusive_file_lock(lock_path, poll_seconds=0.001):
             pytest.fail("lock waiter unexpectedly acquired the file lock")
 
-    monkeypatch.setattr(knowledge_refresh_runner, "_REFRESH_FILE_LOCK_POLL_SECONDS", 0.001)
-    monkeypatch.setattr(knowledge_refresh_runner, "_open_refresh_file_lock_sync", _open)
-    monkeypatch.setattr(knowledge_refresh_runner, "_try_acquire_refresh_file_lock_sync", _try_acquire)
-    monkeypatch.setattr(knowledge_refresh_runner, "_close_refresh_file_lock_sync", _close)
-    monkeypatch.setattr(knowledge_refresh_runner, "_release_refresh_file_lock_sync", _release)
+    monkeypatch.setattr(file_locks, "_open_lock_file", _open)
+    monkeypatch.setattr(file_locks.fcntl, "flock", _flock)
 
     waiter = asyncio.create_task(_wait_for_file_lock())
     await opened.wait()
@@ -2697,8 +3174,8 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_refresh_rebuilds_stale_list_metadata_without_serving_old_collection(tmp_path: Path) -> None:
-    """List-shaped metadata is stale format and forces a fresh publish."""
+async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collection(tmp_path: Path) -> None:
+    """Malformed metadata forces a fresh publish without serving the old collection."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2713,7 +3190,7 @@ async def test_refresh_rebuilds_stale_list_metadata_without_serving_old_collecti
     ]
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(json.dumps(list(key.indexing_settings)), encoding="utf-8")
+    metadata_path.write_text(json.dumps(["malformed"]), encoding="utf-8")
     doc.write_text("stale list new", encoding="utf-8")
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -3291,7 +3768,7 @@ def test_stale_metadata_without_collection_returns_unavailable_index(tmp_path: P
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": key.indexing_settings.to_metadata(),
                 "status": "complete",
                 "collection": "missing_collection",
                 "indexed_count": 1,
@@ -3323,7 +3800,7 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": key.indexing_settings.to_metadata(),
                 "status": "complete",
                 "collection": "broken_collection",
                 "indexed_count": 1,
@@ -3372,7 +3849,7 @@ def test_published_index_handle_open_failure_degrades_and_schedules_repair_refre
     metadata_path.write_text(
         json.dumps(
             {
-                "settings": list(key.indexing_settings),
+                "settings": key.indexing_settings.to_metadata(),
                 "status": "complete",
                 "collection": collection,
                 "indexed_count": 1,
@@ -4400,6 +4877,140 @@ def test_index_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
     assert key_a != key_b
 
 
+def test_shared_knowledge_path_named_memory_stays_config_relative(tmp_path: Path) -> None:
+    """A shared KB named like memory should not bind to agent file-memory workspaces."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "openclaw": AgentConfig(
+                    display_name="OpenClaw",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+                "mindroom_spouse": AgentConfig(
+                    display_name="MindRoom Spouse",
+                    memory_backend="file",
+                    knowledge_bases=["daily_memory"],
+                ),
+            },
+            models={},
+            knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+            memory={"backend": "file", "file": {"path": "./memory"}},
+        ),
+        runtime_paths,
+    )
+
+    dashboard_root = knowledge_api._knowledge_root(config, "daily_memory", runtime_paths, create=True)
+    shared_key = resolve_published_index_key("daily_memory", config=config, runtime_paths=runtime_paths, create=True)
+    openclaw_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="openclaw"),
+        create=True,
+    )
+    spouse_key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost", agent_name="mindroom_spouse"),
+        create=True,
+    )
+
+    assert dashboard_root == runtime_paths.config_dir / "memory"
+    assert Path(shared_key.knowledge_path) == runtime_paths.config_dir / "memory"
+    assert Path(openclaw_key.knowledge_path) == runtime_paths.config_dir / "memory"
+    assert Path(spouse_key.knowledge_path) == runtime_paths.config_dir / "memory"
+    assert {shared_key, openclaw_key, spouse_key} == {shared_key}
+    assert not (runtime_paths.storage_root / "agents" / "openclaw" / "workspace" / "memory").exists()
+    assert not (runtime_paths.storage_root / "agents" / "mindroom_spouse" / "workspace" / "memory").exists()
+
+
+def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tmp_path: Path) -> None:
+    """Ordinary shared relative knowledge paths should stay config-relative."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={"docs": KnowledgeBaseConfig(path="./knowledge_docs")},
+        memory={"backend": "file", "file": {"path": "./memory"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "knowledge_docs"
+
+
+def test_shared_literal_dollar_path_stays_config_relative(tmp_path: Path) -> None:
+    """Literal dollar signs in path names should stay ordinary config-relative knowledge paths."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./notes$archive")},
+        memory={"backend": "file", "file": {"path": "./notes$archive"}},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "notes$archive"
+
+
+def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config_relative(tmp_path: Path) -> None:
+    """Agent-level file memory does not make arbitrary shared paths workspace-relative."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "helper": AgentConfig(
+                display_name="Helper",
+                memory_backend="file",
+                knowledge_bases=["daily_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
+        memory={"backend": "mem0"},
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+
+    key = resolve_published_index_key(
+        "daily_memory",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=_identity("@alice:localhost"),
+        create=True,
+    )
+
+    assert Path(key.knowledge_path) == runtime_paths.config_dir / "memory"
+
+
 @pytest.mark.asyncio
 async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path) -> None:
     """Requester-local private knowledge must resolve to separate physical index bindings."""
@@ -4842,7 +5453,7 @@ def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
         knowledge_registry.save_published_index_state(
             metadata_path,
             knowledge_registry.PublishedIndexState(
-                settings=("settings",),
+                settings=_test_indexing_settings(),
                 status="complete",
                 collection="collection",
                 source_signature="signature",

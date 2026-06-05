@@ -112,12 +112,15 @@ def resolve_private_requester_scope_root(
     worker_key: str,
 ) -> Path:
     """Return the requester-scoped private root shared across same-requester agents."""
-    requester_worker_key = worker_key
+    requester_worker_key: str | None = worker_key
     if execution_scope == "user_agent":
         requester_worker_key = resolve_worker_key("user", execution_identity, agent_name=None)
         if requester_worker_key is None:
             msg = "Requester-scoped private root requires a requester identity"
             raise ValueError(msg)
+    if requester_worker_key is None:
+        msg = "Requester-scoped private root requires a worker key"
+        raise ValueError(msg)
     return _resolve_private_scope_root(
         runtime_paths=runtime_paths,
         worker_key=requester_worker_key,

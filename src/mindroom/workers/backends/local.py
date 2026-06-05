@@ -2,19 +2,36 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 import threading
 import time
 import venv
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
-from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
-from mindroom.workers.manager import WorkerManager
+from mindroom.workers.backend import (
+    WorkerBackend,
+    WorkerBackendError,
+    effective_idle_status,
+    filter_and_sort_worker_handles,
+)
+from mindroom.workers.backends._lifecycle import (
+    initial_worker_lifecycle_state,
+    mark_worker_failed,
+    mark_worker_idle,
+    mark_worker_ready,
+    prepare_worker_ensure_lifecycle,
+    read_lifecycle_state,
+    touch_worker_lifecycle,
+    write_lifecycle_state,
+)
+from mindroom.workers.backends._metadata_store import (
+    list_worker_state_paths,
+    load_worker_metadata,
+    save_worker_metadata,
+)
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 if TYPE_CHECKING:
@@ -85,8 +102,8 @@ def _read_worker_api_root(runtime_paths: RuntimePaths) -> str:
     return _normalize_worker_api_root(raw_api_root or _DEFAULT_WORKER_API_ROOT)
 
 
-def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths for one concrete worker runtime root."""
+def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
+    """Return the filesystem paths owned by one concrete worker runtime root."""
     resolved_root = state_root.expanduser().resolve()
     metadata_dir = resolved_root / "metadata"
     return LocalWorkerStatePaths(
@@ -99,15 +116,10 @@ def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePath
     )
 
 
-def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths owned by one concrete worker runtime root."""
-    return _local_worker_state_paths_for_root(state_root)
-
-
 def _local_worker_state_paths(worker_key: str, *, worker_root: Path) -> LocalWorkerStatePaths:
     """Return the runtime-local filesystem paths owned by one worker key."""
     resolved_root = worker_root.expanduser().resolve()
-    return _local_worker_state_paths_for_root(resolved_root / worker_dir_name(worker_key))
+    return local_worker_state_paths_for_root(resolved_root / worker_dir_name(worker_key))
 
 
 def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerStatePaths:
@@ -116,7 +128,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     if state_root is None:
         msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
         raise WorkerBackendError(msg)
-    return _local_worker_state_paths_for_root(Path(state_root))
+    return local_worker_state_paths_for_root(Path(state_root))
 
 
 def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
@@ -131,18 +143,19 @@ def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
     builder.create(paths.venv_dir)
 
 
-def ensure_local_worker_state_locked(worker_key: str, paths: LocalWorkerStatePaths) -> None:
+def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
     """Create one worker runtime root under a shared per-worker initialization lock."""
-    with _shared_worker_initialization_lock(worker_key):
+    with _shared_worker_initialization_lock(paths):
         _ensure_local_worker_state(paths)
 
 
-def _shared_worker_initialization_lock(worker_key: str) -> threading.Lock:
+def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
+    lock_key = str(paths.root)
     with _SHARED_INITIALIZATION_LOCK:
-        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(worker_key)
+        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
         if worker_lock is None:
             worker_lock = threading.Lock()
-            _SHARED_INITIALIZATION_LOCKS[worker_key] = worker_lock
+            _SHARED_INITIALIZATION_LOCKS[lock_key] = worker_lock
     return worker_lock
 
 
@@ -163,7 +176,10 @@ class _LocalWorkerBackend:
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self.worker_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._initialization_locks: dict[str, threading.Lock] = {}
+
+    def shutdown(self) -> None:
+        """Local worker state is persistent; manager replacement does not need extra teardown."""
+        return
 
     def ensure_worker(
         self,
@@ -175,18 +191,21 @@ class _LocalWorkerBackend:
         """Resolve or create one local worker."""
         del progress_sink
         timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(spec.worker_key)
         paths = _local_worker_state_paths(spec.worker_key, worker_root=self.worker_root)
+        worker_lock = self._worker_lock(paths)
 
         with worker_lock:
             with self._lock:
                 metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
-                if self._effective_status(metadata, timestamp) != "ready":
-                    metadata.status = "starting"
-                    metadata.last_started_at = timestamp
-                    metadata.startup_count += 1
-                    metadata.failure_reason = None
-                metadata.last_used_at = timestamp
+                should_restart = self._effective_status(metadata, timestamp) != "ready"
+                write_lifecycle_state(
+                    metadata,
+                    prepare_worker_ensure_lifecycle(
+                        read_lifecycle_state(metadata),
+                        now=timestamp,
+                        should_restart=should_restart,
+                    ),
+                )
                 self._save_metadata(paths, metadata)
 
             try:
@@ -198,31 +217,20 @@ class _LocalWorkerBackend:
                 raise WorkerBackendError(failure_reason) from exc
 
             with self._lock:
-                metadata.status = "ready"
-                metadata.last_used_at = timestamp
+                write_lifecycle_state(metadata, mark_worker_ready(read_lifecycle_state(metadata), now=timestamp))
                 self._save_metadata(paths, metadata)
                 return self._to_handle(metadata, paths, now=timestamp)
-
-    def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Return one known local worker handle."""
-        timestamp = time.time() if now is None else now
-        paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        with self._lock:
-            metadata = self._load_metadata(paths)
-            if metadata is None:
-                return None
-            return self._to_handle(metadata, paths, now=timestamp)
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one local worker."""
         timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(worker_key)
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
+        worker_lock = self._worker_lock(paths)
         with worker_lock, self._lock:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 return None
-            metadata.last_used_at = timestamp
+            write_lifecycle_state(metadata, touch_worker_lifecycle(read_lifecycle_state(metadata), now=timestamp))
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, paths, now=timestamp)
 
@@ -238,33 +246,6 @@ class _LocalWorkerBackend:
 
         return filter_and_sort_worker_handles(handles, include_idle)
 
-    def evict_worker(
-        self,
-        worker_key: str,
-        *,
-        preserve_state: bool = True,
-        now: float | None = None,
-    ) -> WorkerHandle | None:
-        """Evict one local worker and optionally preserve its state."""
-        timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(worker_key)
-        paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-
-        with worker_lock:
-            with self._lock:
-                metadata = self._load_metadata(paths)
-                if metadata is None:
-                    return None
-                if preserve_state:
-                    metadata.status = "idle"
-                    metadata.last_used_at = timestamp
-                    self._save_metadata(paths, metadata)
-                    return self._to_handle(metadata, paths, now=timestamp)
-
-            if paths.root.exists():
-                shutil.rmtree(paths.root)
-            return None
-
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Mark timed-out local workers idle."""
         timestamp = time.time() if now is None else now
@@ -276,7 +257,7 @@ class _LocalWorkerBackend:
                 if metadata is None:
                     continue
                 if metadata.status == "ready" and self._effective_status(metadata, timestamp) == "idle":
-                    metadata.status = "idle"
+                    write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
                     self._save_metadata(paths, metadata)
                     cleaned_workers.append(self._to_handle(metadata, paths, now=timestamp))
 
@@ -285,61 +266,41 @@ class _LocalWorkerBackend:
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist one local worker failure."""
         timestamp = time.time() if now is None else now
-        worker_lock = self._worker_lock(worker_key)
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
+        worker_lock = self._worker_lock(paths)
 
         with worker_lock, self._lock:
             return self._record_failure_locked(paths, worker_key, failure_reason, now=timestamp)
 
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._lock:
-            worker_lock = self._initialization_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._initialization_locks[worker_key] = worker_lock
-            return worker_lock
+    def _worker_lock(self, paths: LocalWorkerStatePaths) -> threading.Lock:
+        return _shared_worker_initialization_lock(paths)
 
     def _default_metadata(self, worker_key: str, now: float) -> _LocalWorkerMetadata:
+        lifecycle = initial_worker_lifecycle_state(now=now)
         return _LocalWorkerMetadata(
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
             endpoint=f"{self.api_root}/execute",
             backend_name=self.backend_name,
-            created_at=now,
-            last_used_at=now,
-            status="starting",
+            created_at=lifecycle.created_at,
+            last_used_at=lifecycle.last_used_at,
+            status=lifecycle.status,
         )
 
     def _ensure_worker_state(self, paths: LocalWorkerStatePaths) -> None:
         _ensure_local_worker_state(paths)
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
-        if not self.worker_root.exists():
-            return []
-
-        return [
-            _local_worker_state_paths_for_root(metadata_file.parents[1])
-            for metadata_file in sorted(self.worker_root.glob("*/metadata/worker.json"))
-        ]
+        return list_worker_state_paths(
+            self.worker_root,
+            state_paths_from_root=local_worker_state_paths_for_root,
+        )
 
     def _load_metadata(self, paths: LocalWorkerStatePaths) -> _LocalWorkerMetadata | None:
-        if not paths.metadata_file.exists():
-            return None
-        try:
-            with paths.metadata_file.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return None
-
-        try:
-            return _LocalWorkerMetadata(**data)
-        except TypeError:
-            return None
+        return load_worker_metadata(paths, metadata_type=_LocalWorkerMetadata)
 
     def _save_metadata(self, paths: LocalWorkerStatePaths, metadata: _LocalWorkerMetadata) -> None:
-        paths.metadata_dir.mkdir(parents=True, exist_ok=True)
-        with paths.metadata_file.open("w", encoding="utf-8") as f:
-            json.dump(asdict(metadata), f, sort_keys=True)
+        save_worker_metadata(paths, metadata)
 
     def _effective_status(self, metadata: _LocalWorkerMetadata, now: float) -> WorkerStatus:
         return effective_idle_status(metadata.status, metadata.last_used_at, self.idle_timeout_seconds, now)
@@ -353,10 +314,10 @@ class _LocalWorkerBackend:
         now: float,
     ) -> WorkerHandle:
         metadata = self._load_metadata(paths) or self._default_metadata(worker_key, now)
-        metadata.status = "failed"
-        metadata.last_used_at = now
-        metadata.failure_count += 1
-        metadata.failure_reason = failure_reason
+        write_lifecycle_state(
+            metadata,
+            mark_worker_failed(read_lifecycle_state(metadata), now=now, failure_reason=failure_reason),
+        )
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, paths, now=now)
 
@@ -382,12 +343,12 @@ class _LocalWorkerBackend:
         )
 
 
-_local_worker_manager: WorkerManager | None = None
+_local_worker_manager: WorkerBackend | None = None
 _local_worker_manager_config: tuple[str, str, float] | None = None
 _local_worker_manager_lock = threading.Lock()
 
 
-def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerManager:
+def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerBackend:
     """Return the local sandbox worker manager for the current config."""
     global _local_worker_manager, _local_worker_manager_config
 
@@ -398,12 +359,10 @@ def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerManager:
 
     with _local_worker_manager_lock:
         if _local_worker_manager is None or _local_worker_manager_config != config:
-            _local_worker_manager = WorkerManager(
-                _LocalWorkerBackend(
-                    worker_root=worker_root,
-                    api_root=api_root,
-                    idle_timeout_seconds=idle_timeout_seconds,
-                ),
+            _local_worker_manager = _LocalWorkerBackend(
+                worker_root=worker_root,
+                api_root=api_root,
+                idle_timeout_seconds=idle_timeout_seconds,
             )
             _local_worker_manager_config = config
 

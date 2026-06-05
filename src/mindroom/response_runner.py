@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -11,6 +10,8 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
@@ -20,9 +21,9 @@ from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history import HistoryScope, has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
 from mindroom.matrix.typing import typing_indicator
@@ -52,10 +53,12 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     clean_partial_reply_text,
+    strip_visible_tool_markers,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
 
@@ -89,6 +92,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.history import CompactionOutcome, HistoryScope
+    from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -102,8 +106,6 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
-_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 
 def _merge_response_extra_content(
@@ -131,35 +133,6 @@ def _split_delivery_tool_trace(
     return completed, interrupted
 
 
-def _strip_visible_tool_markers(text: str) -> str:
-    """Remove Matrix-visible tool markers from streamed text before replay persistence."""
-    lines = text.splitlines()
-    filtered_lines: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
-            filtered_lines.append(line)
-            index += 1
-            continue
-
-        index += 1
-        spacer_lines: list[str] = []
-        while index < len(lines) and not lines[index].strip():
-            spacer_lines.append(lines[index])
-            index += 1
-
-        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
-            filtered_lines.extend(spacer_lines)
-            index += 1
-            if index < len(lines) and not lines[index].strip():
-                index += 1
-            continue
-
-        filtered_lines.extend(spacer_lines)
-    return "\n".join(filtered_lines).rstrip()
-
-
 def _materialize_matrix_run_metadata(
     matrix_run_metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -169,13 +142,18 @@ def _materialize_matrix_run_metadata(
     return dict(matrix_run_metadata)
 
 
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
+def _agent_has_matrix_messaging_tool(config: Config, agent_name: str, session_id: str | None) -> bool:
     """Return whether one agent can issue Matrix message actions."""
     try:
-        tool_names = config.get_agent_tools(agent_name)
+        surface = visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            session_id=session_id,
+            enable_dynamic_tools_manager=False,
+        )
     except ValueError:
         return False
-    return "matrix_message" in tool_names
+    return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
 
 
 def _append_matrix_prompt_context(
@@ -283,20 +261,16 @@ def prepare_memory_and_model_context(
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
 
-    room_id: str
-    reply_to_event_id: str
-    thread_id: str | None
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
+    response_envelope: MessageEnvelope
     model_prompt: str | None = None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
-    response_envelope: MessageEnvelope | None = None
     correlation_id: str | None = None
-    target: MessageTarget | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
@@ -304,6 +278,21 @@ class ResponseRequest:
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+
+    @property
+    def room_id(self) -> str:
+        """Return the canonical response room."""
+        return self.response_envelope.target.room_id
+
+    @property
+    def reply_to_event_id(self) -> str | None:
+        """Return the canonical event this response answers."""
+        return self.response_envelope.target.reply_to_event_id
+
+    @property
+    def thread_id(self) -> str | None:
+        """Return the canonical resolved response thread root."""
+        return self.response_envelope.target.resolved_thread_id
 
 
 class PostLockRequestPreparationError(RuntimeError):
@@ -406,7 +395,7 @@ class ResponseRunner:
         self,
         *,
         user_message: str,
-        reply_to_event_id: str,
+        reply_to_event_id: str | None,
         matrix_run_metadata: dict[str, Any] | None,
     ) -> TurnRecorder:
         """Create one lifecycle-owned recorder seeded with canonical Matrix metadata."""
@@ -486,7 +475,7 @@ class ResponseRunner:
         tool_trace: Sequence[ToolTraceEntry],
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
-        partial_text = clean_partial_reply_text(_strip_visible_tool_markers(accumulated_text))
+        partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
             partial_text = recorder.assistant_text
@@ -508,11 +497,19 @@ class ResponseRunner:
         """Return whether one canonical conversation target already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_target(target)
 
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
+        """Return canonical thread IDs with active response lifecycles in one room."""
+        return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
+
+    async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
+        """Wait until one canonical room/thread has no active response turn."""
+        await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
+
     def reserve_waiting_human_message(
         self,
         *,
         target: MessageTarget,
-        response_envelope: MessageEnvelope | None,
+        response_envelope: MessageEnvelope,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
         return self._lifecycle_coordinator.reserve_waiting_human_message(
@@ -550,18 +547,6 @@ class ResponseRunner:
             ),
         )
 
-    def _resolve_request_target(self, request: ResponseRequest) -> MessageTarget:
-        """Resolve the canonical response target for one request."""
-        return request.target or (
-            request.response_envelope.target
-            if request.response_envelope is not None
-            else self.deps.resolver.build_message_target(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-            )
-        )
-
     def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return still-running response event IDs for one room."""
         return {
@@ -577,7 +562,7 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget], Awaitable[str | None]],
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
-        resolved_target = self._resolve_request_target(request)
+        resolved_target = request.response_envelope.target
         return await self._lifecycle_coordinator.run_locked_response(
             target=resolved_target,
             response_envelope=request.response_envelope,
@@ -593,12 +578,10 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Return a prepared request constrained to the target that owns the lock."""
         response_envelope = request.response_envelope
-        if response_envelope is not None and response_envelope.target != resolved_target:
+        if response_envelope.target != resolved_target:
             response_envelope = replace(response_envelope, target=resolved_target)
         return replace(
             request,
-            thread_id=resolved_target.resolved_thread_id,
-            target=resolved_target,
             response_envelope=response_envelope,
         )
 
@@ -656,6 +639,42 @@ class ResponseRunner:
             target=target,
             reply_to_event_id=reply_to_event_id,
         )
+
+    def _has_queued_forced_compaction(
+        self,
+        *,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
+        """Return whether this scope should compact before creating a reply placeholder."""
+        storage = None
+        try:
+            storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
+            session = storage.get_session(session_id, self.deps.state_writer.session_type_for_scope(scope))
+            if not isinstance(session, AgentSession | TeamSession):
+                return False
+            state = read_scope_state(session, scope)
+            return state.force_compact_before_next_run or has_pending_force_compaction_scope(session, scope)
+        except Exception as error:
+            self.deps.logger.warning(
+                "forced_compaction_placeholder_check_failed",
+                session_id=session_id,
+                scope=scope.key,
+                exception_type=error.__class__.__name__,
+            )
+            return False
+        finally:
+            if storage is not None:
+                try:
+                    storage.close()
+                except Exception as error:
+                    self.deps.logger.warning(
+                        "forced_compaction_placeholder_storage_close_failed",
+                        session_id=session_id,
+                        scope=scope.key,
+                        exception_type=error.__class__.__name__,
+                    )
 
     async def _refresh_model_history_after_lock(
         self,
@@ -715,54 +734,18 @@ class ResponseRunner:
             used_streaming=used_streaming,
         )
 
-    def _response_envelope_for_request(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        requester_id: str | None = None,
-        sender_id: str | None = None,
-    ) -> MessageEnvelope:
-        """Resolve the hook envelope for one response request."""
-        if request.response_envelope is not None:
-            return request.response_envelope
-        resolved_requester_id = (
-            requester_id if requester_id is not None else request.user_id or self.deps.matrix_full_id
-        )
-        resolved_sender_id = sender_id if sender_id is not None else request.user_id or self.deps.matrix_full_id
-        return MessageEnvelope(
-            source_event_id=request.reply_to_event_id,
-            room_id=request.room_id,
-            target=resolved_target,
-            requester_id=resolved_requester_id,
-            sender_id=resolved_sender_id,
-            body=request.prompt,
-            attachment_ids=tuple(request.attachment_ids or ()),
-            mentioned_agents=(),
-            agent_name=self.deps.agent_name,
-            source_kind="message",
-        )
-
     def _correlation_id_for_request(self, request: ResponseRequest) -> str:
         """Resolve the correlation id for one request."""
-        return request.correlation_id or request.reply_to_event_id
+        return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
 
     def _build_lifecycle(
         self,
         *,
         response_kind: str,
         request: ResponseRequest,
-        response_envelope: MessageEnvelope | None = None,
         correlation_id: str | None = None,
     ) -> ResponseLifecycle:
         """Build one lifecycle helper with the resolved shared response context."""
-        resolved_response_envelope = response_envelope
-        if resolved_response_envelope is None:
-            assert request.target is not None
-            resolved_response_envelope = self._response_envelope_for_request(
-                request,
-                resolved_target=request.target,
-            )
         return ResponseLifecycle(
             ResponseLifecycleDeps(
                 response_hooks=self.deps.delivery_gateway.deps.response_hooks,
@@ -770,7 +753,7 @@ class ResponseRunner:
             ),
             response_kind=response_kind,
             pipeline_timing=request.pipeline_timing,
-            response_envelope=resolved_response_envelope,
+            response_envelope=request.response_envelope,
             correlation_id=correlation_id or self._correlation_id_for_request(request),
         )
 
@@ -789,10 +772,6 @@ class ResponseRunner:
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
-            response_envelope=self._response_envelope_for_request(
-                request,
-                resolved_target=resolved_target,
-            ),
             correlation_id=self._correlation_id_for_request(request),
         )
         final_outcome = await lifecycle.finalize(
@@ -898,30 +877,27 @@ class ResponseRunner:
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
         )
         include_matrix_prompt_context = any(
-            _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
+            _agent_has_matrix_messaging_tool(self.deps.runtime.config, name, resolved_target.session_id)
+            for name in agent_names
         )
         model_message = _append_matrix_prompt_context(
             prepared_prompt,
             target=resolved_target,
             include_context=include_matrix_prompt_context,
         )
-        resolved_request = replace(
-            request,
-            target=resolved_target,
-            thread_history=model_thread_history,
-            media=request.media or MediaInputs(),
+        resolved_request = self._request_with_locked_target(
+            replace(
+                request,
+                thread_history=model_thread_history,
+                media=request.media or MediaInputs(),
+            ),
+            resolved_target,
         )
-        resolved_response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=resolved_target,
-            requester_id=requester_user_id,
-            sender_id=requester_user_id,
-        )
+        resolved_response_envelope = resolved_request.response_envelope
         resolved_correlation_id = self._correlation_id_for_request(request)
         lifecycle = self._build_lifecycle(
             response_kind="team",
-            request=request,
-            response_envelope=resolved_response_envelope,
+            request=resolved_request,
             correlation_id=resolved_correlation_id,
         )
         delivery_target = (
@@ -929,7 +905,7 @@ class ResponseRunner:
             if request.existing_event_id is None or request.existing_event_is_placeholder
             else resolved_target.with_thread_root(request.thread_id)
         )
-        delivery_request_base = replace(resolved_request, target=delivery_target)
+        delivery_request_base = resolved_request
         session_id = resolved_target.session_id
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
@@ -983,10 +959,6 @@ class ResponseRunner:
         async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
             nonlocal final_delivery_outcome, tracked_event_id, delivery_stage_started
             delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
-            delivery_target = delivery_request.target
-            if delivery_target is None:
-                msg = "Team response delivery target was not resolved"
-                raise RuntimeError(msg)
             if message_id is not None:
                 tracked_event_id = message_id
                 team_turn_recorder.set_response_event_id(message_id)
@@ -1220,7 +1192,11 @@ class ResponseRunner:
                     request.pipeline_timing.mark("response_complete")
 
         thinking_msg = None
-        if not request.existing_event_id:
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
+            session_id=session_id,
+            scope=session_scope,
+            execution_identity=tool_dispatch.execution_identity,
+        ):
             thinking_msg = "🤝 Team Response: Thinking..."
 
         run_message_id: str | None = None
@@ -1233,9 +1209,6 @@ class ResponseRunner:
 
         try:
             run_message_id = await self.run_cancellable_response(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
                 target=delivery_target,
                 response_function=generate_team_response,
                 thinking_message=thinking_msg,
@@ -1354,24 +1327,16 @@ class ResponseRunner:
     async def run_cancellable_response(
         self,
         *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
+        target: MessageTarget,
         response_function: Callable[[str | None], Coroutine[Any, Any, None]],
         thinking_message: str | None = None,
         existing_event_id: str | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
-        target: MessageTarget | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response generation function with cancellation support."""
-        resolved_target = target or self.deps.resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        )
         try:
             self.in_flight_response_count += 1
             return await ResponseAttemptRunner(
@@ -1389,7 +1354,7 @@ class ResponseRunner:
                 ),
             ).run(
                 ResponseAttemptRequest(
-                    target=resolved_target,
+                    target=target,
                     response_function=response_function,
                     thinking_message=thinking_message,
                     existing_event_id=existing_event_id,
@@ -1409,18 +1374,11 @@ class ResponseRunner:
         existing_event_uses_thread_id: bool,
         room_mode: bool,
     ) -> _PreparedResponseRuntime:
-        resolved_target = self._resolve_request_target(request)
+        resolved_target = request.response_envelope.target
         response_thread_id = (
-            resolved_target.resolved_thread_id
-            if request.target is not None
-            else request.thread_id
+            request.thread_id
             if request.existing_event_id and existing_event_uses_thread_id
-            else self.deps.resolver.resolve_response_thread_root(
-                request.thread_id,
-                request.reply_to_event_id,
-                room_id=request.room_id,
-                response_envelope=request.response_envelope,
-            )
+            else request.response_envelope.target.resolved_thread_id
         )
         resolved_target = resolved_target.with_thread_root(response_thread_id)
         media_inputs = request.media or MediaInputs()
@@ -1428,7 +1386,11 @@ class ResponseRunner:
         resolved_model_prompt = _append_matrix_prompt_context(
             request.model_prompt or request.prompt,
             target=resolved_target,
-            include_context=_agent_has_matrix_messaging_tool(self.deps.runtime.config, self.deps.agent_name),
+            include_context=_agent_has_matrix_messaging_tool(
+                self.deps.runtime.config,
+                self.deps.agent_name,
+                session_id,
+            ),
         )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
@@ -1668,6 +1630,16 @@ class ResponseRunner:
                 )
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
+                if turn_recorder.outcome == "interrupted":
+                    self._persist_interrupted_recorder(
+                        recorder=turn_recorder,
+                        session_scope=self.deps.state_writer.history_scope(),
+                        session_id=runtime.session_id,
+                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        run_id=run_id,
+                        is_team=False,
+                        response_event_id=request.existing_event_id,
+                    )
                 return transport_outcome
         except asyncio.CancelledError:
             self._persist_interrupted_recorder(
@@ -1698,15 +1670,12 @@ class ResponseRunner:
         runtime = await self.prepare_non_streaming_runtime(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=runtime.resolved_target,
-        )
+        request = self._request_with_locked_target(request, runtime.resolved_target)
+        response_envelope = request.response_envelope
         correlation_id = self._correlation_id_for_request(request)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
-            response_envelope=response_envelope,
             correlation_id=correlation_id,
         )
         session_scope = self.deps.state_writer.history_scope()
@@ -1841,15 +1810,12 @@ class ResponseRunner:
         runtime = await self.prepare_streaming_runtime(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=runtime.resolved_target,
-        )
+        request = self._request_with_locked_target(request, runtime.resolved_target)
+        response_envelope = request.response_envelope
         correlation_id = self._correlation_id_for_request(request)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
-            response_envelope=response_envelope,
             correlation_id=correlation_id,
         )
         session_scope = self.deps.state_writer.history_scope()
@@ -2059,7 +2025,6 @@ class ResponseRunner:
             model_prompt=model_prompt_text,
             thread_history=model_thread_history,
             media=request.media or MediaInputs(),
-            target=resolved_target,
         )
 
         session_id = resolved_target.session_id
@@ -2095,15 +2060,12 @@ class ResponseRunner:
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
         attempt_run_ids: list[str] = []
+        request = self._request_with_locked_target(request, resolved_target)
         resolved_correlation_id = self._correlation_id_for_request(request)
-        resolved_response_envelope = self._response_envelope_for_request(
-            request,
-            resolved_target=resolved_target,
-        )
+        resolved_response_envelope = request.response_envelope
         lifecycle = self._build_lifecycle(
             response_kind="ai",
             request=request,
-            response_envelope=resolved_response_envelope,
             correlation_id=resolved_correlation_id,
         )
 
@@ -2203,15 +2165,16 @@ class ResponseRunner:
                 )
 
         thinking_msg = None
-        if not request.existing_event_id:
+        if not request.existing_event_id and not self._has_queued_forced_compaction(
+            session_id=session_id,
+            scope=self.deps.state_writer.history_scope(),
+            execution_identity=execution_identity,
+        ):
             thinking_msg = "Thinking..."
 
         run_message_id: str | None = None
         try:
             run_message_id = await self.run_cancellable_response(
-                room_id=request.room_id,
-                reply_to_event_id=request.reply_to_event_id,
-                thread_id=request.thread_id,
                 target=resolved_target,
                 response_function=generate,
                 thinking_message=thinking_msg,

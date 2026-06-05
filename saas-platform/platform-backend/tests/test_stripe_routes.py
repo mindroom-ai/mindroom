@@ -63,7 +63,7 @@ class TestStripeRoutesEndpoints:
             mock_stripe.checkout.Session.create.return_value = mock_checkout_session
 
             # Make request
-            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
+            response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 200
@@ -151,17 +151,17 @@ class TestStripeRoutesEndpoints:
             mock_supabase.table().update().eq().execute.return_value = Mock()
 
             # Make request
-            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
+            response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 200
             data = response.json()
             assert data["url"] == "https://checkout.stripe.com/pay/cs_test_123"
 
-    def test_checkout_with_quantity(
+    def test_checkout_uses_single_flat_price(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
-        """Test creating checkout with quantity for professional plan."""
+        """Test creating checkout for a flat-priced plan."""
         # Setup
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
             data={"stripe_customer_id": "cus_test_123"}
@@ -176,15 +176,14 @@ class TestStripeRoutesEndpoints:
             mock_checkout_session.url = "https://checkout.stripe.com/pay/cs_test_123"
             mock_stripe.checkout.Session.create.return_value = mock_checkout_session
 
-            # Make request with quantity
-            response = client.post(
-                "/stripe/checkout", json={"tier": "professional", "billing_cycle": "monthly", "quantity": 5}
-            )
+            response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 200
             data = response.json()
             assert data["url"] == "https://checkout.stripe.com/pay/cs_test_123"
+            call_args = mock_stripe.checkout.Session.create.call_args.kwargs
+            assert call_args["line_items"] == [{"price": "price_test_123", "quantity": 1}]
 
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
@@ -203,7 +202,7 @@ class TestStripeRoutesEndpoints:
             mock_stripe.checkout.Session.create.side_effect = Exception("Checkout error")
 
             # Make request
-            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
+            response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 500
@@ -225,5 +224,5 @@ class TestStripeRoutesEndpoints:
 
     def test_unauthorized_access(self, client: TestClient):
         """Test accessing endpoints without authentication."""
-        response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
+        response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
         assert response.status_code == 401

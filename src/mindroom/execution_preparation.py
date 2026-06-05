@@ -19,6 +19,7 @@ from mindroom.constants import (
     STREAM_STATUS_INTERRUPTED,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    TOOL_TRACE_CONTENT_KEY,
     RuntimePaths,
 )
 from mindroom.entity_resolution import entity_identity_registry
@@ -38,7 +39,7 @@ from mindroom.history import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
+from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -184,6 +185,32 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
     return isinstance(original_sender, str) and bool(original_sender)
 
 
+def _should_strip_visible_tool_markers(
+    message: ResolvedVisibleMessage,
+    *,
+    response_sender_id: str | None,
+) -> bool:
+    """Return whether visible marker lines are known MindRoom display chrome."""
+    if isinstance(message.content.get(TOOL_TRACE_CONTENT_KEY), dict):
+        return True
+    return (
+        response_sender_id is not None
+        and message.sender == response_sender_id
+        and not _is_relayed_user_message(message)
+    )
+
+
+def _context_body_from_visible_message(
+    message: ResolvedVisibleMessage,
+    *,
+    response_sender_id: str | None,
+) -> str:
+    """Return the model-facing body for one visible Matrix message."""
+    if _should_strip_visible_tool_markers(message, response_sender_id=response_sender_id):
+        return strip_visible_tool_markers(message.body)
+    return message.body
+
+
 def _cap_visible_message_body(body: str, max_length: int | None) -> str:
     """Return a body capped for fallback context while marking truncated text."""
     if max_length is None or len(body) <= max_length:
@@ -213,20 +240,25 @@ def _context_message_from_visible_message(
     *,
     response_sender_id: str | None,
     missing_sender_label: str | None = None,
+    body: str | None = None,
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
+    # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
+    # Those markers are display chrome, not conversation content; if we replay
+    # them to the model it can continue the pattern as plain text with no trace.
+    body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
         and not _is_relayed_user_message(message)
     ):
-        return Message(role="assistant", content=message.body)
+        return Message(role="assistant", content=body)
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
         speaker_label = missing_sender_label
     if speaker_label:
-        return Message(role="user", content=f"{speaker_label}: {message.body}")
-    return Message(role="user", content=message.body)
+        return Message(role="user", content=f"{speaker_label}: {body}")
+    return Message(role="user", content=body)
 
 
 def _context_messages_from_visible_messages(
@@ -241,11 +273,15 @@ def _context_messages_from_visible_messages(
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
     context_messages: list[Message] = []
     for message in visible_messages:
-        if not message.body:
+        # Strip before length capping so display-only markers do not consume the
+        # model-context budget or leave marker-only turns behind.
+        body = _context_body_from_visible_message(message, response_sender_id=response_sender_id)
+        if not body:
             continue
-        capped_message = message
+        capped_body = body
+        capped_message = replace_visible_message(message, body=capped_body)
         if max_message_length is not None:
-            capped_body = _cap_visible_message_body(message.body, max_message_length)
+            capped_body = _cap_visible_message_body(body, max_message_length)
             if not capped_body:
                 continue
             capped_message = replace_visible_message(message, body=capped_body)
@@ -254,6 +290,7 @@ def _context_messages_from_visible_messages(
                 capped_message,
                 response_sender_id=response_sender_id,
                 missing_sender_label=missing_sender_label,
+                body=capped_body,
             ),
         )
     return tuple(context_messages)
@@ -569,28 +606,6 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
-    if fallback_thread_history is not None:
-        fallback_thread_history = _sanitize_thread_history_for_replay(
-            fallback_thread_history,
-            response_sender_id=response_sender_id,
-            active_event_ids=active_event_ids,
-        )
-    replay_fallback_messages = _build_thread_history_messages(
-        prompt,
-        fallback_thread_history,
-        response_sender_id=response_sender_id,
-        current_sender_id=current_sender_id,
-        config=config,
-        max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
-        max_message_length=(thread_history_render_limits.max_message_length if thread_history_render_limits else None),
-        missing_sender_label=(
-            thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
-        ),
-        static_token_budget=fallback_static_token_budget,
-        estimate_static_tokens_fn=estimate_static_tokens_fn,
-        render_messages_text_fn=render_messages_text_fn,
-    )
 
     provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id, config=config)
     if reply_to_event_id and thread_history:
@@ -631,7 +646,31 @@ async def _prepare_execution_context_common(
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
-    if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
+    if not prepared_history.replays_persisted_history and thread_history:
+        fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+        if fallback_thread_history is not None:
+            fallback_thread_history = _sanitize_thread_history_for_replay(
+                fallback_thread_history,
+                response_sender_id=response_sender_id,
+                active_event_ids=active_event_ids,
+            )
+        replay_fallback_messages = _build_thread_history_messages(
+            prompt,
+            fallback_thread_history,
+            response_sender_id=response_sender_id,
+            current_sender_id=current_sender_id,
+            config=config,
+            max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
+            max_message_length=(
+                thread_history_render_limits.max_message_length if thread_history_render_limits else None
+            ),
+            missing_sender_label=(
+                thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
+            ),
+            static_token_budget=fallback_static_token_budget,
+            estimate_static_tokens_fn=estimate_static_tokens_fn,
+            render_messages_text_fn=render_messages_text_fn,
+        )
         final_messages = replay_fallback_messages
         fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
         if prepared_history.replay_plan is not None:

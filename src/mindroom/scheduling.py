@@ -21,7 +21,8 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_for_room
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
@@ -39,7 +40,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
-from mindroom.thread_utils import get_agents_in_thread
+from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -326,27 +327,6 @@ def _parse_scheduled_task_record(
         except (ValueError, json.JSONDecodeError):
             logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
             return None
-    elif status != "pending":
-        # Backward compatibility: older cancellation paths wrote only {"status": "cancelled"}.
-        description_value = content.get("description")
-        description = (
-            description_value if isinstance(description_value, str) and description_value else "Cancelled task"
-        )
-        message_value = content.get("message")
-        message = message_value if isinstance(message_value, str) else ""
-        thread_id_value = content.get("thread_id")
-        thread_id = thread_id_value if isinstance(thread_id_value, str) else None
-        created_by_value = content.get("created_by")
-        created_by = created_by_value if isinstance(created_by_value, str) else None
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=None,
-            message=message,
-            description=description,
-            created_by=created_by,
-            thread_id=thread_id,
-            room_id=room_id,
-        )
     else:
         return None
 
@@ -979,7 +959,7 @@ async def _execute_scheduled_workflow(
             )
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
-            content["com.mindroom.source_kind"] = "scheduled"
+            content[SOURCE_KIND_KEY] = SCHEDULED_SOURCE_KIND
             delivered = await send_and_track_message(client, workflow.room_id, content, config, conversation_cache)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
@@ -1373,8 +1353,13 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     caller_label="schedule_existing_thread",
                 ),
             )
-            thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
-            available_responders = [agent for agent in thread_agents if agent in sender_visible_room_responders]
+            available_responders = filter_thread_agents_for_sender(
+                get_agents_in_thread(thread_history, config, runtime_paths),
+                scheduled_by,
+                config,
+                runtime_paths,
+                available_responders_in_room=sender_visible_room_responders,
+            )
 
         if mentioned_agents:
             for mid in mentioned_agents:

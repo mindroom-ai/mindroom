@@ -36,6 +36,14 @@ def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> st
     return f"{_AGENT_USERNAME_PREFIX}{agent_name}"
 
 
+def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> str | None:
+    """Extract an unnamespaced generated agent name from a Matrix username localpart."""
+    if not username_localpart.lower().startswith(_AGENT_USERNAME_PREFIX):
+        return None
+    agent_name = username_localpart[len(_AGENT_USERNAME_PREFIX) :]
+    return agent_name or None
+
+
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
     namespace = _mindroom_namespace(runtime_paths)

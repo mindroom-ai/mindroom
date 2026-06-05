@@ -23,6 +23,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
 )
+from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
@@ -1216,6 +1217,7 @@ def create_scope_session_storage(
         state_root=_team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
         subdir="sessions",
         session_table=f"{storage_name}_sessions",
+        prompt_roles=prompt_roles_for_history_storage(),
     )
 
 

@@ -235,7 +235,10 @@ def _sanitize_url_attribute(value: str) -> str | None:
     normalized = "".join(char for char in candidate if not char.isspace())
     if normalized.startswith(("#", "/", "//")):
         return candidate
-    scheme = urlsplit(normalized).scheme.lower()
+    try:
+        scheme = urlsplit(normalized).scheme.lower()
+    except ValueError:
+        return None
     if scheme in _ALLOWED_URL_SCHEMES:
         return candidate
     if not scheme and ":" not in normalized:

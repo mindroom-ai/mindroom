@@ -33,6 +33,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
@@ -78,8 +79,10 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -492,9 +495,7 @@ class TestStreamingBehavior:
         # Create streaming response
         config = self.config
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -545,9 +546,7 @@ class TestStreamingBehavior:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id="$thread_123",
+            target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -604,9 +603,7 @@ class TestStreamingBehavior:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id="$thread_123",
+            target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -631,9 +628,7 @@ class TestStreamingBehavior:
     def test_streaming_update_interval_starts_fast_then_slows(self) -> None:
         """Test progressive throttling: frequent edits first, slower later."""
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -655,9 +650,7 @@ class TestStreamingBehavior:
     def test_streaming_char_threshold_starts_small_then_grows(self) -> None:
         """Character trigger should ramp from a low threshold to steady-state."""
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_char_threshold=180,
@@ -679,9 +672,7 @@ class TestStreamingBehavior:
     def test_replacement_streaming_tracks_chars_since_last_update(self) -> None:
         """Replacement streams should still advance char-trigger counters."""
         streaming = ReplacementStreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -695,9 +686,7 @@ class TestStreamingBehavior:
     def test_stream_started_at_not_set_before_first_send(self) -> None:
         """Test that stream_started_at is None until first _throttled_send."""
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -755,9 +744,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -781,9 +768,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -810,9 +795,7 @@ class TestStreamingBehavior:
             mock_client.room_send.return_value = mock_response
 
             streaming = StreamingResponse(
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 update_interval=10.0,
@@ -858,9 +841,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -912,9 +893,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -964,9 +943,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1022,9 +999,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1082,9 +1057,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1136,9 +1109,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1205,9 +1176,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = streaming_cls(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1252,9 +1221,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1316,9 +1283,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1356,9 +1321,7 @@ class TestStreamingBehavior:
         """A long gap before the next text chunk should trigger an idle flush on that text event."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1396,9 +1359,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1458,9 +1419,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_char_threshold=1,
@@ -1509,9 +1468,7 @@ class TestStreamingBehavior:
         mock_response.event_id = "$boundary_refresh_start"
         mock_client.room_send.return_value = mock_response
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -1539,9 +1496,7 @@ class TestStreamingBehavior:
         """An idle flush should reset the idle baseline before the next small chunk arrives."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1575,9 +1530,7 @@ class TestStreamingBehavior:
         """Small inter-delta gaps should not inflate edit cadence via the idle trigger."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=0.5,
@@ -1605,9 +1558,7 @@ class TestStreamingBehavior:
         """A single buffered chunk should flush once the idle gap exceeds max_idle."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1643,9 +1594,7 @@ class TestStreamingBehavior:
         send_results = iter((False, True))
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1686,9 +1635,7 @@ class TestStreamingBehavior:
         """Idle-triggered edits should still respect the anti-spam minimum interval floor."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1722,9 +1669,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1749,9 +1694,7 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1790,9 +1733,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1821,9 +1762,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1851,9 +1790,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1896,9 +1833,7 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -1945,15 +1880,12 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             outcome = await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=empty_stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         event_id = outcome.last_physical_stream_event_id
@@ -2012,9 +1944,7 @@ class TestStreamingBehavior:
         ):
             outcome = await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id="$thread_root",
+                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=one_chunk_stream(),
@@ -2093,7 +2023,12 @@ class TestStreamingBehavior:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         async def record_send(
@@ -2129,9 +2064,6 @@ class TestStreamingBehavior:
         ):
             delivery = await bot._response_runner.process_and_respond_streaming(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$reply_plain:localhost",
-                    thread_id=None,
                     thread_history=[],
                     prompt="Continue",
                     user_id="@user:localhost",
@@ -2170,12 +2102,9 @@ class TestStreamingBehavior:
 
         with patch("mindroom.streaming.send_message_result", new=record_send):
             streaming = StreamingResponse(
-                room_id="!stale:localhost",
-                reply_to_event_id="$stale_reply:localhost",
-                thread_id="$stale_thread:localhost",
+                target=target,
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
-                target=target,
             )
 
             assert streaming.room_id == "!canonical:localhost"
@@ -2220,7 +2149,7 @@ class TestStreamingBehavior:
             yield "stream chunk"
 
         async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = args[6]
+            response_stream = args[4]
             chunks = [str(chunk) async for chunk in response_stream]
             body = "".join(chunks)
             return StreamTransportOutcome(
@@ -2244,12 +2173,15 @@ class TestStreamingBehavior:
             event_id = await asyncio.wait_for(
                 bot._response_runner.generate_response(
                     ResponseRequest(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        thread_id=None,
                         thread_history=[],
                         prompt="Please check the docs",
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            prompt="Please check the docs",
+                            user_id="@user:localhost",
+                        ),
                         pipeline_timing=pipeline_timing,
                     ),
                 ),
@@ -2308,12 +2240,15 @@ class TestStreamingBehavior:
         ):
             delivery = await bot._response_runner.process_and_respond(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id=None,
                     thread_history=[],
                     prompt="Please check the docs",
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Please check the docs",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
@@ -2338,9 +2273,7 @@ class TestStreamingBehavior:
         # Create streaming response
         config = self.config
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -2393,14 +2326,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert len(edited_texts) == 2
@@ -2438,14 +2368,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=interrupted_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert len(edited_texts) == 2
@@ -2470,14 +2397,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
                 visible_event_id_callback=visible_event_ids.append,
             )
 
@@ -2506,13 +2430,10 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
-                room_mode=True,
                 visible_event_id_callback=visible_event_ids.append,
             )
 
@@ -2547,14 +2468,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert len(edited_messages) == 2
@@ -2608,14 +2526,11 @@ class TestStreamingBehavior:
             ):
                 await send_streaming_response(
                     client=mock_client,
-                    room_id="!test:localhost",
-                    reply_to_event_id="$original_123",
-                    thread_id=None,
+                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                     config=self.config,
                     runtime_paths=runtime_paths_for(self.config),
                     response_stream=cancelling_stream(),
                     existing_event_id="$thinking_123",
-                    room_mode=True,
                 )
 
             observed_statuses[label] = str(edited_messages[-1][STREAM_STATUS_KEY])
@@ -2653,14 +2568,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
@@ -2705,14 +2617,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
@@ -2769,15 +2678,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
@@ -2832,15 +2738,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert terminal_statuses[-1] == STREAM_STATUS_ERROR
@@ -2896,15 +2799,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert later_chunk_reached is False
@@ -2950,9 +2850,7 @@ class TestStreamingBehavior:
         ):
             outcome = await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
@@ -3022,15 +2920,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3081,15 +2976,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3136,15 +3028,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3163,14 +3052,10 @@ class TestStreamingBehavior:
             room_mode=True,
         )
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=target,
             config=self.config,
             runtime_paths=runtime_paths,
-            target=target,
             latest_thread_event_id=None,
-            room_mode=True,
             show_tool_calls=True,
             extra_content=None,
         )
@@ -3269,9 +3154,7 @@ class TestStreamingBehavior:
         """Merged requests must retain the oldest unsent delta so idle flush still fires."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -3312,9 +3195,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = ReplacementStreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3394,9 +3275,7 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=_aiter(),
@@ -3468,15 +3347,12 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3492,9 +3368,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3586,9 +3460,7 @@ class TestStreamingBehavior:
 
         outcome = await send_streaming_response(
             client=mock_client,
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             response_stream=stream(),
@@ -3608,9 +3480,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
@@ -3646,9 +3516,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3686,9 +3554,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3797,28 +3663,22 @@ class TestStreamingBehavior:
                 with pytest.raises(StreamingDeliveryError):
                     await send_streaming_response(
                         client=mock_client,
-                        room_id="!test:localhost",
-                        reply_to_event_id="$original_123",
-                        thread_id=None,
+                        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                         config=self.config,
                         runtime_paths=runtime_paths_for(self.config),
                         response_stream=stream(),
                         existing_event_id="$thinking_123",
                         adopt_existing_placeholder=True,
-                        room_mode=True,
                     )
             else:
                 await send_streaming_response(
                     client=mock_client,
-                    room_id="!test:localhost",
-                    reply_to_event_id="$original_123",
-                    thread_id=None,
+                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                     config=self.config,
                     runtime_paths=runtime_paths_for(self.config),
                     response_stream=stream(),
                     existing_event_id="$thinking_123",
                     adopt_existing_placeholder=True,
-                    room_mode=True,
                 )
 
         assert late_event_thread is not None
@@ -3908,15 +3768,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert late_event_thread is not None
@@ -3939,9 +3796,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3979,9 +3834,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -4014,9 +3867,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -4062,9 +3913,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -4104,7 +3953,12 @@ class TestStreamingBehavior:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         response_hooks = SimpleNamespace(
             apply_before_response=AsyncMock(
@@ -4210,7 +4064,12 @@ class TestStreamingBehavior:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         response_hooks = SimpleNamespace(
             apply_before_response=AsyncMock(),
@@ -4300,7 +4159,12 @@ class TestStreamingBehavior:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         raw_interactive = (
             "```interactive\n"
@@ -4378,9 +4242,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=True,
@@ -4420,9 +4282,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
@@ -4478,9 +4338,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
@@ -4581,14 +4439,11 @@ class TestStreamingConfig:
 
         outcome = await send_streaming_response(
             client=mock_client,
-            room_id="!r:localhost",
-            reply_to_event_id="$orig",
-            thread_id=None,
+            target=MessageTarget.resolve("!r:localhost", None, "$orig", room_mode=True),
             config=config,
             runtime_paths=runtime_paths,
             response_stream=empty_stream(),
             streaming_cls=CapturingStreamingResponse,
-            room_mode=True,
         )
 
         event_id = outcome.last_physical_stream_event_id

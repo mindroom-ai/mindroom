@@ -26,6 +26,7 @@ from mindroom.matrix.large_messages import (
     _oversized_nonterminal_streaming_edit_sent_at,
     prepare_large_message,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.streaming import ReplacementStreamingResponse, StreamingResponse, send_streaming_response
 from mindroom.streaming_delivery import StreamInputChunk
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
@@ -247,9 +248,7 @@ async def test_streaming_initial_message_under_limit() -> None:
     config = MockConfig()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
     )
@@ -271,9 +270,7 @@ async def test_streaming_initial_message_over_limit() -> None:
     config = MockConfig()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
     )
@@ -302,9 +299,7 @@ async def test_streaming_large_initial_message_records_transformed_content_to_ca
     conversation_cache.notify_outbound_message = Mock()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         conversation_cache=conversation_cache,
@@ -330,9 +325,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
     config = MockConfig()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
     )
@@ -373,9 +366,7 @@ async def test_streaming_large_edit_records_transformed_content_to_cache() -> No
     conversation_cache.notify_outbound_message = Mock()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         conversation_cache=conversation_cache,
@@ -409,9 +400,7 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
     config = MockConfig()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
     )
@@ -458,9 +447,7 @@ async def test_streaming_with_thread_context() -> None:
     config = MockConfig()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id="$reply_to",
-        thread_id="$thread_root",
+        target=MessageTarget.resolve("!test:room", "$thread_root", "$reply_to"),
         config=config,
         runtime_paths=_runtime_paths(),
     )
@@ -611,9 +598,7 @@ async def test_streaming_finalize() -> None:
     config = MockConfig()
 
     streaming = StreamingResponse(
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
     )
@@ -645,9 +630,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
@@ -676,9 +659,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
@@ -710,9 +691,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
@@ -740,9 +719,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
@@ -770,9 +747,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
@@ -805,9 +780,7 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
@@ -841,9 +814,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
 
     outcome = await send_streaming_response(
         client=client,
-        room_id="!test:room",
-        reply_to_event_id=None,
-        thread_id=None,
+        target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
         response_stream=stream(),

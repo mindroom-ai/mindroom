@@ -60,6 +60,11 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     path: "",
     max_entrypoint_lines: 200,
   },
+  search: {
+    mode: "keyword",
+    include: ["memory/**/*.md"],
+    include_entrypoint: false,
+  },
   auto_flush: {
     enabled: false,
     flush_interval_seconds: 1800,
@@ -104,6 +109,10 @@ function normalizeMemorySettings(
       ...DEFAULT_MEMORY_SETTINGS.file,
       ...(memory?.file || {}),
     },
+    search: {
+      ...DEFAULT_MEMORY_SETTINGS.search,
+      ...(memory?.search || {}),
+    },
     auto_flush: {
       ...DEFAULT_MEMORY_SETTINGS.auto_flush,
       ...(memory?.auto_flush || {}),
@@ -136,6 +145,13 @@ function parseInteger(value: string, fallback: number): number {
 
 function parseBoolean(value: string): boolean {
   return value === "true";
+}
+
+function parseIncludePatterns(value: string): string[] {
+  return value
+    .split(",")
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern.length > 0);
 }
 
 function providerHelperText(provider: string): string {
@@ -227,6 +243,36 @@ export function MemoryConfig() {
       file: {
         ...localConfig.file,
         path,
+      },
+    });
+  };
+
+  const handleSearchModeChange = (mode: "keyword" | "semantic") => {
+    applyMemoryConfig({
+      ...localConfig,
+      search: {
+        ...localConfig.search,
+        mode,
+      },
+    });
+  };
+
+  const handleSearchIncludeChange = (value: string) => {
+    applyMemoryConfig({
+      ...localConfig,
+      search: {
+        ...localConfig.search,
+        include: parseIncludePatterns(value),
+      },
+    });
+  };
+
+  const handleIncludeEntrypointChange = (include_entrypoint: boolean) => {
+    applyMemoryConfig({
+      ...localConfig,
+      search: {
+        ...localConfig.search,
+        include_entrypoint,
       },
     });
   };
@@ -489,6 +535,71 @@ export function MemoryConfig() {
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Search Mode"
+                helperText="Keyword search is exact text matching; semantic search uses the memory embedder."
+                htmlFor="memory-search-mode"
+              >
+                <Select
+                  value={localConfig.search?.mode ?? "keyword"}
+                  onValueChange={(value) =>
+                    handleSearchModeChange(value as "keyword" | "semantic")
+                  }
+                >
+                  <SelectTrigger
+                    id="memory-search-mode"
+                    className="transition-colors hover:border-ring"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="keyword">Keyword</SelectItem>
+                    <SelectItem value="semantic">Semantic</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldGroup>
+
+              <FieldGroup
+                label="Search Include"
+                helperText="Comma-separated root-relative globs for file-memory search."
+                htmlFor="memory-search-include"
+              >
+                <Input
+                  id="memory-search-include"
+                  type="text"
+                  value={(localConfig.search?.include || []).join(", ")}
+                  onChange={(e) => handleSearchIncludeChange(e.target.value)}
+                  placeholder="memory/**/*.md"
+                  className="transition-colors hover:border-ring focus:border-ring"
+                />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Include Entrypoint"
+                helperText="Include MEMORY.md in search results in addition to preloaded context."
+                htmlFor="memory-search-entrypoint"
+              >
+                <Select
+                  value={String(
+                    localConfig.search?.include_entrypoint ?? false,
+                  )}
+                  onValueChange={(value) =>
+                    handleIncludeEntrypointChange(parseBoolean(value))
+                  }
+                >
+                  <SelectTrigger
+                    id="memory-search-entrypoint"
+                    className="transition-colors hover:border-ring"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="true">Enabled</SelectItem>
+                    <SelectItem value="false">Disabled</SelectItem>
+                  </SelectContent>
+                </Select>
               </FieldGroup>
 
               <FieldGroup

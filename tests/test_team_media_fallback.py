@@ -27,7 +27,7 @@ from agno.team._run import _cleanup_and_store
 from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
@@ -2902,6 +2902,11 @@ async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation(
 async def test_team_response_stream_retry_scrubs_queued_notice_before_second_attempt() -> None:
     """Streaming retries should scrub queued notices from the loaded team session before retrying."""
     config = _build_test_config()
+    config.teams["super_team"] = TeamConfig(
+        display_name="Super Team",
+        role="Configured test team",
+        agents=["general"],
+    )
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
     orchestrator.config = config
@@ -2915,6 +2920,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
+        team_name="super_team",
         create_session_if_missing=True,
     ) as scope_context:
         assert scope_context is not None
@@ -2940,6 +2946,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
         mock_team.db = prepared_scope_context.storage
         team_id = prepared_scope_context.session.team_id
         assert team_id is not None
+        assert team_id == "super_team"
         if attempts == 1:
             errored_output = TeamRunOutput(
                 run_id="run-1",
@@ -2983,6 +2990,7 @@ async def test_team_response_stream_retry_scrubs_queued_notice_before_second_att
                 execution_identity=None,
                 session_id="session-stream-retry-clean",
                 media=MediaInputs(audio=[MagicMock(name="audio_input")]),
+                configured_team_name="super_team",
             )
         ]
 

@@ -160,6 +160,7 @@ class KnowledgeRefreshScheduler:
         mark_refresh_active(key)
         task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{key.base_id}")
         self._tasks[key] = task
+
         task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
 
     def _handle_done(self, key: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_candidate_entities_for_room
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, is_automation_source_kind
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
@@ -41,11 +41,12 @@ from mindroom.teams import (
     resolve_configured_team,
 )
 from mindroom.thread_utils import (
+    AgentResponseDecision,
+    decide_agent_response,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
     is_router_only_agent_mention,
-    should_agent_respond,
     thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import emit_elapsed_timing, timed
@@ -80,6 +81,12 @@ class PreparedDispatch:
     target: MessageTarget
     correlation_id: str
     envelope: MessageEnvelope
+
+    def __post_init__(self) -> None:
+        """Require the prepared envelope and dispatch target to describe the same delivery."""
+        if self.envelope.target != self.target:
+            msg = "Prepared dispatch envelope target must match the resolved dispatch target"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True)
@@ -172,6 +179,7 @@ class IngressHookRunner:
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
             dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,
+            origin=dispatch.envelope.origin,
         )
         model_prompt = payload.model_prompt
         if hook_registered:
@@ -578,13 +586,10 @@ class TurnPolicy:
             return router_plan
 
         action = await self.resolve_response_action(
-            dispatch.context,
+            dispatch,
             room,
-            dispatch.requester_user_id,
             event.body,
             is_dm,
-            target=dispatch.target,
-            source_envelope=dispatch.envelope,
             has_active_response_for_target=has_active_response_for_target,
         )
         if action.kind == "skip":
@@ -593,17 +598,16 @@ class TurnPolicy:
 
     async def resolve_response_action(
         self,
-        context: MessageContext,
+        dispatch: PreparedDispatch,
         room: nio.MatrixRoom,
-        requester_user_id: str,
         message: str,
         is_dm: bool,
         *,
-        target: MessageTarget | None = None,
-        source_envelope: MessageEnvelope | None = None,
-        has_active_response_for_target: Callable[[MessageTarget], bool] | None = None,
+        has_active_response_for_target: Callable[[MessageTarget], bool],
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
+        context = dispatch.context
+        requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
         materializable_agent_names = self.materializable_agent_names()
         live_entity_names = (
@@ -647,8 +651,8 @@ class TurnPolicy:
                 agent_is_responder_candidate
                 and self._should_queue_follow_up_in_active_response_thread(
                     context=context,
-                    target=target,
-                    source_envelope=source_envelope,
+                    target=dispatch.target,
+                    source_envelope=dispatch.envelope,
                     has_active_response_for_target=has_active_response_for_target,
                 )
             )
@@ -680,7 +684,7 @@ class TurnPolicy:
         if team_action is not None:
             return team_action
 
-        if not should_agent_respond(
+        agent_response_decision = decide_agent_response(
             agent_name=self.deps.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
@@ -692,38 +696,61 @@ class TurnPolicy:
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
             available_responders_in_room=available_responders_in_room,
-        ):
+            agents_in_thread=agents_in_thread,
+        )
+        if not agent_response_decision.should_respond:
             if agent_is_responder_candidate and self._should_queue_follow_up_in_active_response_thread(
                 context=context,
-                target=target,
-                source_envelope=source_envelope,
+                target=dispatch.target,
+                source_envelope=dispatch.envelope,
                 has_active_response_for_target=has_active_response_for_target,
             ):
                 return ResponseAction(kind="individual")
+            if agent_is_responder_candidate:
+                self._log_multi_agent_thread_skip(
+                    context,
+                    agent_response_decision,
+                )
             return ResponseAction(kind="skip")
 
         return ResponseAction(kind="individual")
+
+    def _log_multi_agent_thread_skip(
+        self,
+        context: MessageContext,
+        agent_response_decision: AgentResponseDecision,
+    ) -> None:
+        """Log the multi-agent thread branch selected by individual response policy."""
+        if agent_response_decision.skip_reason != "multiple_agents_in_thread":
+            return
+
+        agents_in_thread = agent_response_decision.sender_visible_thread_agents
+        if len(agents_in_thread) < 2:
+            return
+
+        self.deps.logger.info(
+            "Skipping response: multiple agents in thread require explicit mention",
+            agent_name=self.deps.agent_name,
+            thread_id=context.thread_id,
+            agents_in_thread=[agent.full_id for agent in agents_in_thread],
+        )
 
     def _should_queue_follow_up_in_active_response_thread(
         self,
         *,
         context: MessageContext,
-        target: MessageTarget | None,
-        source_envelope: MessageEnvelope | None,
-        has_active_response_for_target: Callable[[MessageTarget], bool] | None,
+        target: MessageTarget,
+        source_envelope: MessageEnvelope,
+        has_active_response_for_target: Callable[[MessageTarget], bool],
     ) -> bool:
         """Return whether one human follow-up should enter the queued-response path."""
-        if target is None or source_envelope is None or not context.is_thread:
+        if not context.is_thread:
             return False
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        if (
-            is_automation_source_kind(source_envelope.source_kind)
-            or registry.current_entity_name_for_user_id(source_envelope.sender_id) is not None
-        ):
+        if not source_envelope.origin.may_answer_interactive_prompt:
             return False
         policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind
         if policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
             return True
-        return has_active_response_for_target(target) if has_active_response_for_target is not None else False
+        return has_active_response_for_target(target)

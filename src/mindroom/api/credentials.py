@@ -59,6 +59,7 @@ _OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed throug
 _OAUTH_CLIENT_CONFIG_FIELDS = frozenset({"client_id", "client_secret", "redirect_uri"})
 _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS = _OAUTH_CLIENT_CONFIG_FIELDS - {"client_secret"}
 _PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
+_PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD = "none"  # noqa: S105
 
 
 @dataclass(frozen=True)
@@ -830,6 +831,34 @@ def _require_or_preserve_oauth_client_config_secret(
     _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_secret")
 
 
+def _preserve_optional_oauth_client_config_secret(
+    credentials: dict[str, Any],
+    existing_credentials: dict[str, Any],
+) -> None:
+    submitted_secret = credentials.get("client_secret")
+    if isinstance(submitted_secret, str) and submitted_secret.strip():
+        credentials["client_secret"] = submitted_secret.strip()
+        return
+    credentials.pop("client_secret", None)
+    submitted_client_id = credentials.get("client_id")
+    existing_client_id = existing_credentials.get("client_id")
+    if (
+        isinstance(submitted_client_id, str)
+        and isinstance(existing_client_id, str)
+        and submitted_client_id.strip() == existing_client_id.strip()
+    ):
+        existing_secret = existing_credentials.get("client_secret")
+        if isinstance(existing_secret, str) and existing_secret.strip():
+            credentials["client_secret"] = existing_secret
+
+
+def _oauth_client_config_secret_required(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
+    return (
+        oauth_service_match is None
+        or oauth_service_match.provider.token_endpoint_auth_method != _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD
+    )
+
+
 @dataclass(frozen=True)
 class _DashboardCredentialAccess:
     """Credential storage access for one dashboard request target."""
@@ -914,7 +943,10 @@ class _DashboardCredentialAccess:
             _reject_invalid_client_config_field_values(credentials)
             existing_credentials = load_credentials_for_target(service, self.target) or {}
             _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_id")
-            _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
+            if _oauth_client_config_secret_required(match):
+                _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
+            else:
+                _preserve_optional_oauth_client_config_secret(credentials, existing_credentials)
             return credentials
         return credentials
 

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import json
 import os
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,12 +17,11 @@ from agno.models.response import ModelResponse
 from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import CODEX_GPT
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from agno.models.message import Message
     from agno.run.agent import RunOutput
     from pydantic import BaseModel
@@ -67,7 +64,7 @@ def _borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str
     if usable_token is not None:
         return usable_token
 
-    with _codex_auth_refresh_lock(auth_path):
+    with advisory_file_lock(auth_path.with_name(f"{auth_path.name}.lock")):
         auth = _read_codex_auth(auth_path)
         tokens = auth.get("tokens")
         if not isinstance(tokens, dict) or not tokens.get("access_token"):
@@ -116,17 +113,6 @@ def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
         msg = "Codex auth.json must use ChatGPT OAuth auth_mode. Run `codex login` first."
         raise _CodexAuthError(msg)
     return auth
-
-
-@contextmanager
-def _codex_auth_refresh_lock(auth_path: Path) -> Iterator[None]:
-    lock_path = auth_path.with_name(f"{auth_path.name}.lock")
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _usable_access_token(tokens: dict[str, Any]) -> tuple[str, str | None] | None:

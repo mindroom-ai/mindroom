@@ -177,6 +177,15 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
         _restore_builtin_tool_metadata_state()
 
 
+def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
+    """The private Home Assistant URL opt-in should expose an explicit secure default."""
+    _restore_builtin_tool_metadata_state()
+    homeassistant = TOOL_METADATA["homeassistant"]
+    fields = {field.name: field for field in homeassistant.config_fields or []}
+
+    assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
+
+
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Plugin validation should snapshot sys.modules before iterating over it."""
 

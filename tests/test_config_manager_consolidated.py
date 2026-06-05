@@ -428,7 +428,7 @@ class TestConsolidatedConfigManager:
 
             config = load_config_yaml(config_path)
             assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
-            effective = config.get_agent_tools("test_agent")
+            effective = config.get_agent_available_tools("test_agent")
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective

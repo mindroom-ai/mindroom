@@ -59,7 +59,7 @@ def _shared_local_watch_targets(config: Config, runtime_paths: RuntimePaths) -> 
     targets_by_key: dict[KnowledgeSourceRoot, list[str]] = {}
     for base_id in sorted(config.knowledge_bases):
         base_config = config.get_knowledge_base_config(base_id)
-        if not base_config.watch or base_config.git is not None:
+        if base_config.mode != "semantic" or not base_config.watch or base_config.git is not None:
             continue
         if config.get_private_knowledge_base_agent(base_id) is not None:
             continue
@@ -144,28 +144,28 @@ class KnowledgeSourceWatcher:
         if config is None:
             return
 
-        for target in _shared_local_watch_targets(config, runtime_paths).values():
+        for watch_target in _shared_local_watch_targets(config, runtime_paths).values():
             stop_event = asyncio.Event()
             task = asyncio.create_task(
-                self._watch_source(target, config=config, runtime_paths=runtime_paths, stop_event=stop_event),
+                self._watch_source(watch_target, config=config, runtime_paths=runtime_paths, stop_event=stop_event),
             )
-            self._filesystem_tasks[target.key] = _WatchTask(stop_event=stop_event, task=task)
+            self._filesystem_tasks[watch_target.key] = _WatchTask(stop_event=stop_event, task=task)
             logger.info(
                 "Knowledge filesystem watcher started",
-                knowledge_path=str(target.path),
-                base_ids=list(target.base_ids),
+                knowledge_path=str(watch_target.path),
+                base_ids=list(watch_target.base_ids),
             )
 
-        for target in _shared_git_poll_targets(config, runtime_paths).values():
+        for poll_target in _shared_git_poll_targets(config, runtime_paths).values():
             stop_event = asyncio.Event()
             task = asyncio.create_task(
-                self._poll_git_source(target, config=config, runtime_paths=runtime_paths, stop_event=stop_event),
+                self._poll_git_source(poll_target, config=config, runtime_paths=runtime_paths, stop_event=stop_event),
             )
-            self._git_poll_tasks[target.key] = _WatchTask(stop_event=stop_event, task=task)
+            self._git_poll_tasks[poll_target.key] = _WatchTask(stop_event=stop_event, task=task)
             logger.info(
                 "Knowledge Git poller started",
-                base_id=target.base_id,
-                poll_interval_seconds=target.poll_interval_seconds,
+                base_id=poll_target.base_id,
+                poll_interval_seconds=poll_target.poll_interval_seconds,
             )
 
     async def shutdown(self) -> None:

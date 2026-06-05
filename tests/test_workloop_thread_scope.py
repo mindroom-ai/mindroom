@@ -52,6 +52,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_event_cache_mock,
+    message_origin,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -255,6 +256,7 @@ def _message_envelope(
         mentioned_agents=(),
         agent_name=agent_name,
         source_kind="message",
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 

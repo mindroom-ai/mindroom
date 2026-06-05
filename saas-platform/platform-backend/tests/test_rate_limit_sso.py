@@ -58,10 +58,7 @@ def test_rate_limit_key_prefers_real_ip_from_trusted_ingress() -> None:
         "Request",
         (),
         {
-            "headers": {
-                "x-forwarded-for": "198.51.100.50, 10.42.0.7",
-                "x-real-ip": "203.0.113.10",
-            },
+            "headers": {"x-forwarded-for": "198.51.100.50, 10.42.0.7", "x-real-ip": "203.0.113.10"},
             "client": type("Client", (), {"host": "10.42.0.7"})(),
         },
     )()

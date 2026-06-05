@@ -14,6 +14,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import yaml
+
 from mindroom import constants
 from mindroom.constants import RuntimePaths
 from mindroom.runtime_env_policy import (
@@ -26,8 +28,13 @@ from mindroom.runtime_env_policy import (
     credentials_encryption_key_value,
     worker_extra_env,
 )
-from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import (
+    plan_scoped_visible_state_roots,
+    resolved_agent_policies_from_config_data,
+    validate_unique_worker_visible_paths,
+)
+from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
@@ -36,6 +43,7 @@ from mindroom.workers.backends.kubernetes_config import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import KubernetesWorkerBackendConfig
@@ -274,6 +282,42 @@ def metadata_annotations(
     return annotations
 
 
+def lifecycle_from_annotations(annotations: dict[str, str], *, now: float) -> WorkerLifecycleState:
+    """Project the lifecycle state persisted on a worker Deployment's annotations.
+
+    Lets the Kubernetes backend reuse the shared worker-lifecycle transitions
+    instead of mutating status annotations inline.
+    """
+    last_used_at = parse_annotation_float(annotations, ANNOTATION_LAST_USED_AT, now)
+    created_at = parse_annotation_float(annotations, ANNOTATION_CREATED_AT, last_used_at)
+    last_started_raw = annotations.get(ANNOTATION_LAST_STARTED_AT)
+    return WorkerLifecycleState(
+        created_at=created_at,
+        last_used_at=last_used_at,
+        status=cast("WorkerStatus", annotations.get(ANNOTATION_WORKER_STATUS, "starting")),
+        last_started_at=float(last_started_raw) if last_started_raw else None,
+        startup_count=parse_annotation_int(annotations, ANNOTATION_STARTUP_COUNT),
+        failure_count=parse_annotation_int(annotations, ANNOTATION_FAILURE_COUNT),
+        failure_reason=annotations.get(ANNOTATION_FAILURE_REASON) or None,
+    )
+
+
+def apply_lifecycle_annotations(annotations: dict[str, str], state: WorkerLifecycleState) -> None:
+    """Write one lifecycle state onto a Deployment's annotations dict in place.
+
+    The failure reason is blanked rather than dropped so the merge-based
+    deployment patch clears it (it is read back as ``None``).
+    """
+    annotations[ANNOTATION_CREATED_AT] = str(state.created_at)
+    annotations[ANNOTATION_LAST_USED_AT] = str(state.last_used_at)
+    annotations[ANNOTATION_WORKER_STATUS] = state.status
+    if state.last_started_at is not None:
+        annotations[ANNOTATION_LAST_STARTED_AT] = str(state.last_started_at)
+    annotations[ANNOTATION_STARTUP_COUNT] = str(state.startup_count)
+    annotations[ANNOTATION_FAILURE_COUNT] = str(state.failure_count)
+    annotations[ANNOTATION_FAILURE_REASON] = state.failure_reason or ""
+
+
 def _template_hash(template: dict[str, object]) -> str:
     """Return a stable hash for one Deployment pod template."""
     payload = json.dumps(template, sort_keys=True, separators=(",", ":"))
@@ -301,6 +345,22 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
 
 
+def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
+    try:
+        raw_config = runtime_paths.config_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    try:
+        config_data = yaml.safe_load(raw_config) or {}
+    except yaml.YAMLError as exc:
+        msg = f"Failed to parse Kubernetes worker config for scoped storage planning: {exc}"
+        raise WorkerBackendError(msg) from exc
+    if not isinstance(config_data, dict):
+        return {}
+    return resolved_agent_policies_from_config_data(cast("dict[str, object]", config_data))
+
+
 class KubernetesResourceManager:
     """Own Kubernetes API access, manifest construction, and cached cluster metadata."""
 
@@ -321,6 +381,7 @@ class KubernetesResourceManager:
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
         self.worker_grantable_credentials = worker_grantable_credentials
+        self.resolved_agent_policies = _resolved_agent_policies_for_runtime_paths(runtime_paths)
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -952,13 +1013,11 @@ class KubernetesResourceManager:
             for key, value in self.runtime_paths.process_env.items()
             if not is_kubernetes_worker_backend_config_env_name(key)
         }
-        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         env_file_values = {
             key: value
             for key, value in self.runtime_paths.env_file_values.items()
             if not is_kubernetes_worker_backend_config_env_name(key)
         }
-        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         process_env.update(
             {
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
@@ -1085,33 +1144,20 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
     ) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        if worker_routing.requires_explicit_private_agent_visibility(worker_key) and private_agent_names is None:
-            msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
-            raise WorkerBackendError(msg)
-        effective_private_agent_names = private_agent_names or frozenset()
-        visible_state_roots = worker_routing.visible_state_roots_for_worker_key(
-            mounted_storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        local_visible_state_roots = worker_routing.visible_state_roots_for_worker_key(
-            self.storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        if not visible_state_roots or len(visible_state_roots) != len(local_visible_state_roots):
-            msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
-            raise WorkerBackendError(msg)
-        for local_state_root in local_visible_state_roots:
-            local_state_root.mkdir(parents=True, exist_ok=True)
-
         mounts: list[dict[str, object]] = [
             {
                 "name": "worker-storage",
-                "mountPath": str(state_root),
-                "subPath": str(state_root.relative_to(mounted_storage_root)),
+                "mountPath": str(planned_root.worker_visible_path),
+                "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
             }
-            for state_root in visible_state_roots
+            for planned_root in plan_scoped_visible_state_roots(
+                worker_key=worker_key,
+                local_shared_storage_root=self.storage_root,
+                worker_visible_shared_storage_root=mounted_storage_root,
+                private_agent_names=private_agent_names,
+                allow_unknown_worker_key=False,
+                resolved_agent_policies=self.resolved_agent_policies,
+            )
         ]
         mounts.append(
             {
@@ -1120,8 +1166,9 @@ class KubernetesResourceManager:
                 "subPath": state_subpath,
             },
         )
-        mount_paths = [str(mount["mountPath"]) for mount in mounts]
-        if len(mount_paths) != len(set(mount_paths)):
-            msg = f"Duplicate Kubernetes mountPath generated for worker key: {worker_key}"
-            raise WorkerBackendError(msg)
+        validate_unique_worker_visible_paths(
+            (str(mount["mountPath"]) for mount in mounts),
+            worker_key=worker_key,
+            duplicate_label="Kubernetes mountPath",
+        )
         return mounts

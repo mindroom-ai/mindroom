@@ -96,7 +96,7 @@ class TestProvisionerCommandValidation:
                         # Run actual provisioning
                         await provision_instance(
                             None,  # request
-                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "professional"},
+                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                             "Bearer test-key",  # authorization
                             None,  # background_tasks
                         )
@@ -177,9 +177,7 @@ class TestProvisionerCommandValidation:
 
         with patch.object(provisioner, "run_kubectl", side_effect=capture_kubectl_command):
             await provisioner._apply_instance_secret(
-                "123",
-                "mindroom-instances",
-                {"credentials_encryption_key": "secret-key-value"},
+                "123", "mindroom-instances", {"credentials_encryption_key": "secret-key-value"}
             )
 
         assert captured["mode"] == 0o600
@@ -240,10 +238,7 @@ class TestProvisionerCommandValidation:
             mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
             await provision_instance(
-                None,
-                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
-                "Bearer test-key",
-                None,
+                None, {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"}, "Bearer test-key", None
             )
 
         helm_args = captured_helm_args[0]
@@ -578,13 +573,13 @@ class TestProvisionerErrorRecovery:
 class TestProvisionerResourceValidation:
     """Test resource limits and quotas."""
 
-    @given(tier=st.sampled_from(["free", "starter", "professional", "enterprise"]))
+    @given(tier=st.sampled_from(["free", "byok", "pro", "enterprise"]))
     def test_resource_limits_match_tier(self, tier: str):
         """Property: Resource limits must match tier specifications."""
         tier_limits = {
             "free": {"cpu": 500, "memory": 512},
-            "starter": {"cpu": 1000, "memory": 1024},
-            "professional": {"cpu": 2000, "memory": 4096},
+            "byok": {"cpu": 1000, "memory": 1024},
+            "pro": {"cpu": 2000, "memory": 4096},
             "enterprise": {"cpu": 8000, "memory": 16384},
         }
 
@@ -717,7 +712,7 @@ class TestProvisionerRealScenarios:
                     with pytest.raises(Exception) as exc_info:
                         await provision_instance(
                             None,  # request
-                            {"subscription_id": "sub-123", "tier": "professional"},
+                            {"subscription_id": "sub-123", "tier": "byok"},
                             "Bearer test-key",  # authorization
                             None,  # background_tasks
                         )
@@ -833,7 +828,7 @@ class TestProvisionerObservability:
                         with pytest.raises(Exception) as exc_info:
                             await provision_instance(
                                 None,  # request
-                                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "professional"},
+                                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "byok"},
                                 "Bearer test-key",  # authorization
                                 None,  # background_tasks
                             )

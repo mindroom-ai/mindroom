@@ -64,6 +64,69 @@ def test_serialized_kubernetes_worker_validation_snapshot_reuses_cached_resolver
     assert first_snapshot == second_snapshot
 
 
+def test_serialized_kubernetes_worker_validation_snapshot_tolerates_plugin_load_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker validation snapshots should match the tolerant primary startup path."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_config = Config(plugins=[{"path": "plugins/broken"}])
+    tolerate_values: list[object] = []
+
+    def fake_resolver(*_args: object, **kwargs: object) -> dict[str, ToolValidationInfo]:
+        tolerate_values.append(kwargs.get("tolerate_plugin_load_errors"))
+        return {"fake": ToolValidationInfo(name="fake")}
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
+        fake_resolver,
+    )
+
+    workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(
+        runtime_paths,
+        runtime_config=runtime_config,
+    )
+
+    assert tolerate_values == [True]
+
+
+def test_serialized_kubernetes_worker_validation_snapshot_loads_config_tolerantly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The default config-loading branch should match tolerant startup behavior."""
+    runtime_paths = _runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "router:\n"
+            "  model: default\n"
+            "agents: {}\n"
+            "plugins:\n"
+            "  - ./plugins/missing\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
+        return {
+            "fake": ToolValidationInfo(name="fake"),
+            "scheduler": ToolValidationInfo(name="scheduler"),
+        }
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
+        fake_resolver,
+    )
+
+    snapshot = workers_runtime_module.serialized_kubernetes_worker_validation_snapshot(runtime_paths)
+
+    assert set(snapshot) == {"fake", "scheduler"}
+
+
 def test_serialized_kubernetes_worker_validation_snapshot_clear_recomputes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

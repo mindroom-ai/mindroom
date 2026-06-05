@@ -17,6 +17,7 @@ from agno.db.base import SessionType
 from agno.media import File
 from agno.models.message import Message
 from agno.models.metrics import Metrics
+from agno.models.openai import OpenAIChat
 from agno.models.response import ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
@@ -39,11 +40,11 @@ from mindroom.ai import (
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
+    _run_error_event_text,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
-    should_retry_without_inline_media,
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import _serialize_metrics
@@ -64,6 +65,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -90,7 +92,11 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.media_fallback import append_inline_media_fallback_prompt
+from mindroom.media_fallback import (
+    append_inline_media_fallback_prompt,
+    reset_model_media_capability_cache,
+    retry_media_inputs_after_failure,
+)
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -100,10 +106,9 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     ResponseRunnerDeps,
-    _strip_visible_tool_markers,
     prepare_memory_and_model_context,
 )
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryError, strip_visible_tool_markers
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -118,7 +123,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
-from tests.conftest import make_event_cache_mock, resolve_response_thread_root_for_test
+from tests.conftest import make_event_cache_mock, message_origin, request_envelope
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -420,9 +425,6 @@ def _build_response_runner(
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )
-    bot._conversation_resolver.resolve_response_thread_root = MagicMock(
-        side_effect=resolve_response_thread_root_for_test,
-    )
     bot._conversation_resolver.deps = SimpleNamespace(
         conversation_cache=SimpleNamespace(
             get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
@@ -621,11 +623,15 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        response_envelope=request_envelope(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            prompt=prompt,
+            user_id=user_id,
+        ),
         model_prompt=model_prompt,
         media=media,
         user_id=user_id,
@@ -696,11 +702,15 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             await coordinator.process_and_respond(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$user_msg",
-                    thread_id="$thread-root",
                     thread_history=(),
                     prompt="Hello",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$user_msg",
+                        thread_id="$thread-root",
+                        prompt="Hello",
+                        user_id="@alice:localhost",
+                    ),
                     user_id="@alice:localhost",
                     existing_event_id="$thinking",
                     existing_event_is_placeholder=True,
@@ -1061,10 +1071,7 @@ async def test_should_watch_session_started_returns_false_when_storage_probe_fai
 
     lifecycle = coordinator._build_lifecycle(
         response_kind="ai",
-        request=replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            target=target,
-        ),
+        request=_response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
     )
     watch = lifecycle.setup_session_watch(
         tool_context=tool_context,
@@ -1375,10 +1382,89 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     ]
 
 
+@pytest.mark.asyncio
+async def test_process_and_respond_streaming_persists_interrupted_history_when_model_stream_errors(
+    tmp_path: Path,
+) -> None:
+    """Model stream errors returned as text should still persist interrupted replay."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+    mock_agent = MagicMock()
+    mock_agent.model = MagicMock()
+    mock_agent.model.__class__.__name__ = "OpenAIChat"
+    mock_agent.model.id = "test-model"
+    mock_agent.name = "GeneralAgent"
+    mock_agent.add_history_to_context = False
+
+    completed_tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="run_shell_command",
+        tool_args={"cmd": "pwd"},
+        result="/app",
+    )
+
+    async def errored_agent_stream() -> AsyncIterator[object]:
+        yield RunContentEvent(content="Partial answer")
+        yield ToolCallStartedEvent(tool=completed_tool)
+        yield ToolCallCompletedEvent(tool=completed_tool)
+        yield RunErrorEvent(content="Error code: 500 - provider exploded")
+
+    mock_agent.arun = MagicMock(return_value=errored_agent_stream())
+
+    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@bob:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def consume_delivery(request: object) -> StreamTransportOutcome:
+            rendered = "".join([str(chunk) async for chunk in request.response_stream])
+            request.visible_event_id_callback("$streamed")
+            return _stream_outcome("$streamed", rendered)
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        delivery = await coordinator.process_and_respond_streaming(
+            _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
+            run_id="run-1",
+        )
+
+    assert delivery.event_id == "$streamed"
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session is not None
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "run-1"
+    assert persisted_run.metadata is not None
+    assert persisted_run.metadata["matrix_response_event_id"] == "$streamed"
+    assert persisted_run.messages is not None
+    assert [(message.role, message.content) for message in persisted_run.messages] == [
+        ("user", "Hello"),
+        (
+            "assistant",
+            "Partial answer\n\n[tool:run_shell_command completed]\n  args: cmd=pwd\n  result: /app\n\n[interrupted]",
+        ),
+    ]
+
+
 def test_strip_visible_tool_markers_handles_blank_lined_markers() -> None:
     """The tool-marker stripper should leave bodies intact when markers are followed by blank lines."""
     text = "Intro\n\n🔧 `run_shell_command` [1]\n\n---\n\nBody"
-    assert _strip_visible_tool_markers(text) == "Intro\n\n\nBody"
+    assert strip_visible_tool_markers(text) == "Intro\n\n\nBody"
+
+
+def test_strip_visible_tool_markers_preserves_marker_free_text_byte_for_byte() -> None:
+    """Marker-free text should not be normalized while checking for display chrome."""
+    text = "Intro\r\n---\r\nBody with trailing spaces  \r\n\r\n"
+    assert strip_visible_tool_markers(text) == text
 
 
 @pytest.mark.asyncio
@@ -2007,7 +2093,12 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         ),
         correlation_id="corr-stream-cancel",
     )
@@ -2094,7 +2185,12 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="general",
-            source_kind="message",
+            source_kind=MESSAGE_SOURCE_KIND,
+            origin=message_origin(
+                sender_id="@alice:localhost",
+                requester_id="@alice:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         ),
         correlation_id="corr-stream-error",
     )
@@ -2186,9 +2282,11 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
 
         mock_ai.side_effect = fake_ai_response
 
+        target = MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg")
+        base_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread")
         request = replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
-            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+            base_request,
+            response_envelope=replace(base_request.response_envelope, target=target),
         )
         await coordinator.process_and_respond(request)
 
@@ -2221,9 +2319,11 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
 
         mock_stream.side_effect = fake_stream_agent_response
 
+        target = MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg")
+        base_request = _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread")
         request = replace(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$raw-thread"),
-            target=MessageTarget.resolve("!test:localhost", "$resolved-thread", "$user_msg"),
+            base_request,
+            response_envelope=replace(base_request.response_envelope, target=target),
         )
         await coordinator.process_and_respond_streaming(request)
 
@@ -4753,7 +4853,11 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+            patch(
+                "mindroom.ai_runtime.cached_agent_run",
+                new_callable=AsyncMock,
+                return_value=mock_run_output,
+            ) as run_mock,
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
 
@@ -4765,6 +4869,7 @@ class TestUserIdPassthrough:
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
                 )
+            run_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_ai_response_persists_interrupted_replay_for_cancelled_runs(self, tmp_path: Path) -> None:
@@ -5191,6 +5296,82 @@ class TestUserIdPassthrough:
         assert first_prompt[-1].files == [document_file]
         assert not second_prompt[-1].files
         assert "Inline media unavailable for this model" in str(second_prompt[-1].content)
+
+    @pytest.mark.asyncio
+    async def test_ai_response_learns_audio_unsupported_for_same_model_route(self, tmp_path: Path) -> None:
+        """Audio-only capability failure should omit audio on later calls to the same concrete route."""
+        reset_model_media_capability_cache()
+
+        def build_agent() -> MagicMock:
+            agent = MagicMock()
+            agent.model = OpenAIChat(id="qwen-local", base_url="http://localhost:9292/v1")
+            agent.name = "GeneralAgent"
+            agent.add_history_to_context = False
+            return agent
+
+        first_agent = build_agent()
+        second_agent = build_agent()
+
+        first_success = MagicMock()
+        first_success.content = "Recovered response"
+        first_success.tools = None
+        second_success = MagicMock()
+        second_success.content = "Cached response"
+        second_success.tools = None
+        first_agent.arun = AsyncMock(
+            side_effect=[
+                Exception("audio input is not supported - hint: you may need to provide the mmproj"),
+                first_success,
+            ],
+        )
+        second_agent.arun = AsyncMock(return_value=second_success)
+
+        audio_input = MagicMock(name="audio_input")
+        image_input = MagicMock(name="image_input")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.side_effect = [
+                _prepared_prompt_result(first_agent),
+                _prepared_prompt_result(second_agent),
+            ]
+            first_response = await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(audio=[audio_input], images=[image_input]),
+            )
+            second_response = await ai_response(
+                agent_name="general",
+                prompt="test again",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                media=MediaInputs(audio=[audio_input], images=[image_input]),
+            )
+
+        assert first_response == "Recovered response"
+        assert second_response == "Cached response"
+        assert first_agent.arun.await_count == 2
+        assert second_agent.arun.await_count == 1
+        first_prompt = first_agent.arun.await_args_list[0].args[0]
+        retry_prompt = first_agent.arun.await_args_list[1].args[0]
+        cached_prompt = second_agent.arun.await_args_list[0].args[0]
+        assert isinstance(first_prompt, list)
+        assert isinstance(retry_prompt, list)
+        assert isinstance(cached_prompt, list)
+        fallback_marker = "Inline media unavailable for this model"
+        assert fallback_marker not in str(first_prompt[-1].content)
+        assert fallback_marker in str(retry_prompt[-1].content)
+        assert fallback_marker in str(cached_prompt[-1].content)
+        assert first_prompt[-1].audio == [audio_input]
+        assert first_prompt[-1].images == [image_input]
+        assert retry_prompt[-1].audio == ()
+        assert retry_prompt[-1].images == [image_input]
+        assert cached_prompt[-1].audio == ()
+        assert cached_prompt[-1].images == [image_input]
+        reset_model_media_capability_cache()
 
     @pytest.mark.asyncio
     async def test_ai_response_rebuilds_request_log_context_for_retry(self, tmp_path: Path) -> None:
@@ -5749,9 +5930,21 @@ class TestUserIdPassthrough:
             ("Rate limit exceeded", False),
         ],
     )
-    def test_should_retry_without_inline_media_error_matching(self, error_text: str, expected: bool) -> None:
-        """Retry matcher should target inline-media validation and unsupported-input failures."""
-        assert should_retry_without_inline_media(error_text, MediaInputs(images=(object(),))) is expected
+    def test_retry_media_inputs_after_failure_error_matching(self, error_text: str, expected: bool) -> None:
+        """Retry decision should target inline-media validation and unsupported-input failures."""
+        media_inputs = MediaInputs(
+            audio=(object(),),
+            images=(object(),),
+            files=(object(),),
+            videos=(object(),),
+        )
+        assert retry_media_inputs_after_failure(None, error_text, media_inputs).should_retry is expected
+
+    def test_retry_media_inputs_after_failure_ignores_media_errors_without_media(self) -> None:
+        """Media-shaped errors should not trigger retry when no media was sent."""
+        assert (
+            retry_media_inputs_after_failure(None, "audio input is not supported", MediaInputs()).should_retry is False
+        )
 
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""
@@ -5884,6 +6077,73 @@ class TestUserIdPassthrough:
         assert str(second_prompt[-1].content).count("Inline media unavailable for this model") == 1
         assert chunks == ["friendly-error"]
         mock_friendly_error.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("event", "expected"),
+        [
+            (
+                RunErrorEvent(content=None, additional_data={"message": " direct provider failure "}),
+                "direct provider failure",
+            ),
+            (
+                RunErrorEvent(content=None, additional_data={"error": {"message": "nested provider failure"}}),
+                "nested provider failure",
+            ),
+            (
+                RunErrorEvent(content=None, additional_data={"detail": {"error": {"message": "deep detail"}}}),
+                "deep detail",
+            ),
+            (RunErrorEvent(content=None), "Agent run failed without provider error details"),
+        ],
+    )
+    def test_run_error_event_text_uses_additional_data_and_fallback(
+        self,
+        event: RunErrorEvent,
+        expected: str,
+    ) -> None:
+        """Run errors should surface nested provider payloads before static fallback."""
+        assert _run_error_event_text(event) == expected
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_uses_run_error_event_metadata_when_content_empty(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Empty Agno streaming errors should surface available error metadata."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def empty_error_stream() -> AsyncIterator[object]:
+            yield RunErrorEvent(content=None, error_type="APITimeoutError", error_id="timeout-1")
+
+        mock_agent.arun = MagicMock(return_value=empty_error_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch(
+                "mindroom.ai.get_user_friendly_error_message",
+                return_value="friendly-error",
+            ) as mock_friendly_error,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            chunks = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                )
+            ]
+
+        assert chunks == ["friendly-error"]
+        friendly_error = mock_friendly_error.call_args.args[0]
+        assert str(friendly_error) == "Agent run failed (type=APITimeoutError, id=timeout-1)"
 
     @pytest.mark.asyncio
     async def test_user_id_none_when_not_provided(self, tmp_path: Path) -> None:

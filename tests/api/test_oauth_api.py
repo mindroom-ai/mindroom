@@ -86,6 +86,35 @@ def _config_payload(
     return payload
 
 
+def _mcp_oauth_config_payload(worker_scope: str = "user_agent") -> dict[str, Any]:
+    return {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "role": "test",
+                "tools": ["mcp_demo"],
+                "worker_scope": worker_scope,
+                "rooms": [],
+            },
+        },
+        "mcp_servers": {
+            "demo": {
+                "transport": "streamable-http",
+                "url": "https://mcp.example.test/mcp",
+                "auth": {
+                    "type": "oauth",
+                    "display_name": "Demo MCP",
+                    "discovery": "manual",
+                    "authorization_url": "https://auth.example.test/authorize",
+                    "token_url": "https://auth.example.test/token",
+                },
+            },
+        },
+    }
+
+
 def _make_test_app(runtime_paths: constants.RuntimePaths, payload: dict[str, Any]) -> FastAPI:
     api_app = FastAPI()
     main.initialize_api_app(api_app, runtime_paths)
@@ -1665,6 +1694,83 @@ def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     assert scoped_credentials is not None
     assert scoped_credentials["client_id"] == "stored-client-id"
     assert scoped_credentials["token"] == "google_drive-access-token"
+
+
+def test_generated_mcp_oauth_routes_store_status_and_disconnect_scoped_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _mcp_oauth_config_payload(worker_scope="user_agent"))
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "mcp_demo_oauth_client",
+        {
+            "client_id": "mcp-public-client",
+            "_source": "ui",
+        },
+    )
+    seen_fetch: dict[str, object] = {}
+
+    class FakeOAuth2Client:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["client_id"] == "mcp-public-client"
+            assert kwargs["client_secret"] is None
+            assert kwargs["token_endpoint_auth_method"] == "none"
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_token(self, url: str, **kwargs: object) -> dict[str, object]:
+            seen_fetch["url"] = url
+            seen_fetch["kwargs"] = kwargs
+            return {
+                "access_token": "mcp-access-token",
+                "refresh_token": "mcp-refresh-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+
+    with TestClient(api_app) as client:
+        _login(client)
+        connect_response = client.post("/api/oauth/mcp_demo/connect?agent_name=general")
+        state = _state_from_auth_url(connect_response.json()["auth_url"])
+        callback_response = client.get(
+            f"/api/oauth/mcp_demo/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+        status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
+        disconnect_response = client.post("/api/oauth/mcp_demo/disconnect?agent_name=general")
+        disconnected_status_response = client.get("/api/oauth/mcp_demo/status?agent_name=general")
+
+    assert connect_response.status_code == 200
+    connect_params = parse_qs(urlparse(connect_response.json()["auth_url"]).query)
+    assert connect_params["client_id"] == ["mcp-public-client"]
+    assert connect_params["code_challenge_method"] == ["S256"]
+    assert callback_response.status_code == 307
+    assert urlparse(callback_response.headers["location"]).path == "/api/oauth/mcp_demo/success"
+    assert seen_fetch["url"] == "https://auth.example.test/token"
+    fetch_kwargs = seen_fetch["kwargs"]
+    assert isinstance(fetch_kwargs, dict)
+    assert fetch_kwargs["code"] == "test-code"
+    assert fetch_kwargs["code_verifier"]
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is True
+    assert disconnect_response.status_code == 200
+    assert disconnected_status_response.status_code == 200
+    assert disconnected_status_response.json()["connected"] is False
+    scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+        "mcp_demo_oauth",
+    )
+    assert scoped_credentials is None
 
 
 @pytest.mark.parametrize("existing_token_client_id", ["old-client-id", None], ids=["previous-client", "unknown-client"])

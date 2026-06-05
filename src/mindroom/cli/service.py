@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import platform
+import signal
+import subprocess
 from typing import TYPE_CHECKING
 
 import typer
@@ -190,3 +192,18 @@ def service_status(
 
     _console.print()
     _console.print(f"[dim]Full logs: {manager.get_log_command()}[/dim]")
+
+
+@service_app.command("logs")
+def service_logs() -> None:
+    """Follow MindRoom service logs."""
+    manager = _manager_or_exit()
+    try:
+        result = subprocess.run(manager.get_log_args(), check=False)
+    except KeyboardInterrupt:
+        raise typer.Exit(0) from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        _err_console.print(f"[bold red]Error:[/bold red] Failed to run log command: {exc}")
+        raise typer.Exit(1) from None
+    if result.returncode not in (0, -signal.SIGINT):
+        raise typer.Exit(result.returncode)

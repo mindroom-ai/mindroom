@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -257,7 +258,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     ):
         await bot._on_sync_response(MagicMock())
 
-    assert captured_content["com.mindroom.source_kind"] == "hook"
+    assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "test-plugin:bot:ready"
 
 

@@ -108,6 +108,7 @@ agents:
 tag_thread("blocked")
 untag_thread("blocked")
 list_thread_tags(thread_id="$threadRootEvent")
+list_thread_tags(exclude_tag="resolved", include_untagged=True)
 ```
 
 ### Notes
@@ -115,6 +116,14 @@ list_thread_tags(thread_id="$threadRootEvent")
 - This tool writes shared room state, so it is stricter than `matrix_message` about Matrix permissions.
 - Tag writes and removals return the updated canonical tag state for the target thread.
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
+- `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+- Both filters can be combined.
+- For full filter semantics, see [`tools`](https://docs.mindroom.chat/tools/).
+- `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+- `include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+- It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+- The response includes `include_untagged: bool` and `truncated: bool`.
+- Callers must check `truncated` before claiming the unresolved list is complete.
 
 ## [`thread_summary`]
 
@@ -260,6 +269,7 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a thread reaches the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 

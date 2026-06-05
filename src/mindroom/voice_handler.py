@@ -17,8 +17,15 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
+    VOICE_PREFIX,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
@@ -233,11 +240,74 @@ async def prepare_voice_message(
         normalized.transcribed_message
         or f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     )
+    return _build_prepared_voice_message(
+        event,
+        config,
+        runtime_paths,
+        text=text,
+        attachment_id=attachment_id,
+        thread_id=thread_id,
+        raw_audio_fallback=normalized.transcribed_message is None,
+    )
 
-    extra_content: dict[str, Any] = {ORIGINAL_SENDER_KEY: event.sender}
+
+async def prepare_raw_voice_fallback_message(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: AudioMessageEvent,
+    config: Config,
+    *,
+    runtime_paths: RuntimePaths,
+    thread_id: str | None,
+) -> _PreparedVoiceMessage:
+    """Download/register audio and build a fallback text event without STT."""
+    audio = await _download_audio(client, event)
+    attachment_id = None
+    if audio is None or audio.content is None:
+        logger.error("Failed to download audio file for raw voice fallback")
+    else:
+        attachment_record = await register_audio_attachment(
+            storage_path,
+            event_id=event.event_id,
+            audio_bytes=audio.content,
+            mime_type=audio.mime_type,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            sender=event.sender,
+            filename=event.body if isinstance(event.body, str) else None,
+        )
+        attachment_id = attachment_record.attachment_id if attachment_record is not None else None
+
+    return _build_prepared_voice_message(
+        event,
+        config,
+        runtime_paths,
+        text=f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}",
+        attachment_id=attachment_id,
+        thread_id=thread_id,
+        raw_audio_fallback=True,
+    )
+
+
+def _build_prepared_voice_message(
+    event: AudioMessageEvent,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    text: str,
+    attachment_id: str | None,
+    thread_id: str | None,
+    raw_audio_fallback: bool,
+) -> _PreparedVoiceMessage:
+    """Build the prepared text/source wrapper for normalized or fallback voice."""
+    extra_content: dict[str, Any] = {
+        ORIGINAL_SENDER_KEY: event.sender,
+        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+    }
     if attachment_id is not None:
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
-    if normalized.transcribed_message is None:
+    if raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     original_content = event.source.get("content") if isinstance(event.source, dict) else None
     inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
@@ -593,4 +663,8 @@ def _voice_mention_entity_name(
             return None
         return registry.current_entity_name_for_user_id(user_id, include_router=False)
 
-    return resolve_entity_name_for_mention_localpart(localpart, config)
+    return resolve_entity_name_for_mention_localpart(
+        localpart,
+        config,
+        allow_generated_agent_localparts=False,
+    )

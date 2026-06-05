@@ -47,16 +47,8 @@ def _broker_config_payload() -> dict[str, object]:
     }
 
 
-def test_worker_egress_broker_resolves_proxy_env_from_default_and_agent_override() -> None:
-    """Worker egress broker should resolve default and per-agent broker env."""
-    config = Config.model_validate(_broker_config_payload())
-
-    default_broker = config.get_agent_worker_egress_broker("code")
-    override_broker = config.get_agent_worker_egress_broker("local_code")
-
-    assert default_broker is not None
-    assert default_broker.name == "agent_vault"
-    assert default_broker.execution_env == {
+def _agent_vault_env() -> dict[str, str]:
+    return {
         "HTTP_PROXY": "http://agent-vault-adapter:18080",
         "HTTPS_PROXY": "http://agent-vault-adapter:18080",
         "http_proxy": "http://agent-vault-adapter:18080",
@@ -67,6 +59,18 @@ def test_worker_egress_broker_resolves_proxy_env_from_default_and_agent_override
         "NO_PROXY": "localhost,127.0.0.1,.svc",
         "no_proxy": "localhost,127.0.0.1,.svc",
     }
+
+
+def test_worker_egress_broker_resolves_proxy_env_from_default_and_agent_override() -> None:
+    """Worker egress broker should resolve default and per-agent broker env."""
+    config = Config.model_validate(_broker_config_payload())
+
+    default_broker = config.get_agent_worker_egress_broker("code")
+    override_broker = config.get_agent_worker_egress_broker("local_code")
+
+    assert default_broker is not None
+    assert default_broker.name == "agent_vault"
+    assert default_broker.execution_env == _agent_vault_env()
     assert override_broker is not None
     assert override_broker.name == "local"
     assert override_broker.execution_env["HTTP_PROXY"] == "http://127.0.0.1:19090"
@@ -92,10 +96,41 @@ def test_unknown_worker_egress_broker_reports_available_names() -> None:
     """Unknown worker egress broker names should report configured broker names."""
     payload = _broker_config_payload()
     payload["defaults"] = {"worker_egress_broker": "missing"}
-    config = Config.model_validate(payload)
 
-    with pytest.raises(ValueError, match=r"Unknown worker_egress_broker 'missing'.*agent_vault, local"):
-        config.get_agent_worker_egress_broker("code")
+    with pytest.raises(
+        ValueError,
+        match=r"defaults.worker_egress_broker references unknown worker egress broker 'missing'.*agent_vault, local",
+    ):
+        Config.model_validate(payload)
+
+
+def test_unknown_agent_worker_egress_broker_reports_config_path() -> None:
+    """Unknown agent-level worker egress broker names should fail at config load."""
+    payload = _broker_config_payload()
+    agents = payload["agents"]
+    assert isinstance(agents, dict)
+    agent_config = agents["local_code"]
+    assert isinstance(agent_config, dict)
+    agent_config["worker_egress_broker"] = "missing"
+
+    with pytest.raises(
+        ValueError,
+        match=r"agents.local_code.worker_egress_broker references unknown worker egress broker 'missing'",
+    ):
+        Config.model_validate(payload)
+
+
+def test_worker_egress_broker_rejects_proxy_url_without_scheme() -> None:
+    """Worker egress broker should reject proxy URLs without HTTP scheme."""
+    payload = _broker_config_payload()
+    brokers = payload["worker_egress_brokers"]
+    assert isinstance(brokers, dict)
+    local_broker = brokers["local"]
+    assert isinstance(local_broker, dict)
+    local_broker["proxy_url"] = "127.0.0.1:19090"
+
+    with pytest.raises(ValueError, match="proxy_url must include an http:// or https:// scheme"):
+        Config.model_validate(payload)
 
 
 def test_sandbox_execution_env_payload_includes_worker_egress_env(tmp_path: Path) -> None:
@@ -164,14 +199,7 @@ def test_build_agent_toolkit_passes_worker_egress_env_to_registered_tools(
     assert toolkit is not None
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
-    assert kwargs["worker_egress_env"] == {
-        "HTTP_PROXY": "http://agent-vault-adapter:18080",
-        "HTTPS_PROXY": "http://agent-vault-adapter:18080",
-        "http_proxy": "http://agent-vault-adapter:18080",
-        "https_proxy": "http://agent-vault-adapter:18080",
-        "REQUESTS_CA_BUNDLE": "/etc/agent-vault/ca.pem",
-        "CURL_CA_BUNDLE": "/etc/agent-vault/ca.pem",
-        "SSL_CERT_FILE": "/etc/agent-vault/ca.pem",
-        "NO_PROXY": "localhost,127.0.0.1,.svc",
-        "no_proxy": "localhost,127.0.0.1,.svc",
-    }
+    worker_egress_env = kwargs["worker_egress_env"]
+    assert isinstance(worker_egress_env, dict)
+    for key, value in _agent_vault_env().items():
+        assert worker_egress_env[key] == value

@@ -23,6 +23,7 @@ jobs:
           ref: ${{ inputs.release_ref }}
           fetch-depth: 0
           lfs: true
+          persist-credentials: false
       - name: Fetch Git LFS assets
         run: git lfs pull
       - name: Install uv
@@ -33,3 +34,192 @@ jobs:
         run: uv build
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  build_macos_app:
+    name: Build and publish macOS app
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_ref }}
+          fetch-depth: 0
+          lfs: true
+          persist-credentials: false
+      - name: Fetch Git LFS assets
+        run: git lfs pull
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Import Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CODESIGN_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CODESIGN_CERTIFICATE_PASSWORD }}
+          keychain-password: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+      - name: Resolve Developer ID identity
+        id: codesign
+        run: |
+          IDENTITY=$(
+            security find-identity -v -p codesigning |
+              awk -F '"' '/Developer ID Application/ { print $2; exit }'
+          )
+          if [[ -z "$IDENTITY" ]]; then
+            echo "Developer ID Application signing identity not found." >&2
+            exit 1
+          fi
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+      - name: Build notarized macOS DMG
+        env:
+          CODESIGN_IDENTITY: ${{ steps.codesign.outputs.identity }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_VERSION: ${{ inputs.release_ref }}
+          BUILD_VERSION: ${{ github.run_number }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+            echo "SPARKLE_PUBLIC_ED_KEY repository variable is required to enable Sparkle updates." >&2
+            exit 1
+          fi
+          NOTARIZE=1 macos/build-macos-app.sh --dmg
+          ditto -c -k --keepParent dist/macos/MindRoom.app dist/macos/MindRoom.zip
+      - name: Upload macOS app to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.release_ref }}
+        run: gh release upload "$TAG_NAME" dist/macos/MindRoom.dmg dist/macos/MindRoom.zip --clobber
+      - name: Update Sparkle appcast
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.release_ref }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+          git switch --force-create release-metadata FETCH_HEAD
+
+          if [[ -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
+            echo "SPARKLE_PRIVATE_ED_KEY is required to sign Sparkle updates." >&2
+            exit 1
+          fi
+
+          SPARKLE_GENERATE_APPCAST="macos/MindRoom/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+          if [[ ! -x "$SPARKLE_GENERATE_APPCAST" ]]; then
+            echo "Sparkle generate_appcast not found: $SPARKLE_GENERATE_APPCAST" >&2
+            exit 1
+          fi
+
+          APPCAST_DIR="$RUNNER_TEMP/mindroom-appcast"
+          rm -rf "$APPCAST_DIR"
+          mkdir -p "$APPCAST_DIR"
+          cp dist/macos/MindRoom.zip "$APPCAST_DIR/MindRoom.zip"
+          cp macos/appcast.xml "$APPCAST_DIR/appcast.xml"
+          gh release view "$TAG_NAME" --json body --jq .body >"$APPCAST_DIR/MindRoom.md"
+
+          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" |
+            "$SPARKLE_GENERATE_APPCAST" \
+              --ed-key-file - \
+              --download-url-prefix "https://github.com/mindroom-ai/mindroom/releases/download/${TAG_NAME}/" \
+              --link "https://github.com/mindroom-ai/mindroom" \
+              --embed-release-notes \
+              --maximum-versions 10 \
+              -o "$APPCAST_DIR/appcast.xml" \
+              "$APPCAST_DIR"
+
+          cp "$APPCAST_DIR/appcast.xml" macos/appcast.xml
+      - name: Update Sparkle appcast metadata
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_METADATA_PAT || secrets.PAT }}
+          TAG_NAME: ${{ inputs.release_ref }}
+        run: |
+          python3 .github/scripts/normalize_appcast.py macos/appcast.xml
+
+          if git diff --quiet -- macos/appcast.xml; then
+            echo "macos/appcast.xml is already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add macos/appcast.xml
+          git commit -m "Update MindRoom release metadata to ${TAG_NAME}"
+          git pull --rebase "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+
+          PR_BODY=$(mktemp)
+          cat >"$PR_BODY" <<EOF
+          Updates release metadata generated by the ${TAG_NAME} macOS release workflow.
+
+          This includes:
+          - Sparkle appcast entry and signature
+          EOF
+
+          EXISTING_RELEASE_METADATA_PR=$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --state open \
+              --search '"Update MindRoom release metadata" in:title' \
+              --limit 100 \
+              --json number,title,headRefName,updatedAt \
+              --jq 'map(select(.title | startswith("Update MindRoom release metadata"))) | sort_by(.updatedAt) | reverse | first | if . == null then "" else "\(.number) \(.headRefName)" end'
+          )
+
+          if [[ -n "$EXISTING_RELEASE_METADATA_PR" ]]; then
+            EXISTING_RELEASE_METADATA_PR_NUMBER="${EXISTING_RELEASE_METADATA_PR%% *}"
+            RELEASE_METADATA_BRANCH="${EXISTING_RELEASE_METADATA_PR#* }"
+            echo "Updating existing release metadata PR #${EXISTING_RELEASE_METADATA_PR_NUMBER} on ${RELEASE_METADATA_BRANCH}."
+          else
+            EXISTING_RELEASE_METADATA_PR_NUMBER=""
+            RELEASE_METADATA_BRANCH="release-metadata/mindroom"
+            echo "Creating a new release metadata PR on ${RELEASE_METADATA_BRANCH}."
+          fi
+
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "+refs/heads/${RELEASE_METADATA_BRANCH}:refs/remotes/origin/${RELEASE_METADATA_BRANCH}" || true
+          if REMOTE_RELEASE_METADATA_SHA=$(git rev-parse --verify --quiet "refs/remotes/origin/${RELEASE_METADATA_BRANCH}"); then
+            FORCE_WITH_LEASE=(--force-with-lease="refs/heads/${RELEASE_METADATA_BRANCH}:${REMOTE_RELEASE_METADATA_SHA}")
+          else
+            FORCE_WITH_LEASE=(--force-with-lease="refs/heads/${RELEASE_METADATA_BRANCH}:")
+          fi
+          git push "${FORCE_WITH_LEASE[@]}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:${RELEASE_METADATA_BRANCH}"
+
+          if [[ -n "$EXISTING_RELEASE_METADATA_PR_NUMBER" ]]; then
+            gh pr edit "$EXISTING_RELEASE_METADATA_PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Update MindRoom release metadata to ${TAG_NAME}" \
+              --body-file "$PR_BODY"
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$RELEASE_METADATA_BRANCH" \
+              --title "Update MindRoom release metadata to ${TAG_NAME}" \
+              --body-file "$PR_BODY"
+          fi
+  update_homebrew_tap:
+    name: Trigger Homebrew tap update
+    needs: build_macos_app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch tap workflow
+        env:
+          # Token needs write access to mindroom-ai/homebrew-tap.
+          # Fine-grained tokens need Contents: write on that repo.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN || secrets.PAT }}
+          TAG_NAME: ${{ inputs.release_ref }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "HOMEBREW_TAP_DISPATCH_TOKEN or PAT is required to update mindroom-ai/homebrew-tap." >&2
+            exit 1
+          fi
+
+          gh api repos/mindroom-ai/homebrew-tap/dispatches \
+            -f event_type=mindroom-release \
+            -F "client_payload[tag_name]=$TAG_NAME" \
+            -F "client_payload[asset_url]=https://github.com/mindroom-ai/mindroom/releases/download/${TAG_NAME}/MindRoom.dmg"

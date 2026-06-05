@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -24,7 +25,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import WorkerProgressEvent
@@ -78,6 +79,7 @@ __all__ = [
     "clean_partial_reply_text",
     "is_interrupted_partial_reply",
     "send_streaming_response",
+    "strip_visible_tool_markers",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -88,6 +90,43 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
+_VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
+_VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
+
+
+def strip_visible_tool_markers(text: str) -> str:
+    """Remove display-only tool marker lines before text re-enters model context."""
+    lines = text.splitlines()
+    if not any(_VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) for line in lines):
+        return text
+
+    filtered_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line):
+            filtered_lines.append(line)
+            index += 1
+            continue
+
+        index += 1
+        spacer_lines: list[str] = []
+        while index < len(lines) and not lines[index].strip():
+            spacer_lines.append(lines[index])
+            index += 1
+
+        # Tool markers rendered by MindRoom are often followed by a markdown
+        # separator. Remove the separator with the marker, but preserve ordinary
+        # blank-line spacing so surrounding prose does not get smashed together.
+        if index < len(lines) and _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN.fullmatch(lines[index]):
+            filtered_lines.extend(spacer_lines)
+            index += 1
+            if index < len(lines) and not lines[index].strip():
+                index += 1
+            continue
+
+        filtered_lines.extend(spacer_lines)
+    return "\n".join(filtered_lines).rstrip()
 
 
 class StreamingDeliveryError(Exception):
@@ -259,12 +298,13 @@ class _PreparedStreamingDelivery:
 class StreamingResponse:
     """Manages a streaming response with incremental message updates."""
 
-    room_id: str
-    reply_to_event_id: str | None
-    thread_id: str | None
+    target: MessageTarget
     config: Config
     runtime_paths: RuntimePaths
-    target: MessageTarget | None = None
+    room_id: str = field(init=False)
+    reply_to_event_id: str | None = field(init=False)
+    thread_id: str | None = field(init=False)
+    room_mode: bool = field(init=False)
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
@@ -277,7 +317,6 @@ class StreamingResponse:
     progress_update_interval: float = 1.0
     max_idle: float = 2.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
-    room_mode: bool = False  # When True, skip all thread relations (for bridges/mobile)
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     extra_content: dict[str, Any] | None = None
@@ -310,14 +349,7 @@ class StreamingResponse:
     _inflight_nonterminal_capture_state: _CommittedDeliveryState | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Normalize transitional target fields onto one canonical target."""
-        if self.target is None:
-            self.target = MessageTarget.resolve(
-                room_id=self.room_id,
-                thread_id=self.thread_id,
-                reply_to_event_id=self.reply_to_event_id,
-                room_mode=self.room_mode,
-            )
+        """Derive Matrix delivery fields from the canonical target."""
         self.room_id = self.target.room_id
         self.thread_id = self.target.resolved_thread_id
         self.reply_to_event_id = self.target.reply_to_event_id
@@ -1009,9 +1041,7 @@ class ReplacementStreamingResponse(StreamingResponse):
 
 async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
-    room_id: str,
-    reply_to_event_id: str | None,
-    thread_id: str | None,
+    target: MessageTarget,
     config: Config,
     runtime_paths: RuntimePaths,
     response_stream: AsyncIterator[StreamInputChunk],
@@ -1020,8 +1050,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     header: str | None = None,
     existing_event_id: str | None = None,
     adopt_existing_placeholder: bool = False,
-    room_mode: bool = False,
-    target: MessageTarget | None = None,
     show_tool_calls: bool = True,
     extra_content: dict[str, Any] | None = None,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
@@ -1032,23 +1060,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     preserve_existing_visible_on_empty_terminal: bool = False,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
-    resolved_target = target or MessageTarget.resolve(
-        room_id=room_id,
-        thread_id=thread_id,
-        reply_to_event_id=reply_to_event_id,
-        room_mode=room_mode,
-    )
-
     sc = config.defaults.streaming
     streaming = streaming_cls(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
+        target=target,
         config=config,
         runtime_paths=runtime_paths,
-        target=resolved_target,
         latest_thread_event_id=latest_thread_event_id,
-        room_mode=resolved_target.is_room_mode,
         show_tool_calls=show_tool_calls,
         extra_content=extra_content,
         update_interval=sc.update_interval,

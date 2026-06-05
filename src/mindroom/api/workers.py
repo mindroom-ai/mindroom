@@ -22,7 +22,7 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.workers.manager import WorkerManager
+    from mindroom.workers.backend import WorkerBackend
 
 
 __all__ = [
@@ -37,7 +37,7 @@ __all__ = [
 router = APIRouter(prefix="/api/workers", tags=["workers"])
 
 
-def _worker_manager(request: Request) -> WorkerManager:
+def _worker_manager(request: Request) -> WorkerBackend:
     runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     proxy_config = sandbox_proxy_config(runtime_paths)
     if not primary_worker_backend_available(
@@ -46,6 +46,7 @@ def _worker_manager(request: Request) -> WorkerManager:
         proxy_token=proxy_config.proxy_token,
     ):
         raise HTTPException(status_code=503, detail="Worker backend is not configured.")
+
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
     if primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(

@@ -10,7 +10,6 @@ from agno.db.base import SessionType
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
@@ -40,6 +39,10 @@ class _QueuedMessageState:
     pending_human_message_event_ids: set[str] = field(default_factory=set)
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
+    _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        self._idle_event.set()
 
     @property
     def pending_human_messages(self) -> int:
@@ -49,12 +52,15 @@ class _QueuedMessageState:
     def begin_response_turn(self) -> bool:
         existing_turn = self._active_response_turns > 0
         self._active_response_turns += 1
+        self._idle_event.clear()
         return existing_turn
 
     def finish_response_turn(self) -> None:
         if self._active_response_turns == 0:
             return
         self._active_response_turns -= 1
+        if self._active_response_turns == 0:
+            self._idle_event.set()
 
     def add_waiting_human_message(self, source_event_id: str) -> bool:
         previous_count = self.pending_human_messages
@@ -77,6 +83,9 @@ class _QueuedMessageState:
 
     async def wait(self) -> None:
         await self._event.wait()
+
+    async def wait_until_idle(self) -> None:
+        await self._idle_event.wait()
 
     def is_set(self) -> bool:
         return self._event.is_set()
@@ -127,6 +136,30 @@ class ResponseLifecycleCoordinator:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(self._thread_key(target))
 
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
+        """Return canonical thread IDs with active response lifecycles in one room."""
+        known_thread_keys = set(self._thread_queued_signals) | set(self._response_lifecycle_locks)
+        return frozenset(
+            thread_id
+            for known_room_id, thread_id in known_thread_keys
+            if known_room_id == room_id and self._has_active_response_for_thread_key((known_room_id, thread_id))
+        )
+
+    async def wait_for_thread_idle(self, room_id: str, thread_id: str | None) -> None:
+        """Wait until a response lifecycle lock is idle for one room/thread key."""
+        thread_key = (room_id, thread_id)
+        while self._has_active_response_for_thread_key(thread_key):
+            queued_signal = self._thread_queued_signals.get(thread_key)
+            if queued_signal is not None and queued_signal.has_active_response_turn():
+                await queued_signal.wait_until_idle()
+                continue
+            lifecycle_lock = self._response_lifecycle_locks.get(thread_key)
+            if lifecycle_lock is not None and lifecycle_lock.locked():
+                async with lifecycle_lock:
+                    pass
+                continue
+            return
+
     def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
         """Return the per-target lock that serializes one response lifecycle."""
         lock_key = self._thread_key(target)
@@ -157,19 +190,27 @@ class ResponseLifecycleCoordinator:
 
     @staticmethod
     def _should_signal_queued_message(
-        response_envelope: MessageEnvelope | None,
+        response_envelope: MessageEnvelope,
     ) -> bool:
         """Return whether one queued ingress should interrupt the active turn."""
-        return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
+        return response_envelope.origin.may_answer_interactive_prompt
+
+    def _assert_target_matches_envelope(self, target: MessageTarget, response_envelope: MessageEnvelope) -> None:
+        """Require lifecycle callers to use the envelope's canonical response target."""
+        if self._thread_key(target) == self._thread_key(response_envelope.target):
+            return
+        msg = "Response lifecycle target must match MessageEnvelope.target"
+        raise ValueError(msg)
 
     def reserve_waiting_human_message(
         self,
         *,
         target: MessageTarget,
-        response_envelope: MessageEnvelope | None,
+        response_envelope: MessageEnvelope,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve an active-turn notice before queued dispatch owns the follow-up."""
-        if response_envelope is None or not self._should_signal_queued_message(response_envelope):
+        self._assert_target_matches_envelope(target, response_envelope)
+        if not self._should_signal_queued_message(response_envelope):
             return None
         thread_key = self._thread_key(target)
         if not self._has_active_response_for_thread_key(thread_key):
@@ -184,7 +225,7 @@ class ResponseLifecycleCoordinator:
         *,
         lifecycle_lock: asyncio.Lock,
         queued_signal: _QueuedMessageState,
-        response_envelope: MessageEnvelope | None,
+        response_envelope: MessageEnvelope,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
@@ -194,7 +235,6 @@ class ResponseLifecycleCoordinator:
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
-        assert response_envelope is not None
         if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
             return None
         return response_envelope.source_event_id
@@ -213,12 +253,13 @@ class ResponseLifecycleCoordinator:
         self,
         *,
         target: MessageTarget,
-        response_envelope: MessageEnvelope | None,
+        response_envelope: MessageEnvelope,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
+        self._assert_target_matches_envelope(target, response_envelope)
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         notice = self._begin_response_turn_notice(

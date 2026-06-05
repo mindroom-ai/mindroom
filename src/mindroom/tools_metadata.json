@@ -2530,10 +2530,15 @@
       "config_fields": [],
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Load and unload allowed toolkits for the current session",
+      "description": "Load and unload deferred tools for the current session",
       "display_name": "Dynamic Tools",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "list_tools",
+        "load_tool",
+        "unload_tool",
+        "tool_search"
+      ],
       "helper_text": null,
       "icon": "PackagePlus",
       "icon_color": "text-sky-500",
@@ -3378,7 +3383,7 @@
         "search_gifs"
       ],
       "helper_text": null,
-      "icon": "GiGift",
+      "icon": "SiGiphy",
       "icon_color": "text-purple-500",
       "name": "giphy",
       "setup_type": "api_key",
@@ -5381,7 +5386,7 @@
         "summarize_table"
       ],
       "helper_text": null,
-      "icon": "SiAmazonredshift",
+      "icon": "AwsRedshift",
       "icon_color": "text-red-600",
       "name": "redshift",
       "setup_type": "special",
@@ -5468,7 +5473,10 @@
       "description": "Allow an agent to read and modify its own configuration",
       "display_name": "Self Config",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "get_own_config",
+        "update_own_config"
+      ],
       "helper_text": null,
       "icon": "Settings",
       "icon_color": "text-indigo-500",
@@ -6948,7 +6956,9 @@
       "description": "Request context compaction before the next reply in this conversation scope",
       "display_name": "Context Compaction",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "compact_context"
+      ],
       "helper_text": null,
       "icon": "Minimize2",
       "icon_color": "text-amber-500",
@@ -7100,7 +7110,9 @@
       "description": "Delegate tasks to other configured agents",
       "display_name": "Agent Delegation",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "delegate_task"
+      ],
       "helper_text": null,
       "icon": "Users",
       "icon_color": "text-blue-500",
@@ -7511,7 +7523,14 @@
       "description": "Explicitly store and search agent memories on demand",
       "display_name": "Agent Memory",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "add_memory",
+        "delete_memory",
+        "get_memory",
+        "list_memories",
+        "search_memories",
+        "update_memory"
+      ],
       "helper_text": null,
       "icon": "Brain",
       "icon_color": "text-violet-500",
@@ -11672,6 +11691,18 @@
           "placeholder": "Bearer token",
           "required": true,
           "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
+          "label": "Allow Private Home Assistant URL",
+          "name": "HOMEASSISTANT_ALLOW_PRIVATE_URL",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],

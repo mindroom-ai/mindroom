@@ -10,6 +10,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
@@ -48,6 +49,8 @@ def parse_mentions_in_text(
     text: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    allow_generated_agent_localparts: bool = True,
 ) -> tuple[str, list[str], str]:
     """Parse text for agent/team mentions and return processed text with user IDs.
 
@@ -55,6 +58,7 @@ def parse_mentions_in_text(
         text: Text that may contain @entity_name mentions
         config: Application configuration
         runtime_paths: Explicit runtime context for namespace-aware mention resolution
+        allow_generated_agent_localparts: Whether generated localparts like @mindroom_agent are aliases
 
     Returns:
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
@@ -69,6 +73,7 @@ def parse_mentions_in_text(
         tokens,
         registry=registry,
         config=config,
+        allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
 
     return (
@@ -93,6 +98,7 @@ def resolve_mentioned_user_ids_from_text(
         tokens,
         registry=registry,
         config=config,
+        allow_generated_agent_localparts=False,
     )
     return _mentioned_user_ids_from_replacements(replacements)
 
@@ -169,6 +175,7 @@ def _resolve_mention_tokens(
     *,
     registry: EntityIdentityRegistry,
     config: Config,
+    allow_generated_agent_localparts: bool,
 ) -> list[_MentionReplacement]:
     """Resolve scanned tokens into render-ready replacements."""
     replacements: list[_MentionReplacement] = []
@@ -177,6 +184,7 @@ def _resolve_mention_tokens(
             token,
             registry=registry,
             config=config,
+            allow_generated_agent_localparts=allow_generated_agent_localparts,
         )
         if resolution is None:
             continue
@@ -197,6 +205,7 @@ def _resolve_mention_token(
     *,
     registry: EntityIdentityRegistry,
     config: Config,
+    allow_generated_agent_localparts: bool,
 ) -> _MentionResolution | None:
     """Resolve one scanned mention token into an entity or literal-user target."""
     if token.explicit_user_id is not None:
@@ -210,6 +219,7 @@ def _resolve_mention_token(
         has_server_name=token.has_server_name,
         registry=registry,
         config=config,
+        allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
 
 
@@ -240,11 +250,16 @@ def _resolve_entity_alias_token(
     has_server_name: bool,
     registry: EntityIdentityRegistry,
     config: Config,
+    allow_generated_agent_localparts: bool,
 ) -> _MentionResolution | None:
     """Resolve one alias-style token to a local configured agent or team, if any."""
     if has_server_name:
         return None
-    if entity_name := _find_matching_entity_name_for_localpart(localpart, config):
+    if entity_name := _find_matching_entity_name_for_localpart(
+        localpart,
+        config,
+        allow_generated_agent_localparts=allow_generated_agent_localparts,
+    ):
         return _entity_mention_resolution(
             entity_name,
             registry=registry,
@@ -299,11 +314,31 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
 def _find_matching_entity_name_for_localpart(
     localpart: str,
     config: Config,
+    *,
+    allow_generated_agent_localparts: bool,
 ) -> str | None:
     """Return the configured agent or team name matched by one localpart string, if any."""
-    lower_localpart = localpart.lower()
+    entities = [*config.agents, *config.teams]
 
-    for entity_name in [*config.agents, *config.teams]:
+    if entity_name := _find_matching_entity_name(localpart, entities):
+        return entity_name
+
+    if not allow_generated_agent_localparts:
+        return None
+
+    generated_name = unnamespaced_agent_name_from_username_localpart(localpart)
+    if generated_name is None or generated_name.lower().startswith("user_"):
+        return None
+    return _find_matching_entity_name(generated_name, entities)
+
+
+def _find_matching_entity_name(
+    localpart: str,
+    entities: list[str],
+) -> str | None:
+    """Return the configured entity name matched by one localpart candidate."""
+    lower_localpart = localpart.lower()
+    for entity_name in entities:
         if entity_name == ROUTER_AGENT_NAME:
             continue
         if entity_name.lower() == lower_localpart:
@@ -314,11 +349,14 @@ def _find_matching_entity_name_for_localpart(
 def resolve_entity_name_for_mention_localpart(
     localpart: str,
     config: Config,
+    *,
+    allow_generated_agent_localparts: bool = True,
 ) -> str | None:
     """Return the configured agent or team name matched by one Matrix mention localpart."""
     return _find_matching_entity_name_for_localpart(
         localpart,
         config,
+        allow_generated_agent_localparts=allow_generated_agent_localparts,
     )
 
 

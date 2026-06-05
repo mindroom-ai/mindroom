@@ -17,7 +17,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="dynamic_tools",
         display_name="Dynamic Tools",
-        description="Load and unload allowed toolkits for the current session",
+        description="Load and unload deferred tools for the current session",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -25,5 +25,6 @@ register_builtin_tool_metadata(
         icon_color="text-sky-500",
         config_fields=[],
         dependencies=[],
+        function_names=("list_tools", "load_tool", "unload_tool", "tool_search"),
     ),
 )

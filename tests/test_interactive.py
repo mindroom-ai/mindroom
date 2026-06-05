@@ -150,6 +150,9 @@ class TestInteractiveFunctions:
         assert "```" not in response.formatted_text
         assert response.option_map == {"✅": "approve", "1": "approve"}
         assert response.options_list == [{"emoji": "✅", "label": "Approve", "value": "approve"}]
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.question_text == "Which option?"
+        assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
 
     def test_parse_and_format_interactive_accepts_inline_intro_before_fence(self) -> None:
         """Parser should handle prose immediately before the opening fence."""
@@ -169,6 +172,26 @@ class TestInteractiveFunctions:
         assert "1. ✅ Approve" in response.formatted_text
         assert response.option_map == {"✅": "approve", "1": "approve"}
         assert response.options_list == [{"emoji": "✅", "label": "Approve", "value": "approve"}]
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.question_text == "Which option?"
+        assert response.interactive_metadata.option_labels == {"✅": "Approve", "1": "Approve"}
+
+    def test_parse_and_format_interactive_defaults_null_question_text(self) -> None:
+        """Explicit JSON null question text should use the default prompt."""
+        response_text = """```interactive
+{
+    "question": null,
+    "options": [
+        {"emoji": "✅", "label": "Approve", "value": "approve"}
+    ]
+}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.question_text == interactive._DEFAULT_QUESTION
+        assert interactive._DEFAULT_QUESTION in response.formatted_text
 
     def test_parse_and_format_interactive_logs_warning_when_block_does_not_match(self) -> None:
         """Malformed interactive-looking blocks should log a warning."""
@@ -291,10 +314,25 @@ Based on your choice, I'll proceed accordingly."""
         assert option_map["🔍"] == "careful"
         assert option_map["1"] == "fast"
         assert option_map["2"] == "careful"
+        assert response.interactive_metadata is not None
+        assert response.interactive_metadata.option_labels == {
+            "🚀": "Fast and automated",
+            "1": "Fast and automated",
+            "🔍": "Careful and manual",
+            "2": "Careful and manual",
+        }
 
         # Register the question
         event_id = "$question123"
-        interactive.register_interactive_question(event_id, "!room:localhost", "$thread123", option_map, "test_agent")
+        interactive.register_interactive_question(
+            event_id,
+            "!room:localhost",
+            "$thread123",
+            option_map,
+            "test_agent",
+            question_text=response.interactive_metadata.question_text,
+            option_labels=response.interactive_metadata.option_labels,
+        )
 
         # Should create question
         assert event_id in interactive._active_questions
@@ -305,6 +343,9 @@ Based on your choice, I'll proceed accordingly."""
         assert question.options["🔍"] == "careful"
         assert question.options["1"] == "fast"
         assert question.options["2"] == "careful"
+        assert question.question_text == "What approach would you prefer?"
+        assert question.option_labels["🚀"] == "Fast and automated"
+        assert question.option_labels["2"] == "Careful and manual"
 
         # Add reaction buttons
         await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options, config=self.config)
@@ -327,6 +368,26 @@ Based on your choice, I'll proceed accordingly."""
                 },
             },
         ]
+
+    def test_load_active_questions_defaults_null_context_fields(self) -> None:
+        """Persisted explicit null context fields should load as absent metadata."""
+        payload = {
+            "$question": {
+                "room_id": "!room:localhost",
+                "thread_id": "$thread",
+                "options": {"1": "approve"},
+                "creator_agent": "test_agent",
+                "question_text": None,
+                "option_labels": None,
+                "created_at": time.time(),
+            },
+        }
+
+        questions = interactive._load_active_questions(payload)
+
+        question = questions["$question"]
+        assert question.question_text == ""
+        assert question.option_labels == {}
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:  # noqa: ARG002
@@ -416,7 +477,9 @@ Based on your choice, I'll proceed accordingly."""
 
         assert result == interactive.InteractiveSelection(
             question_event_id="$question123",
+            question_text="",
             selection_key="🚀",
+            selected_label="fast",
             selected_value="fast",
             thread_id="$thread123",
         )
@@ -454,11 +517,61 @@ Based on your choice, I'll proceed accordingly."""
 
         assert result == interactive.InteractiveSelection(
             question_event_id="$question123",
+            question_text="",
             selection_key="🚀",
+            selected_label="fast",
             selected_value="fast",
             thread_id="$thread123",
         )
         assert "$question123" not in interactive._active_questions
+
+    @pytest.mark.asyncio
+    async def test_handle_reaction_uses_targeted_question_metadata_for_reused_emoji(
+        self,
+        mock_client: AsyncMock,
+    ) -> None:
+        """A reaction to an older same-emoji question should carry that question's context."""
+        interactive._active_questions.clear()
+        interactive._active_questions["$older-question"] = interactive._InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            options={"✅": "approve-old", "1": "approve-old"},
+            creator_agent="test_agent",
+            question_text="Approve the migration?",
+            option_labels={"✅": "Approve migration", "1": "Approve migration"},
+        )
+        interactive._active_questions["$newer-question"] = interactive._InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            options={"✅": "approve-new", "1": "approve-new"},
+            creator_agent="test_agent",
+            question_text="Approve the release?",
+            option_labels={"✅": "Approve release", "1": "Approve release"},
+        )
+
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$older-question"
+        event.key = "✅"
+
+        result = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+
+        assert result == interactive.InteractiveSelection(
+            question_event_id="$older-question",
+            question_text="Approve the migration?",
+            selection_key="✅",
+            selected_label="Approve migration",
+            selected_value="approve-old",
+            thread_id="$thread123",
+        )
+        assert "$older-question" not in interactive._active_questions
+        assert "$newer-question" in interactive._active_questions
 
     @pytest.mark.asyncio
     async def test_handle_reaction_unknown_event(self, mock_client: AsyncMock) -> None:
@@ -593,7 +706,9 @@ Based on your choice, I'll proceed accordingly."""
 
         assert result == interactive.InteractiveSelection(
             question_event_id="$question123",
+            question_text="",
             selection_key="1",
+            selected_label="first",
             selected_value="first",
             thread_id="$thread123",
         )
@@ -635,6 +750,29 @@ Based on your choice, I'll proceed accordingly."""
 
         assert result is None
         assert interactive._active_questions == {}
+
+    def test_build_selection_prompt_anchors_question_and_escapes_user_text(self) -> None:
+        """Selection prompts should anchor to the original question without markdown fences."""
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question:localhost",
+            question_text='Choose safely\n```json\n{"breakout": true}\n```',
+            selection_key="✅",
+            selected_label="Approve",
+            selected_value="approve",
+            thread_id="$thread:localhost",
+        )
+
+        prompt = interactive.build_selection_prompt(selection)
+
+        assert "question_event_id" in prompt
+        assert "$question:localhost" in prompt
+        assert "question_text" in prompt
+        assert "selected_option" in prompt
+        assert '"key": "✅"' in prompt
+        assert '"label": "Approve"' in prompt
+        assert '"value": "approve"' in prompt
+        assert "Use the question_event_id and question_text" in prompt
+        assert "\n```" not in prompt
 
     @pytest.mark.asyncio
     async def test_handle_text_response_invalid(self, mock_client: AsyncMock) -> None:
@@ -712,7 +850,9 @@ Based on your choice, I'll proceed accordingly."""
 
         assert result == interactive.InteractiveSelection(
             question_event_id="$question123",
+            question_text="",
             selection_key="1",
+            selected_label="first",
             selected_value="first",
             thread_id="$thread123",
         )
@@ -825,6 +965,8 @@ Just let me know your preference!"""
             "$thread123",
             option_map or {},
             "test_agent",
+            question_text=response.interactive_metadata.question_text if response.interactive_metadata else "",
+            option_labels=response.interactive_metadata.option_labels if response.interactive_metadata else None,
         )
 
         # Verify question was created
@@ -865,7 +1007,9 @@ Just let me know your preference!"""
 
         assert result == interactive.InteractiveSelection(
             question_event_id=event_id,
+            question_text="How would you like me to proceed?",
             selection_key="🔍",
+            selected_label="Detailed analysis",
             selected_value="detailed",
             thread_id="$thread123",
         )
@@ -942,10 +1086,14 @@ Just let me know your preference!"""
             "$thread123",
             option_map,
             "test_agent",
+            question_text="Approve this change?",
+            option_labels={"✅": "Approve", "1": "Approve"},
         )
 
         persisted = json.loads(persistence_file.read_text())
         assert persisted["$question123"]["creator_agent"] == "test_agent"
+        assert persisted["$question123"]["question_text"] == "Approve this change?"
+        assert persisted["$question123"]["option_labels"] == {"✅": "Approve", "1": "Approve"}
         assert persisted["$question123"]["created_at"] > 0
 
         interactive._active_questions.clear()
@@ -956,6 +1104,8 @@ Just let me know your preference!"""
         assert restored.thread_id == "$thread123"
         assert restored.options == option_map
         assert restored.creator_agent == "test_agent"
+        assert restored.question_text == "Approve this change?"
+        assert restored.option_labels == {"✅": "Approve", "1": "Approve"}
         assert restored.created_at > 0
 
         event = MagicMock(spec=nio.ReactionEvent)
@@ -973,7 +1123,9 @@ Just let me know your preference!"""
 
         assert result == interactive.InteractiveSelection(
             question_event_id="$question123",
+            question_text="Approve this change?",
             selection_key="✅",
+            selected_label="Approve",
             selected_value="yes",
             thread_id="$thread123",
         )
@@ -1025,6 +1177,8 @@ Just let me know your preference!"""
         restored = interactive._active_questions["$question123"]
         assert restored.thread_id == "$thread123"
         assert restored.options == {"1": "yes"}
+        assert restored.question_text == ""
+        assert restored.option_labels == {}
         assert restored.created_at == 0.0
 
     def test_init_persistence_starts_fresh_on_corrupt_json(self, tmp_path: Path) -> None:

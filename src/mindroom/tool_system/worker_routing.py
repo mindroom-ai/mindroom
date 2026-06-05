@@ -218,7 +218,8 @@ def stream_with_tool_execution_identity[ChunkT](
     )
 
 
-def _normalize_worker_key_part(value: str) -> str:
+def normalize_worker_key_part(value: str) -> str:
+    """Return one normalized worker-key component."""
     normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
     return normalized or "default"
 
@@ -371,18 +372,31 @@ def _requires_shared_only_integration_scope(
     name: str,
     *,
     configured_mcp_server_ids: Collection[str] | None = None,
+    oauth_mcp_server_ids: Collection[str] | None = None,
 ) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope."""
     if name in _SHARED_ONLY_INTEGRATION_NAMES:
         return True
 
-    from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name  # noqa: PLC0415
+    from mindroom.mcp.registry import (  # noqa: PLC0415
+        mcp_server_id_from_tool_name,
+        mcp_tool_name,
+        mcp_tool_name_is_oauth_backed,
+    )
 
-    if mcp_server_id_from_tool_name(name) is not None:
-        return True
+    server_id = mcp_server_id_from_tool_name(name)
+    if server_id is not None:
+        return not (
+            mcp_tool_name_is_oauth_backed(name)
+            or (oauth_mcp_server_ids is not None and server_id in oauth_mcp_server_ids)
+        )
     if configured_mcp_server_ids is None:
         return False
-    return any(name == mcp_tool_name(server_id) for server_id in configured_mcp_server_ids)
+    for server_id in configured_mcp_server_ids:
+        if name != mcp_tool_name(server_id):
+            continue
+        return oauth_mcp_server_ids is None or server_id not in oauth_mcp_server_ids
+    return False
 
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
@@ -397,6 +411,7 @@ def unsupported_shared_only_integration_names(
     worker_scope: WorkerScope | None,
     *,
     configured_mcp_server_ids: Collection[str] | None = None,
+    oauth_mcp_server_ids: Collection[str] | None = None,
 ) -> list[str]:
     """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
@@ -407,6 +422,7 @@ def unsupported_shared_only_integration_names(
         if _requires_shared_only_integration_scope(
             name,
             configured_mcp_server_ids=configured_mcp_server_ids,
+            oauth_mcp_server_ids=oauth_mcp_server_ids,
         )
     ]
 
@@ -442,8 +458,8 @@ def resolve_worker_key(
     agent_name: str | None = None,
 ) -> str | None:
     """Derive a stable worker key from scope and execution identity."""
-    tenant_key = _normalize_worker_key_part(identity.tenant_id or identity.account_id or "default")
-    effective_agent_name = _normalize_worker_key_part(agent_name or identity.agent_name)
+    tenant_key = normalize_worker_key_part(identity.tenant_id or identity.account_id or "default")
+    effective_agent_name = normalize_worker_key_part(agent_name or identity.agent_name)
     worker_key: str | None
 
     if worker_scope == "shared":
@@ -474,14 +490,14 @@ def resolve_unscoped_worker_key(
 ) -> str:
     """Derive a stable backend worker key for unscoped sandbox execution."""
     identity = execution_identity
-    tenant_key = _normalize_worker_key_part(
+    tenant_key = normalize_worker_key_part(
         tenant_id
         or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
         or account_id
         or (identity.account_id if identity is not None and identity.account_id is not None else None)
         or "default",
     )
-    effective_agent_name = _normalize_worker_key_part(agent_name)
+    effective_agent_name = normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
@@ -523,7 +539,7 @@ def requires_explicit_private_agent_visibility(worker_key: str) -> bool:
     return resolved_worker_key_scope(worker_key) == "user_agent"
 
 
-def _worker_key_agent_name(worker_key: str) -> str | None:
+def worker_key_agent_name(worker_key: str) -> str | None:
     """Return the encoded agent name for one resolved worker key, when present."""
     scope = resolved_worker_key_scope(worker_key)
     if scope is None or scope == "user":
@@ -676,7 +692,7 @@ def visible_state_roots_for_worker_key(
             private_instance_scope_root_path(base_storage_path, worker_key),
         )
 
-    agent_name = _worker_key_agent_name(worker_key)
+    agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
     if scope == "user_agent" and agent_name in private_agent_names:

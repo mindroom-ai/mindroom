@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import threading
@@ -12,31 +11,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
-from mindroom.history import HistoryScope
+from mindroom.file_locks import advisory_file_lock
+from mindroom.history import HistoryScope, HistoryScopeMetadata
 from mindroom.logging_config import get_logger
-from mindroom.message_target import MessageTarget
+from mindroom.message_target import MessageTarget, MessageTargetMetadata
 
 logger = get_logger(__name__)
-
-
-class _SerializedHistoryScope(TypedDict):
-    """JSON-safe persisted history-scope identity."""
-
-    kind: Literal["agent", "team"]
-    scope_id: str
-
-
-class _SerializedConversationTarget(TypedDict):
-    """JSON-safe persisted conversation target."""
-
-    room_id: str
-    source_thread_id: str | None
-    resolved_thread_id: str | None
-    reply_to_event_id: str | None
-    session_id: str
-    thread_id: NotRequired[str | None]
 
 
 class _SerializedHandledTurnRecord(TypedDict):
@@ -52,8 +34,8 @@ class _SerializedHandledTurnRecord(TypedDict):
     response_owner: NotRequired[str | None]
     requester_id: NotRequired[str | None]
     correlation_id: NotRequired[str | None]
-    history_scope: NotRequired[_SerializedHistoryScope | None]
-    conversation_target: NotRequired[_SerializedConversationTarget | None]
+    history_scope: NotRequired[HistoryScopeMetadata | None]
+    conversation_target: NotRequired[MessageTargetMetadata | None]
 
 
 type _SerializedHandledTurnRecordLike = _SerializedHandledTurnRecord | dict[str, Any]
@@ -129,6 +111,27 @@ class HandledTurnState:
             correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
+        )
+
+    @classmethod
+    def from_persisted_metadata(
+        cls,
+        source_event_ids: typing.Sequence[str],
+        *,
+        response_event_id: str | None = None,
+        source_event_prompts: typing.Mapping[str, str] | None = None,
+        response_owner: str | None = None,
+        history_scope_metadata: object,
+        conversation_target_metadata: object,
+    ) -> HandledTurnState:
+        """Build handled-turn state from persisted Matrix run metadata."""
+        return cls.create(
+            source_event_ids,
+            response_event_id=response_event_id,
+            source_event_prompts=source_event_prompts,
+            response_owner=response_owner,
+            history_scope=HistoryScope.from_metadata(history_scope_metadata),
+            conversation_target=MessageTarget.from_metadata(conversation_target_metadata),
         )
 
     @property
@@ -434,12 +437,8 @@ class HandledTurnLedger:
     @contextmanager
     def _file_lock(self, *, exclusive: bool) -> typing.Iterator[None]:
         """Lock the ledger for cross-instance readers and writers."""
-        with self._responses_lock_file.open("a+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with advisory_file_lock(self._responses_lock_file, exclusive=exclusive):
+            yield
 
     def _read_responses_file_locked(
         self,
@@ -718,36 +717,12 @@ def _normalized_correlation_id(correlation_id: str | None) -> str | None:
 
 def _normalized_history_scope(history_scope: HistoryScope | None) -> HistoryScope | None:
     """Return one normalized persisted history scope."""
-    if not isinstance(history_scope, HistoryScope):
-        return None
-    if history_scope.kind not in {"agent", "team"}:
-        return None
-    if not isinstance(history_scope.scope_id, str) or not history_scope.scope_id:
-        return None
-    return HistoryScope(kind=history_scope.kind, scope_id=history_scope.scope_id)
+    return history_scope if isinstance(history_scope, HistoryScope) else None
 
 
 def _normalized_conversation_target(conversation_target: MessageTarget | None) -> MessageTarget | None:
     """Return one normalized persisted conversation target."""
-    if not isinstance(conversation_target, MessageTarget):
-        return None
-    if not isinstance(conversation_target.room_id, str) or not conversation_target.room_id:
-        return None
-    session_id = (
-        conversation_target.session_id
-        if isinstance(conversation_target.session_id, str) and conversation_target.session_id
-        else MessageTarget._build_session_id(
-            conversation_target.room_id,
-            conversation_target.resolved_thread_id,
-        )
-    )
-    return MessageTarget(
-        room_id=conversation_target.room_id,
-        source_thread_id=_normalized_event_id(conversation_target.source_thread_id),
-        resolved_thread_id=_normalized_event_id(conversation_target.resolved_thread_id),
-        reply_to_event_id=_normalized_event_id(conversation_target.reply_to_event_id),
-        session_id=session_id,
-    )
+    return conversation_target if isinstance(conversation_target, MessageTarget) else None
 
 
 def _explicit_prompt_map_for_sources(
@@ -800,18 +775,9 @@ def _serialized_record(
     if correlation_id is not None:
         record["correlation_id"] = correlation_id
     if history_scope is not None:
-        record["history_scope"] = {
-            "kind": history_scope.kind,
-            "scope_id": history_scope.scope_id,
-        }
+        record["history_scope"] = history_scope.to_metadata()
     if conversation_target is not None:
-        record["conversation_target"] = {
-            "room_id": conversation_target.room_id,
-            "source_thread_id": conversation_target.source_thread_id,
-            "resolved_thread_id": conversation_target.resolved_thread_id,
-            "reply_to_event_id": conversation_target.reply_to_event_id,
-            "session_id": conversation_target.session_id,
-        }
+        record["conversation_target"] = conversation_target.to_metadata()
     return record
 
 
@@ -878,17 +844,13 @@ def _response_groups(
     )
 
 
-def _normalize_serialized_record(  # noqa: C901
+def _normalize_serialized_record(
     event_id: str,
     raw_record: _SerializedHandledTurnRecordLike,
 ) -> _SerializedHandledTurnRecord:
-    """Normalize old and new on-disk record shapes into one schema."""
+    """Normalize one on-disk record into the current schema."""
     response_event_id = raw_record.get("response_event_id")
-    if not isinstance(response_event_id, str):
-        response_event_id = raw_record.get("response_id")
     visible_echo_event_id = raw_record.get("visible_echo_event_id")
-    if not isinstance(visible_echo_event_id, str):
-        visible_echo_event_id = raw_record.get("visible_echo_response_id")
     timestamp = raw_record.get("timestamp")
     raw_source_event_ids = raw_record.get("source_event_ids")
     normalized_source_event_ids = (
@@ -927,18 +889,9 @@ def _normalize_serialized_record(  # noqa: C901
     if correlation_id is not None:
         normalized_record["correlation_id"] = correlation_id
     if history_scope is not None:
-        normalized_record["history_scope"] = {
-            "kind": history_scope.kind,
-            "scope_id": history_scope.scope_id,
-        }
+        normalized_record["history_scope"] = history_scope.to_metadata()
     if conversation_target is not None:
-        normalized_record["conversation_target"] = {
-            "room_id": conversation_target.room_id,
-            "source_thread_id": conversation_target.source_thread_id,
-            "resolved_thread_id": conversation_target.resolved_thread_id,
-            "reply_to_event_id": conversation_target.reply_to_event_id,
-            "session_id": conversation_target.session_id,
-        }
+        normalized_record["conversation_target"] = conversation_target.to_metadata()
     return normalized_record
 
 
@@ -1009,40 +962,14 @@ def _history_scope_for_record(record: _SerializedHandledTurnRecordLike | None) -
     """Return the normalized history scope for one record."""
     if record is None:
         return None
-    raw_history_scope = record.get("history_scope")
-    if not isinstance(raw_history_scope, dict):
-        return None
-    kind = raw_history_scope.get("kind")
-    scope_id = raw_history_scope.get("scope_id")
-    if kind not in {"agent", "team"} or not isinstance(scope_id, str) or not scope_id:
-        return None
-    return HistoryScope(kind=kind, scope_id=scope_id)
+    return HistoryScope.from_metadata(record.get("history_scope"))
 
 
 def _conversation_target_for_record(record: _SerializedHandledTurnRecordLike | None) -> MessageTarget | None:
     """Return the normalized conversation target for one record."""
     if record is None:
         return None
-    raw_target = record.get("conversation_target")
-    if not isinstance(raw_target, dict):
-        return None
-    room_id = raw_target.get("room_id")
-    session_id = raw_target.get("session_id")
-    if not isinstance(room_id, str) or not room_id:
-        return None
-    resolved_thread_id = _normalized_event_id(raw_target.get("resolved_thread_id"))
-    normalized_target = MessageTarget(
-        room_id=room_id,
-        source_thread_id=_normalized_event_id(raw_target.get("source_thread_id") or raw_target.get("thread_id")),
-        resolved_thread_id=resolved_thread_id,
-        reply_to_event_id=_normalized_event_id(raw_target.get("reply_to_event_id")),
-        session_id=(
-            session_id
-            if isinstance(session_id, str) and session_id
-            else MessageTarget._build_session_id(room_id, resolved_thread_id)
-        ),
-    )
-    return _normalized_conversation_target(normalized_target)
+    return MessageTarget.from_metadata(record.get("conversation_target"))
 
 
 def _response_event_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
@@ -1050,10 +977,7 @@ def _response_event_id_for_record(record: _SerializedHandledTurnRecordLike | Non
     if record is None:
         return None
     response_event_id = record.get("response_event_id")
-    if isinstance(response_event_id, str):
-        return response_event_id
-    legacy_response_id = record.get("response_id")
-    return legacy_response_id if isinstance(legacy_response_id, str) else None
+    return response_event_id if isinstance(response_event_id, str) else None
 
 
 def _visible_echo_event_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
@@ -1061,10 +985,7 @@ def _visible_echo_event_id_for_record(record: _SerializedHandledTurnRecordLike |
     if record is None:
         return None
     visible_echo_event_id = record.get("visible_echo_event_id")
-    if isinstance(visible_echo_event_id, str):
-        return visible_echo_event_id
-    legacy_visible_echo_id = record.get("visible_echo_response_id")
-    return legacy_visible_echo_id if isinstance(legacy_visible_echo_id, str) else None
+    return visible_echo_event_id if isinstance(visible_echo_event_id, str) else None
 
 
 def _completed_for_record(record: _SerializedHandledTurnRecordLike | None) -> bool:

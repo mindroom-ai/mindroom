@@ -38,6 +38,11 @@ def _get_log_command() -> str:
     return f"journalctl --user -u {SERVICE_NAME} -f"
 
 
+def _get_log_args() -> list[str]:
+    """Return the argv for following service logs."""
+    return ["journalctl", "--user", "-u", SERVICE_NAME, "-f"]
+
+
 def _get_recent_logs(num_lines: int = 10) -> list[str]:
     """Return recent service logs from journalctl."""
     result = subprocess.run(
@@ -241,5 +246,6 @@ manager = ServiceManager(
     restart_service=_restart_service,
     get_service_status=_get_service_status,
     get_log_command=_get_log_command,
+    get_log_args=_get_log_args,
     get_recent_logs=_get_recent_logs,
 )

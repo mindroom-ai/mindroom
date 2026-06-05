@@ -17,12 +17,16 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    TOOL_TRACE_CONTENT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.logging_config import get_logger
@@ -38,9 +42,9 @@ _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
-        "com.mindroom.hook_source",
-        "com.mindroom.skip_mentions",
-        "com.mindroom.source_kind",
+        HOOK_SOURCE_KEY,
+        SKIP_MENTIONS_KEY,
+        SOURCE_KIND_KEY,
         ATTACHMENT_IDS_KEY,
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
@@ -53,7 +57,7 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
-        "io.mindroom.tool_trace",
+        TOOL_TRACE_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
     },
 )

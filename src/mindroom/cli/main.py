@@ -22,6 +22,7 @@ from .config import (
     print_config_search_locations,
 )
 from .local_stack import local_stack_setup
+from .migrate import config_migrate
 from .service import service_app
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.thread_export import ThreadExportStats
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -39,7 +41,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom config init[/cyan]   Create a starter config
   [cyan]mindroom run[/cyan]           Start the system\
 """
-_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,codex,claude,llama.cpp,vertexai_claude}"
+_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,azure,bedrock_claude,codex,claude,llama.cpp,vertexai_claude}"
 
 app = typer.Typer(
     help=_HELP,
@@ -51,8 +53,11 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
+threads_app = typer.Typer(help="Export Matrix threads to local files.")
+config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(avatars_app, name="avatars")
+app.add_typer(threads_app, name="threads")
 app.add_typer(service_app, name="service")
 
 
@@ -88,6 +93,12 @@ def run(
         case_sensitive=False,
         envvar="LOG_LEVEL",
     ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
     storage_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--storage-path",
@@ -121,6 +132,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
+            config_path=config_path,
             storage_path=storage_path,
             api=api,
             api_port=api_port,
@@ -155,6 +167,7 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
 async def _run(
     log_level: str,
+    config_path: Path | None,
     storage_path: Path | None,
     *,
     api: bool,
@@ -164,7 +177,7 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(storage_path=storage_path)
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
@@ -277,6 +290,133 @@ def avatars_sync(
         raise
 
 
+@threads_app.command("export")
+def _threads_export_command(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data.",
+    ),
+    output: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--output",
+        "-o",
+        help="Output directory. Defaults to <storage>/thread_exports.",
+    ),
+    room: str | None = typer.Option(
+        None,
+        "--room",
+        "-r",
+        help="Filter exported rooms by a substring of the room key, alias, name, or Matrix room ID.",
+    ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        help="Repeat the export forever on a fixed interval.",
+    ),
+    interval: int = typer.Option(
+        300,
+        "--interval",
+        help="Watch interval in seconds.",
+    ),
+    max_thread_roots: int = typer.Option(
+        2000,
+        "--max-thread-roots",
+        help="Maximum thread roots to enumerate per room.",
+    ),
+) -> None:
+    """Export Matrix threads to YAML files for grep/ripgrep search."""
+    asyncio.run(
+        _threads_export(
+            config_path=config_path,
+            storage_path=storage_path,
+            output=output,
+            room=room,
+            watch=watch,
+            interval=interval,
+            max_thread_roots=max_thread_roots,
+        ),
+    )
+
+
+def _print_thread_export_stats(stats: ThreadExportStats) -> None:
+    """Print one export-pass summary."""
+    console.print(
+        f"Exported {stats.threads_exported}/{stats.threads_seen} threads "
+        f"from {stats.rooms_exported} room(s) to {stats.output_dir}",
+    )
+    if stats.truncated_rooms:
+        console.print(f"[yellow]Warning:[/yellow] {stats.truncated_rooms} room(s) hit the thread enumeration limit")
+    for failure in stats.failed_items:
+        target = failure.thread_id or failure.room_id
+        console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
+
+
+def _handle_thread_export_error(exc: RuntimeError | OSError, runtime_paths: RuntimePaths, *, watch: bool) -> None:
+    """Print one top-level export error and exit unless watch mode can retry."""
+    if isinstance(exc, ConnectionError) or _is_connection_os_error(exc):
+        _print_connection_error(exc, runtime_paths)
+    else:
+        console.print(f"[red]Error:[/red] {exc}")
+    if not watch:
+        raise typer.Exit(1) from None
+
+
+def _is_connection_os_error(exc: BaseException) -> bool:
+    """Return whether an OS error looks like a Matrix connection failure."""
+    return isinstance(exc, OSError) and ("connect" in str(exc).lower() or "refused" in str(exc).lower())
+
+
+async def _threads_export(
+    *,
+    config_path: Path | None,
+    storage_path: Path | None,
+    output: Path | None,
+    room: str | None,
+    watch: bool,
+    interval: int,
+    max_thread_roots: int,
+) -> None:
+    """Run one thread export command."""
+    from mindroom.thread_export import export_threads_once  # noqa: PLC0415
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
+    if interval < 1:
+        console.print("[red]Error:[/red] --interval must be at least 1 second")
+        raise typer.Exit(1)
+    if max_thread_roots < 1:
+        console.print("[red]Error:[/red] --max-thread-roots must be at least 1")
+        raise typer.Exit(1)
+
+    while True:
+        try:
+            stats = await export_threads_once(
+                config=config,
+                runtime_paths=runtime_paths,
+                output_dir=output,
+                room_filter=room,
+                max_thread_roots=max_thread_roots,
+            )
+        except (OSError, RuntimeError) as exc:
+            _handle_thread_export_error(exc, runtime_paths, watch=watch)
+        else:
+            _print_thread_export_stats(stats)
+            if not watch:
+                if stats.failures:
+                    raise typer.Exit(1)
+                return
+
+        await asyncio.sleep(interval)
+
+
 @app.command()
 def connect(
     pair_code: str = typer.Option(
@@ -344,7 +484,7 @@ def connect(
         )
     if credentials.namespace_invalid:
         console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; derived a fallback namespace.",
+            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; leaving MINDROOM_NAMESPACE empty.",
         )
 
     if persist_env:

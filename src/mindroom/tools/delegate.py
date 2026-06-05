@@ -26,5 +26,6 @@ register_builtin_tool_metadata(
         icon_color="text-blue-500",
         config_fields=[],
         dependencies=[],
+        function_names=("delegate_task",),
     ),
 )

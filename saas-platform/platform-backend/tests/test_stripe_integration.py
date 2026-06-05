@@ -48,14 +48,16 @@ class TestStripeIntegration:
         """Test that MindRoom product exists in Stripe."""
         products = stripe.Product.list(limit=100)
 
-        mindroom_products = [p for p in products.data if p.metadata.get("platform") == "mindroom"]
+        mindroom_products = [
+            p for p in products.data if "platform" in p.metadata and p.metadata["platform"] == "mindroom"
+        ]
 
         assert len(mindroom_products) > 0, "No MindRoom product found in Stripe"
 
         # Verify product details
         product = mindroom_products[0]
         assert product.name == "MindRoom Subscription"
-        assert product.metadata.get("platform") == "mindroom"
+        assert product.metadata["platform"] == "mindroom"
 
     @pytest.mark.skipif(not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials")
     def test_all_configured_prices_exist(self) -> None:
@@ -126,7 +128,7 @@ class TestCheckoutEndpoint:
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
             mock_stripe.Subscription.list.return_value = Mock(data=[])
 
-            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
+            response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
 
             assert response.status_code == 200
             data = response.json()
@@ -138,7 +140,7 @@ class TestCheckoutEndpoint:
             call_args = mock_stripe.checkout.Session.create.call_args[1]
             assert call_args["mode"] == "subscription"
             assert len(call_args["line_items"]) == 1
-            assert call_args["line_items"][0]["price"] == get_stripe_price_id("starter", "monthly")
+            assert call_args["line_items"][0]["price"] == get_stripe_price_id("byok", "monthly")
 
     def test_checkout_invalid_plan(self, client: TestClient) -> None:
         """Test checkout with invalid plan."""
@@ -153,13 +155,13 @@ class TestCheckoutEndpoint:
         """Test checkout with invalid billing cycle."""
         with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
             mock_stripe.api_key = "sk_test_mock"
-            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "weekly"})
+            response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "weekly"})
 
             assert response.status_code == 400
             assert "No price found" in response.json()["detail"]
 
-    def test_checkout_professional_with_quantity(self, client: TestClient) -> None:
-        """Test checkout for professional plan with quantity."""
+    def test_checkout_pro_uses_flat_quantity(self, client: TestClient) -> None:
+        """Test checkout for the flat-priced pro plan."""
         with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
             mock_stripe.api_key = "sk_test_mock"
             mock_session = Mock()
@@ -168,16 +170,13 @@ class TestCheckoutEndpoint:
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
             mock_stripe.Subscription.list.return_value = Mock(data=[])
 
-            response = client.post(
-                "/stripe/checkout", json={"tier": "professional", "billing_cycle": "yearly", "quantity": 5}
-            )
+            response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "yearly"})
 
             assert response.status_code == 200
 
-            # Verify quantity was passed for per-user pricing
             mock_stripe.checkout.Session.create.assert_called_once()
             call_args = mock_stripe.checkout.Session.create.call_args[1]
-            assert call_args["line_items"][0]["quantity"] == 5
+            assert call_args["line_items"][0]["quantity"] == 1
 
 
 class TestPricingEndpoints:
@@ -204,19 +203,19 @@ class TestPricingEndpoints:
         assert "discounts" in data
 
         # Check that Stripe IDs are included
-        assert data["plans"]["starter"]["stripe_price_id_monthly"] is not None
-        assert data["plans"]["professional"]["stripe_price_id_yearly"] is not None
+        assert data["plans"]["byok"]["stripe_price_id_monthly"] is not None
+        assert data["plans"]["pro"]["stripe_price_id_yearly"] is not None
 
     def test_stripe_price_endpoint(self, client: TestClient) -> None:
         """Test the Stripe price retrieval endpoint."""
-        response = client.get("/pricing/stripe-price/starter/monthly")
+        response = client.get("/pricing/stripe-price/byok/monthly")
 
         assert response.status_code == 200
         data = response.json()
 
         assert "price_id" in data
-        assert data["price_id"] == get_stripe_price_id("starter", "monthly")
-        assert data["plan"] == "starter"
+        assert data["price_id"] == get_stripe_price_id("byok", "monthly")
+        assert data["plan"] == "byok"
         assert data["billing_cycle"] == "monthly"
 
     def test_stripe_price_endpoint_invalid(self, client: TestClient) -> None:
@@ -226,5 +225,5 @@ class TestPricingEndpoints:
         assert response.status_code == 404
 
         # Invalid billing cycle
-        response = client.get("/pricing/stripe-price/starter/weekly")
+        response = client.get("/pricing/stripe-price/byok/weekly")
         assert response.status_code == 400

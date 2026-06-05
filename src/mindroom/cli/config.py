@@ -33,6 +33,11 @@ from mindroom.model_defaults import (
     SENTENCE_TRANSFORMERS_DEFAULT,
     llama_cpp_server_command,
 )
+from mindroom.runtime_env_policy import (
+    AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
+    AZURE_OPENAI_ENV_BY_KEY,
+    VERTEXAI_CLAUDE_ENV_BY_KEY,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,6 +68,8 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
 _MatrixServerPreset = Literal["self-hosted", "mindroom.chat"]
 _ProviderPreset = Literal[
     "anthropic",
+    "bedrock_claude",
+    "azure",
     "codex",
     "llama_cpp",
     "ollama",
@@ -76,6 +83,10 @@ _LLAMA_CPP_BASE_URL = LLAMA_CPP_BASE_URL_DEFAULT
 _LLAMA_CPP_API_KEY = LLAMA_CPP_API_KEY_DEFAULT
 _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "anthropic": "anthropic",
+    "bedrock_claude": "bedrock_claude",
+    "azure": "azure",
+    "azure_openai": "azure",
+    "azure-openai": "azure",
     "claude": "anthropic",
     "codex": "codex",
     "llama.cpp": "llama_cpp",
@@ -95,6 +106,7 @@ _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MATRIX_HOMESERVER", "https://mindroom.chat"),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
     ("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
+    ("MINDROOM_NAMESPACE", ""),
     ("MATRIX_REGISTRATION_TOKEN", ""),
 )
 _MATRIX_SERVER_CHOICES_TEXT = "self-hosted or mindroom.chat"
@@ -102,7 +114,9 @@ _MATRIX_SERVER_HELP = (
     "Matrix defaults: self-hosted = configure your own homeserver; mindroom.chat = hosted Matrix pairing defaults."
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
-_PROVIDER_CHOICES_TEXT = "anthropic, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
+_PROVIDER_CHOICES_TEXT = (
+    "anthropic, azure, bedrock_claude, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
+)
 _MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
 matrix_delivery:
   ignore_unverified_devices: false"""
@@ -136,28 +150,6 @@ def _default_mind_workspace(storage_root: Path) -> Path:
     from mindroom.tool_system.worker_routing import agent_workspace_root_path  # noqa: PLC0415
 
     return agent_workspace_root_path(storage_root, "mind")
-
-
-def _path_string_for_config(path: Path, config_dir: Path) -> str:
-    """Render one filesystem path for config.yaml, preferring config-relative paths when possible."""
-    resolved_path = path.expanduser().resolve()
-    try:
-        relative_path = resolved_path.relative_to(config_dir.resolve())
-    except ValueError:
-        return str(resolved_path)
-    return f"./{relative_path.as_posix()}"
-
-
-def _default_mind_knowledge_base_path(
-    config_dir: Path,
-    *,
-    storage_root: Path,
-    use_storage_env_placeholder: bool,
-) -> str:
-    """Return the starter knowledge-base path anchored to the chosen runtime storage root."""
-    if use_storage_env_placeholder:
-        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
-    return _path_string_for_config(_default_mind_workspace(storage_root) / "memory", config_dir)
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
@@ -236,12 +228,16 @@ def _should_replace_env_file(env_path: Path, *, force: bool) -> bool:
 def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _ProviderPreset) -> str:
     """Return the env setup hint shown after `mindroom config init`."""
     hosted_hints: dict[_ProviderPreset, str] = {
+        "azure": "Set your Azure OpenAI key/endpoint and confirm the config model deployment name",
+        "bedrock_claude": "Set AWS Bedrock region and credentials (Matrix homeserver is prefilled)",
         "codex": "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
         "vertexai_claude": "Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)",
         "ollama": "Start Ollama and pull the local models (Matrix homeserver is prefilled)",
         "llama_cpp": "Start llama.cpp server with the local model (Matrix homeserver is prefilled)",
     }
     standalone_hints: dict[_ProviderPreset, str] = {
+        "azure": "Set your Matrix homeserver, Azure OpenAI key/endpoint, and config model deployment name",
+        "bedrock_claude": "Set your Matrix homeserver, AWS Bedrock region, and AWS credentials",
         "codex": "Set your Matrix homeserver and run `codex login` before starting MindRoom",
         "vertexai_claude": "Set your Matrix homeserver, Vertex AI project/region, and Google auth",
         "ollama": "Set your Matrix homeserver, start Ollama, and pull the local models",
@@ -654,11 +650,33 @@ def _find_missing_env_keys(
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
-    from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY  # noqa: PLC0415
 
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
+        if provider == "bedrock_claude":
+            provider_models = [model for model in config.models.values() if model.provider == provider]
+            if any((model.extra_kwargs or {}).get("aws_region") for model in provider_models):
+                continue
+            if any((model.extra_kwargs or {}).get("aws_profile") for model in provider_models) or get_secret_from_env(
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+                runtime_paths=runtime_paths,
+            ):
+                continue
+            region_keys = (
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
+            )
+            if not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in region_keys):
+                missing.append((provider, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
+            continue
+        if provider == "azure":
+            missing.extend(
+                (provider, env_key)
+                for env_key in (AZURE_OPENAI_ENV_BY_KEY["api_key"], AZURE_OPENAI_ENV_BY_KEY["endpoint"])
+                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
+            )
+            continue
         if provider == "vertexai_claude":
             missing.extend(
                 (provider, env_key)
@@ -724,7 +742,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/azure/bedrock_claude/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
@@ -740,8 +758,9 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
     lines = [
         f"provider: {model_preset.provider}",
         f"id: {model_preset.id}",
-        f"context_window: {model_preset.context_window}",
     ]
+    if model_preset.context_window is not None:
+        lines.append(f"context_window: {model_preset.context_window}")
     if provider_preset == "codex":
         lines.extend(
             [
@@ -822,14 +841,10 @@ def _full_template(
     `config init` intentionally generates the shared single-user starter model.
     Requester-private agents remain an opt-in advanced config surface.
     """
+    _ = config_dir, storage_root, use_storage_env_placeholder
     model_block = _model_template_block(provider_preset)
     additional_models_block = _additional_models_template_block(provider_preset)
     commented_model_options_block = _commented_model_options_template_block(provider_preset)
-    mind_memory_knowledge_path = _default_mind_knowledge_base_path(
-        config_dir,
-        storage_root=storage_root,
-        use_storage_env_placeholder=use_storage_env_placeholder,
-    )
 
     if matrix_server == "mindroom.chat":
         mindroom_user_block = ""
@@ -880,11 +895,10 @@ agents:
       - IDENTITY.md
       - TOOLS.md
       - HEARTBEAT.md
-    knowledge_bases:
-      - mind_memory
     tools:
       - shell
       - coding
+      - memory
       - duckduckgo
       - website
       - browser
@@ -899,7 +913,7 @@ agents:
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write or update the relevant file directly.
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external or destructive actions.
-      - Before answering prior-history questions, search memory files first when a knowledge base is configured.
+      - Before answering prior-history questions, use search_memories first.
 
 router:
   model: default
@@ -914,12 +928,7 @@ matrix_space:
 
 {_MATRIX_DELIVERY_TEMPLATE_BLOCK}
 
-knowledge_bases:
-  mind_memory:
-    path: {mind_memory_knowledge_path}
-    watch: true
-
-# File-based memory requires no external LLM, and starter configs use a local embedder for knowledge indexing.
+# File-based memory requires no external LLM.
 memory:
   backend: file
   embedder:
@@ -928,6 +937,11 @@ memory:
       model: {SENTENCE_TRANSFORMERS_DEFAULT}
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
   auto_flush:
     enabled: true
 
@@ -967,6 +981,8 @@ def _env_template(
             "MATRIX_SERVER_NAME=mindroom.chat\n\n"
             "# Hosted pairing/provisioning API for `mindroom connect` and token issuance\n"
             "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n\n"
+            "# Optional hosted installation namespace. Leave blank for existing unnamespaced rooms.\n"
+            "MINDROOM_NAMESPACE=\n\n"
             "# Required for homeservers that gate bot registration (recommended for mindroom.chat)\n"
             "# Keep this secret; do not commit real values.\n"
             "MATRIX_REGISTRATION_TOKEN="
@@ -1007,7 +1023,7 @@ MINDROOM_API_KEY={api_key}
 """
 
 
-def _provider_env_template(provider_preset: _ProviderPreset) -> str:
+def _provider_env_template(provider_preset: _ProviderPreset) -> str:  # noqa: PLR0911
     """Return the provider-specific section of the starter .env file."""
     if provider_preset == "codex":
         return textwrap.dedent("""\
@@ -1018,14 +1034,41 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
         """).rstrip()
 
     if provider_preset == "vertexai_claude":
-        return textwrap.dedent("""\
+        return textwrap.dedent(f"""\
         # Vertex AI Claude configuration
-        ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id
-        CLOUD_ML_REGION=us-central1
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]}=your-gcp-project-id
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=us-central1
 
         # Authenticate with Google Application Default Credentials before running:
         # gcloud auth application-default login
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+        """).rstrip()
+
+    if provider_preset == "azure":
+        return textwrap.dedent(f"""\
+        # Azure OpenAI configuration
+        {AZURE_OPENAI_ENV_BY_KEY["api_key"]}=your-azure-openai-key-here
+        {AZURE_OPENAI_ENV_BY_KEY["endpoint"]}=https://your-resource.openai.azure.com
+
+        # Optional: override Agno's Azure OpenAI default API version.
+        # {AZURE_OPENAI_ENV_BY_KEY["api_version"]}=2024-10-21
+
+        # In config.yaml, set models.default.id to your Azure OpenAI deployment name.
+        """).rstrip()
+
+    if provider_preset == "bedrock_claude":
+        return textwrap.dedent("""\
+        # Amazon Bedrock Claude configuration
+        AWS_REGION=us-east-1
+
+        # Use standard AWS credential resolution.
+        # Static credentials are supported through .env:
+        # AWS_ACCESS_KEY_ID=your-access-key-id
+        # AWS_SECRET_ACCESS_KEY=your-secret-access-key
+        # AWS_SESSION_TOKEN=your-session-token
+        #
+        # Or use a local AWS profile / IAM role:
+        # AWS_PROFILE=your-profile
         """).rstrip()
 
     if provider_preset == "ollama":

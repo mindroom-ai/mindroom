@@ -61,7 +61,7 @@ describe('InstanceCard', () => {
   const trialSubscription = {
     ...freeSubscription,
     id: 'sub-trial',
-    tier: 'starter' as const,
+    tier: 'byok' as const,
     status: 'trialing' as const,
     trial_ends_at: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
     can_run_instances: true,
@@ -212,16 +212,17 @@ describe('InstanceCard', () => {
       expect(screen.getByText('Running')).toBeInTheDocument()
       expect(screen.getAllByText('customer.mindroom.chat').length).toBeGreaterThan(0)
       expect(screen.getByText('customer.api.mindroom.chat')).toBeInTheDocument()
-      expect(screen.getByText('customer.matrix.mindroom.chat')).toBeInTheDocument()
+      expect(screen.getByText('Chat Interface')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: /^Open chat$/i })).toBeInTheDocument()
       expect(screen.getByText('pro')).toBeInTheDocument()
       expect(screen.getByText('#1')).toBeInTheDocument()
     })
 
-    it('should link Matrix access through Cinny with the homeserver prefilled', () => {
+    it('should link chat access through Cinny with the homeserver prefilled', () => {
       render(<InstanceCard instance={mockInstance} />)
 
-      const matrixLink = screen.getByRole('link', { name: /customer.matrix.mindroom.chat/i })
-      expect(matrixLink).toHaveAttribute(
+      const chatLink = screen.getByRole('link', { name: /Open Chat Interface/i })
+      expect(chatLink).toHaveAttribute(
         'href',
         'https://chat.mindroom.chat/login/https%3A%2F%2Fcustomer.matrix.mindroom.chat/'
       )
@@ -301,6 +302,29 @@ describe('InstanceCard', () => {
       expect(openButton).toBeInTheDocument()
       expect(openButton).toHaveAttribute('href', mockInstance.frontend_url)
       expect(openButton).toHaveAttribute('target', '_blank')
+      expect(openButton).toHaveClass('w-full')
+    })
+
+    it('should show Open Chat Interface button for running instances', () => {
+      render(<InstanceCard instance={mockInstance} />)
+
+      const openButton = screen.getByRole('link', { name: /Open Chat Interface/i })
+      expect(openButton).toBeInTheDocument()
+      expect(openButton).toHaveAttribute(
+        'href',
+        'https://chat.mindroom.chat/login/https%3A%2F%2Fcustomer.matrix.mindroom.chat/'
+      )
+      expect(openButton).toHaveAttribute('target', '_blank')
+      expect(openButton).toHaveClass('w-full')
+    })
+
+    it('should keep the MindRoom action full-width when chat is unavailable', () => {
+      render(<InstanceCard instance={{ ...mockInstance, matrix_server_url: null }} />)
+
+      const openButton = screen.getByRole('link', { name: /Open MindRoom/i })
+      expect(openButton).toHaveClass('w-full')
+      expect(openButton.parentElement).not.toHaveClass('sm:grid-cols-2')
+      expect(screen.queryByRole('link', { name: /Open Chat Interface/i })).not.toBeInTheDocument()
     })
 
     it('should not show Open MindRoom button for non-running instances', () => {
@@ -308,6 +332,7 @@ describe('InstanceCard', () => {
       render(<InstanceCard instance={stoppedInstance} />)
 
       expect(screen.queryByRole('link', { name: /Open MindRoom/i })).not.toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: /Open Chat Interface/i })).not.toBeInTheDocument()
     })
   })
 
@@ -351,10 +376,10 @@ describe('InstanceCard', () => {
       expect(mockClipboardWriteText).toHaveBeenCalledWith('https://customer.api.mindroom.chat')
     })
 
-    it('should copy Matrix URL to clipboard', async () => {
+    it('should copy chat server URL to clipboard', async () => {
       render(<InstanceCard instance={mockInstance} />)
 
-      const copyButton = screen.getByTitle('Copy Matrix URL')
+      const copyButton = screen.getByTitle('Copy chat server URL')
       await userEvent.click(copyButton)
 
       expect(mockClipboardWriteText).toHaveBeenCalledWith('https://customer.matrix.mindroom.chat')
@@ -394,7 +419,7 @@ describe('InstanceCard', () => {
       expect(screen.queryByText('Domain')).not.toBeInTheDocument()
       expect(screen.queryByText('Frontend')).not.toBeInTheDocument()
       expect(screen.queryByText('API')).not.toBeInTheDocument()
-      expect(screen.queryByText('Matrix Server')).not.toBeInTheDocument()
+      expect(screen.queryByText('Chat Interface')).not.toBeInTheDocument()
     })
 
     it('should handle unknown status gracefully', () => {

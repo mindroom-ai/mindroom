@@ -12,11 +12,11 @@ from backend.tasks.cleanup import cleanup_unentitled_instances
 async def test_cleanup_stops_instances_for_expired_trials() -> None:
     expired_trial = {
         "id": "sub_expired",
-        "tier": "starter",
+        "tier": "byok",
         "status": "trialing",
         "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
     }
-    active_subscription = {"id": "sub_active", "tier": "starter", "status": "active", "trial_ends_at": None}
+    active_subscription = {"id": "sub_active", "tier": "byok", "status": "active", "trial_ends_at": None}
 
     subscription_query = MagicMock()
     subscription_query.select.return_value = subscription_query
@@ -78,7 +78,7 @@ async def test_cleanup_stops_instances_for_expired_trials() -> None:
 async def test_cleanup_does_not_mark_instance_stopped_when_any_tenant_deployment_fails() -> None:
     expired_trial = {
         "id": "sub_expired",
-        "tier": "starter",
+        "tier": "byok",
         "status": "trialing",
         "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
     }
@@ -122,8 +122,7 @@ async def test_cleanup_does_not_mark_instance_stopped_when_any_tenant_deployment
 
     with patch("backend.tasks.cleanup.ensure_supabase", return_value=supabase):
         with patch(
-            "backend.tasks.cleanup.run_kubectl",
-            new=AsyncMock(side_effect=[(0, "", ""), (1, "", "synapse error")]),
+            "backend.tasks.cleanup.run_kubectl", new=AsyncMock(side_effect=[(0, "", ""), (1, "", "synapse error")])
         ) as kubectl:
             result = await cleanup_unentitled_instances()
 

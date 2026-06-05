@@ -15,7 +15,7 @@ from mindroom.matrix_identifiers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
@@ -55,6 +55,18 @@ def configured_bot_user_ids_for_room(
         configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
 
     return configured_bots
+
+
+def is_configured_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
+) -> bool:
+    """Return whether one Matrix room is present in the configured room set."""
+    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    return _room_refs_match(list(config.get_all_configured_rooms()), room_identifiers, runtime_paths)
 
 
 def configured_routable_entity_names_for_room(
@@ -354,8 +366,27 @@ def effective_entity_model_name(
     """Return the effective model for one entity in one room context."""
     if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
         return "default"
-    if room_id is not None:
-        room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
-        if room_alias and room_alias in config.room_models:
-            return config.room_models[room_alias]
+    if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
+        return room_override
     return config.get_entity_model_name(entity_name)
+
+
+def resolve_room_scoped_model_override(
+    overrides: Mapping[str, str],
+    room_id: str | None,
+    runtime_paths: RuntimePaths,
+    *,
+    allow_raw_room_id: bool = False,
+) -> str | None:
+    """Return a model override keyed by persisted room key or alias."""
+    if room_id is None or not overrides:
+        return None
+    if allow_raw_room_id and room_id in overrides:
+        return overrides[room_id]
+    room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
+    if room_alias and room_alias in overrides:
+        return overrides[room_alias]
+    for room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.values():
+        if room.room_id == room_id and room.alias in overrides:
+            return overrides[room.alias]
+    return None

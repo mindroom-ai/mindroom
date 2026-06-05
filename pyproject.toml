@@ -80,6 +80,9 @@ baidusearch = [
   "baidusearch",
   "pycountry",
 ]
+aws_bedrock = [
+  "boto3>=1.40.8",
+]
 bitbucket = [
   "requests",
 ]
@@ -533,6 +536,7 @@ python_files = "test_*.py"
 asyncio_mode = "auto"
 pythonpath = [ "src" ]
 addopts = """
+    -p no:tach
     -vvv
     -n auto
     --cov=mindroom

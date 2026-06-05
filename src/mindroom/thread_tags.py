@@ -6,11 +6,14 @@ import json
 import math
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
 _POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
@@ -19,6 +22,19 @@ _DEFAULT_USER_POWER_LEVEL = 0
 _MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
+
+__all__ = [
+    "THREAD_TAGS_EVENT_TYPE",
+    "ThreadTagRecord",
+    "ThreadTagsError",
+    "ThreadTagsListing",
+    "ThreadTagsState",
+    "get_thread_tags",
+    "list_tagged_threads",
+    "normalize_tag_name",
+    "remove_thread_tag",
+    "set_thread_tag",
+]
 
 # ARCHITECTURE DECISION: One State Event Per Thread Tag
 #
@@ -96,6 +112,15 @@ class ThreadTagsState(BaseModel):
     room_id: str
     thread_root_id: str
     tags: dict[str, ThreadTagRecord] = Field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ThreadTagsListing:
+    """Room-wide thread tag listing with optional untagged enumeration metadata."""
+
+    tag_state: dict[str, ThreadTagsState]
+    include_untagged: bool
+    truncated: bool
 
 
 def _parse_timestamp(value: object) -> datetime | None:
@@ -483,6 +508,21 @@ def _empty_thread_tags_state(room_id: str, thread_root_id: str) -> ThreadTagsSta
     )
 
 
+def _thread_tags_match_filters(
+    tags: Mapping[str, ThreadTagRecord],
+    *,
+    tag: str | None,
+    include_tag: str | None,
+    exclude_tag: str | None,
+) -> bool:
+    """Return whether one thread tag map matches list filters."""
+    if tag is not None and tag not in tags:
+        return False
+    if include_tag is not None and include_tag not in tags:
+        return False
+    return exclude_tag is None or exclude_tag not in tags
+
+
 async def _put_thread_tag_state(
     client: nio.AsyncClient,
     room_id: str,
@@ -852,12 +892,63 @@ async def list_tagged_threads(
     room_id: str,
     *,
     tag: str | None = None,
-) -> dict[str, ThreadTagsState]:
+    include_tag: str | None = None,
+    exclude_tag: str | None = None,
+    include_untagged: bool = False,
+) -> ThreadTagsListing:
     """Return all currently tagged thread markers for a room."""
     normalized_tag = normalize_tag_name(tag) if tag is not None else None
+    normalized_include_tag = normalize_tag_name(include_tag) if include_tag is not None else None
+    normalized_exclude_tag = normalize_tag_name(exclude_tag) if exclude_tag is not None else None
 
     tagged_threads = await _get_room_thread_tags_states(client, room_id)
-    if normalized_tag is None:
-        return tagged_threads
+    filtered_tagged_threads = {
+        thread_root_id: state
+        for thread_root_id, state in tagged_threads.items()
+        if _thread_tags_match_filters(
+            state.tags,
+            tag=normalized_tag,
+            include_tag=normalized_include_tag,
+            exclude_tag=normalized_exclude_tag,
+        )
+    }
+    if not include_untagged:
+        return ThreadTagsListing(
+            tag_state=filtered_tagged_threads,
+            include_untagged=False,
+            truncated=False,
+        )
 
-    return {thread_root_id: state for thread_root_id, state in tagged_threads.items() if normalized_tag in state.tags}
+    if normalized_tag is not None or normalized_include_tag is not None:
+        return ThreadTagsListing(
+            tag_state=filtered_tagged_threads,
+            include_untagged=True,
+            truncated=False,
+        )
+
+    thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, room_id)
+    merged_threads: dict[str, ThreadTagsState] = {}
+    for thread_root_id in thread_root_ids:
+        merged_threads[thread_root_id] = tagged_threads.get(
+            thread_root_id,
+            _empty_thread_tags_state(room_id, thread_root_id),
+        )
+
+    for thread_root_id, state in tagged_threads.items():
+        if thread_root_id not in merged_threads:
+            merged_threads[thread_root_id] = state
+
+    return ThreadTagsListing(
+        tag_state={
+            thread_root_id: state
+            for thread_root_id, state in merged_threads.items()
+            if _thread_tags_match_filters(
+                state.tags,
+                tag=normalized_tag,
+                include_tag=normalized_include_tag,
+                exclude_tag=normalized_exclude_tag,
+            )
+        },
+        include_untagged=True,
+        truncated=truncated,
+    )

@@ -38,10 +38,7 @@ def test_matrix_oidc_discovery_advertises_platform_issuer(monkeypatch) -> None:
     _patch_oidc(monkeypatch)
     client = TestClient(app)
 
-    response = client.get(
-        "/matrix-oidc/.well-known/openid-configuration",
-        headers={"host": "api.mindroom.chat"},
-    )
+    response = client.get("/matrix-oidc/.well-known/openid-configuration", headers={"host": "api.mindroom.chat"})
 
     assert response.status_code == 200
     body = response.json()
@@ -64,10 +61,7 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     }
 
     response = client.get(
-        "/matrix-oidc/authorize",
-        params=params,
-        headers={"host": "api.mindroom.chat"},
-        follow_redirects=False,
+        "/matrix-oidc/authorize", params=params, headers={"host": "api.mindroom.chat"}, follow_redirects=False
     )
 
     assert response.status_code == 307
@@ -102,7 +96,7 @@ def test_matrix_oidc_code_flow_maps_platform_user_to_owned_tenant(monkeypatch) -
     subscription_query.select.return_value = subscription_query
     subscription_query.eq.return_value = subscription_query
     subscription_query.limit.return_value = subscription_query
-    subscription_query.execute.return_value = Mock(data=[{"id": "sub-123", "tier": "starter", "status": "active"}])
+    subscription_query.execute.return_value = Mock(data=[{"id": "sub-123", "tier": "byok", "status": "active"}])
 
     supabase = MagicMock()
     supabase.table.side_effect = [instance_query, subscription_query]

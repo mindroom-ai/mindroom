@@ -3,14 +3,18 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
+import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_enhanced_prompt as public_build_memory_enhanced_prompt
@@ -252,6 +256,117 @@ def config(storage_path: Path) -> Config:
 
 
 @pytest.mark.asyncio
+async def test_semantic_memory_search_uses_knowledge_published_index(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Published semantic memory.\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(config)
+
+    class FakeKnowledge:
+        def search(self, *, query: str, max_results: int) -> list[object]:
+            assert query == "semantic memory"
+            assert max_results == 5
+            return [
+                SimpleNamespace(
+                    content="Published semantic memory.",
+                    meta_data={"source_path": "memory/2026-06-02.md"},
+                    reranking_score=0.8,
+                ),
+            ]
+
+    access_base_ids: list[str] = []
+
+    def resolve_access(
+        base_id: str,
+        access_config: Config,
+        access_runtime_paths: object,
+        *,
+        execution_identity: object = None,
+    ) -> object:
+        del execution_identity
+        access_base_ids.append(base_id)
+        assert access_runtime_paths == runtime_paths
+        base_config = access_config.knowledge_bases[base_id]
+        assert base_config.path == str(root.resolve())
+        assert base_config.include_patterns == ["memory/**/*.md"]
+        assert base_config.include_extensions == [".md"]
+        return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
+
+    scheduled_base_ids: list[str] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            scheduled_base_ids.append(base_id)
+
+    def list_files(*_args: object, **_kwargs: object) -> list[Path]:
+        return [memory_file.resolve()]
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access, raising=False)
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler(), raising=False)
+
+    results = await semantic_file_search.search_semantic_file_memories(
+        "semantic memory",
+        scope_user_id="agent_general",
+        root=root,
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=config.memory.search,
+        limit=5,
+    )
+
+    assert results[0]["memory"] == "Published semantic memory."
+    assert access_base_ids
+    assert scheduled_base_ids == access_base_ids
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_raises_fallback(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
+
+    scheduled_base_ids: list[str] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            scheduled_base_ids.append(base_id)
+
+    def list_files(*_args: object, **_kwargs: object) -> list[Path]:
+        return [memory_file.resolve()]
+
+    def resolve_access(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError):
+        await semantic_file_search.search_semantic_file_memories(
+            "semantic memory",
+            scope_user_id="agent_general",
+            root=root,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            search_config=config.memory.search,
+            limit=5,
+        )
+
+    assert scheduled_base_ids
+
+
+@pytest.mark.asyncio
 async def test_file_backend_add_and_list_memories(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
@@ -447,6 +562,233 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
     )
     assert alice_memory_file.exists()
     assert "Alice workspace memory" in alice_memory_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_file_backend_semantic_search_reads_daily_memory_root(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    (workspace / "memory").mkdir(parents=True)
+    (workspace / "memory" / "2026-06-02.md").write_text("Bas prefers small precise plans.\n", encoding="utf-8")
+    (workspace / "MEMORY.md").write_text("Entrypoint should not be indexed by default.\n", encoding="utf-8")
+
+    with patch("mindroom.memory._file_backend.search_semantic_file_memories") as semantic_search:
+        semantic_search.return_value = [
+            {
+                "id": "semantic:memory/2026-06-02.md:0",
+                "memory": "Bas prefers small precise plans.",
+                "user_id": "agent_general",
+                "score": 1.0,
+                "metadata": {"source_file": "memory/2026-06-02.md", "semantic": True, "search_mode": "semantic"},
+            },
+        ]
+
+        results = await search_agent_memories("precise planning", "general", storage_path, config, limit=5)
+
+    assert results[0]["memory"] == "Bas prefers small precise plans."
+    semantic_search.assert_called_once()
+    assert semantic_search.call_args.kwargs["limit"] == 5
+    assert semantic_search.call_args.kwargs["root"] == workspace
+
+
+@pytest.mark.asyncio
+async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        side_effect=RuntimeError("embedder offline"),
+    ):
+        results = await search_agent_memories("Keyword fallback", "general", storage_path, config, limit=5)
+
+    assert any(result.get("memory") == "Keyword fallback memory" for result in results)
+    assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in results)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    scheduled: list[tuple[str, Config, object, object]] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
+            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"], kwargs["execution_identity"]))
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    with tool_execution_identity(identity):
+        await add_agent_memory("Semantic refresh memory", "general", storage_path, config)
+
+    assert len(scheduled) == 1
+    base_id, scheduled_config, scheduled_runtime_paths, scheduled_identity = scheduled[0]
+    assert scheduled_runtime_paths == runtime_paths_for(config)
+    assert scheduled_identity == identity
+    scheduled_path = scheduled_config.knowledge_bases[base_id].path
+    assert "private_instances" in scheduled_path
+    assert scheduled_path.endswith("mind_data")
+
+
+@pytest.mark.asyncio
+async def test_file_backend_update_and_delete_schedule_semantic_refresh_when_semantic_search_enabled(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[str] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            scheduled.append(base_id)
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await add_agent_memory("Original semantic memory", "general", storage_path, config)
+    memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+
+    scheduled.clear()
+    await update_agent_memory(memory_id, "Updated semantic memory", "general", storage_path, config)
+    assert len(scheduled) == 1
+
+    scheduled.clear()
+    await delete_agent_memory(memory_id, "general", storage_path, config)
+    assert len(scheduled) == 1
+
+
+@pytest.mark.asyncio
+async def test_file_backend_store_conversation_memory_schedules_semantic_refresh_when_semantic_search_enabled(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[tuple[str, Config]] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
+            scheduled.append((base_id, kwargs["config"]))
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await store_conversation_memory(
+        "Conversation semantic memory",
+        "general",
+        storage_path,
+        "session-general",
+        config,
+    )
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    assert len(scheduled) == 1
+    base_id, scheduled_config = scheduled[0]
+    assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
+
+
+@pytest.mark.asyncio
+async def test_file_backend_add_skips_semantic_refresh_when_search_mode_is_keyword(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config.memory.backend = "file"
+    config.memory.search.mode = "keyword"
+    config.agents["general"].memory_backend = "file"
+
+    scheduled: list[str] = []
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            scheduled.append(base_id)
+
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    await add_agent_memory("Keyword mode memory", "general", storage_path, config)
+
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_file_backend_private_semantic_search_uses_requester_root(
+    storage_path: Path,
+    config: Config,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    template_dir = build_private_template_dir(
+        files={"MEMORY.md": "# Memory\n", "memory/notes.md": "Alice private semantic note.\n"},
+    )
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with (
+        tool_execution_identity(identity),
+        patch(
+            "mindroom.memory._file_backend.search_semantic_file_memories",
+        ) as semantic_search,
+    ):
+        semantic_search.return_value = [
+            {
+                "id": "semantic:memory/notes.md:0",
+                "memory": "Alice private semantic note.",
+                "user_id": "agent_general",
+                "score": 1.0,
+                "metadata": {"source_file": "memory/notes.md", "semantic": True, "search_mode": "semantic"},
+            },
+        ]
+        results = await search_agent_memories("private semantic", "general", storage_path, config, limit=5)
+
+    assert results[0]["memory"] == "Alice private semantic note."
+    root = semantic_search.call_args.kwargs["root"]
+    assert "private_instances" in str(root)
+    assert str(root).endswith("mind_data")
+    assert semantic_search.call_args.kwargs["execution_identity"] == identity
 
 
 @pytest.mark.asyncio

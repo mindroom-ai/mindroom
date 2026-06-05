@@ -195,6 +195,7 @@ async def _run_cleanup(
     joined_rooms: list[str],
     bot_user_ids: set[str] | None = None,
     now_ms: int = NOW_MS,
+    startup_cutoff_ms: int | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     with (
@@ -210,6 +211,7 @@ async def _run_cleanup(
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=startup_cutoff_ms,
         )
 
 
@@ -486,6 +488,54 @@ async def test_cleanup_skips_messages_older_than_restart_window(tmp_path: Path) 
     assert cleaned == 0
     assert interrupted == []
     mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_streaming_messages_at_or_after_startup_cutoff(tmp_path: Path) -> None:
+    """Post-sync cleanup must ignore messages that could have been created by this process."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    startup_cutoff_ms = NOW_MS - 120_000
+    before_cutoff_message = _make_message_event(
+        event_id="$before-cutoff",
+        body="Previous process partial",
+        timestamp_ms=startup_cutoff_ms - 1,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    at_cutoff_message = _make_message_event(
+        event_id="$at-cutoff",
+        body="Current process partial",
+        timestamp_ms=startup_cutoff_ms,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    after_cutoff_message = _make_message_event(
+        event_id="$after-cutoff",
+        body="Current process newer partial",
+        timestamp_ms=startup_cutoff_ms + 1,
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(
+        before_cutoff_message,
+        at_cutoff_message,
+        after_cutoff_message,
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            startup_cutoff_ms=startup_cutoff_ms,
+        )
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert mock_edit.await_count == 1
+    assert mock_edit.await_args.args[2] == "$before-cutoff"
 
 
 @pytest.mark.asyncio
@@ -2198,8 +2248,8 @@ async def test_auto_resume_cap_uses_timestamps_not_room_iteration_order(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: Path) -> None:
-    """Startup should clean stale streams and queue resumes before sync loops begin."""
+async def test_orchestrator_runs_cleanup_and_resume_after_sync_loops(tmp_path: Path) -> None:
+    """Startup should clean stale streams and queue resumes in post-sync maintenance."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
@@ -2215,6 +2265,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
     call_order: list[str] = []
+    resume_finished = asyncio.Event()
 
     async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
         call_order.append("wait")
@@ -2222,7 +2273,8 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     async def _setup_rooms(_: list[object]) -> None:
         call_order.append("setup")
 
-    async def _cleanup(_: list[object], __: Config) -> list[InterruptedThread]:
+    async def _cleanup(_: list[object], __: Config, startup_cutoff_ms: int | None = None) -> list[InterruptedThread]:
+        assert startup_cutoff_ms is not None
         call_order.append("cleanup")
         return [
             InterruptedThread(
@@ -2236,24 +2288,29 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
 
     async def _resume(_: list[InterruptedThread], __: Config) -> None:
         call_order.append("resume")
+        resume_finished.set()
 
     ready = asyncio.Event()
 
     def _mark_ready() -> None:
         ready.set()
 
+    def _start_sync_task(_: str, __: object) -> None:
+        call_order.append("sync")
+
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
         patch.object(orchestrator, "_cleanup_stale_streams_after_restart", side_effect=_cleanup),
         patch.object(orchestrator, "_auto_resume_after_restart", side_effect=_resume),
-        patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
-        patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator, "_start_sync_task", side_effect=_start_sync_task),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
     ):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
+            await asyncio.wait_for(resume_finished.wait(), timeout=1.0)
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:
@@ -2262,7 +2319,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
-    assert call_order == ["wait", "setup", "cleanup", "resume"]
+    assert call_order == ["wait", "sync", "setup", "cleanup", "resume"]
 
 
 @pytest.mark.asyncio
