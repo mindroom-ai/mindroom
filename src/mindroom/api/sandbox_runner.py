@@ -822,11 +822,13 @@ def _prepared_shell_execution_env(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    execution_env: dict[str, str],
 ) -> dict[str, str] | None:
     """Return the worker shell env when shell execution is bound to a prepared worker."""
     if request.tool_name != "shell" or prepared is None:
         return None
     worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
+    worker_execution_env.update(execution_env)
     worker_execution_env.update(
         constants.shell_extra_env_values(
             extra_env_passthrough=request.extra_env_passthrough,
@@ -887,7 +889,7 @@ def _prepare_execute_request(
         prepared_worker=prepared_worker,
         runner_token=runner_token,
     )
-    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared) or execution_env
+    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     config = config or _runtime_config_or_empty(runtime_paths)
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
     try:

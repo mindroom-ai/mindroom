@@ -1889,6 +1889,68 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     assert "MINDROOM_STORAGE_PATH" not in subprocess_context.subprocess_env
 
 
+def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_path: Path) -> None:
+    """Prepared Docker/Kubernetes shell workers must keep broker env passed by the primary runtime."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    worker_runtime = build_dedicated_worker_runtime_paths(
+        runtime_paths=runtime_paths,
+        backend_name="Docker",
+        worker_key="v1:default:unscoped:code",
+        config_path=Path("/app/config.yaml"),
+        dedicated_root=Path("/app/worker"),
+        worker_port=8766,
+        shared_storage_root="/app/shared-storage",
+        extra_env={},
+    )
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key="v1:default:unscoped:code",
+            endpoint="http://127.0.0.1:8766",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="docker",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={},
+    )
+
+    prepared_request = sandbox_runner_module._prepare_execute_request(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            execution_env={
+                "HTTP_PROXY": "http://agent-vault-adapter:18080",
+                "http_proxy": "http://agent-vault-adapter:18080",
+                "MINDROOM_CONFIG_PATH": "/bad/config.yaml",
+                "MINDROOM_STORAGE_PATH": "/bad/storage",
+                SHARED_CREDENTIALS_PATH_ENV: "/bad/credentials",
+            },
+        ),
+        worker_runtime,
+        prepared_worker=prepared_worker,
+    )
+    subprocess_context = sandbox_runner_module._prepare_subprocess_context(prepared_request)
+
+    assert prepared_request.execution_env["HTTP_PROXY"] == "http://agent-vault-adapter:18080"
+    assert prepared_request.execution_env["http_proxy"] == "http://agent-vault-adapter:18080"
+    assert "MINDROOM_CONFIG_PATH" not in prepared_request.execution_env
+    assert "MINDROOM_STORAGE_PATH" not in prepared_request.execution_env
+    assert SHARED_CREDENTIALS_PATH_ENV not in prepared_request.execution_env
+    assert subprocess_context.subprocess_env is not None
+    assert subprocess_context.subprocess_env["HTTP_PROXY"] == "http://agent-vault-adapter:18080"
+    assert subprocess_context.subprocess_env["http_proxy"] == "http://agent-vault-adapter:18080"
+
+
 def test_filter_runtime_tool_init_overrides_keeps_only_safe_declared_fields() -> None:
     """Runner-side tool rebuilds should preserve only safe init overrides."""
     filtered = sandbox_runner_module._filter_runtime_tool_init_overrides(
