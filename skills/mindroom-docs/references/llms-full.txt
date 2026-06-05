@@ -15335,8 +15335,10 @@ python -m mindroom.egress.agent_vault_bridge \
   --host 0.0.0.0 \
   --port 18080 \
   --upstream-proxy-url http://agent-vault:14322 \
-  --session-token "$AGENT_VAULT_PROXY_SESSION_TOKEN"
+  --session-token-env AGENT_VAULT_PROXY_SESSION_TOKEN
 ```
+
+The adapter reads the named environment variable itself so the session token does not appear in process arguments.
 
 For Docker Compose, put the adapter on both the worker network and the Agent Vault network.
 MindRoom workers only need access to `agent-vault-bridge-adapter:18080`.

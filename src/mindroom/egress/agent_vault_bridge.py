@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import os
 import select
+import socket
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,8 +14,9 @@ from typing import TYPE_CHECKING, Self
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
-    import socket
     from collections.abc import Iterable
+
+__all__ = ["RunningAdapter", "start_adapter"]
 
 _HOP_BY_HOP_HEADERS = {
     "connection",
@@ -27,6 +30,7 @@ _HOP_BY_HOP_HEADERS = {
 }
 _TUNNEL_BUFFER_BYTES = 64 * 1024
 _TUNNEL_IDLE_TIMEOUT_SECONDS = 30
+_UPSTREAM_AUTH_FAILED_MESSAGE = "Bad Gateway: upstream proxy authentication failed"
 
 
 @dataclass(slots=True)
@@ -63,8 +67,8 @@ class RunningAdapter:
 
 
 class _QuietHandler(BaseHTTPRequestHandler):
-    def log_message(self, _format: str, *_args: object) -> None:
-        return
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        del format, args
 
 
 def start_adapter(  # noqa: C901
@@ -89,6 +93,7 @@ def start_adapter(  # noqa: C901
 
     class AgentVaultAdapterHandler(_QuietHandler):
         def do_CONNECT(self) -> None:
+            self.close_connection = True
             _forward_connect(
                 self,
                 proxy_host=upstream.hostname or "",
@@ -150,6 +155,9 @@ def _forward_http_request(
     try:
         connection.request(handler.command, handler.path, body=body, headers=headers)
         response = connection.getresponse()
+        if response.status == 407:
+            handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
+            return
         _copy_response(handler, response)
     except (OSError, TimeoutError, http.client.HTTPException) as exc:
         handler.send_error(502, f"Bad Gateway: {exc}")
@@ -164,31 +172,39 @@ def _forward_connect(
     proxy_port: int,
     proxy_authorization: str,
 ) -> None:
-    connection = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
+    upstream_sock: socket.socket | None = None
     try:
-        connection.request(
-            "CONNECT",
-            handler.path,
-            headers={
-                "Host": handler.path,
-                "Proxy-Authorization": proxy_authorization,
-            },
-        )
-        response = connection.getresponse()
-        if response.status != 200:
-            _copy_response(handler, response)
+        try:
+            upstream_sock = socket.create_connection((proxy_host, proxy_port), timeout=10)
+            connect_request = (
+                f"CONNECT {handler.path} HTTP/1.1\r\n"
+                f"Host: {handler.path}\r\n"
+                f"Proxy-Authorization: {proxy_authorization}\r\n"
+                "\r\n"
+            )
+            upstream_sock.sendall(connect_request.encode("iso-8859-1"))
+            response = http.client.HTTPResponse(upstream_sock)
+            response.begin()
+            if response.status == 407:
+                handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
+                return
+            if response.status != 200:
+                _copy_response(handler, response)
+                return
+
+            handler.send_response(200, response.reason)
+            handler.end_headers()
+        except (OSError, TimeoutError, http.client.HTTPException) as exc:
+            handler.send_error(502, f"Bad Gateway: {exc}")
             return
 
-        handler.send_response(200, response.reason)
-        handler.end_headers()
-        upstream_sock = connection.sock
-        if upstream_sock is None:
+        try:
+            _tunnel_sockets(handler.connection, upstream_sock)
+        except OSError:
             return
-        _tunnel_sockets(handler.connection, upstream_sock)
-    except (OSError, TimeoutError, http.client.HTTPException) as exc:
-        handler.send_error(502, f"Bad Gateway: {exc}")
     finally:
-        connection.close()
+        if upstream_sock is not None:
+            upstream_sock.close()
 
 
 def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes | None:
@@ -201,8 +217,9 @@ def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes | None:
         return None
     try:
         length = int(raw_length)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        msg = f"Invalid Content-Length: {raw_length}"
+        raise ValueError(msg) from exc
     if length <= 0:
         return None
     return handler.rfile.read(length)
@@ -221,6 +238,9 @@ def _read_chunked_request_body(handler: BaseHTTPRequestHandler) -> bytes:
         except ValueError as exc:
             msg = "Malformed chunked request body"
             raise ValueError(msg) from exc
+        if size < 0:
+            msg = "Negative chunk size"
+            raise ValueError(msg)
         if size == 0:
             _drain_chunked_trailers(handler)
             return b"".join(chunks)
@@ -249,10 +269,17 @@ def _forward_headers(
     proxy_authorization: str,
 ) -> dict[str, str]:
     headers: dict[str, str] = {}
+    header_names: dict[str, str] = {}
     for key, value in items:
-        if key.lower() in _HOP_BY_HOP_HEADERS:
+        normalized_key = key.lower()
+        if normalized_key in _HOP_BY_HOP_HEADERS:
             continue
-        headers[key] = value
+        existing_key = header_names.get(normalized_key)
+        if existing_key is None:
+            header_names[normalized_key] = key
+            headers[key] = value
+        else:
+            headers[existing_key] = f"{headers[existing_key]}, {value}"
     headers["Proxy-Authorization"] = proxy_authorization
     return headers
 
@@ -274,7 +301,7 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
     for sock in sockets:
         sock.setblocking(False)
 
-    while sockets:
+    while True:
         readable, _, errored = select.select(sockets, [], sockets, _TUNNEL_IDLE_TIMEOUT_SECONDS)
         if errored or not readable:
             return
@@ -292,23 +319,42 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
                 return
 
 
-def main() -> None:
-    """Run the adapter process."""
-    parser = argparse.ArgumentParser(description="Run Agent Vault forward proxy adapter.")
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run Agent Vault forward proxy adapter.",
+        allow_abbrev=False,
+    )
     parser.add_argument("--host", default="0.0.0.0")  # noqa: S104
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--upstream-proxy-url", required=True)
-    parser.add_argument("--session-token", required=True)
-    args = parser.parse_args()
+    parser.add_argument("--session-token-env", default="AGENT_VAULT_PROXY_SESSION_TOKEN")
+    return parser.parse_args(argv)
+
+
+def _session_token_from_env(env_var: str) -> str:
+    session_token = os.environ.get(env_var)
+    if not session_token:
+        msg = f"{env_var} environment variable must be set"
+        raise ValueError(msg)
+    return session_token
+
+
+def _main() -> None:
+    """Run the adapter process."""
+    args = _parse_args()
+    try:
+        session_token = _session_token_from_env(args.session_token_env)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
     with start_adapter(
         host=args.host,
         port=args.port,
         upstream_proxy_url=args.upstream_proxy_url,
-        session_token=args.session_token,
+        session_token=session_token,
     ) as adapter:
         adapter.thread.join()
 
 
 if __name__ == "__main__":
-    main()
+    _main()
