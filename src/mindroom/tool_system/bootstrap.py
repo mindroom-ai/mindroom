@@ -15,7 +15,7 @@ def ensure_tool_registry_loaded(
     *,
     load_plugin_tools: bool = True,
 ) -> None:
-    """Ensure core and MCP registrations are loaded, plus plugin tools when requested."""
+    """Load core tools, then sync MCP and optional plugin tools when config is provided."""
     import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
 
     if config is None:
