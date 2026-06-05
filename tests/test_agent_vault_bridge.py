@@ -14,7 +14,8 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -105,13 +106,42 @@ def _load_live_smoke_module() -> ModuleType:
 
 @dataclass(slots=True)
 class RequestBodyHandler:
-    headers: dict[str, str]
+    headers: http.client.HTTPMessage
+
+    @classmethod
+    def from_pairs(cls, pairs: Iterable[tuple[str, str]]) -> RequestBodyHandler:
+        message = http.client.HTTPMessage()
+        for key, value in pairs:
+            message[key] = value
+        return cls(headers=message)
+
+
+class _NullReader:
+    def peek(self, size: int = 0, /) -> bytes:
+        del size
+        return b""
+
+    def read(self, size: int = -1, /) -> bytes:
+        del size
+        return b""
+
+
+class _NullConnection:
+    def gettimeout(self) -> float | None:
+        return None
+
+    def setblocking(self, flag: bool, /) -> None:
+        del flag
+
+    def settimeout(self, timeout: float | None, /) -> None:
+        del timeout
 
 
 @dataclass(slots=True)
 class ConnectHandler:
     path: str = "api.example.test:443"
-    connection: object = object()
+    connection: _NullConnection = field(default_factory=_NullConnection)
+    rfile: _NullReader = field(default_factory=_NullReader)
     responses: list[tuple[int, str | None]] | None = None
     errors: list[tuple[int, str | None]] | None = None
     ended_headers: int = 0
@@ -357,7 +387,7 @@ def test_adapter_answers_expect_continue_before_reading_http_request_body() -> N
                     b"POST http://example.test/upload HTTP/1.1\r\n"
                     b"Host: example.test\r\n"
                     b"Content-Length: 12\r\n"
-                    b"Expect: 100-continue\r\n"
+                    b"Expect: 100-continue \r\n"
                     b"\r\n",
                 )
                 interim_response = _recv_until(client, b"\r\n\r\n")
@@ -371,7 +401,7 @@ def test_adapter_answers_expect_continue_before_reading_http_request_body() -> N
         fake_proxy_thread.join(timeout=5)
 
     assert upstream_errors == []
-    assert interim_response.startswith(b"HTTP/1.0 100")
+    assert interim_response.startswith(b"HTTP/1.1 100")
     assert body == b"ok"
     assert bytes(upstream_received) == b"request-body"
     assert "expect" not in upstream_headers
@@ -707,6 +737,36 @@ def test_connect_tunnel_closes_when_both_directions_are_idle(monkeypatch: pytest
     assert not tunnel_still_running
 
 
+def test_connect_tunnel_keeps_one_way_stream_alive_when_reverse_direction_is_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_IDLE_TIMEOUT_SECONDS", 0.15)
+    worker_sock, adapter_client_sock = socket.socketpair()
+    adapter_upstream_sock, upstream_sock = socket.socketpair()
+    for sock in (worker_sock, adapter_client_sock, adapter_upstream_sock, upstream_sock):
+        sock.settimeout(2)
+    tunnel_thread = threading.Thread(
+        target=agent_vault_bridge._tunnel_sockets,
+        args=(adapter_client_sock, adapter_upstream_sock),
+        daemon=True,
+    )
+
+    tunnel_thread.start()
+    received = bytearray()
+    try:
+        for index in range(8):
+            byte = bytes([65 + index])
+            upstream_sock.sendall(byte)
+            received.extend(worker_sock.recv(1))
+            time.sleep(0.05)
+    finally:
+        for sock in (worker_sock, adapter_client_sock, adapter_upstream_sock, upstream_sock):
+            sock.close()
+        tunnel_thread.join(timeout=1)
+
+    assert bytes(received) == b"ABCDEFGH"
+
+
 def test_adapter_connect_tunnel_preserves_bytes_buffered_with_upstream_200() -> None:
     fake_proxy = socket.socket()
     fake_proxy.settimeout(5)
@@ -980,10 +1040,30 @@ def test_copy_connect_response_decodes_chunked_body_when_transfer_encoding_is_st
 
 
 def test_request_content_length_rejects_invalid_header() -> None:
-    handler = RequestBodyHandler(headers={"Content-Length": "not-an-int"})
+    handler = RequestBodyHandler.from_pairs([("Content-Length", "not-an-int")])
 
     with pytest.raises(ValueError, match="Invalid Content-Length: not-an-int"):
         agent_vault_bridge._request_content_length(handler)
+
+
+def test_request_content_length_rejects_conflicting_duplicates() -> None:
+    handler = RequestBodyHandler.from_pairs([("Content-Length", "5"), ("Content-Length", "10")])
+
+    with pytest.raises(ValueError, match="Conflicting Content-Length: 5, 10"):
+        agent_vault_bridge._request_content_length(handler)
+
+
+def test_request_content_length_rejects_non_digit_numeric_forms() -> None:
+    handler = RequestBodyHandler.from_pairs([("Content-Length", "+5")])
+
+    with pytest.raises(ValueError, match=r"Invalid Content-Length: \+5"):
+        agent_vault_bridge._request_content_length(handler)
+
+
+def test_request_content_length_collapses_identical_duplicates() -> None:
+    handler = RequestBodyHandler.from_pairs([("Content-Length", "7"), ("Content-Length", "7")])
+
+    assert agent_vault_bridge._request_content_length(handler) == 7
 
 
 def test_chunk_size_rejects_negative_values() -> None:
@@ -1088,6 +1168,12 @@ def test_cli_rejects_raw_session_token_argument() -> None:
         )
 
 
+def test_cli_defaults_host_to_loopback() -> None:
+    args = agent_vault_bridge._parse_args(["--upstream-proxy-url", "http://agent-vault:14322"])
+
+    assert args.host == "127.0.0.1"
+
+
 def test_live_smoke_parses_worker_json_after_docker_pull_output() -> None:
     smoke = cast("Any", _load_live_smoke_module())
 
@@ -1107,3 +1193,298 @@ def test_live_smoke_worker_targets_local_echo_server() -> None:
     smoke = cast("Any", _load_live_smoke_module())
 
     assert smoke._worker_target_url() == "http://local-echo.test/headers"
+
+
+def test_adapter_connect_forwards_client_bytes_pipelined_with_request() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    captured: dict[str, bytes] = {}
+
+    def serve_connect_capture() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            request = _recv_until(connection, b"\r\n\r\n")
+            _headers, _separator, leftover = request.partition(b"\r\n\r\n")
+            connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            received = bytearray(leftover)
+            while len(received) < len(b"PIPELINED-CLIENTHELLO"):
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                received.extend(chunk)
+            captured["bytes"] = bytes(received)
+
+    fake_proxy_thread = threading.Thread(target=serve_connect_capture, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with (
+            start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter,
+            socket.create_connection((adapter.host, adapter.port), timeout=5) as client,
+        ):
+            client.settimeout(5)
+            # Coalesce the CONNECT request and the first tunnel bytes in a single send, without
+            # waiting for the 200, so the bytes land in handler.rfile's buffer.
+            client.sendall(
+                b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\nPIPELINED-CLIENTHELLO",
+            )
+            response = _recv_until(client, b"\r\n\r\n")
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert response.startswith(b"HTTP/1.0 200")
+    assert captured.get("bytes") == b"PIPELINED-CLIENTHELLO"
+
+
+def test_connect_tunnel_times_out_wedged_direction_while_reverse_is_busy(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_IDLE_TIMEOUT_SECONDS", 0.5)
+    client_a, client_b = socket.socketpair()
+    upstream_a, upstream_b = socket.socketpair()
+    for sock in (client_a, client_b, upstream_a, upstream_b):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    stop = threading.Event()
+
+    def flood_reverse() -> None:
+        # upstream -> client direction stays busy and never reads upstream-bound data,
+        # so the client -> upstream direction wedges while this keeps refreshing its own clock.
+        block = b"y" * 4096
+        while not stop.is_set():
+            try:
+                upstream_b.sendall(block)
+            except OSError:
+                return
+
+    def drain_client() -> None:
+        while not stop.is_set():
+            try:
+                if not client_b.recv(4096):
+                    return
+            except OSError:
+                return
+
+    def flood_forward() -> None:
+        with suppress(OSError):
+            client_b.sendall(b"x" * (2 * 1024 * 1024))
+
+    workers = [
+        threading.Thread(target=flood_reverse, daemon=True),
+        threading.Thread(target=drain_client, daemon=True),
+        threading.Thread(target=flood_forward, daemon=True),
+    ]
+    for worker in workers:
+        worker.start()
+
+    tunnel_thread = threading.Thread(
+        target=agent_vault_bridge._tunnel_sockets,
+        args=(client_a, upstream_a),
+        daemon=True,
+    )
+    tunnel_thread.start()
+    tunnel_thread.join(timeout=8)
+    finished = not tunnel_thread.is_alive()
+
+    stop.set()
+    for sock in (client_a, client_b, upstream_a, upstream_b):
+        with suppress(OSError):
+            sock.close()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert finished
+
+
+def test_copy_connect_response_closes_connection_when_client_body_write_fails() -> None:
+    class FailingWriteHandler:
+        close_connection = False
+
+        def __init__(self) -> None:
+            self.responses: list[tuple[int, str]] = []
+            self.headers: list[tuple[str, str]] = []
+            self.ended_headers = 0
+            self.wfile = self
+
+        def send_response(self, code: int, message: str) -> None:
+            self.responses.append((code, message))
+
+        def send_header(self, key: str, value: str) -> None:
+            self.headers.append((key, value))
+
+        def end_headers(self) -> None:
+            self.ended_headers += 1
+
+        def write(self, _body: bytes) -> None:
+            msg = "client gone"
+            raise OSError(msg)
+
+    _client_sock, upstream_sock = socket.socketpair()
+    handler = FailingWriteHandler()
+    try:
+        agent_vault_bridge._copy_connect_response(
+            handler,
+            agent_vault_bridge._ConnectResponse(
+                status=403,
+                reason="Forbidden",
+                headers=[("Content-Length", "5")],
+                leftover=b"nope!",
+            ),
+            upstream_sock,
+        )
+    finally:
+        _client_sock.close()
+        upstream_sock.close()
+
+    assert handler.responses == [(403, "Forbidden")]
+    assert handler.ended_headers == 1
+    assert handler.close_connection is True
+
+
+def test_adapter_rejects_conflicting_request_content_length() -> None:
+    with (
+        start_adapter(upstream_proxy_url="http://127.0.0.1:1", session_token="adapter-session") as adapter,
+        socket.create_connection((adapter.host, adapter.port), timeout=5) as client,
+    ):
+        client.settimeout(5)
+        client.sendall(
+            b"POST http://example.test/upload HTTP/1.1\r\n"
+            b"Host: example.test\r\n"
+            b"Content-Length: 5\r\n"
+            b"Content-Length: 6\r\n"
+            b"\r\n"
+            b"abcde",
+        )
+        response = _recv_until(client, b"\r\n\r\n")
+
+    assert response.startswith(b"HTTP/1.0 400")
+
+
+def test_adapter_times_out_stalled_request_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_vault_bridge, "_REQUEST_IDLE_TIMEOUT_SECONDS", 0.5)
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+
+    def serve_silent_proxy() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection, suppress(OSError):
+            while connection.recv(4096):
+                pass
+
+    fake_proxy_thread = threading.Thread(target=serve_silent_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with (
+            start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter,
+            socket.create_connection((adapter.host, adapter.port), timeout=10) as client,
+        ):
+            client.settimeout(10)
+            client.sendall(
+                b"POST http://example.test/upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 100\r\n\r\npartial",
+            )
+            response = _recv_until(client, b"\r\n\r\n")
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert response.startswith(b"HTTP/1.0 502")
+
+
+def test_adapter_does_not_send_interim_continue_to_http_1_0_client() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    upstream_headers: dict[str, str] = {}
+    upstream_errors: list[Exception] = []
+
+    def serve_proxy() -> None:
+        try:
+            connection, _addr = fake_proxy.accept()
+            with connection:
+                request = _recv_until(connection, b"\r\n\r\n")
+                header_bytes, _separator, body = request.partition(b"\r\n\r\n")
+                for line in header_bytes.decode("iso-8859-1").split("\r\n")[1:]:
+                    if not line:
+                        continue
+                    key, value = line.split(":", 1)
+                    upstream_headers[key.lower()] = value.strip()
+                received = bytearray(body)
+                while len(received) < len(b"data"):
+                    chunk = connection.recv(len(b"data") - len(received))
+                    if not chunk:
+                        return
+                    received.extend(chunk)
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        except Exception as exc:
+            upstream_errors.append(exc)
+
+    fake_proxy_thread = threading.Thread(target=serve_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with (
+            start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter,
+            socket.create_connection((adapter.host, adapter.port), timeout=5) as client,
+        ):
+            client.settimeout(5)
+            client.sendall(
+                b"POST http://example.test/upload HTTP/1.0\r\n"
+                b"Host: example.test\r\n"
+                b"Content-Length: 4\r\n"
+                b"Expect: 100-continue\r\n"
+                b"\r\n"
+                b"data",
+            )
+            response = _recv_until(client, b"\r\n\r\n")
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert upstream_errors == []
+    assert response.startswith(b"HTTP/1.0 200")
+    assert b"100 Continue" not in response
+    assert "expect" not in upstream_headers
+
+
+def test_adapter_rejects_truncated_chunked_trailers() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+
+    def serve_drain_proxy() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection, suppress(OSError):
+            while connection.recv(4096):
+                pass
+
+    fake_proxy_thread = threading.Thread(target=serve_drain_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with (
+            start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter,
+            socket.create_connection((adapter.host, adapter.port), timeout=5) as client,
+        ):
+            client.settimeout(5)
+            client.sendall(
+                b"POST http://example.test/upload HTTP/1.1\r\n"
+                b"Host: example.test\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"\r\n"
+                b"5\r\nhello\r\n0\r\n",  # last-chunk size line, then EOF before the terminating CRLF
+            )
+            client.shutdown(socket.SHUT_WR)
+            response = _recv_until(client, b"\r\n\r\n")
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert response.startswith(b"HTTP/1.0 400")

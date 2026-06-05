@@ -411,6 +411,10 @@ python -m mindroom.egress.agent_vault_bridge \
 
 The adapter reads the named environment variable itself so the session token does not appear in process arguments.
 
+The adapter performs no inbound authentication: anyone who can reach its listener can egress through Agent Vault using the hidden session token.
+For that reason the CLI defaults `--host` to `127.0.0.1`, and the explicit `--host 0.0.0.0` above is required only when the adapter and workers run in separate containers or pods.
+When you bind a non-loopback interface, network isolation is load-bearing and must restrict the listener to intended workers.
+
 For Docker Compose, put the adapter on both the worker network and the Agent Vault network.
 MindRoom workers only need access to `agent-vault-bridge-adapter:18080`.
 For Kubernetes, run the adapter as a `Deployment` or sidecar, expose it with a private `ClusterIP` service, and use `NetworkPolicy` so workers can reach only the adapter while the adapter can reach Agent Vault.

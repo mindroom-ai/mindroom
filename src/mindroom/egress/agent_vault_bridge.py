@@ -34,6 +34,7 @@ _TUNNEL_BUFFER_BYTES = 64 * 1024
 _TUNNEL_IDLE_TIMEOUT_SECONDS = 30
 _HTTP_STREAM_CHUNK_BYTES = 64 * 1024
 _CONNECT_RESPONSE_HEADER_LIMIT_BYTES = 64 * 1024
+_REQUEST_IDLE_TIMEOUT_SECONDS = 60
 _UPSTREAM_AUTH_FAILED_MESSAGE = "Bad Gateway: upstream proxy authentication failed"
 
 
@@ -115,6 +116,8 @@ def start_adapter(  # noqa: C901
         return f"Bearer {session_token}"
 
     class AgentVaultAdapterHandler(_QuietHandler):
+        timeout = _REQUEST_IDLE_TIMEOUT_SECONDS
+
         def do_CONNECT(self) -> None:
             self.close_connection = True
             _forward_connect(
@@ -172,18 +175,20 @@ def _forward_http_request(
         handler.send_error(400, str(exc))
         return
     is_chunked = "chunked" in handler.headers.get("Transfer-Encoding", "").lower()
-    expects_continue = handler.headers.get("Expect", "").lower() == "100-continue"
+    expects_continue = handler.headers.get("Expect", "").strip().lower() == "100-continue"
+    send_continue = expects_continue and handler.request_version >= "HTTP/1.1"
     headers = _forward_headers(handler.headers.items(), proxy_authorization=proxy_authorization)
     if expects_continue:
         _remove_header(headers, "expect")
+    _remove_header(headers, "content-length")
     if is_chunked:
-        _remove_header(headers, "content-length")
         headers["Transfer-Encoding"] = "chunked"
+    elif content_length is not None:
+        headers["Content-Length"] = str(content_length)
     connection = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
     try:
-        if expects_continue:
-            handler.send_response_only(100)
-            handler.end_headers()
+        if send_continue:
+            handler.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
         _send_streaming_request(
             connection,
             handler,
@@ -213,6 +218,8 @@ def _forward_connect(
 ) -> None:
     upstream_sock: socket.socket | None = None
     try:
+        # Only the upstream connect + CONNECT handshake can map to a 502; once the 200 status line
+        # is committed to the client, no later failure may emit a second HTTP response.
         try:
             upstream_sock = socket.create_connection((proxy_host, proxy_port), timeout=10)
             connect_request = (
@@ -223,26 +230,52 @@ def _forward_connect(
             )
             upstream_sock.sendall(connect_request.encode("iso-8859-1"))
             response = _read_connect_response(upstream_sock)
-            if response.status == 407:
-                handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
-                return
-            if response.status != 200:
-                _copy_connect_response(handler, response, upstream_sock)
-                return
-
-            handler.send_response(200, response.reason)
-            handler.end_headers()
         except (OSError, TimeoutError, http.client.HTTPException) as exc:
             handler.send_error(502, f"Bad Gateway: {exc}")
             return
 
-        try:
-            _tunnel_sockets(handler.connection, upstream_sock, upstream_initial=response.leftover)
-        except OSError:
+        if response.status == 407:
+            handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
             return
+        if response.status != 200:
+            _copy_connect_response(handler, response, upstream_sock)
+            return
+
+        handler.send_response(200, response.reason)
+        handler.end_headers()
+        client_initial = _buffered_request_bytes(handler)
+        with suppress(OSError):
+            _tunnel_sockets(
+                handler.connection,
+                upstream_sock,
+                upstream_initial=response.leftover,
+                client_initial=client_initial,
+            )
     finally:
         if upstream_sock is not None:
             upstream_sock.close()
+
+
+def _buffered_request_bytes(handler: BaseHTTPRequestHandler) -> bytes:
+    """Return bytes already buffered in handler.rfile (e.g. a CONNECT-pipelined client hello).
+
+    BaseHTTPRequestHandler parses the request line/headers through a buffered reader, so a client
+    that pipelines tunnel bytes in the same segment as the CONNECT request leaves them stranded in
+    that buffer rather than on the raw socket the tunnel relays. Drain them without blocking on a
+    raw read so they can be forwarded as the client->upstream initial bytes.
+    """
+    reader = cast(_PeekableReader, handler.rfile)  # noqa: TC006
+    previous_timeout = handler.connection.gettimeout()
+    handler.connection.setblocking(False)
+    try:
+        buffered = reader.peek()
+    except (OSError, ValueError):
+        buffered = b""
+    finally:
+        handler.connection.settimeout(previous_timeout)
+    if not buffered:
+        return b""
+    return reader.read(len(buffered))
 
 
 def _send_streaming_request(
@@ -270,18 +303,19 @@ def _send_streaming_request(
 
 
 def _request_content_length(handler: BaseHTTPRequestHandler) -> int | None:
-    raw_length = handler.headers.get("Content-Length")
-    if raw_length is None:
+    raw_lengths = handler.headers.get_all("Content-Length")
+    if not raw_lengths:
         return None
-    try:
-        length = int(raw_length)
-    except ValueError as exc:
-        msg = f"Invalid Content-Length: {raw_length}"
-        raise ValueError(msg) from exc
-    if length < 0:
+    distinct = {value.strip() for value in raw_lengths}
+    if len(distinct) > 1:
+        joined = ", ".join(raw_lengths)
+        msg = f"Conflicting Content-Length: {joined}"
+        raise ValueError(msg)
+    raw_length = distinct.pop()
+    if not raw_length.isascii() or not raw_length.isdigit():
         msg = f"Invalid Content-Length: {raw_length}"
         raise ValueError(msg)
-    return length
+    return int(raw_length)
 
 
 def _stream_content_length_request_body(
@@ -351,7 +385,8 @@ def _stream_chunked_trailers(
     while True:
         line = handler.rfile.readline()
         if line == b"":
-            return
+            msg = "Incomplete chunked request body"
+            raise ValueError(msg)
         connection.send(line)
         if line in {b"\n", b"\r\n"}:
             return
@@ -408,7 +443,10 @@ def _copy_connect_response(
         handler.send_header(key, value)
     handler.end_headers()
     if body:
-        handler.wfile.write(body)
+        try:
+            handler.wfile.write(body)
+        except OSError:
+            handler.close_connection = True
 
 
 def _read_connect_response_body(sock: socket.socket, response: _ConnectResponse) -> bytes:
@@ -543,22 +581,36 @@ def _tunnel_sockets(
     upstream_sock: socket.socket,
     *,
     upstream_initial: bytes = b"",
+    client_initial: bytes = b"",
 ) -> None:
-    activity = _TunnelActivity(at=time.monotonic())
     client_sock.settimeout(_TUNNEL_IDLE_TIMEOUT_SECONDS)
     upstream_sock.settimeout(_TUNNEL_IDLE_TIMEOUT_SECONDS)
+
+    tunnel_activity = _TunnelActivity(at=time.monotonic())
+    upstream_to_client_send_activity = _TunnelActivity(at=tunnel_activity.at)
+    client_to_upstream_send_activity = _TunnelActivity(at=tunnel_activity.at)
 
     upstream_to_client = threading.Thread(
         target=_relay_tunnel_data,
         args=(upstream_sock, client_sock),
-        kwargs={"activity": activity, "initial": upstream_initial},
+        kwargs={
+            "tunnel_activity": tunnel_activity,
+            "send_activity": upstream_to_client_send_activity,
+            "initial": upstream_initial,
+        },
         daemon=True,
     )
     upstream_to_client.start()
-    _relay_tunnel_data(client_sock, upstream_sock, activity=activity)
+    _relay_tunnel_data(
+        client_sock,
+        upstream_sock,
+        tunnel_activity=tunnel_activity,
+        send_activity=client_to_upstream_send_activity,
+        initial=client_initial,
+    )
     while upstream_to_client.is_alive():
         upstream_to_client.join(timeout=_TUNNEL_IDLE_TIMEOUT_SECONDS)
-        if upstream_to_client.is_alive() and _tunnel_is_idle(activity):
+        if upstream_to_client.is_alive() and _tunnel_is_idle(tunnel_activity):
             _shutdown_tunnel(client_sock, upstream_sock)
             upstream_to_client.join(timeout=1)
             return
@@ -568,10 +620,11 @@ def _relay_tunnel_data(
     source: socket.socket,
     target: socket.socket,
     *,
-    activity: _TunnelActivity,
+    tunnel_activity: _TunnelActivity,
+    send_activity: _TunnelActivity,
     initial: bytes = b"",
 ) -> None:
-    if initial and not _send_tunnel_data(target, initial, activity):
+    if initial and not _send_tunnel_data(target, initial, send_activity, tunnel_activity):
         _shutdown_tunnel(source, target)
         return
 
@@ -579,7 +632,7 @@ def _relay_tunnel_data(
         try:
             chunk = source.recv(_TUNNEL_BUFFER_BYTES)
         except TimeoutError:
-            if _tunnel_is_idle(activity):
+            if _tunnel_is_idle(tunnel_activity):
                 _shutdown_tunnel(source, target)
                 return
             continue
@@ -591,26 +644,36 @@ def _relay_tunnel_data(
             with suppress(OSError):
                 target.shutdown(socket.SHUT_WR)
             return
-        activity.at = time.monotonic()
-        if not _send_tunnel_data(target, chunk, activity):
+        now = time.monotonic()
+        tunnel_activity.at = now
+        send_activity.at = now
+        if not _send_tunnel_data(target, chunk, send_activity, tunnel_activity):
             _shutdown_tunnel(source, target)
             return
 
 
-def _send_tunnel_data(sock: socket.socket, data: bytes, activity: _TunnelActivity) -> bool:
+def _send_tunnel_data(
+    sock: socket.socket,
+    data: bytes,
+    send_activity: _TunnelActivity,
+    tunnel_activity: _TunnelActivity,
+) -> bool:
+    send_activity.at = time.monotonic()
     view = memoryview(data)
     while view:
         try:
             sent = sock.send(view)
         except TimeoutError:
-            if _tunnel_is_idle(activity):
+            if _tunnel_is_idle(send_activity):
                 return False
             continue
         except OSError:
             return False
         if sent == 0:
             return False
-        activity.at = time.monotonic()
+        now = time.monotonic()
+        send_activity.at = now
+        tunnel_activity.at = now
         view = view[sent:]
     return True
 
@@ -630,7 +693,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run Agent Vault forward proxy adapter.",
         allow_abbrev=False,
     )
-    parser.add_argument("--host", default="0.0.0.0")  # noqa: S104
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--upstream-proxy-url", required=True)
     parser.add_argument("--session-token-env", default="AGENT_VAULT_PROXY_SESSION_TOKEN")
