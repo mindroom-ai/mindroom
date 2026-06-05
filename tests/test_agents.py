@@ -613,7 +613,7 @@ def test_create_agent_does_not_bootstrap_tool_registry_once_per_registered_tool(
         _create_agent_for_test("general", config=config)
 
     assert len(mock_get_tool_by_name.call_args_list) == 4
-    assert mock_ensure_registry.call_count <= 1
+    assert mock_ensure_registry.call_count == 1
 
 
 @patch("mindroom.agents.get_tool_by_name")
