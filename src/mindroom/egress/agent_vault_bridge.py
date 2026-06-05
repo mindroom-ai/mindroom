@@ -412,6 +412,8 @@ def _copy_connect_response(
 
 def _read_connect_response_body(sock: socket.socket, response: _ConnectResponse) -> bytes:
     headers = {key.lower(): value for key, value in response.headers}
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        return _read_chunked_connect_response_body(sock, response.leftover)
     raw_length = headers.get("content-length")
     if raw_length is None:
         return response.leftover
@@ -426,6 +428,53 @@ def _read_connect_response_body(sock: socket.socket, response: _ConnectResponse)
             break
         body.extend(chunk)
     return bytes(body[:content_length])
+
+
+def _read_chunked_connect_response_body(sock: socket.socket, initial: bytes) -> bytes:
+    buffer = bytearray(initial)
+    body = bytearray()
+    while True:
+        size = _chunk_size(_read_connect_response_line(sock, buffer))
+        if size == 0:
+            _read_connect_response_trailers(sock, buffer)
+            return bytes(body)
+
+        body.extend(_read_connect_response_bytes(sock, buffer, size))
+        terminator = _read_connect_response_bytes(sock, buffer, 2)
+        if terminator != b"\r\n":
+            msg = "malformed upstream CONNECT chunked response body"
+            raise http.client.HTTPException(msg)
+
+
+def _read_connect_response_line(sock: socket.socket, buffer: bytearray) -> bytes:
+    while b"\n" not in buffer:
+        chunk = sock.recv(_TUNNEL_BUFFER_BYTES)
+        if not chunk:
+            msg = "upstream proxy closed during CONNECT response body"
+            raise http.client.HTTPException(msg)
+        buffer.extend(chunk)
+    line, separator, rest = bytes(buffer).partition(b"\n")
+    buffer[:] = rest
+    return line + separator
+
+
+def _read_connect_response_bytes(sock: socket.socket, buffer: bytearray, size: int) -> bytes:
+    while len(buffer) < size:
+        chunk = sock.recv(size - len(buffer))
+        if not chunk:
+            msg = "upstream proxy closed during CONNECT response body"
+            raise http.client.HTTPException(msg)
+        buffer.extend(chunk)
+    data = bytes(buffer[:size])
+    del buffer[:size]
+    return data
+
+
+def _read_connect_response_trailers(sock: socket.socket, buffer: bytearray) -> None:
+    while True:
+        line = _read_connect_response_line(sock, buffer)
+        if line in {b"\n", b"\r\n"}:
+            return
 
 
 def _forward_headers(

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Live smoke test for MindRoom's Agent Vault bridge adapter.
 
-This test intentionally uses the real ``infisical/agent-vault`` image and a
-separate Docker worker container. It is not part of normal pytest because it
-pulls images, starts containers, and calls httpbin.org with a fake credential.
+This test intentionally uses the real ``infisical/agent-vault`` image, a local
+echo container, and a separate Docker worker container. It is not part of normal
+pytest because it pulls images and starts containers.
 """
 
 from __future__ import annotations
@@ -22,9 +22,38 @@ from mindroom.egress.agent_vault_bridge import start_adapter
 
 AGENT_VAULT_IMAGE = os.environ.get("AGENT_VAULT_IMAGE", "infisical/agent-vault:latest")
 WORKER_IMAGE = os.environ.get("MINDROOM_AGENT_VAULT_SMOKE_WORKER_IMAGE", "python:3.13-alpine")
+DOCKER_HOST_GATEWAY = "host.docker.internal"
+ECHO_HOST = "local-echo.test"
+ECHO_PORT = 80
+ECHO_SUBNET = "203.0.113.0/24"
+ECHO_IPV4 = "203.0.113.10"
 FAKE_SECRET = "real-vault-smoke-secret"  # noqa: S105
 MASTER_PASSWORD = "mindroom-agent-vault-smoke-master-password"  # noqa: S105
 OWNER_PASSWORD = "mindroom-agent-vault-smoke-owner-password"  # noqa: S105
+ECHO_SERVER_CODE = r"""
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class HeaderEchoHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path != "/headers":
+            self.send_error(404, "Not Found")
+            return
+        payload = json.dumps(
+            {"headers": {key: value for key, value in self.headers.items()}},
+            sort_keys=True,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+ThreadingHTTPServer(("0.0.0.0", __ECHO_PORT__), HeaderEchoHandler).serve_forever()
+""".replace("__ECHO_PORT__", str(ECHO_PORT))
 
 
 def _run(
@@ -60,6 +89,55 @@ def _docker_port(container: str, private_port: int) -> int:
     result = _run(["docker", "port", container, f"{private_port}/tcp"])
     raw = result.stdout.strip().rsplit(":", 1)[-1]
     return int(raw)
+
+
+def _start_echo_container(container: str, network: str) -> None:
+    _run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "--network",
+            network,
+            "--ip",
+            ECHO_IPV4,
+            "--network-alias",
+            ECHO_HOST,
+            WORKER_IMAGE,
+            "python",
+            "-c",
+            ECHO_SERVER_CODE,
+        ],
+    )
+    _wait_for_echo(container)
+
+
+def _wait_for_echo(container: str) -> None:
+    probe_code = f"""
+import urllib.request
+urllib.request.urlopen("http://127.0.0.1:{ECHO_PORT}/headers", timeout=2).read()
+"""
+    deadline = time.monotonic() + 45
+    last_output = ""
+    while time.monotonic() < deadline:
+        result = _run(
+            ["docker", "exec", container, "python", "-c", probe_code],
+            check=False,
+            timeout_seconds=5,
+        )
+        if result.returncode == 0:
+            return
+        last_output = result.stdout
+        time.sleep(1)
+    logs = _run(["docker", "logs", container], check=False).stdout
+    msg = f"Echo container did not become healthy:\n{last_output}\n{logs}"
+    raise TimeoutError(msg)
+
+
+def _worker_target_url() -> str:
+    return f"http://{ECHO_HOST}/headers"
 
 
 def _parse_worker_headers(output: str) -> dict[str, str]:
@@ -142,9 +220,9 @@ def _configure_agent_vault(container: str) -> str:
             "--vault",
             "default",
             "--name",
-            "httpbin",
+            "local-echo",
             "--host",
-            "httpbin.org",
+            ECHO_HOST,
             "--auth-type",
             "bearer",
             "--token-key",
@@ -169,7 +247,8 @@ def _configure_agent_vault(container: str) -> str:
 
 
 def _run_worker(adapter_port: int) -> dict[str, str]:
-    proxy_url = f"http://host.docker.internal:{adapter_port}"
+    proxy_url = f"http://{DOCKER_HOST_GATEWAY}:{adapter_port}"
+    target_url = _worker_target_url()
     worker_code = r"""
 import json
 import os
@@ -183,16 +262,16 @@ leaked = {
 if leaked:
     raise SystemExit(f"worker env leaked secret-like names: {sorted(leaked)}")
 
-with urllib.request.urlopen("http://httpbin.org/headers", timeout=20) as response:
+with urllib.request.urlopen("__TARGET_URL__", timeout=20) as response:
     data = json.loads(response.read().decode("utf-8"))
 print(json.dumps(data["headers"], sort_keys=True))
-"""
+""".replace("__TARGET_URL__", target_url)
     result = _run(
         [
             "docker",
             "run",
             "--rm",
-            "--add-host=host.docker.internal:host-gateway",
+            f"--add-host={DOCKER_HOST_GATEWAY}:host-gateway",
             "-e",
             f"HTTP_PROXY={proxy_url}",
             "-e",
@@ -217,8 +296,13 @@ def main() -> int:
         return 1
 
     temp_dir = Path(tempfile.mkdtemp(prefix="mindroom-agent-vault-smoke-"))
-    container = f"mindroom-agent-vault-smoke-{os.getpid()}"
+    network = f"mindroom-agent-vault-smoke-{os.getpid()}"
+    container = f"mindroom-agent-vault-smoke-vault-{os.getpid()}"
+    echo_container = f"mindroom-agent-vault-smoke-echo-{os.getpid()}"
     try:
+        # Agent Vault refuses local/private proxy targets, so this uses a TEST-NET bridge.
+        _run(["docker", "network", "create", "--subnet", ECHO_SUBNET, network])
+        _start_echo_container(echo_container, network)
         _run(
             [
                 "docker",
@@ -226,6 +310,8 @@ def main() -> int:
                 "-d",
                 "--name",
                 container,
+                "--network",
+                network,
                 "-p",
                 "127.0.0.1::14321",
                 "-p",
@@ -276,6 +362,8 @@ def main() -> int:
         return 0
     finally:
         _run(["docker", "rm", "-f", container], check=False)
+        _run(["docker", "rm", "-f", echo_container], check=False)
+        _run(["docker", "network", "rm", network], check=False)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

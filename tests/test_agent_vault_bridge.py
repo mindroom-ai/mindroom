@@ -8,6 +8,7 @@ import http.client
 import importlib.util
 import json
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -96,6 +97,7 @@ def _load_live_smoke_module() -> ModuleType:
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -924,6 +926,52 @@ def test_copy_connect_response_strips_connection_nominated_headers() -> None:
     assert handler.ended_headers == 1
 
 
+def test_copy_connect_response_decodes_chunked_body_when_transfer_encoding_is_stripped() -> None:
+    class CapturingHandler:
+        def __init__(self) -> None:
+            self.responses: list[tuple[int, str]] = []
+            self.headers: list[tuple[str, str]] = []
+            self.ended_headers = 0
+            self.body = b""
+            self.wfile = self
+
+        def send_response(self, code: int, message: str) -> None:
+            self.responses.append((code, message))
+
+        def send_header(self, key: str, value: str) -> None:
+            self.headers.append((key, value))
+
+        def end_headers(self) -> None:
+            self.ended_headers += 1
+
+        def write(self, body: bytes) -> None:
+            self.body += body
+
+    _client_sock, upstream_sock = socket.socketpair()
+    handler = CapturingHandler()
+    try:
+        agent_vault_bridge._copy_connect_response(
+            handler,
+            agent_vault_bridge._ConnectResponse(
+                status=403,
+                reason="Forbidden",
+                headers=[
+                    ("Transfer-Encoding", "chunked"),
+                ],
+                leftover=b"5\r\nerror\r\n0\r\n\r\n",
+            ),
+            upstream_sock,
+        )
+    finally:
+        _client_sock.close()
+        upstream_sock.close()
+
+    assert handler.responses == [(403, "Forbidden")]
+    assert handler.headers == []
+    assert handler.body == b"error"
+    assert handler.ended_headers == 1
+
+
 def test_request_content_length_rejects_invalid_header() -> None:
     handler = RequestBodyHandler(headers={"Content-Length": "not-an-int"})
 
@@ -1039,10 +1087,16 @@ def test_live_smoke_parses_worker_json_after_docker_pull_output() -> None:
     headers = smoke._parse_worker_headers(
         "Unable to find image 'python:3.13-alpine' locally\n"
         "3.13-alpine: Pulling from library/python\n"
-        '{"Authorization": "Bearer fake-secret", "Host": "httpbin.org"}\n',
+        '{"Authorization": "Bearer fake-secret", "Host": "local-echo.test"}\n',
     )
 
     assert headers == {
         "Authorization": "Bearer fake-secret",
-        "Host": "httpbin.org",
+        "Host": "local-echo.test",
     }
+
+
+def test_live_smoke_worker_targets_local_echo_server() -> None:
+    smoke = cast("Any", _load_live_smoke_module())
+
+    assert smoke._worker_target_url() == "http://local-echo.test/headers"
