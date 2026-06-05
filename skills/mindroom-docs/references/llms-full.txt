@@ -15286,6 +15286,7 @@ That keeps PATH handling deployment-specific instead of baking host-specific dir
 For tools that should call external APIs without receiving the real upstream credential, configure a worker egress broker.
 MindRoom injects proxy and CA env into worker-routed `shell` and `python` requests; the worker process then uses the proxy for HTTP(S) traffic.
 This does not inspect command lines or match API URLs, so URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the broker.
+The broker itself is not a MindRoom plugin. It is a proxy service or sidecar that owns the broker session or upstream credential.
 
 Example:
 
@@ -15320,6 +15321,35 @@ Unknown broker names fail config validation when the config is loaded.
 Broker profiles are backend-neutral: the same config works for Docker/static runners and dedicated Kubernetes workers as long as the worker can reach `proxy_url` and read the configured CA path.
 The proxy should be an adapter or broker that owns the real credential or broker session.
 Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
+
+### Agent Vault bridge adapter
+
+MindRoom ships a small Agent Vault bridge adapter that can run as a private sidecar/service.
+Workers point at the adapter; the adapter points at Agent Vault and adds the Agent Vault proxy session authorization.
+That keeps the Agent Vault session token out of the worker environment.
+
+Run the adapter with the MindRoom image or local package:
+
+```bash
+python -m mindroom.egress.agent_vault_bridge \
+  --host 0.0.0.0 \
+  --port 18080 \
+  --upstream-proxy-url http://agent-vault:14322 \
+  --session-token "$AGENT_VAULT_PROXY_SESSION_TOKEN"
+```
+
+For Docker Compose, put the adapter on both the worker network and the Agent Vault network.
+MindRoom workers only need access to `agent-vault-bridge-adapter:18080`.
+For Kubernetes, run the adapter as a `Deployment` or sidecar, expose it with a private `ClusterIP` service, and use `NetworkPolicy` so workers can reach only the adapter while the adapter can reach Agent Vault.
+
+To validate the real integration locally with Docker and the real `infisical/agent-vault` image, run:
+
+```bash
+uv run python tests/manual/agent_vault_bridge_live_smoke.py
+```
+
+The smoke configures Agent Vault with a fake bearer credential, starts the MindRoom adapter, then runs a separate Docker worker that has only proxy env.
+It passes only when Agent Vault injects the fake credential and the worker receives no Agent Vault token or upstream secret env.
 
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
