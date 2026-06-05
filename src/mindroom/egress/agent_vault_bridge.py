@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import http.client
 import os
-import select
+import selectors
 import socket
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, cast
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
@@ -29,6 +30,8 @@ _HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 _TUNNEL_BUFFER_BYTES = 64 * 1024
+_TUNNEL_BACKPRESSURE_LIMIT_BYTES = 1024 * 1024
+_TUNNEL_BACKPRESSURE_RESUME_BYTES = _TUNNEL_BACKPRESSURE_LIMIT_BYTES // 2
 _TUNNEL_IDLE_TIMEOUT_SECONDS = 30
 _UPSTREAM_AUTH_FAILED_MESSAGE = "Bad Gateway: upstream proxy authentication failed"
 
@@ -301,22 +304,143 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
     for sock in sockets:
         sock.setblocking(False)
 
-    while True:
-        readable, _, errored = select.select(sockets, [], sockets, _TUNNEL_IDLE_TIMEOUT_SECONDS)
-        if errored or not readable:
-            return
-        for source in readable:
-            target = upstream_sock if source is client_sock else client_sock
-            try:
-                chunk = source.recv(_TUNNEL_BUFFER_BYTES)
-            except OSError:
-                return
-            if not chunk:
-                return
-            try:
-                target.sendall(chunk)
-            except OSError:
-                return
+    peers = {
+        client_sock: upstream_sock,
+        upstream_sock: client_sock,
+    }
+    pending_writes = {
+        client_sock: bytearray(),
+        upstream_sock: bytearray(),
+    }
+    read_enabled = {
+        client_sock: True,
+        upstream_sock: True,
+    }
+    read_closed: set[socket.socket] = set()
+
+    try:
+        with selectors.DefaultSelector() as selector:
+            registered: set[socket.socket] = set()
+
+            for sock in sockets:
+                _refresh_tunnel_interest(selector, registered, sock, read_enabled, pending_writes)
+
+            while selector.get_map():
+                ready = selector.select(_TUNNEL_IDLE_TIMEOUT_SECONDS)
+                if not ready:
+                    return
+
+                for key, mask in ready:
+                    sock = cast("socket.socket", key.fileobj)
+                    if mask & selectors.EVENT_READ and not _handle_tunnel_read(
+                        selector,
+                        registered,
+                        sock,
+                        peers,
+                        pending_writes,
+                        read_enabled,
+                        read_closed,
+                    ):
+                        return
+                    if mask & selectors.EVENT_WRITE and not _handle_tunnel_write(
+                        selector,
+                        registered,
+                        sock,
+                        peers,
+                        pending_writes,
+                        read_enabled,
+                        read_closed,
+                    ):
+                        return
+    finally:
+        for sock in sockets:
+            with suppress(OSError):
+                sock.setblocking(True)
+
+
+def _refresh_tunnel_interest(
+    selector: selectors.BaseSelector,
+    registered: set[socket.socket],
+    sock: socket.socket,
+    read_enabled: dict[socket.socket, bool],
+    pending_writes: dict[socket.socket, bytearray],
+) -> None:
+    events = 0
+    if read_enabled[sock]:
+        events |= selectors.EVENT_READ
+    if pending_writes[sock]:
+        events |= selectors.EVENT_WRITE
+
+    if sock in registered:
+        if events:
+            selector.modify(sock, events)
+        else:
+            selector.unregister(sock)
+            registered.remove(sock)
+    elif events:
+        selector.register(sock, events)
+        registered.add(sock)
+
+
+def _handle_tunnel_read(
+    selector: selectors.BaseSelector,
+    registered: set[socket.socket],
+    sock: socket.socket,
+    peers: dict[socket.socket, socket.socket],
+    pending_writes: dict[socket.socket, bytearray],
+    read_enabled: dict[socket.socket, bool],
+    read_closed: set[socket.socket],
+) -> bool:
+    target = peers[sock]
+    try:
+        chunk = sock.recv(_TUNNEL_BUFFER_BYTES)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+
+    if not chunk:
+        read_enabled[sock] = False
+        read_closed.add(sock)
+        _refresh_tunnel_interest(selector, registered, sock, read_enabled, pending_writes)
+        return bool(pending_writes[target])
+
+    pending_writes[target].extend(chunk)
+    if len(pending_writes[target]) >= _TUNNEL_BACKPRESSURE_LIMIT_BYTES:
+        read_enabled[sock] = False
+    _refresh_tunnel_interest(selector, registered, target, read_enabled, pending_writes)
+    _refresh_tunnel_interest(selector, registered, sock, read_enabled, pending_writes)
+    return True
+
+
+def _handle_tunnel_write(
+    selector: selectors.BaseSelector,
+    registered: set[socket.socket],
+    sock: socket.socket,
+    peers: dict[socket.socket, socket.socket],
+    pending_writes: dict[socket.socket, bytearray],
+    read_enabled: dict[socket.socket, bool],
+    read_closed: set[socket.socket],
+) -> bool:
+    pending = pending_writes[sock]
+    if not pending:
+        return True
+    try:
+        sent = sock.send(pending)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    if sent == 0:
+        return False
+
+    del pending[:sent]
+    source = peers[sock]
+    if source not in read_closed and len(pending) <= _TUNNEL_BACKPRESSURE_RESUME_BYTES:
+        read_enabled[source] = True
+    _refresh_tunnel_interest(selector, registered, sock, read_enabled, pending_writes)
+    _refresh_tunnel_interest(selector, registered, source, read_enabled, pending_writes)
+    return source not in read_closed or bool(pending)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

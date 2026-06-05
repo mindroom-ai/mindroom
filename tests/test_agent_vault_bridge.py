@@ -9,6 +9,7 @@ import io
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
@@ -75,6 +76,16 @@ def _start_server(handler: type[BaseHTTPRequestHandler], *, host: str = "127.0.0
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return RunningServer(httpd=httpd, thread=thread)
+
+
+def _recv_until(sock: socket.socket, marker: bytes) -> bytes:
+    data = b""
+    while marker not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return data
+        data += chunk
+    return data
 
 
 @dataclass(slots=True)
@@ -306,6 +317,53 @@ def test_adapter_forwards_connect_proxy_authorization_and_tunnels_bytes() -> Non
     assert response.startswith(b"HTTP/1.0 200")
     assert tunneled_response == b"upstream:ping"
     assert seen_headers["proxy-authorization"] == "Bearer adapter-session"
+
+
+def test_adapter_connect_tunnel_handles_slow_reader_backpressure() -> None:
+    payload = b"x" * (8 * 1024 * 1024)
+    upstream_errors: list[Exception] = []
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+
+    def serve_large_tunnel_response() -> None:
+        try:
+            connection, _addr = fake_proxy.accept()
+            with connection:
+                _recv_until(connection, b"\r\n\r\n")
+                connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                assert connection.recv(1024) == b"request"
+                connection.sendall(payload)
+        except Exception as exc:
+            upstream_errors.append(exc)
+
+    fake_proxy_thread = threading.Thread(target=serve_large_tunnel_response, daemon=True)
+    fake_proxy_thread.start()
+    received = bytearray()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                client.settimeout(15)
+                client.sendall(b"CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n\r\n")
+                response = _recv_until(client, b"\r\n\r\n")
+                assert response.startswith(b"HTTP/1.0 200")
+                client.sendall(b"request")
+                time.sleep(0.5)
+                while len(received) < len(payload):
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert upstream_errors == []
+    assert len(received) == len(payload)
+    assert set(received) == {ord("x")}
 
 
 def test_adapter_converts_upstream_connect_407_to_bad_gateway() -> None:
