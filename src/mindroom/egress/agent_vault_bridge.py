@@ -238,7 +238,10 @@ def _forward_connect(
             handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
             return
         if response.status != 200:
-            _copy_connect_response(handler, response, upstream_sock)
+            try:
+                _copy_connect_response(handler, response, upstream_sock)
+            except (OSError, TimeoutError, http.client.HTTPException) as exc:
+                handler.send_error(502, f"Bad Gateway: {exc}")
             return
 
         handler.send_response(200, response.reason)
@@ -452,19 +455,28 @@ def _copy_connect_response(
 def _read_connect_response_body(sock: socket.socket, response: _ConnectResponse) -> bytes:
     headers = {key.lower(): value for key, value in response.headers}
     if "chunked" in headers.get("transfer-encoding", "").lower():
-        return _read_chunked_connect_response_body(sock, response.leftover)
+        try:
+            return _read_chunked_connect_response_body(sock, response.leftover)
+        except ValueError as exc:
+            msg = "malformed upstream CONNECT response body"
+            raise http.client.HTTPException(msg) from exc
     raw_length = headers.get("content-length")
     if raw_length is None:
         return response.leftover
     try:
         content_length = int(raw_length)
-    except ValueError:
-        return response.leftover
+    except ValueError as exc:
+        msg = f"malformed upstream CONNECT response Content-Length: {raw_length}"
+        raise http.client.HTTPException(msg) from exc
+    if content_length < 0:
+        msg = f"negative upstream CONNECT response Content-Length: {raw_length}"
+        raise http.client.HTTPException(msg)
     body = bytearray(response.leftover)
     while len(body) < content_length:
         chunk = sock.recv(content_length - len(body))
         if not chunk:
-            break
+            msg = f"upstream proxy closed before CONNECT response body completed ({len(body)}/{content_length} bytes)"
+            raise http.client.HTTPException(msg)
         body.extend(chunk)
     return bytes(body[:content_length])
 

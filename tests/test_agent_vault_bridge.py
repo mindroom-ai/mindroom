@@ -144,11 +144,16 @@ class ConnectHandler:
     rfile: _NullReader = field(default_factory=_NullReader)
     responses: list[tuple[int, str | None]] | None = None
     errors: list[tuple[int, str | None]] | None = None
+    headers: list[tuple[str, str]] | None = None
+    wfile: ConnectHandler = field(init=False)
+    body: bytes = b""
     ended_headers: int = 0
 
     def __post_init__(self) -> None:
         self.responses = []
         self.errors = []
+        self.headers = []
+        self.wfile = self
 
     def send_response(self, code: int, message: str | None = None) -> None:
         assert self.responses is not None
@@ -158,8 +163,15 @@ class ConnectHandler:
         assert self.errors is not None
         self.errors.append((code, message))
 
+    def send_header(self, key: str, value: str) -> None:
+        assert self.headers is not None
+        self.headers.append((key, value))
+
     def end_headers(self) -> None:
         self.ended_headers += 1
+
+    def write(self, body: bytes) -> None:
+        self.body += body
 
 
 def _forward_headers(
@@ -1039,6 +1051,25 @@ def test_copy_connect_response_decodes_chunked_body_when_transfer_encoding_is_st
     assert handler.ended_headers == 1
 
 
+@pytest.mark.parametrize("raw_length", ["-1", "not-an-int"])
+def test_connect_response_body_rejects_invalid_content_length(raw_length: str) -> None:
+    _client_sock, upstream_sock = socket.socketpair()
+    try:
+        with pytest.raises(http.client.HTTPException, match="upstream CONNECT response Content-Length"):
+            agent_vault_bridge._read_connect_response_body(
+                upstream_sock,
+                agent_vault_bridge._ConnectResponse(
+                    status=403,
+                    reason="Forbidden",
+                    headers=[("Content-Length", raw_length)],
+                    leftover=b"abc",
+                ),
+            )
+    finally:
+        _client_sock.close()
+        upstream_sock.close()
+
+
 def test_request_content_length_rejects_invalid_header() -> None:
     handler = RequestBodyHandler.from_pairs([("Content-Length", "not-an-int")])
 
@@ -1083,6 +1114,38 @@ def test_forward_connect_returns_bad_gateway_when_upstream_closes_before_respons
         connection.close()
 
     fake_proxy_thread = threading.Thread(target=close_before_response, daemon=True)
+    fake_proxy_thread.start()
+    handler = ConnectHandler()
+    try:
+        agent_vault_bridge._forward_connect(
+            handler,
+            proxy_host="127.0.0.1",
+            proxy_port=proxy_port,
+            proxy_authorization="Bearer adapter-session",
+        )
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert handler.responses == []
+    assert handler.errors
+    assert handler.errors[0][0] == 502
+
+
+def test_forward_connect_returns_bad_gateway_for_truncated_non_200_response_body() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    proxy_port = fake_proxy.getsockname()[1]
+
+    def send_truncated_forbidden() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            _recv_until(connection, b"\r\n\r\n")
+            connection.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 5\r\n\r\nabc")
+
+    fake_proxy_thread = threading.Thread(target=send_truncated_forbidden, daemon=True)
     fake_proxy_thread.start()
     handler = ConnectHandler()
     try:
