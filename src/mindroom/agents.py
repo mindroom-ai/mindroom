@@ -34,7 +34,12 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.timing import timed
 from mindroom.tool_approval import tool_requires_approval_for_openai_compat
-from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.catalog import (
+    TOOL_METADATA,
+    default_worker_routed_tools,
+    ensure_tool_registry_loaded,
+    get_tool_by_name,
+)
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
@@ -745,8 +750,6 @@ def _resolve_runtime_worker_tools(
     if configured is not None:
         return config.expand_tool_names(list(configured))
 
-    from mindroom.tool_system.catalog import default_worker_routed_tools, ensure_tool_registry_loaded  # noqa: PLC0415
-
     if not tool_registry_preloaded:
         ensure_tool_registry_loaded(runtime_paths, config)
     return default_worker_routed_tools(runtime_tool_names)
@@ -956,8 +959,6 @@ def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -
 
 @timed("system_prompt_assembly.agent_create.tool_registry_sync")
 def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePaths) -> None:
-    from mindroom.tool_system.catalog import ensure_tool_registry_loaded  # noqa: PLC0415
-
     ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
 
 
