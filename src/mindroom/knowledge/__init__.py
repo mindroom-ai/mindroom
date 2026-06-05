@@ -2,6 +2,7 @@
 
 # ruff: noqa: RUF022
 
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import list_knowledge_files
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
@@ -16,6 +17,7 @@ from mindroom.knowledge.utils import (
 
 __all__ = [
     "KnowledgeAccessSupport",
+    "KnowledgeAvailability",
     "KnowledgeBaseAccessResolution",
     "KnowledgeAvailabilityDetail",
     "format_knowledge_availability_notice",

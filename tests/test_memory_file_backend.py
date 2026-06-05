@@ -256,7 +256,7 @@ def config(storage_path: Path) -> Config:
 
 
 @pytest.mark.asyncio
-async def test_semantic_memory_search_uses_knowledge_published_index(
+async def test_semantic_memory_search_uses_ready_published_index_without_refresh(
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -322,7 +322,7 @@ async def test_semantic_memory_search_uses_knowledge_published_index(
 
     assert results[0]["memory"] == "Published semantic memory."
     assert access_base_ids
-    assert scheduled_base_ids == access_base_ids
+    assert scheduled_base_ids == []
 
 
 class _FakeSemanticTimingKnowledge:
@@ -336,11 +336,6 @@ class _FakeSemanticTimingKnowledge:
                 reranking_score=0.8,
             ),
         ]
-
-
-class _FakeSemanticTimingScheduler:
-    def schedule_refresh(self, *_args: object, **_kwargs: object) -> None:
-        return None
 
 
 @pytest.mark.asyncio
@@ -366,7 +361,6 @@ async def test_semantic_memory_search_emits_nested_query_timings(
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args, **_kwargs: [memory_file.resolve()])
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", _FakeSemanticTimingScheduler())
     monkeypatch.setattr(semantic_file_search, "emit_elapsed_timing", emit_timing)
 
     results = await semantic_file_search.search_semantic_file_memories(

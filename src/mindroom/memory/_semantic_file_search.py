@@ -8,7 +8,12 @@ import time
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.knowledge import KnowledgeRefreshScheduler, list_knowledge_files, resolve_knowledge_base_access
+from mindroom.knowledge import (
+    KnowledgeAvailability,
+    KnowledgeRefreshScheduler,
+    list_knowledge_files,
+    resolve_knowledge_base_access,
+)
 from mindroom.logging_config import get_logger
 from mindroom.memory._shared import MemoryResult
 from mindroom.timing import emit_elapsed_timing
@@ -205,15 +210,17 @@ async def search_semantic_file_memories(
         timing_scope=timing_scope,
         availability=resolution.availability.value,
     )
+    refresh_scheduled = False
     schedule_start = time.monotonic()
-    refresh_scheduled = schedule_semantic_file_memory_refresh(
-        scope_user_id=scope_user_id,
-        root=root,
-        config=config,
-        runtime_paths=runtime_paths,
-        search_config=search_config,
-        execution_identity=execution_identity,
-    )
+    if resolution.availability is not KnowledgeAvailability.READY:
+        refresh_scheduled = schedule_semantic_file_memory_refresh(
+            scope_user_id=scope_user_id,
+            root=root,
+            config=config,
+            runtime_paths=runtime_paths,
+            search_config=search_config,
+            execution_identity=execution_identity,
+        )
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.published_index.schedule_refresh",
         schedule_start,
