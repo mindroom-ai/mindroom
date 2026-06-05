@@ -268,6 +268,46 @@ If proxied shell commands need extra PATH entries such as wrapper directories, c
 This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates.
 That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
+## Brokered worker egress
+
+For tools that should call external APIs without receiving the real upstream credential, configure a worker egress broker.
+MindRoom injects proxy and CA env into worker-routed `shell` and `python` requests; the worker process then uses the proxy for HTTP(S) traffic.
+This does not inspect command lines or match API URLs, so URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the broker.
+
+Example:
+
+```yaml
+worker_egress_brokers:
+  agent_vault:
+    proxy_url: http://agent-vault-bridge-adapter:18080
+    ca_bundle: /etc/ssl/agent-vault-ca.pem
+    no_proxy: localhost,127.0.0.1,.svc
+
+defaults:
+  worker_tools: [shell, python]
+  worker_scope: user_agent
+  worker_egress_broker: agent_vault
+
+agents:
+  code:
+    display_name: Code
+    tools: [shell, python]
+```
+
+For each brokered worker request MindRoom adds:
+
+- `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy`
+- `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `SSL_CERT_FILE` when `ca_bundle` is set
+- `NO_PROXY` and `no_proxy` when `no_proxy` is set
+
+Agent-level `worker_egress_broker` overrides `defaults.worker_egress_broker`.
+Set `worker_egress_broker: false` on an agent to disable an inherited broker.
+Unknown broker names fail config validation when the agent is built.
+
+Broker profiles are backend-neutral: the same config works for Docker/static runners and dedicated Kubernetes workers as long as the worker can reach `proxy_url` and read the configured CA path.
+The proxy should be an adapter or broker that owns the real credential or broker session.
+Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
+
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
 These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.

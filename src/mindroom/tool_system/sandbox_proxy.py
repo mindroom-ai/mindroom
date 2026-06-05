@@ -504,19 +504,25 @@ def _execution_env_payload(
     *,
     runtime_paths: RuntimePaths,
     extra_env_passthrough: str | None = None,
+    worker_egress_env: Mapping[str, str] | None = None,
 ) -> dict[str, str] | None:
     """Return explicit execution env only for tools that intentionally support it."""
     if tool_name not in _EXECUTION_ENV_TOOL_NAMES:
         return None
+    env: dict[str, str]
     if tool_name == "shell":
-        return dict(
+        env = dict(
             sandbox_shell_execution_runtime_env_values(
                 runtime_paths,
                 extra_env_passthrough=extra_env_passthrough,
                 process_env=runtime_paths.process_env,
             ),
         )
-    return dict(execution_tool_runtime_env_values(runtime_paths))
+    else:
+        env = dict(execution_tool_runtime_env_values(runtime_paths))
+    if worker_egress_env:
+        env.update(worker_egress_env)
+    return env
 
 
 def _request_headers_for_handle(
@@ -1043,6 +1049,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     extra_env_passthrough: str | None = None,
+    worker_egress_env: Mapping[str, str] | None = None,
     worker_tools_override: list[str] | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> Toolkit:
@@ -1063,6 +1070,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         runtime_paths=runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
+        worker_egress_env=worker_egress_env,
     )
     original_functions = toolkit.functions
     original_async_functions = toolkit.async_functions

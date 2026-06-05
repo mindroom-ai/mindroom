@@ -349,6 +349,13 @@ class DefaultsConfig(BaseModel):
         default=None,
         description="Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
+    worker_egress_broker: str | Literal[False] | None = Field(
+        default=None,
+        description=(
+            "Default worker egress broker profile name for worker-routed execution tools "
+            "(None = no broker; false = no broker)"
+        ),
+    )
     worker_grantable_credentials: list[str] | None = Field(
         default=None,
         description=(

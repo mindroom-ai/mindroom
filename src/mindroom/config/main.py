@@ -44,6 +44,7 @@ from mindroom.config.models import (
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
+from mindroom.config.worker_egress import ResolvedWorkerEgressBroker, WorkerEgressBrokerConfig
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
@@ -124,6 +125,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
     "matrix_delivery",
+    "worker_egress_brokers",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
 
@@ -358,6 +360,10 @@ class Config(BaseModel):
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
         description="MCP server configurations keyed by server id",
+    )
+    worker_egress_brokers: dict[str, WorkerEgressBrokerConfig] = Field(
+        default_factory=dict,
+        description="Worker execution egress broker profiles keyed by broker name",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
@@ -1117,6 +1123,22 @@ class Config(BaseModel):
         if configured is None:
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
+
+    def get_agent_worker_egress_broker(self, agent_name: str) -> ResolvedWorkerEgressBroker | None:
+        """Return resolved worker egress broker env for one agent, if configured."""
+        agent_config = self.get_agent(agent_name)
+        broker_reference = agent_config.worker_egress_broker
+        if broker_reference is None:
+            broker_reference = self.defaults.worker_egress_broker
+        if broker_reference is False or broker_reference is None:
+            return None
+
+        broker = self.worker_egress_brokers.get(broker_reference)
+        if broker is None:
+            available = ", ".join(sorted(self.worker_egress_brokers)) or "(none)"
+            msg = f"Unknown worker_egress_broker '{broker_reference}'. Available worker_egress_brokers: {available}"
+            raise ConfigRuntimeValidationError(msg)
+        return ResolvedWorkerEgressBroker(name=broker_reference, execution_env=broker.execution_env())
 
     def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.

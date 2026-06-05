@@ -502,6 +502,7 @@ def _build_tool_instance(
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int,
+    worker_egress_env: Mapping[str, str] | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
@@ -582,6 +583,7 @@ def _build_tool_instance(
         tool_init_overrides=proxy_tool_init_overrides or None,
         tool_config_overrides=validated_tool_config_overrides,
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
+        worker_egress_env=worker_egress_env,
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,
         worker_target=worker_target,
@@ -603,6 +605,7 @@ def get_tool_by_name(
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    worker_egress_env: Mapping[str, str] | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
@@ -626,6 +629,7 @@ def get_tool_by_name(
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=tool_output_workspace_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        worker_egress_env=worker_egress_env,
         worker_target=worker_target,
     )
 
