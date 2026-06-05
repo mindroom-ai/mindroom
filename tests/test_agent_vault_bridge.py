@@ -32,6 +32,7 @@ _HOP_BY_HOP_HEADERS = {
     "proxy-authenticate",
     "proxy-authorization",
     "te",
+    "trailer",
     "trailers",
     "transfer-encoding",
     "upgrade",
@@ -535,7 +536,11 @@ def test_adapter_closes_http_response_when_upstream_uses_chunked_encoding() -> N
         with connection:
             _recv_until(connection, b"\r\n\r\n")
             connection.sendall(
-                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\n"
+                b"Transfer-Encoding: chunked\r\n"
+                b"Trailer: X-Checksum\r\n"
+                b"\r\n"
+                b"5\r\nhello\r\n0\r\nX-Checksum: abc\r\n\r\n",
             )
 
     fake_proxy_thread = threading.Thread(target=serve_chunked_response_proxy, daemon=True)
@@ -559,6 +564,7 @@ def test_adapter_closes_http_response_when_upstream_uses_chunked_encoding() -> N
 
     assert header_bytes.startswith(b"HTTP/1.0 200")
     assert b"Transfer-Encoding" not in header_bytes
+    assert b"Trailer" not in header_bytes
     assert body == b"hello"
 
 
@@ -957,8 +963,9 @@ def test_copy_connect_response_decodes_chunked_body_when_transfer_encoding_is_st
                 reason="Forbidden",
                 headers=[
                     ("Transfer-Encoding", "chunked"),
+                    ("Trailer", "X-Checksum"),
                 ],
-                leftover=b"5\r\nerror\r\n0\r\n\r\n",
+                leftover=b"5\r\nerror\r\n0\r\nX-Checksum: abc\r\n\r\n",
             ),
             upstream_sock,
         )
