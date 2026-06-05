@@ -300,6 +300,60 @@ def test_adapter_streams_http_request_body_before_full_content_length_arrives() 
     assert body == b"ok"
 
 
+def test_adapter_streams_chunked_http_request_body_before_full_chunk_arrives(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_vault_bridge, "_HTTP_STREAM_CHUNK_BYTES", len(b"first"))
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    upstream_received = bytearray()
+    first_body_bytes_seen = threading.Event()
+
+    def serve_streaming_chunked_request_proxy() -> None:
+        connection, _addr = fake_proxy.accept()
+        connection.settimeout(5)
+        with connection, connection.makefile("rb") as reader:
+            assert reader.readline().startswith(b"POST ")
+            while reader.readline() != b"\r\n":
+                pass
+            assert reader.readline() == b"b\r\n"
+            upstream_received.extend(reader.read(len(b"first")))
+            first_body_bytes_seen.set()
+            upstream_received.extend(reader.read(len(b"second")))
+            assert reader.read(2) == b"\r\n"
+            assert reader.readline() == b"0\r\n"
+            assert reader.readline() == b"\r\n"
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    fake_proxy_thread = threading.Thread(target=serve_streaming_chunked_request_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(5)
+                client.sendall(
+                    b"POST http://example.test/upload HTTP/1.1\r\n"
+                    b"Host: example.test\r\n"
+                    b"Transfer-Encoding: chunked\r\n"
+                    b"\r\n"
+                    b"b\r\n"
+                    b"first",
+                )
+                assert first_body_bytes_seen.wait(timeout=2)
+                client.sendall(b"second\r\n0\r\n\r\n")
+                response = _recv_until(client, b"\r\n\r\n")
+                _headers, _separator, body = response.partition(b"\r\n\r\n")
+                while len(body) < len(b"ok"):
+                    body += client.recv(1024)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert bytes(upstream_received) == b"firstsecond"
+    assert body == b"ok"
+
+
 def test_adapter_streams_http_response_body_before_full_response_arrives() -> None:
     fake_proxy = socket.socket()
     fake_proxy.settimeout(5)
@@ -450,8 +504,10 @@ def test_adapter_forwards_connect_proxy_authorization_and_tunnels_bytes() -> Non
     assert seen_headers["proxy-authorization"] == "Bearer adapter-session"
 
 
-def test_adapter_connect_tunnel_handles_slow_reader_backpressure() -> None:
-    payload = b"x" * (8 * 1024 * 1024)
+def test_adapter_connect_tunnel_handles_slow_reader_backpressure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_BACKPRESSURE_LIMIT_BYTES", 32 * 1024)
+    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_BACKPRESSURE_RESUME_BYTES", 16 * 1024)
+    payload = b"x" * (512 * 1024)
     upstream_errors: list[Exception] = []
     fake_proxy = socket.socket()
     fake_proxy.settimeout(5)
@@ -609,6 +665,70 @@ def test_forward_headers_combines_duplicate_client_headers() -> None:
         "X-Trace": "first, second",
         "Proxy-Authorization": "Bearer adapter-session",
     }
+
+
+def test_forward_headers_strips_connection_nominated_headers() -> None:
+    headers = agent_vault_bridge._forward_headers(
+        [
+            ("Connection", "X-Hop, keep-alive"),
+            ("X-Hop", "secret"),
+            ("X-Trace", "visible"),
+        ],
+        proxy_authorization="Bearer adapter-session",
+    )
+
+    assert headers == {
+        "X-Trace": "visible",
+        "Proxy-Authorization": "Bearer adapter-session",
+    }
+
+
+def test_copy_response_strips_connection_nominated_headers_and_closes_on_stream_failure() -> None:
+    class RaisingBodyResponse:
+        status = 200
+        reason = "OK"
+
+        def getheaders(self) -> list[tuple[str, str]]:
+            return [
+                ("Connection", "X-Hop"),
+                ("X-Hop", "secret"),
+                ("Content-Type", "text/plain"),
+            ]
+
+        def read1(self, _size: int) -> bytes:
+            msg = "upstream stream failed"
+            raise OSError(msg)
+
+    class CapturingHandler:
+        close_connection = False
+
+        def __init__(self) -> None:
+            self.responses: list[tuple[int, str]] = []
+            self.headers: list[tuple[str, str]] = []
+            self.ended_headers = 0
+            self.wfile = self
+
+        def send_response(self, code: int, message: str) -> None:
+            self.responses.append((code, message))
+
+        def send_header(self, key: str, value: str) -> None:
+            self.headers.append((key, value))
+
+        def end_headers(self) -> None:
+            self.ended_headers += 1
+
+        def write(self, _chunk: bytes) -> None:
+            msg = "response body write should not run"
+            raise AssertionError(msg)
+
+    handler = CapturingHandler()
+
+    agent_vault_bridge._copy_response(handler, RaisingBodyResponse())
+
+    assert handler.responses == [(200, "OK")]
+    assert handler.headers == [("Content-Type", "text/plain")]
+    assert handler.ended_headers == 1
+    assert handler.close_connection is True
 
 
 def test_request_content_length_rejects_invalid_header() -> None:

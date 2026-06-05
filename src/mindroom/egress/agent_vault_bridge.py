@@ -303,15 +303,18 @@ def _stream_chunked_request_body(
             _stream_chunked_trailers(handler, connection)
             return
 
-        chunk = handler.rfile.read(size)
-        if len(chunk) != size:
-            msg = "Incomplete chunked request body"
-            raise ValueError(msg)
+        remaining = size
+        while remaining:
+            chunk = handler.rfile.read(min(remaining, _HTTP_STREAM_CHUNK_BYTES))
+            if not chunk:
+                msg = "Incomplete chunked request body"
+                raise ValueError(msg)
+            connection.send(chunk)
+            remaining -= len(chunk)
         terminator = handler.rfile.read(2)
         if terminator != b"\r\n":
             msg = "Malformed chunked request body"
             raise ValueError(msg)
-        connection.send(chunk)
         connection.send(terminator)
 
 
@@ -419,11 +422,13 @@ def _forward_headers(
     *,
     proxy_authorization: str,
 ) -> dict[str, str]:
+    header_items = list(items)
+    connection_header_names = _connection_header_names(header_items)
     headers: dict[str, str] = {}
     header_names: dict[str, str] = {}
-    for key, value in items:
+    for key, value in header_items:
         normalized_key = key.lower()
-        if normalized_key in _HOP_BY_HOP_HEADERS:
+        if normalized_key in _HOP_BY_HOP_HEADERS or normalized_key in connection_header_names:
             continue
         existing_key = header_names.get(normalized_key)
         if existing_key is None:
@@ -435,12 +440,23 @@ def _forward_headers(
     return headers
 
 
+def _connection_header_names(items: Iterable[tuple[str, str]]) -> set[str]:
+    names: set[str] = set()
+    for key, value in items:
+        if key.lower() != "connection":
+            continue
+        names.update(token.strip().lower() for token in value.split(",") if token.strip())
+    return names
+
+
 def _copy_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPResponse) -> None:
     handler.send_response(response.status, response.reason)
     has_content_length = False
-    for key, value in response.getheaders():
+    response_headers = response.getheaders()
+    connection_header_names = _connection_header_names(response_headers)
+    for key, value in response_headers:
         normalized_key = key.lower()
-        if normalized_key in _HOP_BY_HOP_HEADERS:
+        if normalized_key in _HOP_BY_HOP_HEADERS or normalized_key in connection_header_names:
             continue
         if normalized_key == "content-length":
             has_content_length = True
@@ -448,8 +464,11 @@ def _copy_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPRe
     if not has_content_length:
         handler.close_connection = True
     handler.end_headers()
-    while chunk := response.read1(_HTTP_STREAM_CHUNK_BYTES):
-        handler.wfile.write(chunk)
+    try:
+        while chunk := response.read1(_HTTP_STREAM_CHUNK_BYTES):
+            handler.wfile.write(chunk)
+    except (OSError, TimeoutError, http.client.HTTPException):
+        handler.close_connection = True
 
 
 def _tunnel_sockets(
