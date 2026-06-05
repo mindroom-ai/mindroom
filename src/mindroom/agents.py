@@ -128,13 +128,6 @@ _PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
 ] = WeakValueDictionary()
 
 
-class _UnsetToolRuntimeOverrides:
-    """Sentinel for runtime overrides that have not been resolved yet."""
-
-
-_UNSET_TOOL_RUNTIME_OVERRIDES = _UnsetToolRuntimeOverrides()
-
-
 def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
     """Resolve tool-call visibility for one agent from current config."""
     agent_config = config.agents.get(agent_name)
@@ -558,16 +551,17 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     config: Config,
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
+    runtime_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None,
     session_id: str | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    runtime_overrides: dict[str, object] | None | _UnsetToolRuntimeOverrides = _UNSET_TOOL_RUNTIME_OVERRIDES,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
+    Callers own runtime override resolution before invoking this builder.
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
     """
@@ -690,11 +684,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         )
 
     worker_egress_broker = config.get_agent_worker_egress_broker(agent_name)
-    resolved_runtime_overrides = (
-        config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths)
-        if runtime_overrides is _UNSET_TOOL_RUNTIME_OVERRIDES
-        else cast("dict[str, object] | None", runtime_overrides)
-    )
     return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
@@ -709,7 +698,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.is_private,
         execution_identity,
-        resolved_runtime_overrides,
+        runtime_overrides,
         worker_egress_broker.execution_env if worker_egress_broker is not None else None,
     )
 
@@ -1221,13 +1210,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 config=config,
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
+                runtime_overrides=runtime_overrides,
                 agent_runtime=agent_runtime,
                 tool_config_overrides=resolved_tool_configs.get(tool_name),
                 session_id=session_id,
                 execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                runtime_overrides=runtime_overrides,
             )
             if toolkit:
                 toolkit = _prune_openai_approval_gated_tools(

@@ -193,6 +193,7 @@ def test_build_agent_toolkit_passes_worker_egress_env_to_registered_tools(
         config=config,
         runtime_paths=runtime_paths,
         worker_tools=["shell"],
+        runtime_overrides=config.get_agent_tool_runtime_overrides("code", "shell", runtime_paths=runtime_paths),
         execution_identity=None,
     )
 

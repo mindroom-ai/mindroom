@@ -826,6 +826,7 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
         config=config,
         runtime_paths=runtime_paths,
         worker_tools=[],
+        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
@@ -856,6 +857,7 @@ def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path)
         config=config,
         runtime_paths=runtime_paths,
         worker_tools=[],
+        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
