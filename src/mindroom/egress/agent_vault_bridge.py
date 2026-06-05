@@ -683,6 +683,12 @@ def _tunnel_is_idle(activity: _TunnelActivity) -> bool:
 
 
 def _shutdown_tunnel(*socks: socket.socket) -> None:
+    # Intentional: a hard error or an idle/send-wedge on one relay direction tears down BOTH
+    # directions rather than half-closing. A CONNECT tunnel carries a single (TLS) session, so a
+    # direction that has errored or made no progress for the idle timeout means the session is
+    # effectively dead; full teardown also guarantees the peer relay thread and its socket are
+    # released instead of leaking. (If a real workload ever needs strict half-close so a live
+    # reverse stream survives a wedged forward direction, distinguish the send-timeout case here.)
     for sock in socks:
         with suppress(OSError):
             sock.shutdown(socket.SHUT_RDWR)
