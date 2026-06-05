@@ -504,9 +504,7 @@ def test_adapter_forwards_connect_proxy_authorization_and_tunnels_bytes() -> Non
     assert seen_headers["proxy-authorization"] == "Bearer adapter-session"
 
 
-def test_adapter_connect_tunnel_handles_slow_reader_backpressure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_BACKPRESSURE_LIMIT_BYTES", 32 * 1024)
-    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_BACKPRESSURE_RESUME_BYTES", 16 * 1024)
+def test_adapter_connect_tunnel_handles_slow_reader_backpressure() -> None:
     payload = b"x" * (512 * 1024)
     upstream_errors: list[Exception] = []
     fake_proxy = socket.socket()
