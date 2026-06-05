@@ -313,6 +313,67 @@ def test_adapter_streams_http_request_body_before_full_content_length_arrives() 
     assert body == b"ok"
 
 
+def test_adapter_answers_expect_continue_before_reading_http_request_body() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    upstream_received = bytearray()
+    upstream_headers: dict[str, str] = {}
+    upstream_errors: list[Exception] = []
+
+    def serve_expect_continue_proxy() -> None:
+        try:
+            connection, _addr = fake_proxy.accept()
+            with connection:
+                request = _recv_until(connection, b"\r\n\r\n")
+                header_bytes, _separator, body = request.partition(b"\r\n\r\n")
+                for line in header_bytes.decode("iso-8859-1").split("\r\n")[1:]:
+                    if not line:
+                        continue
+                    key, value = line.split(":", 1)
+                    upstream_headers[key.lower()] = value.strip()
+                upstream_received.extend(body)
+                while len(upstream_received) < len(b"request-body"):
+                    chunk = connection.recv(len(b"request-body") - len(upstream_received))
+                    if not chunk:
+                        return
+                    upstream_received.extend(chunk)
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        except Exception as exc:
+            upstream_errors.append(exc)
+
+    fake_proxy_thread = threading.Thread(target=serve_expect_continue_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(1)
+                client.sendall(
+                    b"POST http://example.test/upload HTTP/1.1\r\n"
+                    b"Host: example.test\r\n"
+                    b"Content-Length: 12\r\n"
+                    b"Expect: 100-continue\r\n"
+                    b"\r\n",
+                )
+                interim_response = _recv_until(client, b"\r\n\r\n")
+                client.sendall(b"request-body")
+                final_response = _recv_until(client, b"\r\n\r\n")
+                _headers, _separator, body = final_response.partition(b"\r\n\r\n")
+                while len(body) < len(b"ok"):
+                    body += client.recv(1024)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert upstream_errors == []
+    assert interim_response.startswith(b"HTTP/1.0 100")
+    assert body == b"ok"
+    assert bytes(upstream_received) == b"request-body"
+    assert "expect" not in upstream_headers
+
+
 def test_adapter_streams_chunked_http_request_body_before_full_chunk_arrives(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent_vault_bridge, "_HTTP_STREAM_CHUNK_BYTES", len(b"first"))
     fake_proxy = socket.socket()

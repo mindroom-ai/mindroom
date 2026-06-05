@@ -171,14 +171,18 @@ def _forward_http_request(
         handler.send_error(400, str(exc))
         return
     is_chunked = "chunked" in handler.headers.get("Transfer-Encoding", "").lower()
+    expects_continue = handler.headers.get("Expect", "").lower() == "100-continue"
     headers = _forward_headers(handler.headers.items(), proxy_authorization=proxy_authorization)
+    if expects_continue:
+        _remove_header(headers, "expect")
     if is_chunked:
-        for key in list(headers):
-            if key.lower() == "content-length":
-                del headers[key]
+        _remove_header(headers, "content-length")
         headers["Transfer-Encoding"] = "chunked"
     connection = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
     try:
+        if expects_continue:
+            handler.send_response_only(100)
+            handler.end_headers()
         _send_streaming_request(
             connection,
             handler,
@@ -445,6 +449,12 @@ def _forward_headers(
             headers[existing_key] = f"{headers[existing_key]}, {value}"
     headers["Proxy-Authorization"] = proxy_authorization
     return headers
+
+
+def _remove_header(headers: dict[str, str], header_name: str) -> None:
+    for key in list(headers):
+        if key.lower() == header_name:
+            del headers[key]
 
 
 def _connection_header_names(items: Iterable[tuple[str, str]]) -> set[str]:
