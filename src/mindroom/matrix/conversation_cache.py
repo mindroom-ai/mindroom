@@ -78,7 +78,7 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
-_STARTUP_PREWARM_THREAD_CONCURRENCY = 4
+_STARTUP_PREWARM_THREAD_CONCURRENCY = 8
 type _StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
 
 

@@ -665,7 +665,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
     bot = _agent_bot(tmp_path)
     bot._conversation_cache.logger = MagicMock()
     thread_ids = [f"$thread-{index}:localhost" for index in range(40)]
-    expected_concurrency = 4
+    expected_concurrency = 8
     all_concurrent_refreshes_started = asyncio.Event()
     release_refreshes = asyncio.Event()
     started_thread_ids: list[str] = []
