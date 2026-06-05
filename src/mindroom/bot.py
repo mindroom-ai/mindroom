@@ -717,17 +717,16 @@ class AgentBot:
 
     async def _prewarm_claimed_startup_thread_room(self, room_id: str) -> None:
         """Prewarm one claimed room and release the claim unless the room-level pass finishes."""
+        completed = False
         try:
             async with self.startup_thread_prewarm_registry.room_slot():
                 completed = await self._conversation_cache.prewarm_recent_room_threads(
                     room_id,
                     is_shutting_down=lambda: self._sync_shutting_down,
                 )
-        except asyncio.CancelledError:
-            await self.startup_thread_prewarm_registry.release(room_id)
-            raise
-        if not completed:
-            await self.startup_thread_prewarm_registry.release(room_id)
+        finally:
+            if not completed:
+                await self.startup_thread_prewarm_registry.release(room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
         """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""

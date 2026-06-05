@@ -52,11 +52,8 @@ class StartupThreadPrewarmRegistry:
     @asynccontextmanager
     async def room_slot(self) -> AsyncIterator[None]:
         """Limit concurrent room-level startup prewarm work across all bots."""
-        await self._room_slots.acquire()
-        try:
+        async with self._room_slots:
             yield
-        finally:
-            self._room_slots.release()
 
 
 @dataclass(frozen=True, slots=True)

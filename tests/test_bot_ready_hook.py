@@ -730,9 +730,22 @@ async def test_startup_thread_prewarm_limits_room_work_across_bots(tmp_path: Pat
     second_bot._get_startup_thread_prewarm_joined_rooms = AsyncMock(return_value=["!second:localhost"])
     first_started = asyncio.Event()
     release_first = asyncio.Event()
+    second_waiting_for_slot = asyncio.Event()
     active_rooms = 0
     max_active_rooms = 0
+    room_slot_attempts = 0
     warmed_rooms: list[str] = []
+
+    original_room_slot = shared_registry.room_slot
+
+    @asynccontextmanager
+    async def observed_room_slot() -> AsyncIterator[None]:
+        nonlocal room_slot_attempts
+        room_slot_attempts += 1
+        if room_slot_attempts == 2:
+            second_waiting_for_slot.set()
+        async with original_room_slot():
+            yield
 
     async def prewarm_room(room_id: str, *, is_shutting_down: object) -> bool:
         nonlocal active_rooms, max_active_rooms
@@ -748,11 +761,12 @@ async def test_startup_thread_prewarm_limits_room_work_across_bots(tmp_path: Pat
 
     first_bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=prewarm_room)
     second_bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=prewarm_room)
+    shared_registry.room_slot = observed_room_slot
 
     first_task = asyncio.create_task(first_bot._run_startup_thread_prewarm())
     await asyncio.wait_for(first_started.wait(), timeout=1.0)
     second_task = asyncio.create_task(second_bot._run_startup_thread_prewarm())
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(second_waiting_for_slot.wait(), timeout=1.0)
 
     assert warmed_rooms == ["!first:localhost"]
     release_first.set()
@@ -760,6 +774,22 @@ async def test_startup_thread_prewarm_limits_room_work_across_bots(tmp_path: Pat
 
     assert warmed_rooms == ["!first:localhost", "!second:localhost"]
     assert max_active_rooms == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_releases_room_claim_after_failure(tmp_path: Path) -> None:
+    """Unexpected room prewarm errors should release the claim so another bot can retry."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!room:localhost"
+    registry = StartupThreadPrewarmRegistry()
+    bot.startup_thread_prewarm_registry = registry
+    assert await registry.try_claim(room_id)
+    bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await bot._prewarm_claimed_startup_thread_room(room_id)
+
+    assert await registry.try_claim(room_id)
 
 
 @pytest.mark.asyncio
