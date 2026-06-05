@@ -354,6 +354,60 @@ def test_adapter_streams_chunked_http_request_body_before_full_chunk_arrives(mon
     assert body == b"ok"
 
 
+def test_adapter_strips_content_length_from_chunked_requests_case_insensitively() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    seen_headers: dict[str, str] = {}
+    upstream_errors: list[Exception] = []
+
+    def serve_chunked_request_proxy() -> None:
+        try:
+            connection, _addr = fake_proxy.accept()
+            with connection:
+                request = _recv_until(connection, b"\r\n\r\n")
+                header_bytes, _separator, body = request.partition(b"\r\n\r\n")
+                for line in header_bytes.decode("iso-8859-1").split("\r\n")[1:]:
+                    if not line:
+                        continue
+                    key, value = line.split(":", 1)
+                    seen_headers[key.lower()] = value.strip()
+                while b"0\r\n\r\n" not in body:
+                    chunk = connection.recv(1024)
+                    if not chunk:
+                        break
+                    body += chunk
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        except Exception as exc:
+            upstream_errors.append(exc)
+
+    fake_proxy_thread = threading.Thread(target=serve_chunked_request_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(5)
+                client.sendall(
+                    b"POST http://example.test/upload HTTP/1.1\r\n"
+                    b"Host: example.test\r\n"
+                    b"content-length: 999\r\n"
+                    b"Transfer-Encoding: chunked\r\n"
+                    b"\r\n"
+                    b"5\r\nhello\r\n0\r\n\r\n",
+                )
+                response = _recv_until(client, b"\r\n\r\n")
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert upstream_errors == []
+    assert response.startswith(b"HTTP/1.0 200")
+    assert "content-length" not in seen_headers
+    assert seen_headers["transfer-encoding"] == "chunked"
+
+
 def test_adapter_streams_http_response_body_before_full_response_arrives() -> None:
     fake_proxy = socket.socket()
     fake_proxy.settimeout(5)
@@ -747,6 +801,53 @@ def test_copy_response_strips_connection_nominated_headers_and_closes_on_stream_
     assert handler.headers == [("Content-Type", "text/plain")]
     assert handler.ended_headers == 1
     assert handler.close_connection is True
+
+
+def test_copy_connect_response_strips_connection_nominated_headers() -> None:
+    class CapturingHandler:
+        def __init__(self) -> None:
+            self.responses: list[tuple[int, str]] = []
+            self.headers: list[tuple[str, str]] = []
+            self.ended_headers = 0
+            self.wfile = self
+
+        def send_response(self, code: int, message: str) -> None:
+            self.responses.append((code, message))
+
+        def send_header(self, key: str, value: str) -> None:
+            self.headers.append((key, value))
+
+        def end_headers(self) -> None:
+            self.ended_headers += 1
+
+        def write(self, _body: bytes) -> None:
+            msg = "empty CONNECT response body should not be written"
+            raise AssertionError(msg)
+
+    _client_sock, upstream_sock = socket.socketpair()
+    handler = CapturingHandler()
+    try:
+        agent_vault_bridge._copy_connect_response(
+            handler,
+            agent_vault_bridge._ConnectResponse(
+                status=403,
+                reason="Forbidden",
+                headers=[
+                    ("Connection", "X-Hop"),
+                    ("X-Hop", "secret"),
+                    ("Content-Length", "0"),
+                ],
+                leftover=b"",
+            ),
+            upstream_sock,
+        )
+    finally:
+        _client_sock.close()
+        upstream_sock.close()
+
+    assert handler.responses == [(403, "Forbidden")]
+    assert handler.headers == [("Content-Length", "0")]
+    assert handler.ended_headers == 1
 
 
 def test_request_content_length_rejects_invalid_header() -> None:

@@ -173,7 +173,9 @@ def _forward_http_request(
     is_chunked = "chunked" in handler.headers.get("Transfer-Encoding", "").lower()
     headers = _forward_headers(handler.headers.items(), proxy_authorization=proxy_authorization)
     if is_chunked:
-        headers.pop("Content-Length", None)
+        for key in list(headers):
+            if key.lower() == "content-length":
+                del headers[key]
         headers["Transfer-Encoding"] = "chunked"
     connection = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
     try:
@@ -393,8 +395,10 @@ def _copy_connect_response(
 ) -> None:
     body = _read_connect_response_body(sock, response)
     handler.send_response(response.status, response.reason)
+    connection_header_names = _connection_header_names(response.headers)
     for key, value in response.headers:
-        if key.lower() in _HOP_BY_HOP_HEADERS:
+        normalized_key = key.lower()
+        if normalized_key in _HOP_BY_HOP_HEADERS or normalized_key in connection_header_names:
             continue
         handler.send_header(key, value)
     handler.end_headers()
