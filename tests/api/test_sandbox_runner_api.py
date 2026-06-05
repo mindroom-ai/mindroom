@@ -1928,9 +1928,11 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="shell",
             function_name="run_shell_command",
+            worker_key="v1:default:unscoped:code",
             execution_env={
                 "HTTP_PROXY": "http://agent-vault-adapter:18080",
                 "http_proxy": "http://agent-vault-adapter:18080",
+                "PATH": "/host/bin",
                 "MINDROOM_CONFIG_PATH": "/bad/config.yaml",
                 "MINDROOM_STORAGE_PATH": "/bad/storage",
                 SHARED_CREDENTIALS_PATH_ENV: "/bad/credentials",
@@ -1943,12 +1945,58 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
 
     assert prepared_request.execution_env["HTTP_PROXY"] == "http://agent-vault-adapter:18080"
     assert prepared_request.execution_env["http_proxy"] == "http://agent-vault-adapter:18080"
+    assert prepared_request.execution_env["PATH"].startswith(str(worker_paths.venv_dir / "bin"))
+    assert "/host/bin" in prepared_request.execution_env["PATH"]
+    worker_path_entries = sandbox_exec_module.worker_subprocess_env(worker_paths)["PATH"].split(os.pathsep)
+    prepared_path_entries = prepared_request.execution_env["PATH"].split(os.pathsep)
+    assert all(entry in prepared_path_entries for entry in worker_path_entries)
     assert "MINDROOM_CONFIG_PATH" not in prepared_request.execution_env
     assert "MINDROOM_STORAGE_PATH" not in prepared_request.execution_env
     assert SHARED_CREDENTIALS_PATH_ENV not in prepared_request.execution_env
     assert subprocess_context.subprocess_env is not None
     assert subprocess_context.subprocess_env["HTTP_PROXY"] == "http://agent-vault-adapter:18080"
     assert subprocess_context.subprocess_env["http_proxy"] == "http://agent-vault-adapter:18080"
+    assert subprocess_context.subprocess_env["PATH"].startswith(str(worker_paths.venv_dir / "bin"))
+    assert "/host/bin" in subprocess_context.subprocess_env["PATH"]
+
+
+def test_prepared_shell_execution_env_resolved_env_wins_over_extra_passthrough(tmp_path: Path) -> None:
+    """Resolved broker env should not be shadowed by raw extra-env passthrough values."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"HTTP_PROXY": "http://runtime-proxy:18080"},
+    )
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key="v1:default:unscoped:code",
+            endpoint="http://127.0.0.1:8766",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="docker",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={},
+    )
+
+    execution_env = sandbox_runner_module._prepared_shell_execution_env(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            execution_env={"HTTP_PROXY": "http://raw-request-proxy:18080"},
+            extra_env_passthrough="HTTP_PROXY",
+        ),
+        runtime_paths,
+        prepared_worker,
+        execution_env={"HTTP_PROXY": "http://resolved-broker-proxy:18080"},
+    )
+
+    assert execution_env is not None
+    assert execution_env["HTTP_PROXY"] == "http://resolved-broker-proxy:18080"
 
 
 def test_filter_runtime_tool_init_overrides_keeps_only_safe_declared_fields() -> None:

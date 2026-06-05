@@ -828,13 +828,27 @@ def _prepared_shell_execution_env(
     if request.tool_name != "shell" or prepared is None:
         return None
     worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
-    worker_execution_env.update(execution_env)
+    worker_base_path = worker_execution_env.get("PATH")
     worker_execution_env.update(
         constants.shell_extra_env_values(
             extra_env_passthrough=request.extra_env_passthrough,
             process_env=request.execution_env or runtime_paths.process_env,
         ),
     )
+    worker_execution_env.update(execution_env)
+    worker_path = constants.subprocess_path_with_prepends(
+        os.pathsep.join(
+            path
+            for path in (
+                worker_execution_env.get("PATH"),
+                worker_base_path,
+            )
+            if path
+        ),
+        prepend_entries=(str(prepared.paths.venv_dir / "bin"),),
+    )
+    if worker_path is not None:
+        worker_execution_env["PATH"] = worker_path
     return worker_execution_env
 
 
