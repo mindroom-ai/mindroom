@@ -360,7 +360,8 @@ That keeps PATH handling deployment-specific instead of baking host-specific dir
 For tools that should call external APIs without receiving the real upstream credential, configure a worker egress broker.
 MindRoom injects proxy and CA env into worker-routed `shell` and `python` requests; the worker process then uses the proxy for HTTP(S) traffic.
 This does not inspect command lines or match API URLs, so URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the broker.
-The broker itself is not a MindRoom plugin. It is a proxy service or sidecar that owns the broker session or upstream credential.
+Run the broker as a separate proxy service or sidecar.
+It holds the upstream session or credential, while MindRoom workers receive only the broker's local proxy URL.
 
 Example:
 
