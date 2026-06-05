@@ -366,6 +366,83 @@ def test_adapter_connect_tunnel_handles_slow_reader_backpressure() -> None:
     assert set(received) == {ord("x")}
 
 
+def test_adapter_connect_tunnel_preserves_bytes_buffered_with_upstream_200() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+
+    def serve_connect_with_immediate_tunnel_bytes() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            _recv_until(connection, b"\r\n\r\n")
+            connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\nearly-tunnel-bytes")
+
+    fake_proxy_thread = threading.Thread(target=serve_connect_with_immediate_tunnel_bytes, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(5)
+                client.sendall(b"CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n\r\n")
+                response = _recv_until(client, b"\r\n\r\n")
+                header_bytes, _separator, tunneled_bytes = response.partition(b"\r\n\r\n")
+                if not tunneled_bytes:
+                    tunneled_bytes = client.recv(1024)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert header_bytes.startswith(b"HTTP/1.0 200")
+    assert tunneled_bytes == b"early-tunnel-bytes"
+
+
+def test_adapter_connect_tunnel_preserves_reverse_direction_after_client_half_close() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    upstream_received = bytearray()
+
+    def serve_connect_after_client_half_close() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            _recv_until(connection, b"\r\n\r\n")
+            connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            while True:
+                chunk = connection.recv(1024)
+                if not chunk:
+                    break
+                upstream_received.extend(chunk)
+            connection.sendall(b"response-after-client-half-close")
+
+    fake_proxy_thread = threading.Thread(target=serve_connect_after_client_half_close, daemon=True)
+    fake_proxy_thread.start()
+    received = bytearray()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(5)
+                client.sendall(b"CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n\r\n")
+                response = _recv_until(client, b"\r\n\r\n")
+                assert response.startswith(b"HTTP/1.0 200")
+                client.sendall(b"request")
+                client.shutdown(socket.SHUT_WR)
+                while True:
+                    chunk = client.recv(1024)
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert bytes(upstream_received) == b"request"
+    assert bytes(received) == b"response-after-client-half-close"
+
+
 def test_adapter_converts_upstream_connect_407_to_bad_gateway() -> None:
     class RejectingConnectProxyHandler(_QuietHandler):
         def do_CONNECT(self) -> None:

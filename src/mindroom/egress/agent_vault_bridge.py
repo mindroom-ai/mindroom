@@ -33,6 +33,7 @@ _TUNNEL_BUFFER_BYTES = 64 * 1024
 _TUNNEL_BACKPRESSURE_LIMIT_BYTES = 1024 * 1024
 _TUNNEL_BACKPRESSURE_RESUME_BYTES = _TUNNEL_BACKPRESSURE_LIMIT_BYTES // 2
 _TUNNEL_IDLE_TIMEOUT_SECONDS = 30
+_CONNECT_RESPONSE_HEADER_LIMIT_BYTES = 64 * 1024
 _UPSTREAM_AUTH_FAILED_MESSAGE = "Bad Gateway: upstream proxy authentication failed"
 
 
@@ -67,6 +68,14 @@ class RunningAdapter:
     def proxy_url(self) -> str:
         """Return the adapter proxy URL."""
         return f"http://{self.host}:{self.port}"
+
+
+@dataclass(slots=True)
+class _ConnectResponse:
+    status: int
+    reason: str
+    headers: list[tuple[str, str]]
+    leftover: bytes
 
 
 class _QuietHandler(BaseHTTPRequestHandler):
@@ -186,13 +195,12 @@ def _forward_connect(
                 "\r\n"
             )
             upstream_sock.sendall(connect_request.encode("iso-8859-1"))
-            response = http.client.HTTPResponse(upstream_sock)
-            response.begin()
+            response = _read_connect_response(upstream_sock)
             if response.status == 407:
                 handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
                 return
             if response.status != 200:
-                _copy_response(handler, response)
+                _copy_connect_response(handler, response, upstream_sock)
                 return
 
             handler.send_response(200, response.reason)
@@ -202,12 +210,82 @@ def _forward_connect(
             return
 
         try:
-            _tunnel_sockets(handler.connection, upstream_sock)
+            _tunnel_sockets(handler.connection, upstream_sock, upstream_initial=response.leftover)
         except OSError:
             return
     finally:
         if upstream_sock is not None:
             upstream_sock.close()
+
+
+def _read_connect_response(sock: socket.socket) -> _ConnectResponse:
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(_TUNNEL_BUFFER_BYTES)
+        if not chunk:
+            msg = "upstream proxy closed before CONNECT response"
+            raise http.client.HTTPException(msg)
+        data.extend(chunk)
+        if len(data) > _CONNECT_RESPONSE_HEADER_LIMIT_BYTES:
+            msg = "upstream CONNECT response headers are too large"
+            raise http.client.HTTPException(msg)
+
+    raw_headers, leftover = bytes(data).split(b"\r\n\r\n", 1)
+    lines = raw_headers.decode("iso-8859-1").split("\r\n")
+    status_parts = lines[0].split(" ", 2)
+    if len(status_parts) < 2 or not status_parts[0].startswith("HTTP/"):
+        msg = "malformed upstream CONNECT response"
+        raise http.client.HTTPException(msg)
+    try:
+        status = int(status_parts[1])
+    except ValueError as exc:
+        msg = "malformed upstream CONNECT response status"
+        raise http.client.HTTPException(msg) from exc
+    reason = status_parts[2] if len(status_parts) == 3 else ""
+    headers: list[tuple[str, str]] = []
+    for line in lines[1:]:
+        if not line:
+            continue
+        key, separator, value = line.partition(":")
+        if not separator:
+            msg = "malformed upstream CONNECT response header"
+            raise http.client.HTTPException(msg)
+        headers.append((key, value.strip()))
+    return _ConnectResponse(status=status, reason=reason, headers=headers, leftover=leftover)
+
+
+def _copy_connect_response(
+    handler: BaseHTTPRequestHandler,
+    response: _ConnectResponse,
+    sock: socket.socket,
+) -> None:
+    body = _read_connect_response_body(sock, response)
+    handler.send_response(response.status, response.reason)
+    for key, value in response.headers:
+        if key.lower() in _HOP_BY_HOP_HEADERS:
+            continue
+        handler.send_header(key, value)
+    handler.end_headers()
+    if body:
+        handler.wfile.write(body)
+
+
+def _read_connect_response_body(sock: socket.socket, response: _ConnectResponse) -> bytes:
+    headers = {key.lower(): value for key, value in response.headers}
+    raw_length = headers.get("content-length")
+    if raw_length is None:
+        return response.leftover
+    try:
+        content_length = int(raw_length)
+    except ValueError:
+        return response.leftover
+    body = bytearray(response.leftover)
+    while len(body) < content_length:
+        chunk = sock.recv(content_length - len(body))
+        if not chunk:
+            break
+        body.extend(chunk)
+    return bytes(body[:content_length])
 
 
 def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes | None:
@@ -299,7 +377,12 @@ def _copy_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPRe
         handler.wfile.write(body)
 
 
-def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) -> None:
+def _tunnel_sockets(
+    client_sock: socket.socket,
+    upstream_sock: socket.socket,
+    *,
+    upstream_initial: bytes = b"",
+) -> None:
     sockets = [client_sock, upstream_sock]
     for sock in sockets:
         sock.setblocking(False)
@@ -309,7 +392,7 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
         upstream_sock: client_sock,
     }
     pending_writes = {
-        client_sock: bytearray(),
+        client_sock: bytearray(upstream_initial),
         upstream_sock: bytearray(),
     }
     read_enabled = {
@@ -317,6 +400,7 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
         upstream_sock: True,
     }
     read_closed: set[socket.socket] = set()
+    write_closed: set[socket.socket] = set()
 
     try:
         with selectors.DefaultSelector() as selector:
@@ -340,6 +424,7 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
                         pending_writes,
                         read_enabled,
                         read_closed,
+                        write_closed,
                     ):
                         return
                     if mask & selectors.EVENT_WRITE and not _handle_tunnel_write(
@@ -350,6 +435,7 @@ def _tunnel_sockets(client_sock: socket.socket, upstream_sock: socket.socket) ->
                         pending_writes,
                         read_enabled,
                         read_closed,
+                        write_closed,
                     ):
                         return
     finally:
@@ -390,6 +476,7 @@ def _handle_tunnel_read(
     pending_writes: dict[socket.socket, bytearray],
     read_enabled: dict[socket.socket, bool],
     read_closed: set[socket.socket],
+    write_closed: set[socket.socket],
 ) -> bool:
     target = peers[sock]
     try:
@@ -402,8 +489,10 @@ def _handle_tunnel_read(
     if not chunk:
         read_enabled[sock] = False
         read_closed.add(sock)
+        _shutdown_tunnel_write_when_drained(target, pending_writes, write_closed)
         _refresh_tunnel_interest(selector, registered, sock, read_enabled, pending_writes)
-        return bool(pending_writes[target])
+        _refresh_tunnel_interest(selector, registered, target, read_enabled, pending_writes)
+        return True
 
     pending_writes[target].extend(chunk)
     if len(pending_writes[target]) >= _TUNNEL_BACKPRESSURE_LIMIT_BYTES:
@@ -421,6 +510,7 @@ def _handle_tunnel_write(
     pending_writes: dict[socket.socket, bytearray],
     read_enabled: dict[socket.socket, bool],
     read_closed: set[socket.socket],
+    write_closed: set[socket.socket],
 ) -> bool:
     pending = pending_writes[sock]
     if not pending:
@@ -438,9 +528,23 @@ def _handle_tunnel_write(
     source = peers[sock]
     if source not in read_closed and len(pending) <= _TUNNEL_BACKPRESSURE_RESUME_BYTES:
         read_enabled[source] = True
+    if source in read_closed:
+        _shutdown_tunnel_write_when_drained(sock, pending_writes, write_closed)
     _refresh_tunnel_interest(selector, registered, sock, read_enabled, pending_writes)
     _refresh_tunnel_interest(selector, registered, source, read_enabled, pending_writes)
-    return source not in read_closed or bool(pending)
+    return True
+
+
+def _shutdown_tunnel_write_when_drained(
+    sock: socket.socket,
+    pending_writes: dict[socket.socket, bytearray],
+    write_closed: set[socket.socket],
+) -> None:
+    if pending_writes[sock] or sock in write_closed:
+        return
+    with suppress(OSError):
+        sock.shutdown(socket.SHUT_WR)
+    write_closed.add(sock)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
