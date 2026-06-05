@@ -11,7 +11,7 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Protocol, Self, cast
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ _TUNNEL_BUFFER_BYTES = 64 * 1024
 _TUNNEL_BACKPRESSURE_LIMIT_BYTES = 1024 * 1024
 _TUNNEL_BACKPRESSURE_RESUME_BYTES = _TUNNEL_BACKPRESSURE_LIMIT_BYTES // 2
 _TUNNEL_IDLE_TIMEOUT_SECONDS = 30
+_HTTP_STREAM_CHUNK_BYTES = 64 * 1024
 _CONNECT_RESPONSE_HEADER_LIMIT_BYTES = 64 * 1024
 _UPSTREAM_AUTH_FAILED_MESSAGE = "Bad Gateway: upstream proxy authentication failed"
 
@@ -76,6 +77,12 @@ class _ConnectResponse:
     reason: str
     headers: list[tuple[str, str]]
     leftover: bytes
+
+
+class _PeekableReader(Protocol):
+    def peek(self, size: int = 0, /) -> bytes: ...
+
+    def read(self, size: int = -1, /) -> bytes: ...
 
 
 class _QuietHandler(BaseHTTPRequestHandler):
@@ -156,21 +163,31 @@ def _forward_http_request(
     proxy_authorization: str,
 ) -> None:
     try:
-        body = _read_request_body(handler)
+        content_length = _request_content_length(handler)
     except ValueError as exc:
         handler.send_error(400, str(exc))
         return
+    is_chunked = "chunked" in handler.headers.get("Transfer-Encoding", "").lower()
     headers = _forward_headers(handler.headers.items(), proxy_authorization=proxy_authorization)
-    if body is not None:
-        headers["Content-Length"] = str(len(body))
+    if is_chunked:
+        headers.pop("Content-Length", None)
+        headers["Transfer-Encoding"] = "chunked"
     connection = http.client.HTTPConnection(proxy_host, proxy_port, timeout=10)
     try:
-        connection.request(handler.command, handler.path, body=body, headers=headers)
+        _send_streaming_request(
+            connection,
+            handler,
+            headers=headers,
+            content_length=content_length,
+            is_chunked=is_chunked,
+        )
         response = connection.getresponse()
         if response.status == 407:
             handler.send_error(502, _UPSTREAM_AUTH_FAILED_MESSAGE)
             return
         _copy_response(handler, response)
+    except ValueError as exc:
+        handler.send_error(400, str(exc))
     except (OSError, TimeoutError, http.client.HTTPException) as exc:
         handler.send_error(502, f"Bad Gateway: {exc}")
     finally:
@@ -216,6 +233,115 @@ def _forward_connect(
     finally:
         if upstream_sock is not None:
             upstream_sock.close()
+
+
+def _send_streaming_request(
+    connection: http.client.HTTPConnection,
+    handler: BaseHTTPRequestHandler,
+    *,
+    headers: dict[str, str],
+    content_length: int | None,
+    is_chunked: bool,
+) -> None:
+    header_names = {key.lower() for key in headers}
+    connection.putrequest(
+        handler.command,
+        handler.path,
+        skip_host="host" in header_names,
+        skip_accept_encoding="accept-encoding" in header_names,
+    )
+    for key, value in headers.items():
+        connection.putheader(key, value)
+    connection.endheaders()
+    if is_chunked:
+        _stream_chunked_request_body(handler, connection)
+    elif content_length:
+        _stream_content_length_request_body(handler, connection, content_length)
+
+
+def _request_content_length(handler: BaseHTTPRequestHandler) -> int | None:
+    raw_length = handler.headers.get("Content-Length")
+    if raw_length is None:
+        return None
+    try:
+        length = int(raw_length)
+    except ValueError as exc:
+        msg = f"Invalid Content-Length: {raw_length}"
+        raise ValueError(msg) from exc
+    if length < 0:
+        msg = f"Invalid Content-Length: {raw_length}"
+        raise ValueError(msg)
+    return length
+
+
+def _stream_content_length_request_body(
+    handler: BaseHTTPRequestHandler,
+    connection: http.client.HTTPConnection,
+    content_length: int,
+) -> None:
+    remaining = content_length
+    reader = cast(_PeekableReader, handler.rfile)  # noqa: TC006
+    while remaining:
+        available = reader.peek(1)
+        chunk = reader.read(min(len(available), _HTTP_STREAM_CHUNK_BYTES, remaining))
+        if not chunk:
+            msg = "Incomplete request body"
+            raise ValueError(msg)
+        connection.send(chunk)
+        remaining -= len(chunk)
+
+
+def _stream_chunked_request_body(
+    handler: BaseHTTPRequestHandler,
+    connection: http.client.HTTPConnection,
+) -> None:
+    while True:
+        size_line = handler.rfile.readline()
+        size = _chunk_size(size_line)
+        connection.send(size_line)
+        if size == 0:
+            _stream_chunked_trailers(handler, connection)
+            return
+
+        chunk = handler.rfile.read(size)
+        if len(chunk) != size:
+            msg = "Incomplete chunked request body"
+            raise ValueError(msg)
+        terminator = handler.rfile.read(2)
+        if terminator != b"\r\n":
+            msg = "Malformed chunked request body"
+            raise ValueError(msg)
+        connection.send(chunk)
+        connection.send(terminator)
+
+
+def _chunk_size(size_line: bytes) -> int:
+    if not size_line:
+        msg = "Malformed chunked request body"
+        raise ValueError(msg)
+    raw_size = size_line.split(b";", 1)[0].strip()
+    try:
+        size = int(raw_size, 16)
+    except ValueError as exc:
+        msg = "Malformed chunked request body"
+        raise ValueError(msg) from exc
+    if size < 0:
+        msg = "Negative chunk size"
+        raise ValueError(msg)
+    return size
+
+
+def _stream_chunked_trailers(
+    handler: BaseHTTPRequestHandler,
+    connection: http.client.HTTPConnection,
+) -> None:
+    while True:
+        line = handler.rfile.readline()
+        if line == b"":
+            return
+        connection.send(line)
+        if line in {b"\n", b"\r\n"}:
+            return
 
 
 def _read_connect_response(sock: socket.socket) -> _ConnectResponse:
@@ -288,62 +414,6 @@ def _read_connect_response_body(sock: socket.socket, response: _ConnectResponse)
     return bytes(body[:content_length])
 
 
-def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes | None:
-    transfer_encoding = handler.headers.get("Transfer-Encoding", "")
-    if "chunked" in transfer_encoding.lower():
-        return _read_chunked_request_body(handler)
-
-    raw_length = handler.headers.get("Content-Length")
-    if raw_length is None:
-        return None
-    try:
-        length = int(raw_length)
-    except ValueError as exc:
-        msg = f"Invalid Content-Length: {raw_length}"
-        raise ValueError(msg) from exc
-    if length <= 0:
-        return None
-    return handler.rfile.read(length)
-
-
-def _read_chunked_request_body(handler: BaseHTTPRequestHandler) -> bytes:
-    chunks: list[bytes] = []
-    while True:
-        size_line = handler.rfile.readline()
-        if not size_line:
-            msg = "Malformed chunked request body"
-            raise ValueError(msg)
-        raw_size = size_line.split(b";", 1)[0].strip()
-        try:
-            size = int(raw_size, 16)
-        except ValueError as exc:
-            msg = "Malformed chunked request body"
-            raise ValueError(msg) from exc
-        if size < 0:
-            msg = "Negative chunk size"
-            raise ValueError(msg)
-        if size == 0:
-            _drain_chunked_trailers(handler)
-            return b"".join(chunks)
-
-        chunk = handler.rfile.read(size)
-        if len(chunk) != size:
-            msg = "Incomplete chunked request body"
-            raise ValueError(msg)
-        chunks.append(chunk)
-        terminator = handler.rfile.read(2)
-        if terminator != b"\r\n":
-            msg = "Malformed chunked request body"
-            raise ValueError(msg)
-
-
-def _drain_chunked_trailers(handler: BaseHTTPRequestHandler) -> None:
-    while True:
-        line = handler.rfile.readline()
-        if line in {b"", b"\n", b"\r\n"}:
-            return
-
-
 def _forward_headers(
     items: Iterable[tuple[str, str]],
     *,
@@ -366,15 +436,14 @@ def _forward_headers(
 
 
 def _copy_response(handler: BaseHTTPRequestHandler, response: http.client.HTTPResponse) -> None:
-    body = response.read()
     handler.send_response(response.status, response.reason)
     for key, value in response.getheaders():
         if key.lower() in _HOP_BY_HOP_HEADERS:
             continue
         handler.send_header(key, value)
     handler.end_headers()
-    if body:
-        handler.wfile.write(body)
+    while chunk := response.read1(_HTTP_STREAM_CHUNK_BYTES):
+        handler.wfile.write(chunk)
 
 
 def _tunnel_sockets(

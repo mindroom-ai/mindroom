@@ -32,15 +32,23 @@ def _run(
     *,
     input_text: str | None = None,
     check: bool = True,
+    timeout_seconds: float = 300,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        args,
-        input=input_text,
-        text=True,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            input=input_text,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        command = " ".join(args)
+        output = exc.stdout or ""
+        msg = f"Command timed out after {timeout_seconds}s: {command}\n{output}"
+        raise TimeoutError(msg) from exc
     if check and result.returncode != 0:
         command = " ".join(args)
         msg = f"Command failed ({result.returncode}): {command}\n{result.stdout}"

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import http.client
-import io
 import json
 import socket
 import threading
@@ -91,7 +90,6 @@ def _recv_until(sock: socket.socket, marker: bytes) -> bytes:
 @dataclass(slots=True)
 class RequestBodyHandler:
     headers: dict[str, str]
-    rfile: io.BytesIO
 
 
 @dataclass(slots=True)
@@ -245,6 +243,100 @@ def test_adapter_brokers_hidden_url_without_exposing_session_token() -> None:
     assert isinstance(headers, dict)
     assert headers["authorization"] == "Bearer fake-secret"
     assert "proxy-authorization" not in headers
+
+
+def test_adapter_streams_http_request_body_before_full_content_length_arrives() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    upstream_received = bytearray()
+    first_body_bytes_seen = threading.Event()
+
+    def serve_streaming_request_proxy() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            request = _recv_until(connection, b"\r\n\r\n")
+            _headers, _separator, body = request.partition(b"\r\n\r\n")
+            upstream_received.extend(body)
+            while len(upstream_received) < len(b"first"):
+                chunk = connection.recv(len(b"first") - len(upstream_received))
+                if not chunk:
+                    return
+                upstream_received.extend(chunk)
+            first_body_bytes_seen.set()
+            while len(upstream_received) < len(b"firstsecond"):
+                chunk = connection.recv(1024)
+                if not chunk:
+                    return
+                upstream_received.extend(chunk)
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    fake_proxy_thread = threading.Thread(target=serve_streaming_request_proxy, daemon=True)
+    fake_proxy_thread.start()
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(5)
+                client.sendall(
+                    b"POST http://example.test/upload HTTP/1.1\r\n"
+                    b"Host: example.test\r\n"
+                    b"Content-Length: 11\r\n"
+                    b"\r\n"
+                    b"first",
+                )
+                assert first_body_bytes_seen.wait(timeout=2)
+                client.sendall(b"second")
+                response = _recv_until(client, b"\r\n\r\n")
+                _headers, _separator, body = response.partition(b"\r\n\r\n")
+                while len(body) < len(b"ok"):
+                    body += client.recv(1024)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert bytes(upstream_received) == b"firstsecond"
+    assert body == b"ok"
+
+
+def test_adapter_streams_http_response_body_before_full_response_arrives() -> None:
+    fake_proxy = socket.socket()
+    fake_proxy.settimeout(5)
+    fake_proxy.bind(("127.0.0.1", 0))
+    fake_proxy.listen()
+    upstream_proxy_url = f"http://127.0.0.1:{fake_proxy.getsockname()[1]}"
+    send_response_tail = threading.Event()
+
+    def serve_streaming_response_proxy() -> None:
+        connection, _addr = fake_proxy.accept()
+        with connection:
+            _recv_until(connection, b"\r\n\r\n")
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nfirst")
+            if send_response_tail.wait(timeout=5):
+                connection.sendall(b"second")
+
+    fake_proxy_thread = threading.Thread(target=serve_streaming_response_proxy, daemon=True)
+    fake_proxy_thread.start()
+    body = b""
+    try:
+        with start_adapter(upstream_proxy_url=upstream_proxy_url, session_token="adapter-session") as adapter:
+            with socket.create_connection((adapter.host, adapter.port), timeout=5) as client:
+                client.settimeout(2)
+                client.sendall(b"GET http://example.test/data HTTP/1.1\r\nHost: example.test\r\n\r\n")
+                response = _recv_until(client, b"\r\n\r\n")
+                _headers, _separator, body = response.partition(b"\r\n\r\n")
+                while len(body) < len(b"first"):
+                    body += client.recv(1024)
+                assert body == b"first"
+                send_response_tail.set()
+                while len(body) < len(b"firstsecond"):
+                    body += client.recv(1024)
+    finally:
+        fake_proxy.close()
+        fake_proxy_thread.join(timeout=5)
+
+    assert body == b"firstsecond"
 
 
 def test_fake_agent_vault_rejects_requests_without_proxy_authorization() -> None:
@@ -480,24 +572,16 @@ def test_forward_headers_combines_duplicate_client_headers() -> None:
     }
 
 
-def test_read_request_body_rejects_invalid_content_length() -> None:
-    handler = RequestBodyHandler(
-        headers={"Content-Length": "not-an-int"},
-        rfile=io.BytesIO(b"body"),
-    )
+def test_request_content_length_rejects_invalid_header() -> None:
+    handler = RequestBodyHandler(headers={"Content-Length": "not-an-int"})
 
     with pytest.raises(ValueError, match="Invalid Content-Length: not-an-int"):
-        agent_vault_bridge._read_request_body(handler)
+        agent_vault_bridge._request_content_length(handler)
 
 
-def test_read_request_body_rejects_negative_chunk_size() -> None:
-    handler = RequestBodyHandler(
-        headers={"Transfer-Encoding": "chunked"},
-        rfile=io.BytesIO(b"-1\r\nbody\r\n0\r\n\r\n"),
-    )
-
+def test_chunk_size_rejects_negative_values() -> None:
     with pytest.raises(ValueError, match="Negative chunk size"):
-        agent_vault_bridge._read_request_body(handler)
+        agent_vault_bridge._chunk_size(b"-1\r\n")
 
 
 def test_forward_connect_returns_bad_gateway_when_upstream_closes_before_response() -> None:
