@@ -551,6 +551,26 @@ def test_adapter_connect_tunnel_handles_slow_reader_backpressure() -> None:
     assert set(received) == {ord("x")}
 
 
+def test_connect_tunnel_closes_when_both_directions_are_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_vault_bridge, "_TUNNEL_IDLE_TIMEOUT_SECONDS", 0.05)
+    worker_sock, adapter_client_sock = socket.socketpair()
+    adapter_upstream_sock, upstream_sock = socket.socketpair()
+    tunnel_thread = threading.Thread(
+        target=agent_vault_bridge._tunnel_sockets,
+        args=(adapter_client_sock, adapter_upstream_sock),
+        daemon=True,
+    )
+
+    tunnel_thread.start()
+    tunnel_thread.join(timeout=1)
+    tunnel_still_running = tunnel_thread.is_alive()
+    for sock in (worker_sock, adapter_client_sock, adapter_upstream_sock, upstream_sock):
+        sock.close()
+    tunnel_thread.join(timeout=1)
+
+    assert not tunnel_still_running
+
+
 def test_adapter_connect_tunnel_preserves_bytes_buffered_with_upstream_200() -> None:
     fake_proxy = socket.socket()
     fake_proxy.settimeout(5)

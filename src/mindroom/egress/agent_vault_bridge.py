@@ -7,6 +7,7 @@ import http.client
 import os
 import socket
 import threading
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,7 @@ _HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 _TUNNEL_BUFFER_BYTES = 64 * 1024
+_TUNNEL_IDLE_TIMEOUT_SECONDS = 30
 _HTTP_STREAM_CHUNK_BYTES = 64 * 1024
 _CONNECT_RESPONSE_HEADER_LIMIT_BYTES = 64 * 1024
 _UPSTREAM_AUTH_FAILED_MESSAGE = "Bad Gateway: upstream proxy authentication failed"
@@ -73,6 +75,11 @@ class _ConnectResponse:
     reason: str
     headers: list[tuple[str, str]]
     leftover: bytes
+
+
+@dataclass(slots=True)
+class _TunnelActivity:
+    at: float
 
 
 class _PeekableReader(Protocol):
@@ -473,37 +480,85 @@ def _tunnel_sockets(
     *,
     upstream_initial: bytes = b"",
 ) -> None:
-    client_sock.setblocking(True)
-    upstream_sock.setblocking(True)
+    activity = _TunnelActivity(at=time.monotonic())
+    client_sock.settimeout(_TUNNEL_IDLE_TIMEOUT_SECONDS)
+    upstream_sock.settimeout(_TUNNEL_IDLE_TIMEOUT_SECONDS)
 
     upstream_to_client = threading.Thread(
         target=_relay_tunnel_data,
         args=(upstream_sock, client_sock),
-        kwargs={"initial": upstream_initial},
-        daemon=True,
-    )
-    client_to_upstream = threading.Thread(
-        target=_relay_tunnel_data,
-        args=(client_sock, upstream_sock),
+        kwargs={"activity": activity, "initial": upstream_initial},
         daemon=True,
     )
     upstream_to_client.start()
-    client_to_upstream.start()
-    upstream_to_client.join()
-    client_to_upstream.join()
+    _relay_tunnel_data(client_sock, upstream_sock, activity=activity)
+    while upstream_to_client.is_alive():
+        upstream_to_client.join(timeout=_TUNNEL_IDLE_TIMEOUT_SECONDS)
+        if upstream_to_client.is_alive() and _tunnel_is_idle(activity):
+            _shutdown_tunnel(client_sock, upstream_sock)
+            upstream_to_client.join(timeout=1)
+            return
 
 
-def _relay_tunnel_data(source: socket.socket, target: socket.socket, *, initial: bytes = b"") -> None:
-    try:
-        if initial:
-            target.sendall(initial)
-        while chunk := source.recv(_TUNNEL_BUFFER_BYTES):
-            target.sendall(chunk)
-    except OSError:
-        pass
-    finally:
+def _relay_tunnel_data(
+    source: socket.socket,
+    target: socket.socket,
+    *,
+    activity: _TunnelActivity,
+    initial: bytes = b"",
+) -> None:
+    if initial and not _send_tunnel_data(target, initial, activity):
+        _shutdown_tunnel(source, target)
+        return
+
+    while True:
+        try:
+            chunk = source.recv(_TUNNEL_BUFFER_BYTES)
+        except TimeoutError:
+            if _tunnel_is_idle(activity):
+                _shutdown_tunnel(source, target)
+                return
+            continue
+        except OSError:
+            _shutdown_tunnel(source, target)
+            return
+
+        if not chunk:
+            with suppress(OSError):
+                target.shutdown(socket.SHUT_WR)
+            return
+        activity.at = time.monotonic()
+        if not _send_tunnel_data(target, chunk, activity):
+            _shutdown_tunnel(source, target)
+            return
+
+
+def _send_tunnel_data(sock: socket.socket, data: bytes, activity: _TunnelActivity) -> bool:
+    view = memoryview(data)
+    while view:
+        try:
+            sent = sock.send(view)
+        except TimeoutError:
+            if _tunnel_is_idle(activity):
+                return False
+            continue
+        except OSError:
+            return False
+        if sent == 0:
+            return False
+        activity.at = time.monotonic()
+        view = view[sent:]
+    return True
+
+
+def _tunnel_is_idle(activity: _TunnelActivity) -> bool:
+    return time.monotonic() - activity.at >= _TUNNEL_IDLE_TIMEOUT_SECONDS
+
+
+def _shutdown_tunnel(*socks: socket.socket) -> None:
+    for sock in socks:
         with suppress(OSError):
-            target.shutdown(socket.SHUT_WR)
+            sock.shutdown(socket.SHUT_RDWR)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
