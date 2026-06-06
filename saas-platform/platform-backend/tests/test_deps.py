@@ -1,5 +1,9 @@
 """Test dependency injection utilities."""
 
+import base64
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -10,6 +14,15 @@ from backend.metrics import get_admin_metric, reset_security_metrics
 
 class TestDeps:
     """Test dependency injection functions."""
+
+    @pytest.fixture(autouse=True)
+    def clear_auth_cache(self):
+        """Clear auth cache between tests."""
+        from backend.deps import _auth_cache
+
+        _auth_cache.clear()
+        yield
+        _auth_cache.clear()
 
     @pytest.fixture
     def mock_supabase(self):
@@ -34,6 +47,16 @@ class TestDeps:
             # Need enough values for all perf_counter calls
             mock.perf_counter.side_effect = [0.0, 0.001, 0.002, 0.003, 0.004]
             yield mock
+
+    @staticmethod
+    def _jwt_with_exp(expires_at: datetime) -> str:
+        """Build an unsigned JWT-like token for cache behavior tests."""
+
+        def b64url(data: dict) -> str:
+            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+        return f"{b64url({'alg': 'none'})}.{b64url({'exp': int(expires_at.timestamp())})}.sig"
 
     @pytest.mark.asyncio
     async def test_verify_user_success(self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock):
@@ -113,26 +136,64 @@ class TestDeps:
     @pytest.mark.asyncio
     async def test_verify_user_cache_hit(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
         """Test user verification uses cache."""
+        from backend.deps import verify_user
+
+        token = self._jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+        mock_user = Mock()
+        mock_user.user.id = "cached_user"
+        mock_user.user.email = "cached@example.com"
+        mock_user.user.user_metadata = {}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "cached_user", "email": "cached@example.com"}
+        )
+
+        result = await verify_user(f"Bearer {token}")
+        cached_result = await verify_user(f"Bearer {token}")
+
+        assert result["user_id"] == "cached_user"
+        assert cached_result["user_id"] == "cached_user"
+        mock_auth_client.auth.get_user.assert_called_once_with(token)
+
+    @pytest.mark.asyncio
+    async def test_verify_user_hashes_auth_cache_keys(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
+        """Auth cache keys should not contain raw bearer tokens."""
         from backend.deps import _auth_cache, verify_user
 
-        # Pre-populate cache
-        _auth_cache["cached-token"] = {
-            "user_id": "cached_user",
-            "account_id": "cached_user",
-            "email": "cached@example.com",
-        }
+        token = self._jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+        mock_user = Mock()
+        mock_user.user.id = "user_123"
+        mock_user.user.email = "test@example.com"
+        mock_user.user.user_metadata = {}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "user_123", "email": "test@example.com"}
+        )
 
-        # Test
-        result = await verify_user("Bearer cached-token")
+        await verify_user(f"Bearer {token}")
 
-        # Verify
-        assert result["user_id"] == "cached_user"
+        assert token not in _auth_cache
+        assert hashlib.sha256(token.encode("utf-8")).hexdigest() in _auth_cache
 
-        # Auth client should not be called for cached token
-        mock_auth_client.auth.get_user.assert_not_called()
+    @pytest.mark.asyncio
+    async def test_verify_user_does_not_cache_past_jwt_exp(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
+        """Auth cache should not reuse entries beyond JWT exp."""
+        from backend.deps import verify_user
 
-        # Clean up cache
-        _auth_cache.clear()
+        token = self._jwt_with_exp(datetime.now(UTC) - timedelta(minutes=1))
+        mock_user = Mock()
+        mock_user.user.id = "user_123"
+        mock_user.user.email = "test@example.com"
+        mock_user.user.user_metadata = {}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "user_123", "email": "test@example.com"}
+        )
+
+        await verify_user(f"Bearer {token}")
+        await verify_user(f"Bearer {token}")
+
+        assert mock_auth_client.auth.get_user.call_count == 2
 
     @pytest.mark.asyncio
     async def test_verify_user_missing_bearer(self):

@@ -588,7 +588,16 @@ $$;
 REVOKE ALL ON FUNCTION exec_sql(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION exec_sql(TEXT) TO service_role;
 
-GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;
+GRANT SELECT, INSERT ON TABLE accounts TO authenticated;
+REVOKE UPDATE ON TABLE accounts FROM authenticated;
+GRANT UPDATE (
+    full_name,
+    company_name,
+    consent_marketing,
+    consent_analytics,
+    consent_updated_at,
+    updated_at
+) ON TABLE accounts TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE subscriptions TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE instances TO authenticated;
 
