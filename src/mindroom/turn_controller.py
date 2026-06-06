@@ -518,7 +518,6 @@ class TurnController:
             self.deps.runtime.config,
             room.room_id,
             self.deps.runtime_paths,
-            room_alias=room.canonical_alias,
         ):
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return None

@@ -77,8 +77,6 @@ def is_authorized_sender(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
-    *,
-    room_alias: str | None = None,
 ) -> bool:
     """Check if a sender is authorized to interact with agents.
 
@@ -87,9 +85,6 @@ def is_authorized_sender(
         config: Application configuration
         room_id: Room ID for permission checks
         runtime_paths: Explicit runtime context for Matrix identity resolution
-        room_alias: Accepted for call-site compatibility but intentionally
-            ignored. Caller-supplied canonical aliases are mutable Matrix room
-            state and are never used for permission-key lookup.
 
     Returns:
         True if the sender is authorized, False otherwise
@@ -107,7 +102,6 @@ def is_authorized_sender(
         return True
 
     room_permissions = config.authorization.room_permissions
-    _ = room_alias
     # Check room-specific permissions by direct room identifiers first. A room
     # ID is stable; a direct alias target is an explicit caller target rather
     # than room state content.

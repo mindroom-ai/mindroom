@@ -1689,7 +1689,6 @@ class AgentBot:
             self.config,
             room.room_id,
             self.runtime_paths,
-            room_alias=room.canonical_alias,
         ):
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return

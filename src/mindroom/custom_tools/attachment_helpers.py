@@ -34,13 +34,11 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         return False
     if room_id == context.room_id:
         return True
-    room_alias = room_id if room_id.startswith("#") else None
     return is_authorized_sender(
         context.requester_id,
         context.config,
         room_id,
         context.runtime_paths,
-        room_alias=room_alias,
     )
 
 

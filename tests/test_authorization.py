@@ -70,8 +70,6 @@ def is_authorized_sender(
     sender_id: str,
     config: Config,
     room_id: str,
-    *,
-    room_alias: str | None = None,
 ) -> bool:
     """Run sender authorization with the test config's bound runtime context."""
     return mindroom.authorization.is_authorized_sender(
@@ -79,7 +77,6 @@ def is_authorized_sender(
         config,
         room_id,
         _runtime_paths_for(config),
-        room_alias=room_alias,
     )
 
 
@@ -753,13 +750,11 @@ def test_room_specific_permissions_support_full_alias(monkeypatch: pytest.Monkey
         "@bob:example.com",
         config,
         "!lobby:example.com",
-        room_alias="#lobby:example.com",
     )
     assert not is_authorized_sender(
         "@eve:example.com",
         config,
         "!lobby:example.com",
-        room_alias="#lobby:example.com",
     )
 
 
@@ -796,13 +791,11 @@ def test_room_specific_permissions_ignore_unmanaged_canonical_alias(monkeypatch:
         "@bob:example.com",
         config,
         "!attacker:example.com",
-        room_alias="#lobby:example.com",
     )
     assert not is_authorized_sender(
         "@charlie:example.com",
         config,
         "!attacker:example.com",
-        room_alias="#lobby:example.com",
     )
 
 
