@@ -9,9 +9,11 @@ import pytest
 from agno.media import Image
 from agno.utils.models.claude import _format_image_for_message
 
+import mindroom.matrix.media as media_module
 from mindroom.matrix import image_handler
 from mindroom.matrix.media import (
     _sniff_image_mime_type,
+    download_media_bytes,
     extract_media_caption,
     resolve_image_mime_type,
     upload_content_uri,
@@ -216,6 +218,84 @@ class TestDownloadImage:
         client.download.side_effect = TimeoutError("connection timed out")
 
         result = await image_handler.download_image(client, event)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_download_media_bytes_rejects_unencrypted_payload_over_limit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unencrypted Matrix media bytes should be capped before handler/model use."""
+        monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/too-large"
+        response = MagicMock()
+        response.body = b"123456"
+        client.download.return_value = response
+
+        result = await download_media_bytes(client, event)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_download_media_bytes_rejects_encrypted_payload_over_limit_before_decrypt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Oversized encrypted Matrix media should be rejected before decrypting."""
+        monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/encrypted-too-large"
+        event.source = {
+            "content": {
+                "file": {
+                    "key": {"k": "test_key"},
+                    "hashes": {"sha256": "test_hash"},
+                    "iv": "test_iv",
+                },
+            },
+        }
+        response = MagicMock()
+        response.body = b"123456"
+        client.download.return_value = response
+
+        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
+            result = await download_media_bytes(client, event)
+
+        assert result is None
+        mock_decrypt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_download_media_bytes_rejects_decrypted_payload_over_limit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Decrypted Matrix media bytes should be capped before persistence or model handoff."""
+        monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomEncryptedImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/decrypted-too-large"
+        event.source = {
+            "content": {
+                "file": {
+                    "key": {"k": "test_key"},
+                    "hashes": {"sha256": "test_hash"},
+                    "iv": "test_iv",
+                },
+            },
+        }
+        response = MagicMock()
+        response.body = b"small"
+        client.download.return_value = response
+
+        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment", return_value=b"123456"):
+            result = await download_media_bytes(client, event)
+
         assert result is None
 
     @pytest.mark.asyncio

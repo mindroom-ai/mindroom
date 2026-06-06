@@ -30,6 +30,7 @@ from .matrix.media import (
     is_matrix_media_dispatch_event,
     is_video_message_event,
     media_mime_type,
+    media_payload_exceeds_limit,
     parse_matrix_media_dispatch_event_source,
     resolve_image_mime_type,
 )
@@ -487,6 +488,14 @@ async def _register_media_attachment(
     kind: _AttachmentKind,
 ) -> AttachmentRecord | None:
     """Persist media bytes and register a scoped attachment record."""
+    if media_payload_exceeds_limit(media_bytes):
+        logger.warning(
+            "Matrix media attachment exceeds byte limit",
+            event_id=event_id,
+            kind=kind,
+            size_bytes=len(media_bytes) if media_bytes is not None else None,
+        )
+        return None
     local_media_path = await _store_media_bytes_locally_async(
         storage_path,
         event_id,

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+import mindroom.matrix.media as media_module
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
     AttachmentRecord,
@@ -207,6 +208,30 @@ async def test_register_media_attachment_offloads_registration_work(tmp_path: Pa
     assert record is not None
     assert registration_thread_ids
     assert registration_thread_ids[0] != loop_thread_id
+
+
+@pytest.mark.asyncio
+async def test_register_media_attachment_rejects_payload_over_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Direct media registration should not persist bytes over the Matrix media cap."""
+    monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+
+    record = await _register_media_attachment(
+        storage_path=tmp_path,
+        event_id="$media_event",
+        media_bytes=b"123456",
+        mime_type="application/octet-stream",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        sender="@user:localhost",
+        filename="payload.bin",
+        kind="file",
+    )
+
+    assert record is None
+    assert not (tmp_path / "incoming_media").exists()
 
 
 def test_resolve_attachment_media_includes_images(tmp_path: Path) -> None:
