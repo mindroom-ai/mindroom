@@ -31,38 +31,38 @@ export type Database = {
           email: string
           full_name?: string | null
           company_name?: string | null
-          stripe_customer_id?: string | null
-          tier?: PlanTier
-          is_admin?: boolean
-          status?: AccountStatus
-          deleted_at?: string | null
-          deletion_reason?: string | null
-          deletion_requested_by?: string | null
-          deletion_requested_at?: string | null
+          stripe_customer_id?: never
+          tier?: never
+          is_admin?: never
+          status?: never
+          deleted_at?: never
+          deletion_reason?: never
+          deletion_requested_by?: never
+          deletion_requested_at?: never
           consent_marketing?: boolean
           consent_analytics?: boolean
           consent_updated_at?: string | null
-          created_at?: string
-          updated_at?: string
+          created_at?: never
+          updated_at?: never
         }
         Update: {
-          id?: string
-          email?: string
+          id?: never
+          email?: never
           full_name?: string | null
           company_name?: string | null
-          stripe_customer_id?: string | null
-          tier?: PlanTier
-          is_admin?: boolean
-          status?: AccountStatus
-          deleted_at?: string | null
-          deletion_reason?: string | null
-          deletion_requested_by?: string | null
-          deletion_requested_at?: string | null
+          stripe_customer_id?: never
+          tier?: never
+          is_admin?: never
+          status?: never
+          deleted_at?: never
+          deletion_reason?: never
+          deletion_requested_by?: never
+          deletion_requested_at?: never
           consent_marketing?: boolean
           consent_analytics?: boolean
           consent_updated_at?: string | null
-          created_at?: string
-          updated_at?: string
+          created_at?: never
+          updated_at?: never
         }
       }
       subscriptions: {

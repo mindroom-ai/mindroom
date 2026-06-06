@@ -1,6 +1,7 @@
 """Comprehensive HTTP API tests for accounts endpoints."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -8,6 +9,23 @@ from backend.deps import verify_user
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from main import app
+
+
+MIGRATION_SQL = Path(__file__).resolve().parents[2] / "supabase/migrations/000_consolidated_complete_schema.sql"
+
+
+def test_accounts_migration_restricts_authenticated_updates_to_profile_columns() -> None:
+    """Authenticated users may update profile fields, not admin/billing/status columns."""
+    sql = MIGRATION_SQL.read_text(encoding="utf-8")
+
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;" not in sql
+    assert "REVOKE INSERT, UPDATE ON TABLE accounts FROM authenticated;" in sql
+    assert (
+        "GRANT UPDATE (full_name, company_name, consent_marketing, consent_analytics, consent_updated_at) "
+        "ON TABLE accounts TO authenticated;"
+    ) in sql
+    for privileged_column in ("tier", "is_admin", "status", "stripe_customer_id", "deleted_at"):
+        assert f"GRANT UPDATE ({privileged_column}) ON TABLE accounts TO authenticated;" not in sql
 
 
 class TestAccountsEndpoints:
