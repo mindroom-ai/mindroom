@@ -11,7 +11,6 @@ import nio
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
-    MissingManagedEntityAccountError,
     configured_routable_entity_ids_for_room,
     current_internal_sender_ids,
     entity_identity_registry,
@@ -29,14 +28,6 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
-
-
-def _safe_current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    try:
-        return current_internal_sender_ids(config, runtime_paths)
-    except MissingManagedEntityAccountError:
-        logger.warning("internal_sender_ids_unavailable_before_account_preparation")
-        return frozenset()
 
 
 def _room_alias_permission_lookup_keys(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
@@ -105,7 +96,7 @@ def is_authorized_sender(
 
     """
     # Always allow active internal identities owned by this runtime.
-    if sender_id in _safe_current_internal_sender_ids(config, runtime_paths):
+    if sender_id in current_internal_sender_ids(config, runtime_paths):
         return True
 
     # Resolve bridge aliases to canonical user ID before permission checks.
@@ -159,7 +150,7 @@ def is_sender_allowed_for_agent_reply(
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    return sender_id in _safe_current_internal_sender_ids(config, runtime_paths)
+    return sender_id in current_internal_sender_ids(config, runtime_paths)
 
 
 def _is_sender_allowed_by_agent_reply_allowlist(sender_id: str, agent_name: str, config: Config) -> bool:
@@ -199,7 +190,7 @@ def get_effective_sender_id_for_reply_permissions(
     in event content. For trusted internal senders and trusted source kinds, use
     that embedded sender.
     """
-    is_internal_mindroom_sender = sender_id in _safe_current_internal_sender_ids(config, runtime_paths)
+    is_internal_mindroom_sender = sender_id in current_internal_sender_ids(config, runtime_paths)
     if not is_internal_mindroom_sender:
         return sender_id
     if not event_source:

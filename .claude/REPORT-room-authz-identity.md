@@ -38,8 +38,6 @@ Fix applied.
 The helper now requires `source_kind_allows_trusted_original_sender(source_kind_from_content(content))` before promoting `original_sender`.
 Existing trusted relay behavior remains for voice, hook, scheduled, hook dispatch, and trusted internal relay source kinds.
 The stale stream cleanup test fixture now models trusted relayed edit sidecar content with `SOURCE_KIND_KEY=trusted_internal_relay`.
-Authorization helpers also fail closed if internal sender IDs are requested before managed Matrix accounts have been prepared.
-That avoids early-startup identity lookup crashes without trusting generated fallback IDs.
 
 ## Bridge And Federation Identity
 
