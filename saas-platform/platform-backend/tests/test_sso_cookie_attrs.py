@@ -9,9 +9,16 @@ from tests.stripe_mock import create_stripe_mock
 
 sys.modules.setdefault("stripe", create_stripe_mock())
 
+import pytest  # noqa: E402
 from backend.deps import Limiter, get_remote_address, limiter, verify_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from main import app  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def clear_dependency_overrides():
+    yield
+    app.dependency_overrides.pop(verify_user, None)
 
 
 def _override_verify_user() -> dict[str, str]:
