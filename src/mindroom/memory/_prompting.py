@@ -31,21 +31,25 @@ def _normalized_inline_text(text: str) -> str:
     return " ".join(text.strip().split())
 
 
+def _normalized_label_value(value: object) -> str:
+    return _normalized_inline_text(str(value)).replace("[", "(").replace("]", ")")
+
+
 def _memory_source_label(memory: MemoryResult) -> str:
-    source = memory.get("user_id") or "unknown"
+    source = _normalized_label_value(memory.get("user_id") or "unknown")
     metadata = memory.get("metadata")
     if isinstance(metadata, dict):
         source_file = metadata.get("source_file")
         if isinstance(source_file, str) and source_file:
-            source = f"{source}:{source_file}"
+            source = f"{source}:{_normalized_label_value(source_file)}"
             line = metadata.get("line")
             if isinstance(line, (int, str)) and not isinstance(line, bool) and str(line).strip():
-                source = f"{source}:{line}"
+                source = f"{source}:{_normalized_label_value(line)}"
 
     labels = [f"source={source}"]
     memory_id = memory.get("id")
     if memory_id:
-        labels.append(f"id={memory_id}")
+        labels.append(f"id={_normalized_label_value(memory_id)}")
     return " ".join(labels)
 
 
