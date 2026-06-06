@@ -769,6 +769,7 @@ class ToolMetadata:
     status: ToolStatus = ToolStatus.AVAILABLE
     setup_type: SetupType = SetupType.NONE
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
+    consumes_workspace_paths: bool = False
     icon: str | None = None  # Icon identifier for frontend
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
@@ -801,6 +802,7 @@ def register_tool_with_metadata(
     status: ToolStatus = ToolStatus.AVAILABLE,
     setup_type: SetupType = SetupType.NONE,
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
+    consumes_workspace_paths: bool = False,
     icon: str | None = None,
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
@@ -826,6 +828,7 @@ def register_tool_with_metadata(
         status: Availability status of the tool
         setup_type: Type of setup required
         default_execution_target: Default runtime location for the tool
+        consumes_workspace_paths: Whether tool functions can consume files saved into the execution workspace
         icon: Icon identifier for frontend
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
@@ -853,6 +856,7 @@ def register_tool_with_metadata(
             status=status,
             setup_type=setup_type,
             default_execution_target=default_execution_target,
+            consumes_workspace_paths=consumes_workspace_paths,
             icon=icon,
             icon_color=icon_color,
             config_fields=config_fields,

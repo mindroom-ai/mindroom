@@ -50,7 +50,9 @@ from mindroom.tool_system.metadata import (
     TOOL_REGISTRY,
     ConfigField,
     ToolCategory,
+    ToolExecutionTarget,
     ToolInitOverrideError,
+    ToolMetadata,
     ToolValidationInfo,
     get_tool_by_name,
     register_tool_with_metadata,
@@ -1257,7 +1259,90 @@ def test_save_attachment_to_worker_request_failure_does_not_record_worker_failur
     assert manager.touched == [worker_target.worker_key]
 
 
-@pytest.mark.parametrize("worker_tools_override", [["coding"], ["python"], ["shell", "coding"]])
+def _sandbox_proxy_test_metadata(
+    name: str,
+    *,
+    default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
+    consumes_workspace_paths: bool = False,
+) -> ToolMetadata:
+    return ToolMetadata(
+        name=name,
+        display_name=name,
+        description=name,
+        category=ToolCategory.DEVELOPMENT,
+        default_execution_target=default_execution_target,
+        consumes_workspace_paths=consumes_workspace_paths,
+    )
+
+
+def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default fail-closed proxy routing should come from tool metadata, not a hardcoded name set."""
+    tool_name = "metadata_worker_execution_test"
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        tool_name,
+        _sandbox_proxy_test_metadata(
+            tool_name,
+            default_execution_target=ToolExecutionTarget.WORKER,
+        ),
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode=None,
+    )
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+
+
+def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attachment saves should follow workspace-consumer metadata, not a hardcoded name set."""
+    consumer_tool = "metadata_workspace_consumer_test"
+    non_consumer_tool = "metadata_non_workspace_consumer_test"
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        consumer_tool,
+        _sandbox_proxy_test_metadata(
+            consumer_tool,
+            default_execution_target=ToolExecutionTarget.WORKER,
+            consumes_workspace_paths=True,
+        ),
+    )
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        non_consumer_tool,
+        _sandbox_proxy_test_metadata(
+            non_consumer_tool,
+            default_execution_target=ToolExecutionTarget.WORKER,
+            consumes_workspace_paths=False,
+        ),
+    )
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    assert (
+        sandbox_proxy_module.attachment_save_uses_worker(
+            runtime_paths=runtime_paths,
+            worker_tools_override=[consumer_tool],
+        )
+        is True
+    )
+    assert (
+        sandbox_proxy_module.attachment_save_uses_worker(
+            runtime_paths=runtime_paths,
+            worker_tools_override=[non_consumer_tool],
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("worker_tools_override", [["coding"], ["docker"], ["python"], ["shell", "coding"]])
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
     worker_tools_override: list[str],

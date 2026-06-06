@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     default_execution_target=ToolExecutionTarget.WORKER,
+    consumes_workspace_paths=True,
     icon="SiDocker",
     icon_color="text-blue-500",
     config_fields=[

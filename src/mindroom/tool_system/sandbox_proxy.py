@@ -19,6 +19,7 @@ import httpx
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -63,8 +64,6 @@ _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
-_ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
-_UNSANDBOXED_EXECUTION_TOOL_NAMES = frozenset({"coding", "docker", "file", "python", "shell"})
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
@@ -466,6 +465,17 @@ def _execution_env_payload(
     return env
 
 
+def _tool_defaults_to_worker(tool_name: str) -> bool:
+    metadata = TOOL_METADATA.get(tool_name)
+    return metadata is not None and metadata.default_execution_target.value == "worker"
+
+
+def _workspace_path_consumer_tool_names() -> tuple[str, ...]:
+    return tuple(
+        sorted(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.consumes_workspace_paths),
+    )
+
+
 def attachment_save_uses_worker(
     *,
     runtime_paths: RuntimePaths,
@@ -478,7 +488,7 @@ def attachment_save_uses_worker(
             runtime_paths=runtime_paths,
             worker_tools_override=worker_tools_override,
         )
-        for tool_name in _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS
+        for tool_name in _workspace_path_consumer_tool_names()
     )
 
 
@@ -690,7 +700,7 @@ def _sandbox_proxy_requested_for_tool(
     elif proxy_config.proxy_tools:
         requested = tool_name in proxy_config.proxy_tools
     else:
-        requested = tool_name in _UNSANDBOXED_EXECUTION_TOOL_NAMES
+        requested = _tool_defaults_to_worker(tool_name)
     return requested
 
 
@@ -733,7 +743,7 @@ def _sandbox_proxy_enabled_for_tool(
     # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
     # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
     return not (
-        tool_name in _UNSANDBOXED_EXECUTION_TOOL_NAMES
+        _tool_defaults_to_worker(tool_name)
         and runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
     )
 
