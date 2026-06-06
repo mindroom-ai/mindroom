@@ -288,11 +288,11 @@ In a live validation, separate `code` and `research` requests produced separate 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
-| `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner`; selected execution tools fail closed without it unless unsafe local execution is explicitly enabled | _(required for worker-routed `static_runner` execution)_ |
+| `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — plain static-runner installs execute locally)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
 | `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses static proxy all-tools routing when `MINDROOM_SANDBOX_PROXY_URL` is set; otherwise uses default worker-routed execution tools)_ |
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
-| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit default local execution of `coding`, `docker`, `file`, `python`, and `shell` when no worker/proxy backend is available | `false` |
+| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit local execution of `coding`, `docker`, `file`, `python`, and `shell` when routing was explicitly requested but no worker/proxy backend is available | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
@@ -339,9 +339,9 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 | `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
 | `all` / `sandbox_all` | Every tool call goes through the proxy |
 | `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
-| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility; otherwise uses default worker-routed execution tools and fails closed for local execution tools when no worker/proxy backend is available |
+| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility. With `MINDROOM_WORKER_BACKEND=docker` or `kubernetes`, routes default worker tools and fails closed if the backend is misconfigured. With plain `static_runner` and no proxy URL, tools execute locally. |
 
-`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` when no worker/proxy backend is available.
+`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` after routing was explicitly requested without a working worker/proxy backend.
 Do not set it in hosted or multi-tenant deployments.
 
 ## Shell env and PATH
@@ -573,7 +573,8 @@ The `worker_tools` field has three states:
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
-Without that URL, selected execution tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
+Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
+If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
 ## Worker Scope

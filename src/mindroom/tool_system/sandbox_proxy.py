@@ -722,6 +722,15 @@ def _sandbox_proxy_enabled_for_tool(
     ):
         return False
 
+    if (
+        worker_tools_override is None
+        and proxy_config.execution_mode is None
+        and not proxy_config.proxy_tools
+        and proxy_config.proxy_url is None
+        and primary_worker_backend_name(runtime_paths) == "static_runner"
+    ):
+        return False
+
     if primary_worker_backend_available(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,

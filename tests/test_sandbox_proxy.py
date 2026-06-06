@@ -1286,6 +1286,7 @@ def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytes
             default_execution_target=ToolExecutionTarget.WORKER,
         ),
     )
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
         proxy_url=None,
@@ -5332,8 +5333,11 @@ class TestWorkerToolsOverride:
             is True
         )
 
-    def test_default_execution_tool_without_proxy_url_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unset sandbox config should not silently run execution tools in the primary runtime."""
+    def test_default_static_runner_without_proxy_keeps_execution_tools_local(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plain local static-runner installs should keep execution tools usable."""
         monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
@@ -5347,7 +5351,7 @@ class TestWorkerToolsOverride:
                 runtime_paths=runtime_paths,
                 worker_tools_override=None,
             )
-            is True
+            is False
         )
         assert (
             sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
@@ -5388,11 +5392,11 @@ class TestWorkerToolsOverride:
             is True
         )
 
-    def test_unsafe_local_execution_opt_in_disables_default_execution_tool_proxying(
+    def test_unsafe_local_execution_opt_in_disables_explicit_routing_without_backend(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Explicit unsafe env opt-in should permit host execution for local execution tools."""
+        """Explicit unsafe env opt-in should permit host execution after explicit routing."""
         monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
@@ -5406,17 +5410,17 @@ class TestWorkerToolsOverride:
             sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
                 "shell",
                 runtime_paths=runtime_paths,
-                worker_tools_override=None,
+                worker_tools_override=["shell"],
             )
             is False
         )
 
     @pytest.mark.asyncio
-    async def test_default_unsandboxed_shell_call_raises_instead_of_running_locally(
+    async def test_default_static_runner_shell_call_runs_locally(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Default local shell calls should fail closed when no sandbox URL or worker backend exists."""
+        """Plain local static-runner installs should keep shell usable without extra env."""
         monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
@@ -5428,8 +5432,7 @@ class TestWorkerToolsOverride:
         entrypoint = tool.async_functions["run_shell_command"].entrypoint
         assert entrypoint is not None
 
-        with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_URL must be set"):
-            await entrypoint("printf should-not-run")
+        assert await entrypoint("printf local-ok") == "local-ok"
 
     @pytest.mark.parametrize(
         "tool_name",
