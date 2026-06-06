@@ -192,3 +192,20 @@ def test_redact_sensitive_data_redacts_value_fields_named_by_sibling_secret_keys
         ],
         "headers": [{"name": "Authorization", "value": REDACTED}],
     }
+
+
+def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
+    """Field/parameter/variable labels should not force-redact harmless values."""
+    redacted = redact_sensitive_data(
+        [
+            {"field": "password_policy", "value": "min length 12"},
+            {"parameter": "client_secret_required", "value": False},
+            {"variable": "secret_sauce_recipe", "value": "tomatoes"},
+        ],
+    )
+
+    assert redacted == [
+        {"field": "password_policy", "value": "min length 12"},
+        {"parameter": "client_secret_required", "value": False},
+        {"variable": "secret_sauce_recipe", "value": "tomatoes"},
+    ]

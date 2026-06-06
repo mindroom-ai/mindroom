@@ -102,14 +102,9 @@ _SECRET_CONTAINER_KEYS: frozenset[str] = frozenset(
 )
 _CONTEXT_SECRET_LABEL_KEYS: frozenset[str] = frozenset(
     {
-        "field",
-        "field_name",
         "header",
         "key",
         "name",
-        "param",
-        "parameter",
-        "variable",
     },
 )
 _CONTEXT_SECRET_VALUE_KEYS: frozenset[str] = frozenset(
