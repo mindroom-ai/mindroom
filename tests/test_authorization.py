@@ -758,8 +758,8 @@ def test_room_specific_permissions_support_full_alias(monkeypatch: pytest.Monkey
     )
 
 
-def test_room_specific_permissions_ignore_unmanaged_canonical_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Untrusted room state must not remap an arbitrary room onto protected permission keys."""
+def test_room_specific_permissions_ignore_unmanaged_alias_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unmanaged room IDs must not resolve alias or room-key permission entries."""
     config = _config(
         agents={
             "assistant": {
