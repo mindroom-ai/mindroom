@@ -426,16 +426,16 @@ def test_plugin_watcher_drops_unconfigured_root_snapshots(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir(
+async def test_plugin_watcher_tracks_configured_absolute_root_under_runtime_control_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Plugin watcher should follow configured absolute roots, not just config_dir/plugins."""
+    """Plugin watcher should follow configured absolute roots accepted by runtime path policy."""
     monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
 
     runtime_root = tmp_path / "runtime"
-    external_plugin_root = tmp_path / "external-plugin"
+    external_plugin_root = runtime_root / "mindroom_data" / "external-plugin"
     external_plugin_root.mkdir(parents=True)
     (external_plugin_root / "mindroom.plugin.json").write_text(
         '{"name": "external-demo", "hooks_module": "hooks.py", "skills": []}',

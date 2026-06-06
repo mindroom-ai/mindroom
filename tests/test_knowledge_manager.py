@@ -885,6 +885,13 @@ async def test_config_mode_round_trip_marks_semantic_index_stale_after_file_mode
         modes={"docs": "files"},
     )
     runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES": "true",
+        },
+    )
     main.initialize_api_app(main.app, runtime_paths)
     _publish_api_config(main.app, semantic_config)
 
@@ -4866,7 +4873,7 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
 
 def test_index_key_is_per_binding_not_raw_base_id(tmp_path: Path) -> None:
     """The same base id resolves to separate refresh keys when storage binding differs."""
-    path = tmp_path / "docs"
+    path = Path("docs")
     config_a = _config(tmp_path / "a", bases={"docs": path}, agent_bases=["docs"])
     config_b = _config(tmp_path / "b", bases={"docs": path}, agent_bases=["docs"])
 

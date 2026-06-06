@@ -86,7 +86,7 @@ def _oauth_config(tmp_path: Path) -> Config:
             "mcp_servers": {
                 "demo": {
                     "transport": "streamable-http",
-                    "url": "https://mcp.example.test/mcp",
+                    "url": "https://8.8.8.8/mcp",
                     "auth": {
                         "type": "oauth",
                         "discovery": "manual",

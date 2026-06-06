@@ -111,7 +111,7 @@ def _mcp_oauth_config_payload(worker_scope: str = "user_agent") -> dict[str, Any
         "mcp_servers": {
             "demo": {
                 "transport": "streamable-http",
-                "url": "https://mcp.example.test/mcp",
+                "url": "https://8.8.8.8/mcp",
                 "auth": {
                     "type": "oauth",
                     "display_name": "Demo MCP",

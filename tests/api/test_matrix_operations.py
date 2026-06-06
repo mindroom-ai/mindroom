@@ -408,7 +408,7 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     payload: dict[str, Any] | list[dict[str, Any]] | None,
 ) -> None:
     """Matrix operations should surface malformed current config instead of stale cached entities."""
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 

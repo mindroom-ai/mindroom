@@ -202,7 +202,7 @@ def _patch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
 def _oauth_mcp_config() -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
-        url="https://mcp.example.test/mcp",
+        url="https://8.8.8.8/mcp",
         auth={
             "type": "oauth",
             "discovery": "manual",

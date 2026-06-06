@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import textwrap
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,8 +18,6 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.tool_system.metadata import get_tool_by_name
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.constants import RuntimePaths
 
 
@@ -54,8 +54,9 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
             "mcp_servers": {
                 "echo": {
                     "transport": "stdio",
-                    "command": sys.executable,
+                    "command": Path(sys.executable).name,
                     "args": [str(server_script)],
+                    "env": {"PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"},
                 },
             },
             "agents": {

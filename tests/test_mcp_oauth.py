@@ -69,18 +69,18 @@ def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
 def _oauth_mcp_server_config() -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
-        url="https://mcp.example.test/mcp",
+        url="https://8.8.8.8/mcp",
         tool_prefix="example",
         auth={
             "type": "oauth",
             "display_name": "Example MCP",
-            "resource": "https://mcp.example.test/mcp",
+            "resource": "https://8.8.8.8/mcp",
             "discovery": "manual",
             "authorization_url": "https://auth.example.test/authorize",
             "token_url": "https://auth.example.test/token",
             "scopes": [],
             "extra_auth_params": {"audience": "example"},
-            "extra_token_params": {"resource": "https://mcp.example.test/mcp"},
+            "extra_token_params": {"resource": "https://8.8.8.8/mcp"},
         },
     )
 
@@ -88,16 +88,16 @@ def _oauth_mcp_server_config() -> MCPServerConfig:
 def _auto_oauth_mcp_server_config() -> MCPServerConfig:
     return MCPServerConfig(
         transport="streamable-http",
-        url="https://mcp.example.test/mcp",
+        url="https://8.8.8.8/mcp",
         tool_prefix="example",
         auth={
             "type": "oauth",
             "display_name": "Example MCP",
-            "resource": "https://mcp.example.test/mcp",
+            "resource": "https://8.8.8.8/mcp",
             "discovery": "auto",
             "scopes": ["mcp.read"],
             "extra_auth_params": {"audience": "example"},
-            "extra_token_params": {"resource": "https://mcp.example.test/mcp"},
+            "extra_token_params": {"resource": "https://8.8.8.8/mcp"},
         },
     )
 
@@ -132,9 +132,9 @@ class _FakeDiscoveryClient:
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
         del headers
         self.gets.append(url)
-        if url == "https://mcp.example.test/.well-known/oauth-protected-resource":
+        if url == "https://8.8.8.8/.well-known/oauth-protected-resource":
             return _FakeDiscoveryResponse({}, status_code=404)
-        if url == "https://mcp.example.test/.well-known/oauth-protected-resource/mcp":
+        if url == "https://8.8.8.8/.well-known/oauth-protected-resource/mcp":
             return _FakeDiscoveryResponse({"authorization_servers": ["https://auth.example.test/issuer"]})
         if url == "https://auth.example.test/.well-known/oauth-authorization-server/issuer":
             return _FakeDiscoveryResponse(
@@ -195,7 +195,7 @@ def test_mcp_oauth_provider_defaults_to_mcp_server_provider_id() -> None:
     assert provider.token_endpoint_auth_method == "none"  # noqa: S105
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.extra_auth_params == {"audience": "example"}
-    assert provider.extra_token_params == {"resource": "https://mcp.example.test/mcp"}
+    assert provider.extra_token_params == {"resource": "https://8.8.8.8/mcp"}
 
 
 def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_scoped() -> None:
@@ -261,8 +261,8 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     assert params["audience"] == ["example"]
     assert params["code_challenge_method"] == ["S256"]
     assert _FakeDiscoveryClient.gets == [
-        "https://mcp.example.test/.well-known/oauth-protected-resource",
-        "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+        "https://8.8.8.8/.well-known/oauth-protected-resource",
+        "https://8.8.8.8/.well-known/oauth-protected-resource/mcp",
         "https://auth.example.test/.well-known/oauth-authorization-server/issuer",
     ]
     assert _FakeDiscoveryClient.posts == [
@@ -301,7 +301,7 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
 
     class _InvalidFirstDiscoveryClient(_FakeDiscoveryClient):
         async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
-            if url == "https://mcp.example.test/.well-known/oauth-protected-resource":
+            if url == "https://8.8.8.8/.well-known/oauth-protected-resource":
                 _FakeDiscoveryClient.gets.append(url)
                 return _InvalidJsonDiscoveryResponse()
             return await super().get(url, headers=headers)
@@ -321,8 +321,8 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
 
     assert urlparse(auth_url).netloc == "auth.example.test"
     assert _FakeDiscoveryClient.gets[:2] == [
-        "https://mcp.example.test/.well-known/oauth-protected-resource",
-        "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+        "https://8.8.8.8/.well-known/oauth-protected-resource",
+        "https://8.8.8.8/.well-known/oauth-protected-resource/mcp",
     ]
 
 
@@ -337,7 +337,7 @@ async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(tmp_pa
     strict_paths = _runtime_paths(tmp_path)
     server_config = MCPServerConfig(
         transport="streamable-http",
-        url="https://mcp.example.test/mcp",
+        url="https://8.8.8.8/mcp",
         auth={
             "type": "oauth",
             "discovery": "manual",
@@ -444,7 +444,17 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
         return func(*args, **kwargs)
 
     monkeypatch.setattr("mindroom.mcp.oauth.asyncio.to_thread", fake_to_thread)
-    provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
+    server_config = _auto_oauth_mcp_server_config()
+    assert server_config.auth is not None
+    provider = mcp_oauth_provider(
+        "demo",
+        server_config.model_copy(
+            update={
+                "url": "https://mcp.example.test/mcp",
+                "auth": server_config.auth.model_copy(update={"resource": "https://mcp.example.test/mcp"}),
+            },
+        ),
+    )
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
 
