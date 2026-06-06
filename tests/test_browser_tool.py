@@ -8,7 +8,7 @@ import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -29,6 +29,9 @@ from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
@@ -636,6 +639,14 @@ async def test_ensure_profile_installs_server_fetch_route(
     context.route.assert_awaited_once()
     route_pattern, route_handler = context.route.await_args.args
     assert route_pattern == "**/*"
+    to_thread_calls = 0
+
+    async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+        nonlocal to_thread_calls
+        to_thread_calls += 1
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.browser_fetch_guard.asyncio.to_thread", fake_to_thread)
 
     unsafe_route = SimpleNamespace(
         request=SimpleNamespace(url="http://127.0.0.1/admin"),
@@ -646,6 +657,7 @@ async def test_ensure_profile_installs_server_fetch_route(
 
     unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
     unsafe_route.continue_.assert_not_called()
+    assert to_thread_calls == 1
 
 
 @pytest.mark.asyncio

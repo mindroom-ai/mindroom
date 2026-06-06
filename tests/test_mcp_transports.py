@@ -265,7 +265,7 @@ async def test_open_streamable_http_rejects_metadata_transport_url(
 @pytest.mark.asyncio
 async def test_mcp_http_client_factory_rejects_private_request_url() -> None:
     """The MCP HTTP client factory should validate redirects and request URLs through server-fetch transport."""
-    async with _server_fetch_mcp_http_client() as client:
+    async with _server_fetch_mcp_http_client(follow_redirects=False, verify=False, future_sdk_option=True) as client:
         with pytest.raises(ServerFetchUrlError) as exc_info:
             await client.get("http://127.0.0.1:8000/mcp")
 

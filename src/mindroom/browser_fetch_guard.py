@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -23,7 +24,7 @@ def _validate_browser_fetch_url(url: str) -> str:
 async def continue_or_abort_browser_fetch(route: Route) -> None:
     """Continue public browser fetches and abort unsafe server-side destinations."""
     try:
-        _validate_browser_fetch_url(route.request.url)
+        await asyncio.to_thread(_validate_browser_fetch_url, route.request.url)
     except ServerFetchUrlError:
         await route.abort("blockedbyclient")
         return

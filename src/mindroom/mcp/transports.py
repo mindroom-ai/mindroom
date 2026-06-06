@@ -64,6 +64,7 @@ def _server_fetch_mcp_http_client(
     headers: dict[str, str] | None = None,
     timeout: httpx.Timeout | None = None,
     auth: httpx.Auth | None = None,
+    **_ignored: object,
 ) -> httpx.AsyncClient:
     """Create an MCP HTTP client that validates requests, redirects, and dialed addresses."""
     kwargs: dict[str, Any] = {

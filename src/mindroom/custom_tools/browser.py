@@ -325,11 +325,7 @@ def _unknown_browser_action_message(action: str) -> str:
 
 def _is_path_inside(path: Path, root: Path) -> bool:
     """Return whether a resolved path is under a resolved root."""
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+    return path.is_relative_to(root)
 
 
 def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
