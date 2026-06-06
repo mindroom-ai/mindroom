@@ -2,24 +2,78 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import time
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from backend import auth_monitor
-from backend.metrics import record_admin_verification, record_auth_event
-from backend.config import auth_client, logger, supabase
+import jwt
 from cachetools import TTLCache
 from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from backend import auth_monitor
+from backend.config import auth_client, logger, supabase
+from backend.metrics import record_admin_verification, record_auth_event
+
 if TYPE_CHECKING:
     from supabase import Client
 
-# TTL cache for auth verification (5 minutes, max 100 entries)
-_auth_cache = TTLCache(maxsize=100, ttl=300)
+MAX_AUTH_CACHE_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class _CachedAuthUser:
+    user_data: dict
+    expires_at: datetime
+
+
+# TTL cache for auth verification (5 minutes max, capped again by JWT exp)
+_auth_cache = TTLCache(maxsize=100, ttl=MAX_AUTH_CACHE_SECONDS)
+
+
+def _auth_cache_key(token: str) -> str:
+    """Hash bearer token before using it as a process-local cache key."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _jwt_expires_at(token: str) -> datetime | None:
+    """Return JWT exp without trusting it for auth decisions."""
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+    except jwt.PyJWTError:
+        return None
+    exp = claims.get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, int | float):
+        return None
+    return datetime.fromtimestamp(exp, UTC)
+
+
+def _get_cached_auth_user(token: str) -> dict | None:
+    """Return cached user data only while the JWT exp is still in the future."""
+    cache_key = _auth_cache_key(token)
+    cached = _auth_cache.get(cache_key)
+    if cached is None:
+        return None
+    if cached.expires_at <= datetime.now(UTC):
+        _auth_cache.pop(cache_key, None)
+        return None
+    return cached.user_data
+
+
+def _store_cached_auth_user(token: str, user_data: dict) -> None:
+    """Cache verified auth no longer than either JWT exp or local cache TTL."""
+    jwt_expires_at = _jwt_expires_at(token)
+    if jwt_expires_at is None:
+        return
+    now = datetime.now(UTC)
+    if jwt_expires_at <= now:
+        return
+    cache_expires_at = min(jwt_expires_at, now + timedelta(seconds=MAX_AUTH_CACHE_SECONDS))
+    _auth_cache[_auth_cache_key(token)] = _CachedAuthUser(user_data=user_data, expires_at=cache_expires_at)
 
 
 def client_ip_from_request(request: Request) -> str:
@@ -103,9 +157,10 @@ async def verify_user(authorization: str = Header(None), request: Request = None
         raise
 
     # Check cache first
-    if token in _auth_cache:
+    cached_user = _get_cached_auth_user(token)
+    if cached_user is not None:
         logger.info("Auth cache hit (instant)")
-        return _auth_cache[token]
+        return cached_user
 
     # Start timing for database lookup
     start = time.perf_counter()
@@ -167,8 +222,8 @@ async def verify_user(authorization: str = Header(None), request: Request = None
             "account": result.data,
         }
 
-        # Cache the result (TTL handled by TTLCache)
-        _auth_cache[token] = user_data
+        # Cache the result no longer than the JWT lifetime.
+        _store_cached_auth_user(token, user_data)
 
         # Log the time taken for database auth
         db_time = time.perf_counter() - start

@@ -149,6 +149,8 @@ Important notes for this mode:
 - The primary runtime does not need `MINDROOM_SANDBOX_PROXY_URL` in this mode because worker endpoints come from the Kubernetes worker handles.
 - Dynamic worker pods default to `enableServiceLinks: false` so Kubernetes does not inject sibling Service names into the runner environment.
 - Runner ingress defaults to allowing the MindRoom control-plane pod to reach worker runner ports, while worker-to-worker ingress is denied by NetworkPolicy.
+- Worker egress defaults to DNS, runtime traffic, and public HTTP/HTTPS with private and metadata CIDR exceptions.
+- Add broker services through `workers.kubernetes.networkPolicy.extraEgress` in the runtime chart, or `networkPolicy.workerExtraEgress` in the hosted instance chart.
 - The authenticated `/api/workers` and `/api/workers/cleanup` endpoints on the primary runtime expose backend-neutral worker lifecycle information.
 
 Untrusted code-execution tools may still share the runner container's process namespace and may be able to inspect the runner process environment through `/proc` on some container runtimes.
@@ -418,6 +420,8 @@ When you bind a non-loopback interface, network isolation is load-bearing and mu
 For Docker Compose, put the adapter on both the worker network and the Agent Vault network.
 MindRoom workers only need access to `agent-vault-bridge-adapter:18080`.
 For Kubernetes, run the adapter as a `Deployment` or sidecar, expose it with a private `ClusterIP` service, and use `NetworkPolicy` so workers can reach only the adapter while the adapter can reach Agent Vault.
+In the runtime chart, add that adapter Service to `workers.kubernetes.networkPolicy.extraEgress`.
+In the hosted instance chart, add it to `networkPolicy.workerExtraEgress`.
 
 To validate the real integration locally with Docker and the real `infisical/agent-vault` image, run:
 

@@ -13,6 +13,9 @@ from mcp.client.stdio import StdioServerParameters, get_default_environment, std
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.message import SessionMessage
 
+from mindroom.constants import validate_runtime_control_path
+from mindroom.server_fetch_url import validate_server_fetch_url
+
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 if TYPE_CHECKING:
@@ -66,17 +69,29 @@ def _build_stdio_server_parameters(
         msg = "stdio MCP servers require command"
         raise ValueError(msg)
     env = server_config.env
+    command = server_config.command
+    cwd = server_config.cwd
     if runtime_paths is not None:
         env = _interpolate_mcp_env(server_config.env, runtime_paths)
+        if _stdio_command_uses_path(command):
+            command = str(
+                validate_runtime_control_path(command, runtime_paths, field_name="mcp_servers.<server>.command"),
+            )
+        if cwd is not None:
+            cwd = str(validate_runtime_control_path(cwd, runtime_paths, field_name="mcp_servers.<server>.cwd"))
     return StdioServerParameters(
-        command=server_config.command,
+        command=command,
         args=list(server_config.args),
         env={
             **get_default_environment(),
             **env,
         },
-        cwd=server_config.cwd,
+        cwd=cwd,
     )
+
+
+def _stdio_command_uses_path(command: str) -> bool:
+    return command.startswith(".") or "/" in command or "\\" in command
 
 
 @asynccontextmanager
@@ -100,12 +115,13 @@ async def _open_remote_transport(
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
+    url = validate_server_fetch_url(server_config.url)
     headers = {
         **_interpolate_mcp_headers(server_config.headers, runtime_paths),
         **(dict(extra_headers) if extra_headers is not None else {}),
     }
     async with client(
-        server_config.url,
+        url,
         headers=headers,
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,

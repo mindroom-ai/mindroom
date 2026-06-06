@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.response import ToolExecution
 
+from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -389,11 +391,12 @@ def _format_structured_result_preview(result: object) -> tuple[str, bool] | None
 
 
 def _format_tool_result_preview(result: object) -> tuple[str, bool]:
-    structured_preview = _format_structured_result_preview(result)
+    redacted_result = redact_sensitive_data(result)
+    structured_preview = _format_structured_result_preview(redacted_result)
     if structured_preview is not None:
         return structured_preview
 
-    result_text = _to_compact_text(result)
+    result_text = _to_compact_text(redacted_result)
     return _truncate(result_text, _MAX_TOOL_RESULT_DISPLAY_CHARS)
 
 
@@ -449,7 +452,7 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     truncated = False
     # Preserve insertion order for easier debugging of tool-call construction.
     for key, value in tool_args.items():
-        value_text = _to_compact_text(value)
+        value_text = _to_compact_text(redact_sensitive_data(value))
         # Collapse newlines so previews stay single-line.
         value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
@@ -603,9 +606,9 @@ def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dic
             "tool_name": entry.tool_name,
         }
         if entry.args_preview is not None:
-            event["args_preview"] = entry.args_preview
+            event["args_preview"] = redact_sensitive_text(entry.args_preview)
         if entry.result_preview is not None:
-            event["result_preview"] = entry.result_preview
+            event["result_preview"] = redact_sensitive_text(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
             has_truncated_content = True
@@ -628,9 +631,9 @@ def render_tool_trace_for_context(events: list[ToolTraceEntry]) -> str:
         status = "completed" if event.type == "tool_call_completed" else "started"
         lines.append(f"[tool:{event.tool_name} {status}]")
         if event.args_preview:
-            lines.append(f"  args: {event.args_preview}")
+            lines.append(f"  args: {redact_sensitive_text(event.args_preview)}")
         if event.result_preview is not None:
-            lines.append(f"  result: {event.result_preview}")
+            lines.append(f"  result: {redact_sensitive_text(event.result_preview)}")
         elif status == "started":
             lines.append("  result: <not yet returned>")
         if event.truncated:

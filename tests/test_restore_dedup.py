@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
 
 from mindroom import scheduling
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import _MISSED_TASK_MAX_AGE_SECONDS, ScheduledWorkflow, restore_scheduled_tasks
-from tests.conftest import make_event_cache_mock
+from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _conversation_cache() -> AsyncMock:
@@ -21,12 +27,42 @@ def _conversation_cache() -> AsyncMock:
     return access
 
 
-def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str = "pending", idx: int = 1) -> dict:
+def _runtime_paths(tmp_path: Path) -> object:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+
+def _config(runtime_paths: object) -> Config:
+    config = bind_runtime_paths(Config(authorization={"default_room_access": True}), runtime_paths)
+    persist_entity_accounts(config, runtime_paths)
+    return config
+
+
+async def _make_state_event(
+    runtime_paths: object,
+    state_key: str,
+    workflow: ScheduledWorkflow,
+    status: str = "pending",
+    idx: int = 1,
+) -> dict:
     """Build a Matrix state event dict for a scheduled task."""
+    client = AsyncMock()
+    await scheduling._persist_scheduled_task_state(
+        client=client,
+        room_id=workflow.room_id or "!r:server",
+        task_id=state_key,
+        workflow=workflow,
+        runtime_paths=runtime_paths,
+        status=status,
+        created_at=datetime.now(UTC),
+    )
     return {
         "type": "com.mindroom.scheduled.task",
         "state_key": state_key,
-        "content": {"workflow": workflow.model_dump_json(), "status": status},
+        "content": client.room_put_state.await_args.kwargs["content"],
         "event_id": f"$e{idx}",
         "sender": "@s:server",
         "origin_server_ts": idx,
@@ -34,10 +70,14 @@ def _make_state_event(state_key: str, workflow: ScheduledWorkflow, status: str =
 
 
 @pytest.mark.asyncio
-async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Past once-tasks within the grace period should be restored; invalid cron skipped."""
     client = AsyncMock()
-    config = AsyncMock()
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config(runtime_paths)
 
     recent_past_once = ScheduledWorkflow(
         schedule_type="once",
@@ -46,6 +86,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         description="Past",
         room_id="!r:server",
         thread_id="$t",
+        created_by="@user:server",
     )
     cron = ScheduledWorkflow(
         schedule_type="cron",
@@ -54,6 +95,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         description="Cron",
         room_id="!r:server",
         thread_id="$t",
+        created_by="@user:server",
     )
 
     valid_cron = ScheduledWorkflow(
@@ -63,13 +105,14 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         description="Cron2",
         room_id="!r:server",
         thread_id="$t",
+        created_by="@user:server",
     )
 
     response = nio.RoomGetStateResponse.from_dict(
         [
-            _make_state_event("id1", recent_past_once, idx=1),
-            _make_state_event("id2", cron, idx=2),
-            _make_state_event("id3", valid_cron, status="cancelled", idx=3),
+            await _make_state_event(runtime_paths, "id1", recent_past_once, idx=1),
+            await _make_state_event(runtime_paths, "id2", cron, idx=2),
+            await _make_state_event(runtime_paths, "id3", valid_cron, status="cancelled", idx=3),
         ],
         room_id="!r:server",
     )
@@ -82,7 +125,7 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
         client,
         "!r:server",
         config,
-        resolve_runtime_paths(process_env={}),
+        runtime_paths,
         make_event_cache_mock(),
         _conversation_cache(),
     )
@@ -91,10 +134,11 @@ async def test_restore_executes_recent_missed_once_and_skips_invalid_cron(monkey
 
 
 @pytest.mark.asyncio
-async def test_restore_marks_ancient_missed_task_as_failed() -> None:
+async def test_restore_marks_ancient_missed_task_as_failed(tmp_path: Path) -> None:
     """One-time task older than the grace period should be marked as failed."""
     client = AsyncMock()
-    config = AsyncMock()
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config(runtime_paths)
 
     ancient_once = ScheduledWorkflow(
         schedule_type="once",
@@ -103,10 +147,11 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
         description="Ancient task",
         room_id="!r:server",
         thread_id="$t",
+        created_by="@user:server",
     )
 
     response = nio.RoomGetStateResponse.from_dict(
-        [_make_state_event("id-ancient", ancient_once)],
+        [await _make_state_event(runtime_paths, "id-ancient", ancient_once)],
         room_id="!r:server",
     )
     client.room_get_state = AsyncMock(return_value=response)
@@ -115,7 +160,7 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
         client,
         "!r:server",
         config,
-        resolve_runtime_paths(process_env={}),
+        runtime_paths,
         make_event_cache_mock(),
         _conversation_cache(),
     )
@@ -129,10 +174,11 @@ async def test_restore_marks_ancient_missed_task_as_failed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Future one-time tasks should be restored normally."""
     client = AsyncMock()
-    config = AsyncMock()
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config(runtime_paths)
 
     future_once = ScheduledWorkflow(
         schedule_type="once",
@@ -141,10 +187,11 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
         description="Future task",
         room_id="!r:server",
         thread_id="$t",
+        created_by="@user:server",
     )
 
     response = nio.RoomGetStateResponse.from_dict(
-        [_make_state_event("id-future", future_once)],
+        [await _make_state_event(runtime_paths, "id-future", future_once)],
         room_id="!r:server",
     )
     client.room_get_state = AsyncMock(return_value=response)
@@ -156,7 +203,7 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
         client,
         "!r:server",
         config,
-        resolve_runtime_paths(process_env={}),
+        runtime_paths,
         make_event_cache_mock(),
         _conversation_cache(),
     )
@@ -165,10 +212,11 @@ async def test_restore_future_task_still_works(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Restoration should not create duplicate asyncio tasks for the same task id."""
     client = AsyncMock()
-    config = AsyncMock()
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _config(runtime_paths)
     workflow = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=10),
@@ -176,18 +224,12 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
         description="Future",
         room_id="!r:server",
         thread_id="$t",
+        created_by="@user:server",
     )
 
     response = nio.RoomGetStateResponse.from_dict(
         [
-            {
-                "type": "com.mindroom.scheduled.task",
-                "state_key": "id1",
-                "content": {"workflow": workflow.model_dump_json(), "status": "pending"},
-                "event_id": "$e1",
-                "sender": "@s:server",
-                "origin_server_ts": 1,
-            },
+            await _make_state_event(runtime_paths, "id1", workflow),
         ],
         room_id="!r:server",
     )
@@ -203,7 +245,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
         client,
         "!r:server",
         config,
-        resolve_runtime_paths(process_env={}),
+        runtime_paths,
         make_event_cache_mock(),
         _conversation_cache(),
     )

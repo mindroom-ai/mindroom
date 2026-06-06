@@ -533,6 +533,40 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
+def test_config_write_fails_closed_without_auth_or_unsafe_opt_in(tmp_path: Path) -> None:
+    """Config write endpoints should require auth unless local unsafe writes are explicit."""
+    runtime_paths = _runtime_paths(tmp_path, process_env={})
+    runtime_paths.config_path.write_text(yaml.safe_dump(_authored_config_payload("test_agent")), encoding="utf-8")
+    main.initialize_api_app(main.app, runtime_paths)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
+
+    response = TestClient(main.app).put(
+        "/api/config/agents/test_agent",
+        json={"display_name": "Updated", "role": "still valid"},
+    )
+
+    assert response.status_code == 403
+    assert "Control-plane writes require dashboard auth" in response.json()["detail"]
+
+
+def test_config_write_allows_explicit_unsafe_local_opt_in(tmp_path: Path) -> None:
+    """Local tests/dev can opt in to unauthenticated config writes with an unsafe flag."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES": "true"},
+    )
+    runtime_paths.config_path.write_text(yaml.safe_dump(_authored_config_payload("test_agent")), encoding="utf-8")
+    main.initialize_api_app(main.app, runtime_paths)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
+
+    response = TestClient(main.app).put(
+        "/api/config/agents/test_agent",
+        json={"display_name": "Updated", "role": "still valid"},
+    )
+
+    assert response.status_code == 200
+
+
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
     """Swapping an app to a different config file should drop the previous cached payload."""
     first_dir = tmp_path / "first"
@@ -2552,7 +2586,10 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     )
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=config_path,
-        process_env={"MINDROOM_NAMESPACE": "prod1"},
+        process_env={
+            "MINDROOM_NAMESPACE": "prod1",
+            "MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES": "true",
+        },
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
@@ -2939,6 +2976,7 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
         validation_runtime_paths: constants.RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool = False,
+        execute_plugin_modules_for_validation: bool = True,
     ) -> Config:
         nonlocal call_count
         with call_lock:
@@ -2953,6 +2991,7 @@ def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path)
         return original_loader(
             validation_runtime_paths,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            execute_plugin_modules_for_validation=execute_plugin_modules_for_validation,
         )
 
     def _run_validation(index: int, source: str) -> None:

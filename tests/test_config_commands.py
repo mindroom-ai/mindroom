@@ -1042,8 +1042,68 @@ async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
-    """Set previews should surface plugin manifest validation failures as user errors."""
+async def test_handle_config_command_show_redacts_sensitive_values(tmp_path: Path) -> None:
+    """Config output should redact authored secrets before sending them into chat."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "sk-live-secret"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "mcp_servers": {
+                    "demo": {
+                        "transport": "streamable-http",
+                        "url": "https://mcp.example.test/mcp",
+                        "headers": {"Authorization": "Bearer mcp-secret"},
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert "sk-live-secret" not in response
+    assert "mcp-secret" not in response
+    assert "***redacted***" in response
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_rejects_privileged_config_paths(tmp_path: Path) -> None:
+    """Chat config commands should not expose or edit privileged config roots."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "authorization": {"global_users": ["@admin:example.org"]},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    get_response, get_change_info = await handle_config_command(
+        "get authorization.global_users",
+        _runtime_paths_for_config(config_path),
+    )
+    set_response, set_change_info = await handle_config_command(
+        'set plugins ["./plugins/demo"]',
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert get_change_info is None
+    assert set_change_info is None
+    assert "restricted" in get_response
+    assert "restricted" in set_response
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_set_rejects_privileged_plugin_path(tmp_path: Path) -> None:
+    """Plugin config updates are too privileged for chat-based config editing."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1069,13 +1129,12 @@ async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(t
     )
 
     assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Invalid plugin name" in response
+    assert "restricted" in response
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_returns_malformed_plugin_manifest_error(tmp_path: Path) -> None:
-    """Set previews should surface malformed plugin manifests as user errors."""
+async def test_handle_config_command_set_rejects_privileged_plugin_manifest_path(tmp_path: Path) -> None:
+    """Malformed plugin config is still rejected before preview because the root is privileged."""
     plugin_root = tmp_path / "plugins" / "bad-manifest"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1101,8 +1160,7 @@ async def test_handle_config_command_set_returns_malformed_plugin_manifest_error
     )
 
     assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Plugin tools_module must be a string" in response
+    assert "restricted" in response
 
 
 @pytest.mark.asyncio
@@ -1177,6 +1235,68 @@ class TestConfigCommandHandling:
             assert change_info is None  # get command should not return change info
             assert "Configuration value for `agents.test_agent.display_name`:" in response
             assert "Test Agent" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_show_redacts_secret_values(self) -> None:
+        """Config show should redact secret fields before sending Matrix-visible output."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "plain-config-secret"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
+            assert change_info is None
+            assert "plain-config-secret" not in response
+            assert "***redacted***" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_get_does_not_expose_secret_values(self) -> None:
+        """Config get should redact or reject secret fields before sending Matrix-visible output."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "plain-config-secret"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response, change_info = await handle_config_command(
+                "get models.default.api_key",
+                _runtime_paths_for_config(config_path),
+            )
+            assert change_info is None
+            assert "plain-config-secret" not in response
+            assert "***redacted***" in response or "restricted" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_set_preview_does_not_expose_secret_values(self) -> None:
+        """Config set previews should redact or reject secret fields before Matrix-visible output."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4", "api_key": "old-config-secret"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response, change_info = await handle_config_command(
+                "set models.default.api_key new-config-secret",
+                _runtime_paths_for_config(config_path),
+            )
+            assert "old-config-secret" not in response
+            assert "new-config-secret" not in response
+            if change_info is None:
+                assert "restricted" in response
+            else:
+                assert change_info["old_value"] == "old-config-secret"
+                assert change_info["new_value"] == "new-config-secret"
+                assert "***redacted***" in response
         finally:
             config_path.unlink()
 

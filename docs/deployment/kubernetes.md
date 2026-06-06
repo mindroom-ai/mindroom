@@ -236,6 +236,7 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 - In the runtime chart's explicit separate worker namespace mode, Secret CRUD for per-worker auth Secrets in that worker namespace.
 - In the hosted instance chart, a pre-created tenant worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
 - NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
+- Worker egress NetworkPolicy rules that default-deny egress, then allow DNS, required runtime traffic, public HTTP/HTTPS with private and metadata CIDR exceptions, and explicit broker or API-server rules from chart values.
 
 ### Operations
 

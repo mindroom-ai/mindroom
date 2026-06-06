@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import socket
+from unittest.mock import AsyncMock
 
 import pytest
 
 from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.tools.crawl4ai import crawl4ai_tools
+from mindroom.tools.custom_api import custom_api_tools
 
 
 def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]]]:
@@ -157,3 +160,56 @@ def test_validate_server_fetch_url_blocks_link_local_dns_when_private_is_enabled
         validate_server_fetch_url("https://link-local-by-dns.example/", allow_private_networks=True)
 
     assert exc_info.value.reason == "blocked_address"
+
+
+def test_custom_api_tool_rejects_private_endpoint_before_request() -> None:
+    """Custom API requests should use server-fetch URL validation before making requests."""
+    tool = custom_api_tools()()
+
+    with pytest.raises(ServerFetchUrlError):
+        tool.make_request("http://127.0.0.1:8000/admin")
+
+
+def test_custom_api_tool_validates_combined_base_url() -> None:
+    """Custom API base_url plus endpoint should not bypass server-fetch validation."""
+    tool = custom_api_tools()(base_url="http://169.254.169.254")
+
+    with pytest.raises(ServerFetchUrlError):
+        tool.make_request("/latest/meta-data")
+
+
+def test_custom_api_tool_rejects_private_redirect_before_following(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API requests should validate each redirect before following it."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("93.184.216.34"),
+    )
+    requested_urls: list[str] = []
+
+    def fake_request(**kwargs: object) -> object:
+        requested_urls.append(str(kwargs["url"]))
+        return type(
+            "RedirectResponse",
+            (),
+            {"headers": {"Location": "http://127.0.0.1/admin"}, "is_redirect": True},
+        )()
+
+    monkeypatch.setattr("requests.request", fake_request)
+    tool = custom_api_tools()()
+
+    with pytest.raises(ServerFetchUrlError):
+        tool.make_request("https://example.com/redirect")
+
+    assert requested_urls == ["https://example.com/redirect"]
+
+
+def test_crawl4ai_tool_rejects_private_url_before_crawling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI wrapper should validate URLs before browser crawling starts."""
+    tool = crawl4ai_tools()()
+    async_crawl = AsyncMock(return_value="ok")
+    monkeypatch.setattr(tool, "_async_crawl", async_crawl)
+
+    with pytest.raises(ServerFetchUrlError):
+        tool.crawl("http://127.0.0.1:8000/private")
+
+    async_crawl.assert_not_called()

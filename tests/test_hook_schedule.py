@@ -32,6 +32,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -40,7 +41,9 @@ if TYPE_CHECKING:
 
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
-    return bind_runtime_paths(Config(), runtime_paths)
+    config = bind_runtime_paths(Config(authorization={"default_room_access": True}), runtime_paths)
+    persist_entity_accounts(config, runtime_paths)
+    return config
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:

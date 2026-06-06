@@ -63,8 +63,10 @@ _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
+_ALLOW_UNSANDBOXED_EXECUTION_TOOLS_ENV = "MINDROOM_ALLOW_UNSANDBOXED_EXECUTION_TOOLS"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
+_FAIL_CLOSED_UNSANDBOXED_TOOL_NAMES = frozenset({"coding", "docker", "file", "python", "shell"})
 
 
 class _AttachmentSavePayloadFields(TypedDict):
@@ -690,7 +692,7 @@ def _sandbox_proxy_enabled_for_tool(
 
     backend_name = primary_worker_backend_name(runtime_paths)
     if backend_name == "static_runner" and proxy_config.proxy_url is None and worker_scope is None:
-        return False
+        return _fail_closed_for_unsandboxed_tool(tool_name, runtime_paths=runtime_paths)
 
     if primary_worker_backend_available(
         runtime_paths,
@@ -701,7 +703,17 @@ def _sandbox_proxy_enabled_for_tool(
 
     # Dedicated-worker backends must fail closed when routing is intended but the
     # provider config is incomplete; otherwise tools silently execute locally.
-    return primary_worker_backend_is_dedicated(runtime_paths)
+    return primary_worker_backend_is_dedicated(runtime_paths) or _fail_closed_for_unsandboxed_tool(
+        tool_name,
+        runtime_paths=runtime_paths,
+    )
+
+
+def _fail_closed_for_unsandboxed_tool(tool_name: str, *, runtime_paths: RuntimePaths) -> bool:
+    """Return whether missing sandbox plumbing should still wrap this tool to raise on call."""
+    if tool_name not in _FAIL_CLOSED_UNSANDBOXED_TOOL_NAMES:
+        return False
+    return not runtime_paths.env_flag(_ALLOW_UNSANDBOXED_EXECUTION_TOOLS_ENV)
 
 
 def _call_proxy_sync(

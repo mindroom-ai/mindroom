@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
-import socket
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -16,6 +14,7 @@ import httpx
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -150,44 +149,6 @@ def _authorization_server_metadata_urls(authorization_server: str) -> tuple[str,
     return tuple(dict.fromkeys(urls))
 
 
-def _address_is_unsafe(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-    )
-
-
-def _resolved_host_addresses(hostname: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
-    try:
-        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        return ()
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-    for info in infos:
-        try:
-            addresses.append(ipaddress.ip_address(info[4][0]))
-        except ValueError:
-            continue
-    return tuple(addresses)
-
-
-async def _host_is_unsafe(hostname: str | None) -> bool:
-    if not hostname:
-        return True
-    if hostname.lower() == "localhost":
-        return True
-    try:
-        address = ipaddress.ip_address(hostname)
-    except ValueError:
-        addresses = await asyncio.to_thread(_resolved_host_addresses, hostname)
-        return any(_address_is_unsafe(address) for address in addresses)
-    return _address_is_unsafe(address)
-
-
 async def _validate_discovery_url(url: str, runtime_paths: RuntimePaths) -> None:
     parsed = urlparse(url)
     allow_insecure = runtime_paths.env_flag("MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY")
@@ -195,9 +156,11 @@ async def _validate_discovery_url(url: str, runtime_paths: RuntimePaths) -> None
     if parsed.scheme != "https" and not allow_insecure:
         msg = f"MCP OAuth discovery requires HTTPS URL: {url}"
         raise OAuthProviderError(msg)
-    if await _host_is_unsafe(parsed.hostname) and not allow_private:
-        msg = f"MCP OAuth discovery refused unsafe URL host: {parsed.hostname or ''}"
-        raise OAuthProviderError(msg)
+    try:
+        await asyncio.to_thread(validate_server_fetch_url, url, allow_private_networks=allow_private)
+    except ServerFetchUrlError as exc:
+        msg = "MCP OAuth discovery refused unsafe URL"
+        raise OAuthProviderError(msg) from exc
 
 
 def _metadata_cache_key(

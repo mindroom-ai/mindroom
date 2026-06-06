@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -16,6 +17,8 @@ from mindroom.config.main import (
     load_config_or_user_error,
 )
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_data
+from mindroom.sensitivity import is_sensitive_config_key
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -23,6 +26,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+_RESTRICTED_CONFIG_ROOTS = frozenset(
+    {
+        "authorization",
+        "knowledge_bases",
+        "mcp_servers",
+        "models",
+        "plugins",
+        "prompts",
+        "worker_egress_brokers",
+    },
+)
+_RESTRICTED_CONFIG_PREFIXES = (
+    ("debug", "llm_request_log_dir"),
+    ("memory", "embedder"),
+)
 
 
 def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
@@ -161,6 +179,31 @@ def _format_value(value: Any) -> str:  # noqa: ANN401
     return yaml_str
 
 
+def _redact_config_value_for_display(value: Any, path: str | None = None) -> Any:  # noqa: ANN401
+    """Redact one config value before displaying it in Matrix."""
+    if path is None:
+        return redact_sensitive_data(value)
+    redacted = redact_sensitive_data({path: value})
+    if isinstance(redacted, dict):
+        return redacted.get(path)
+    return redacted
+
+
+def _is_restricted_config_path(path: str) -> bool:
+    parts = tuple(part for part in path.split(".") if part and not part.isdigit())
+    if not parts:
+        return False
+    if parts[0] in _RESTRICTED_CONFIG_ROOTS:
+        return True
+    if any(is_sensitive_config_key(part) for part in parts):
+        return True
+    return any(parts[: len(prefix)] == prefix for prefix in _RESTRICTED_CONFIG_PREFIXES)
+
+
+def _restricted_config_path_message(path: str) -> str:
+    return f"❌ Configuration path is restricted for chat-based config commands: `{path}`"
+
+
 async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     args_text: str,
     runtime_paths: RuntimePaths,
@@ -185,6 +228,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         runtime_paths,
         footer=load_error_footer,
         tolerate_plugin_load_errors=True,
+        execute_plugin_modules_for_validation=False,
     )
     if load_error:
         return load_error, None
@@ -193,7 +237,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
     if operation == "show":
         # Show entire config
-        yaml_str = yaml.dump(config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        display_config = _redact_config_value_for_display(config_dict)
+        yaml_str = yaml.dump(display_config, default_flow_style=False, sort_keys=False, allow_unicode=True)
         return f"**Current Configuration:**\n```yaml\n{yaml_str}```", None
 
     if operation == "get":
@@ -204,12 +249,14 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             )
 
         config_path_str = args[0]
+        if _is_restricted_config_path(config_path_str):
+            return _restricted_config_path_message(config_path_str), None
         try:
             value = _get_nested_value(config_dict, config_path_str)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
-            formatted = _format_value(value)
+            formatted = _format_value(_redact_config_value_for_display(value, config_path_str))
             return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```", None
 
     elif operation == "set":
@@ -220,6 +267,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             )
 
         config_path_str = args[0]
+        if _is_restricted_config_path(config_path_str):
+            return _restricted_config_path_message(config_path_str), None
         # Join remaining args as the value (handles unquoted strings with spaces)
         value_str = " ".join(args[1:])
 
@@ -233,22 +282,30 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             old_value = None  # Path doesn't exist yet
 
         # Create a copy to test the change
-        test_config_dict = config_dict.copy()
+        test_config_dict = deepcopy(config_dict)
 
         try:
             # Verify the path exists or can be created
             _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            Config.validate_with_runtime(test_config_dict, runtime_paths)
+            Config.validate_with_runtime(
+                test_config_dict,
+                runtime_paths,
+                execute_plugin_modules_for_validation=False,
+            )
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
             # Format the preview message
-            formatted_old = _format_value(old_value) if old_value is not None else "Not set"
-            formatted_new = _format_value(value)
+            formatted_old = (
+                _format_value(_redact_config_value_for_display(old_value, config_path_str))
+                if old_value is not None
+                else "Not set"
+            )
+            formatted_new = _format_value(_redact_config_value_for_display(value, config_path_str))
 
             preview_msg = (
                 f"**Configuration Change Preview**\n\n"
@@ -314,11 +371,15 @@ async def apply_config_change(
             runtime_paths,
             footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
             tolerate_plugin_load_errors=True,
+            execute_plugin_modules_for_validation=False,
         )
         if load_error:
             return load_error
         assert config is not None
         config_dict = config.model_dump()
+
+        if _is_restricted_config_path(config_path_str):
+            return _restricted_config_path_message(config_path_str)
 
         # Apply the specific change
         _set_nested_value(config_dict, config_path_str, new_value)

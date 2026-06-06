@@ -13,6 +13,7 @@ from mindroom.constants import safe_replace
 from mindroom.tool_system.skills import get_user_skills_dir, list_skill_listings, resolve_skill_listing, skill_can_edit
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
+write_router = APIRouter(prefix="/api/skills", tags=["skills"])
 
 _VALID_SKILL_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
@@ -81,8 +82,11 @@ async def get_skill(skill_name: str) -> SkillDetail:
     )
 
 
-@router.put("/{skill_name}")
-async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str, bool]:
+@write_router.put("/{skill_name}")
+async def update_skill(
+    skill_name: str,
+    payload: SkillUpdateRequest,
+) -> dict[str, bool]:
     """Update a skill's SKILL.md content."""
     listing = resolve_skill_listing(skill_name)
     if listing is None:
@@ -101,8 +105,10 @@ async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str
     return {"success": True}
 
 
-@router.post("")
-async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
+@write_router.post("")
+async def create_skill(
+    payload: CreateSkillRequest,
+) -> SkillSummary:
     """Create a new user skill."""
     name = payload.name.strip()
     if not name:
@@ -130,8 +136,10 @@ async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
     return SkillSummary(name=name, description=description, origin="user", can_edit=True)
 
 
-@router.delete("/{skill_name}")
-async def delete_skill(skill_name: str) -> dict[str, bool]:
+@write_router.delete("/{skill_name}")
+async def delete_skill(
+    skill_name: str,
+) -> dict[str, bool]:
     """Delete a user skill."""
     listing = resolve_skill_listing(skill_name)
     if listing is None:

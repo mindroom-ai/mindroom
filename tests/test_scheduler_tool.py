@@ -274,6 +274,7 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         client=context.client,
         room_id=context.room_id,
         task_id="task123",
+        runtime_paths=context.runtime_paths,
     )
 
 

@@ -235,6 +235,39 @@ workers:
     networkPolicy:
       create: true
       name: ""
+      dns:
+        enabled: true
+        to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchExpressions:
+                - key: k8s-app
+                  operator: In
+                  values:
+                    - kube-dns
+                    - coredns
+      publicInternet:
+        enabled: true
+        cidr: 0.0.0.0/0
+        except:
+          - 0.0.0.0/8
+          - 10.0.0.0/8
+          - 100.64.0.0/10
+          - 127.0.0.0/8
+          - 169.254.0.0/16
+          - 172.16.0.0/12
+          - 192.0.0.0/24
+          - 192.168.0.0/16
+          - 198.18.0.0/15
+          - 224.0.0.0/4
+          - 240.0.0.0/4
+        ports:
+          - 80
+          - 443
+      # Append explicit broker or cluster-service egress rules needed by worker tools.
+      extraEgress: []
     port: 8766
     readyTimeoutSeconds: 60
     idleTimeoutSeconds: 1800

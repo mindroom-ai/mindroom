@@ -64,6 +64,45 @@ kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800
 kubernetesWorkerEnableServiceLinks: false
 
+networkPolicy:
+  dns:
+    enabled: true
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchExpressions:
+            - key: k8s-app
+              operator: In
+              values:
+                - kube-dns
+                - coredns
+  publicInternet:
+    enabled: true
+    cidr: 0.0.0.0/0
+    except:
+      - 0.0.0.0/8
+      - 10.0.0.0/8
+      - 100.64.0.0/10
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - 172.16.0.0/12
+      - 192.0.0.0/24
+      - 192.168.0.0/16
+      - 198.18.0.0/15
+      - 224.0.0.0/4
+      - 240.0.0.0/4
+    ports:
+      - 80
+      - 443
+  # Egress rules added to every instance pod.
+  extraEgress: []
+  # Egress rules added only to dedicated worker pods, for private broker services.
+  workerExtraEgress: []
+  # Egress rules added only to the primary runtime pod, for private API-server CIDRs.
+  controlPlaneExtraEgress: []
+
 # API keys and secrets (referenced via Secret in deployment)
 # Production provisioner deploys create this Secret outside Helm so secret values
 # do not land in Helm release history.

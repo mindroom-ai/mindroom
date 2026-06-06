@@ -89,6 +89,29 @@ def test_redact_sensitive_data_redacts_secret_assignments_inside_embedded_text_v
     }
 
 
+def test_redact_sensitive_data_redacts_value_fields_named_by_sibling_secret_keys() -> None:
+    """Key/value style containers should redact bare values when the sibling name is secret-like."""
+    redacted = redact_sensitive_data(
+        {
+            "environment": [
+                {"name": "OPENAI_API_KEY", "value": "plain-openai-secret"},
+                {"key": "client_secret", "value": "plain-client-secret"},
+                {"name": "mode", "value": "safe"},
+            ],
+            "headers": [{"name": "Authorization", "value": "plain-auth-secret"}],
+        },
+    )
+
+    assert redacted == {
+        "environment": [
+            {"name": "OPENAI_API_KEY", "value": REDACTED},
+            {"key": "client_secret", "value": REDACTED},
+            {"name": "mode", "value": "safe"},
+        ],
+        "headers": [{"name": "Authorization", "value": REDACTED}],
+    }
+
+
 def test_redact_sensitive_data_does_not_truncate_by_default() -> None:
     """Redaction should not drop non-secret debug data unless a caller asks for bounds."""
     long_text = "x" * 5000

@@ -25,6 +25,7 @@ register_builtin_tool_metadata(
         icon="Settings",
         icon_color="text-indigo-500",
         config_fields=[],
+        privileged=True,
         dependencies=[],
         function_names=("get_own_config", "update_own_config"),
     ),

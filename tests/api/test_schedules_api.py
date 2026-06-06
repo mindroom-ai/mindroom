@@ -7,8 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from mindroom.api import config_lifecycle
 from mindroom.api.schedules import UpdateScheduleRequest, update_schedule
 from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
+from tests.api.conftest import use_trusted_upstream_runtime
+from tests.identity_helpers import persist_entity_accounts
 
 
 def _task(
@@ -190,6 +193,57 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
 
 
+def test_update_schedule_rebinds_created_by_to_authenticated_matrix_user(test_client: TestClient) -> None:
+    """API edits should not preserve the victim creator identity."""
+    use_trusted_upstream_runtime(test_client.app)
+    mock_client = _mock_matrix_client()
+    existing_task = _task(
+        "abc12345",
+        execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
+        message="@mindroom_test_agent original",
+    )
+    existing_task.workflow.created_by = "@victim:example.org"
+    save_mock = AsyncMock(
+        side_effect=lambda **kwargs: ScheduledTaskRecord(
+            task_id=kwargs["task_id"],
+            room_id=kwargs["room_id"],
+            status="pending",
+            created_at=existing_task.created_at,
+            workflow=kwargs["workflow"],
+        ),
+    )
+
+    config_lifecycle.require_api_state(test_client.app).snapshot.config_data["authorization"] = {
+        "default_room_access": True,
+    }
+    runtime_config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(test_client.app)
+    persist_entity_accounts(
+        runtime_config,
+        runtime_paths,
+        usernames={"router": "mindroom_router", "test_agent": "mindroom_test_agent"},
+    )
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
+    ):
+        response = test_client.put(
+            "/api/schedules/abc12345",
+            json={
+                "room_id": "test_room",
+                "schedule_type": "once",
+                "execute_at": "2026-03-01T10:00:00Z",
+                "message": "@mindroom_test_agent updated",
+            },
+            headers={"X-Trusted-User": "editor", "X-Trusted-Matrix-User": "@editor:example.org"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["created_by"] == "@editor:example.org"
+    assert save_mock.await_args.kwargs["workflow"].created_by == "@editor:example.org"
+
+
 @pytest.mark.asyncio
 async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting() -> None:
     """Pure API schedule edits should not construct or resolve an event cache."""
@@ -223,11 +277,14 @@ async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting()
     )
     save_mock = AsyncMock(return_value=updated_task)
     api_request = MagicMock()
+    api_request.scope = {"auth_user": {"user_id": "standalone"}}
+    runtime_paths = MagicMock()
+    runtime_paths.env_value.return_value = None
 
     with (
         patch(
             "mindroom.api.schedules.config_lifecycle.read_committed_runtime_config",
-            return_value=(runtime_config, MagicMock()),
+            return_value=(runtime_config, runtime_paths),
         ),
         patch("mindroom.api.schedules.resolve_room_aliases", return_value=["test_room"]),
         patch("mindroom.api.schedules.get_room_alias_from_id", return_value=None),

@@ -6,11 +6,27 @@ properly isolate tenant data and prevent cross-tenant access.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+SCHEMA_PATH = Path(__file__).resolve().parents[2] / "supabase/migrations/000_consolidated_complete_schema.sql"
+
+
+def test_accounts_update_grants_do_not_cover_privileged_columns() -> None:
+    """Authenticated users should not get direct UPDATE rights on account privilege columns."""
+    schema = SCHEMA_PATH.read_text(encoding="utf-8")
+
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;" not in schema
+    grant_match = re.search(r"GRANT UPDATE\s*\(([^)]*)\)\s*ON TABLE accounts TO authenticated;", schema, re.S)
+    assert grant_match is not None
+    granted_columns = {column.strip() for column in grant_match.group(1).split(",")}
+    assert {"is_admin", "tier", "status"}.isdisjoint(granted_columns)
 
 
 @pytest.fixture

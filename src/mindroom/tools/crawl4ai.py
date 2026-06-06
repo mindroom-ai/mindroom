@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -99,4 +100,19 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:
     """Return Crawl4AI tools for web crawling and scraping."""
     from agno.tools.crawl4ai import Crawl4aiTools
 
-    return Crawl4aiTools
+    class MindRoomCrawl4aiTools(Crawl4aiTools):
+        """Crawl4AI toolkit variant that validates server-side crawl targets."""
+
+        def crawl(
+            self,
+            url: str | list[str],
+            search_query: str | None = None,
+        ) -> str | dict[str, str]:
+            """Crawl URL(s) after applying MindRoom's server-fetch policy."""
+            if isinstance(url, str):
+                return super().crawl(validate_server_fetch_url(url), search_query)
+
+            validated_urls = [validate_server_fetch_url(single_url) for single_url in url]
+            return super().crawl(validated_urls, search_query)
+
+    return MindRoomCrawl4aiTools

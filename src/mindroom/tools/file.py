@@ -232,6 +232,7 @@ class _MindRoomFileTools(AgnoFileTools):
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
+    privileged=True,
     icon="FaFolder",
     icon_color="text-yellow-500",
     config_fields=[

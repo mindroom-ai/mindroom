@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 
 logger = get_logger(__name__)
 
@@ -39,23 +40,25 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
     """
     error_str = str(error).lower()
     agent_prefix = f"[{agent_name}] " if agent_name else ""
+    safe_error_message = redact_sensitive_text(str(error))
+    safe_error_repr = redact_sensitive_text(repr(error))
 
     # Log the full error for debugging
     logger.error(
         "agent_error",
         agent=agent_name or "agent",
         error_type=type(error).__name__,
-        error=repr(error),
+        error=safe_error_repr,
     )
 
     # Only distinguish the most important error types
     if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]):
         provider = _extract_provider_from_error(error)
         provider_hint = f" ({provider})" if provider else ""
-        return f"{agent_prefix}❌ Authentication failed{provider_hint}: {error}"
+        return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error_message}"
     if any(x in error_str for x in ["rate", "429", "quota"]):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."
     if "timeout" in error_str:
         return f"{agent_prefix}⏰ Request timed out. Please try again."
     # Generic error with the actual error message for transparency
-    return f"{agent_prefix}⚠️ Error: {error!s}"
+    return f"{agent_prefix}⚠️ Error: {safe_error_message}"

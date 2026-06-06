@@ -25,6 +25,7 @@ from mindroom.custom_tools.browser import (
     _persistent_launch_kwargs,
     _profile_dir,
 )
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
@@ -351,6 +352,28 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_browser_open_rejects_private_target_url() -> None:
+    """Open action should reject SSRF targets before starting the browser."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(ServerFetchUrlError):
+        await tool.browser(action="open", targetUrl="http://127.0.0.1:8000/admin")
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_rejects_file_target_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Navigate action should reject local-file URLs before dispatching to Playwright."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    navigate = AsyncMock()
+    monkeypatch.setattr(tool, "_navigate", navigate)
+
+    with pytest.raises(ServerFetchUrlError):
+        await tool.browser(action="navigate", targetUrl="file:///etc/passwd")
+
+    navigate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_browser_rejects_non_host_targets() -> None:
     """MindRoom browser currently supports host only."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
@@ -363,6 +386,38 @@ async def test_browser_rejects_non_host_targets() -> None:
 
     with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
         await tool.browser(action="status", target="host", node="node-1")
+
+
+def test_browser_upload_paths_must_stay_under_runtime_storage(tmp_path: Path) -> None:
+    """Browser uploads should not expose arbitrary host files."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    allowed_file = runtime_paths.storage_root / "uploads" / "safe.txt"
+    allowed_file.parent.mkdir(parents=True)
+    allowed_file.write_text("safe", encoding="utf-8")
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+    tool = BrowserTools(runtime_paths)
+
+    assert tool._validated_upload_paths([str(allowed_file)]) == [str(allowed_file.resolve())]
+    with pytest.raises(ValueError, match="outside allowed upload roots"):
+        tool._validated_upload_paths([str(outside_file)])
+
+
+@pytest.mark.asyncio
+async def test_browser_request_guard_blocks_private_requests() -> None:
+    """Browser route guard should abort private-network requests before Playwright fetches them."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    route = SimpleNamespace(abort=AsyncMock(), continue_=AsyncMock())
+    request = SimpleNamespace(url="http://127.0.0.1:8000/admin")
+
+    await tool._guard_browser_request(route, request)
+
+    route.abort.assert_awaited_once_with("blockedbyclient")
+    route.continue_.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -455,6 +510,7 @@ class _FakeContext:
         self.pages = list(pages or [])
         self.fresh_page = _FakePage()
         self.new_page = AsyncMock(return_value=self.fresh_page)
+        self.route = AsyncMock()
         self.close = AsyncMock()
 
 

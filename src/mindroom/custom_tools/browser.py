@@ -17,10 +17,20 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.tools import Toolkit
-from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
+from playwright.async_api import (
+    BrowserContext,
+    ConsoleMessage,
+    Dialog,
+    Page,
+    Playwright,
+    Request,
+    Route,
+    async_playwright,
+)
 from playwright.async_api import Error as PlaywrightError
 
 from mindroom.logging_config import get_logger
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -429,6 +439,16 @@ class BrowserTools(Toolkit):
         parameters["properties"] = properties
         function.parameters = parameters
 
+    async def _guard_browser_request(self, route: Route, request: Request) -> None:
+        """Abort browser requests that would become server-side SSRF targets."""
+        try:
+            validate_server_fetch_url(request.url)
+        except ServerFetchUrlError:
+            logger.warning("Blocked unsafe browser request", url=request.url)
+            await route.abort("blockedbyclient")
+            return
+        await route.continue_()
+
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
         for profile_name in list(self._profiles.keys()):
@@ -443,7 +463,7 @@ class BrowserTools(Toolkit):
             return
         self._close_task = loop.create_task(self._close_profiles())
 
-    async def browser(  # noqa: C901, PLR0911, PLR0912
+    async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         action: str,
         target: str | None = None,
@@ -540,6 +560,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
+            target_url = validate_server_fetch_url(target_url)
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -585,6 +606,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
+            target_url = validate_server_fetch_url(target_url)
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -718,6 +740,7 @@ class BrowserTools(Toolkit):
         }
 
     async def _open_tab(self, profile_name: str, target_url: str) -> dict[str, Any]:
+        target_url = validate_server_fetch_url(target_url)
         state = await self._ensure_profile(profile_name)
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
@@ -761,6 +784,7 @@ class BrowserTools(Toolkit):
         }
 
     async def _navigate(self, profile_name: str, target_url: str, target_id: str | None) -> dict[str, Any]:
+        target_url = validate_server_fetch_url(target_url)
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
         await tab.page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
@@ -822,7 +846,7 @@ class BrowserTools(Toolkit):
         if selector is None:
             msg = "upload requires inputRef, ref, or element"
             raise ValueError(msg)
-        normalized_paths = [str(Path(path).expanduser()) for path in paths]
+        normalized_paths = self._validated_upload_paths(paths)
         locator = tab.page.locator(selector).first
         await locator.set_input_files(normalized_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
         return {
@@ -1172,6 +1196,7 @@ class BrowserTools(Toolkit):
             _clear_stale_singleton_locks(user_data_dir)
             try:
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+                await context.route("**/*", self._guard_browser_request)
             except PlaywrightError as exc:
                 await playwright.stop()
                 friendly_message = _friendly_playwright_browser_error_message(exc)
@@ -1274,6 +1299,38 @@ class BrowserTools(Toolkit):
         self._output_dir = (storage_root / "browser").resolve()
         self._output_dir.mkdir(parents=True, exist_ok=True)
         return self._output_dir
+
+    def _upload_roots(self) -> tuple[Path, ...]:
+        """Return host directories whose files may be uploaded by browser actions."""
+        roots = [self._runtime_paths.storage_root.resolve(), self._resolve_output_dir()]
+        context = get_tool_runtime_context()
+        if context is not None and context.storage_path is not None:
+            roots.append(context.storage_path.resolve())
+
+        deduped: list[Path] = []
+        for root in roots:
+            if root not in deduped:
+                deduped.append(root)
+        return tuple(deduped)
+
+    def _validated_upload_paths(self, paths: list[str]) -> list[str]:
+        """Resolve and validate browser upload paths against runtime-owned storage."""
+        roots = self._upload_roots()
+        validated: list[str] = []
+        for raw_path in paths:
+            try:
+                path = Path(raw_path).expanduser().resolve(strict=True)
+            except OSError as exc:
+                msg = f"upload path not found: {raw_path}"
+                raise ValueError(msg) from exc
+            if not path.is_file():
+                msg = f"upload path is not a file: {raw_path}"
+                raise ValueError(msg)
+            if not any(path.is_relative_to(root) for root in roots):
+                msg = f"upload path outside allowed upload roots: {raw_path}"
+                raise ValueError(msg)
+            validated.append(str(path))
+        return validated
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

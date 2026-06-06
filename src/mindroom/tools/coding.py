@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
+    privileged=True,
     icon="Code",
     icon_color="text-purple-500",
     config_fields=[

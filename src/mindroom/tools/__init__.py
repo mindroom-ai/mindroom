@@ -267,6 +267,7 @@ __all__ = [
     category=ToolCategory.DEVELOPMENT,
     icon="Workflow",
     icon_color="text-orange-500",
+    privileged=True,
     helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
 )
 def _openclaw_compat_tools() -> type[Toolkit]:

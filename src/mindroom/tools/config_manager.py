@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     icon_color="text-purple-500",
     config_fields=[],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    privileged=True,
     dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
     function_names=("get_info", "manage_agent", "manage_team"),

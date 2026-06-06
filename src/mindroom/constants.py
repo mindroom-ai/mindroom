@@ -781,6 +781,24 @@ def resolve_config_relative_path(
     return config_relative_path(raw_path, runtime_paths).resolve()
 
 
+def validate_runtime_control_path(
+    raw_path: str | Path,
+    runtime_paths: RuntimePaths,
+    *,
+    field_name: str,
+) -> Path:
+    """Resolve and require a configured filesystem path to stay under runtime-owned roots."""
+    resolved_path = resolve_config_relative_path(raw_path, runtime_paths)
+    allowed_roots = (
+        runtime_paths.config_dir.resolve(),
+        runtime_paths.storage_root.resolve(),
+    )
+    if any(resolved_path == root or resolved_path.is_relative_to(root) for root in allowed_roots):
+        return resolved_path
+    msg = f"{field_name} must stay under the runtime config directory or storage root"
+    raise ValueError(msg)
+
+
 def resolve_config_relative_path_preserving_leaf(
     raw_path: str | Path,
     runtime_paths: RuntimePaths,

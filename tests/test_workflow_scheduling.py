@@ -41,8 +41,10 @@ def _mid(name: str) -> MatrixID:
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound workflow config."""
+    config_payload = config.authored_model_dump()
+    config_payload.setdefault("authorization", {})["default_room_access"] = True
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
+    bound_config = bind_runtime_paths(Config.model_validate(config_payload), runtime_paths)
     persist_entity_accounts(bound_config, runtime_paths)
     return bound_config
 
@@ -582,6 +584,7 @@ class TestExecuteScheduledWorkflow:
             message="Check the server status",
             description="Server check reminder",
             room_id="!room:server",
+            created_by="@user:server",
         )
 
         with patch(
@@ -607,7 +610,7 @@ class TestExecuteScheduledWorkflow:
             assert content["body"].startswith("⏰ [Automated Task]\n")
             assert "Check the server status" in content["body"]
             assert "m.relates_to" not in content  # No thread
-            assert ORIGINAL_SENDER_KEY not in content
+            assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
     async def test_execute_workflow_error_handling(self) -> None:
         """Test error handling in execute_scheduled_workflow."""
@@ -620,6 +623,7 @@ class TestExecuteScheduledWorkflow:
             description="Test task",
             room_id="!room:server",
             thread_id="$thread123",
+            created_by="@user:server",
         )
 
         # Mock send_message to raise an error only on the first call
@@ -659,6 +663,7 @@ class TestExecuteScheduledWorkflow:
             description="Queue check",
             room_id="!room:server",
             thread_id="$thread123",
+            created_by="@user:server",
         )
 
         with (

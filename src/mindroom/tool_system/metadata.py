@@ -754,6 +754,7 @@ class ToolValidationInfo:
     config_fields: tuple[ConfigField, ...] = ()
     agent_override_fields: tuple[ConfigField, ...] = ()
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    privileged: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
 
@@ -774,6 +775,7 @@ class ToolMetadata:
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
     agent_override_fields: list[ConfigField] | None = None  # Safe per-agent override field definitions
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
+    privileged: bool = False  # Tool can mutate config, execute code, or access local/worker resources.
     dependencies: list[str] | None = None  # Required pip packages
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
@@ -806,6 +808,7 @@ def register_tool_with_metadata(
     config_fields: list[ConfigField] | None = None,
     agent_override_fields: list[ConfigField] | None = None,
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT,
+    privileged: bool = False,
     dependencies: list[str] | None = None,
     auth_provider: str | None = None,
     docs_url: str | None = None,
@@ -831,6 +834,7 @@ def register_tool_with_metadata(
         config_fields: List of configuration fields
         agent_override_fields: Safe per-agent override fields serialized via config.yaml
         authored_override_validator: Explicit authored-override validation mode for the tool
+        privileged: Whether this tool grants sensitive config, execution, or local/worker resource access
         dependencies: Required Python packages
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
@@ -858,6 +862,7 @@ def register_tool_with_metadata(
             config_fields=config_fields,
             agent_override_fields=agent_override_fields,
             authored_override_validator=authored_override_validator,
+            privileged=privileged,
             dependencies=dependencies,
             auth_provider=auth_provider,
             docs_url=docs_url,
@@ -954,40 +959,60 @@ def _execute_validation_plugin_module(
     return validation_module_name
 
 
-def _resolved_tool_state_for_runtime(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> _ResolvedToolState:
-    """Return registry and metadata visible for one runtime config without mutating global state."""
-    import mindroom.tools  # noqa: F401, PLC0415
+def _builtin_tool_state_with_mcp(config: Config) -> _ResolvedToolState:
+    """Return built-in and MCP tool state for one config."""
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
-    plugin_entries = config.plugins
-    if not plugin_entries:
-        builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
-        builtin_metadata = BUILTIN_TOOL_METADATA.copy()
-        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-        _merge_mcp_tool_state(
-            builtin_registry,
-            builtin_metadata,
-            mcp_registry,
-            mcp_metadata,
-        )
-        return _ResolvedToolState(builtin_registry, builtin_metadata, {})
-
-    plugin_bases = plugin_module._collect_plugin_bases(
-        plugin_entries,
-        runtime_paths,
-        skip_broken_plugins=tolerate_plugin_load_errors,
+    builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
+    builtin_metadata = BUILTIN_TOOL_METADATA.copy()
+    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+    _merge_mcp_tool_state(
+        builtin_registry,
+        builtin_metadata,
+        mcp_registry,
+        mcp_metadata,
     )
+    return _ResolvedToolState(builtin_registry, builtin_metadata, {})
 
-    plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
 
+def _resolved_tool_state_without_plugin_execution(
+    config: Config,
+    plugin_bases: list[tuple[Any, Any, Any]],
+    *,
+    tolerate_plugin_load_errors: bool,
+) -> _ResolvedToolState:
+    """Return desired tool state when plugin modules are validated without import-time execution."""
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
+
+    unavailable_tool_metadata: dict[str, ToolMetadata] = {}
+    for plugin_base, _, _ in plugin_bases:
+        if not tolerate_plugin_load_errors:
+            _validate_plugin_module_sources(plugin_base)
+        unavailable_tool_metadata.update(
+            _unavailable_tool_metadata_from_failed_plugin(plugin_base, {}),
+        )
+
+    desired_registry, desired_metadata = resolved_tool_state([], {})
+    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+    _merge_mcp_tool_state(
+        desired_registry,
+        desired_metadata,
+        mcp_registry,
+        mcp_metadata,
+    )
+    return _ResolvedToolState(desired_registry, desired_metadata, unavailable_tool_metadata)
+
+
+def _validated_plugin_tool_state(
+    plugin_bases: list[tuple[Any, Any, Any]],
+    *,
+    tolerate_plugin_load_errors: bool,
+) -> tuple[dict[str, dict[str, ToolMetadata]], dict[str, ToolMetadata], list[tuple[str, str]]]:
+    """Execute plugin validation modules and collect registry metadata without touching global state."""
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
     active_plugins: list[tuple[str, str]] = []
+
     for plugin_base, plugin_entry, _ in plugin_bases:
         candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
         candidate_active_plugins: list[tuple[str, str]] = []
@@ -1034,6 +1059,43 @@ def _resolved_tool_state_for_runtime(
         validation_registrations.update(candidate_registrations)
         active_plugins.extend(candidate_active_plugins)
 
+    return validation_registrations, unavailable_tool_metadata, active_plugins
+
+
+def _resolved_tool_state_for_runtime(
+    runtime_paths: RuntimePaths,
+    config: Config,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+    execute_plugin_modules: bool = True,
+) -> _ResolvedToolState:
+    """Return registry and metadata visible for one runtime config without mutating global state."""
+    import mindroom.tools  # noqa: F401, PLC0415
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
+
+    plugin_entries = config.plugins
+    if not plugin_entries:
+        return _builtin_tool_state_with_mcp(config)
+
+    plugin_bases = plugin_module._collect_plugin_bases(
+        plugin_entries,
+        runtime_paths,
+        skip_broken_plugins=tolerate_plugin_load_errors,
+    )
+
+    plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
+
+    if not execute_plugin_modules:
+        return _resolved_tool_state_without_plugin_execution(
+            config,
+            plugin_bases,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+
+    validation_registrations, unavailable_tool_metadata, active_plugins = _validated_plugin_tool_state(
+        plugin_bases,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
     desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
     mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
     _merge_mcp_tool_state(
@@ -1107,6 +1169,7 @@ def _tool_validation_snapshot_from_state(
             config_fields=tuple(metadata.config_fields or ()),
             agent_override_fields=tuple(metadata.agent_override_fields or ()),
             authored_override_validator=metadata.authored_override_validator,
+            privileged=metadata.privileged,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
         )
@@ -1137,6 +1200,21 @@ def _declared_tool_metadata_from_broken_plugin_source(module_path: Path) -> dict
             category=ToolCategory.INTEGRATIONS,
         )
     return metadata_by_name
+
+
+def _validate_plugin_module_sources(plugin_base: plugin_module._PluginBase) -> None:
+    """Validate configured plugin module source files without executing plugin code."""
+    module_paths = (
+        plugin_base.tools_module_path,
+        plugin_base.hooks_module_path,
+        plugin_base.oauth_module_path,
+    )
+    for module_path in dict.fromkeys(path for path in module_paths if path is not None):
+        try:
+            ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            msg = f"Plugin validation module source invalid for {module_path}: {exc}"
+            raise ToolMetadataValidationError(msg) from exc
 
 
 def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
@@ -1180,12 +1258,14 @@ def resolved_tool_validation_snapshot_for_runtime(
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
+    execute_plugin_modules: bool = True,
 ) -> dict[str, ToolValidationInfo]:
     """Return validation-only tool state visible for one runtime config."""
     resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        execute_plugin_modules=execute_plugin_modules,
     )
     validation_metadata = {
         **resolved_state.tool_metadata,
@@ -1207,6 +1287,7 @@ def serialize_tool_validation_snapshot(
             "config_fields": [asdict(field) for field in info.config_fields],
             "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
             "authored_override_validator": info.authored_override_validator.value,
+            "privileged": info.privileged,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
         }
@@ -1262,6 +1343,10 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         if not isinstance(raw_runtime_loadable, bool):
             msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
             raise TypeError(msg)
+        raw_privileged = raw_info_mapping.get("privileged", False)
+        if not isinstance(raw_privileged, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set privileged to a boolean."
+            raise TypeError(msg)
         raw_unavailable_due_to_plugin_load_error = raw_info_mapping.get("unavailable_due_to_plugin_load_error", False)
         if not isinstance(raw_unavailable_due_to_plugin_load_error, bool):
             msg = (
@@ -1280,6 +1365,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
+            privileged=raw_privileged,
             runtime_loadable=raw_runtime_loadable,
             unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
         )

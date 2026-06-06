@@ -209,7 +209,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
     runtime_paths = _minimal_runtime_paths(tmp_path)
     message = "unexpected backend type error"
 
-    def _raise_type_error(_self: Config, _runtime_paths: object) -> None:
+    def _raise_type_error(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
         raise TypeError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
@@ -233,7 +233,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_er
     runtime_paths = _minimal_runtime_paths(tmp_path)
     message = "unexpected backend value error"
 
-    def _raise_value_error(_self: Config, _runtime_paths: object) -> None:
+    def _raise_value_error(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
         raise ValueError(message)
 
     monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)
@@ -609,6 +609,69 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
     plugins = load_plugins(config, runtime_paths_for(config))
 
     assert [plugin.name for plugin in plugins] == ["demo-plugin"]
+
+
+def test_validate_with_runtime_can_skip_plugin_module_execution(tmp_path: Path) -> None:
+    """Config preview validation should inspect plugins without executing module code."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    marker_path = tmp_path / "executed.txt"
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from pathlib import Path\n"
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        f"Path({str(marker_path)!r}).write_text('executed', encoding='utf-8')\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "@register_tool_with_metadata(\n"
+        "    name='demo_plugin_tool',\n"
+        "    display_name='Demo Plugin Tool',\n"
+        "    description='Demo',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_tool():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    config = Config.validate_with_runtime(
+        {
+            "plugins": ["./plugins/demo"],
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "tools": ["demo_plugin_tool"]}},
+        },
+        resolve_runtime_paths(config_path=config_path),
+        execute_plugin_modules_for_validation=False,
+    )
+
+    assert "demo_plugin_tool" not in config.get_agent_available_tools("assistant")
+    assert not marker_path.exists()
+
+
+def test_validate_with_runtime_rejects_local_plugin_path_escape(tmp_path: Path) -> None:
+    """Local plugin paths should stay under the config dir or storage root."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    escaped_root = tmp_path / "escaped-plugin"
+    escaped_root.mkdir()
+    (escaped_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "escaped_plugin", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(ConfigRuntimeValidationError, match="Plugin path must stay under"):
+        Config.validate_with_runtime(
+            {"plugins": ["../escaped-plugin"]},
+            resolve_runtime_paths(config_path=config_path),
+        )
 
 
 @pytest.mark.parametrize(

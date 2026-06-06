@@ -24,6 +24,7 @@ from mindroom.tool_system.metadata import (
     ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolConfigOverrideError,
+    ToolExecutionTarget,
     ToolManagedInitArg,
     _execute_validation_plugin_module,
     _validate_authored_overrides,
@@ -184,6 +185,15 @@ def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     fields = {field.name: field for field in homeassistant.config_fields or []}
 
     assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
+
+
+def test_docker_tool_metadata_is_privileged_and_worker_routed_by_default() -> None:
+    """Docker should not default to host-daemon primary-runtime execution."""
+    _restore_builtin_tool_metadata_state()
+    docker = TOOL_METADATA["docker"]
+
+    assert getattr(docker, "privileged", False) is True
+    assert docker.default_execution_target == ToolExecutionTarget.WORKER
 
 
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

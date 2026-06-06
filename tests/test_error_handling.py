@@ -26,6 +26,16 @@ def test_api_key_error_with_provider() -> None:
     assert "Authentication failed" in message
 
 
+def test_api_key_error_redacts_provider_secret_text() -> None:
+    """Provider exception strings should be redacted before reaching users."""
+    error = Exception("Incorrect API key provided: sk-plain-provider-secret")
+    message = get_user_friendly_error_message(error, "assistant")
+
+    assert "Authentication failed" in message
+    assert "sk-plain-provider-secret" not in message
+    assert "***redacted***" in message
+
+
 def test_401_error() -> None:
     """Test that 401 errors are recognized as auth failures."""
     error = Exception("Error code: 401 - Unauthorized")
@@ -62,6 +72,15 @@ def test_generic_error() -> None:
     error = ValueError("Something went wrong")
     message = get_user_friendly_error_message(error)
     assert "Error: Something went wrong" in message
+
+
+def test_generic_error_redacts_secret_text() -> None:
+    """Generic user-facing errors should still redact secrets."""
+    error = ValueError("provider returned token=plain-provider-token")
+    message = get_user_friendly_error_message(error)
+
+    assert "plain-provider-token" not in message
+    assert "***redacted***" in message
 
 
 def test_extract_provider_from_error() -> None:

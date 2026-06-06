@@ -17,6 +17,7 @@ from mindroom.mcp.transports import (
     _TransportStreams,
     build_transport_handle,
 )
+from mindroom.server_fetch_url import ServerFetchUrlError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -31,6 +32,10 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         storage_path=tmp_path,
         process_env={"API_TOKEN": "secret-token", "EXTRA_ARG": "value"},
     )
+
+
+def _public_addrinfo() -> list[tuple[int, int, int, str, tuple[str, int]]]:
+    return [(0, 0, 0, "", ("93.184.216.34", 443))]
 
 
 def test_interpolate_mcp_env_and_headers(tmp_path: Path) -> None:
@@ -88,6 +93,7 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
 ) -> None:
     """Open SSE transports with interpolated headers and configured timeouts."""
     runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", lambda *_args, **_kwargs: _public_addrinfo())
     streams = cast("_TransportStreams", (object(), object()))
     captured: dict[str, object] = {}
 
@@ -128,6 +134,7 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
 ) -> None:
     """Open streamable HTTP transports while dropping the session id getter."""
     runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", lambda *_args, **_kwargs: _public_addrinfo())
     read_stream = object()
     write_stream = object()
     captured: dict[str, object] = {}
@@ -184,3 +191,33 @@ async def test_open_streamable_http_requires_runtime_url(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="streamable-http MCP servers require url"):
         async with handle.opener():
             pass
+
+
+@pytest.mark.asyncio
+async def test_open_remote_transport_rejects_private_url_before_client_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Remote MCP transports should reject SSRF URLs before opening the client."""
+    runtime_paths = _runtime_paths(tmp_path)
+    client_called = False
+
+    @asynccontextmanager
+    async def fake_sse_client(
+        url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[_TransportStreams]:
+        nonlocal client_called
+        client_called = True
+        del url, kwargs
+        yield cast("_TransportStreams", (object(), object()))
+
+    monkeypatch.setattr(transport_module, "sse_client", fake_sse_client)
+    server_config = MCPServerConfig(transport="sse", url="http://127.0.0.1:8000/sse")
+    handle = build_transport_handle("demo", server_config, runtime_paths)
+
+    with pytest.raises(ServerFetchUrlError):
+        async with handle.opener():
+            pass
+
+    assert client_called is False

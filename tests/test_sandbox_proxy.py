@@ -215,6 +215,7 @@ def _configure_proxy_runtime(
     runner_mode: bool = False,
     proxy_tools: set[str] | None = None,
     credential_policy: dict[str, tuple[str, ...]] | None = None,
+    allow_unsandboxed_execution_tools: bool | None = None,
 ) -> RuntimePaths:
     if proxy_url is None:
         monkeypatch.delenv("MINDROOM_SANDBOX_PROXY_URL", raising=False)
@@ -239,6 +240,13 @@ def _configure_proxy_runtime(
         monkeypatch.setenv(
             "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON",
             json.dumps({key: list(value) for key, value in credential_policy.items()}),
+        )
+    if allow_unsandboxed_execution_tools is None:
+        monkeypatch.delenv("MINDROOM_ALLOW_UNSANDBOXED_EXECUTION_TOOLS", raising=False)
+    else:
+        monkeypatch.setenv(
+            "MINDROOM_ALLOW_UNSANDBOXED_EXECUTION_TOOLS",
+            "true" if allow_unsandboxed_execution_tools else "false",
         )
     return _runtime_paths_from_env()
 
@@ -1486,6 +1494,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_ALLOW_UNSANDBOXED_EXECUTION_TOOLS": "true",
             "OPENAI_BASE_URL": "http://example.invalid/v1",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -1518,6 +1527,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_ALLOW_UNSANDBOXED_EXECUTION_TOOLS": "true",
             "OPENAI_BASE_URL": "http://example.invalid/v1",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -5252,12 +5262,58 @@ class TestWorkerToolsOverride:
             is False
         )
 
-    def test_override_still_requires_proxy_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No proxy URL should always disable proxying, even with override."""
+    def test_override_without_proxy_url_fails_closed_for_execution_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Worker-default execution tools should stay wrapped so missing proxy config raises at call time."""
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url=None,
             execution_mode=None,
+        )
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=["shell"],
+            )
+            is True
+        )
+
+    def test_default_no_proxy_url_fails_closed_for_worker_default_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default sandbox policy should not let worker-default tools run on the host when no backend exists."""
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is False
+        )
+
+    def test_unsafe_opt_in_allows_local_execution_tools_without_proxy_url(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit unsafe opt-in should be required before execution tools fall back to local runtime."""
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+            allow_unsandboxed_execution_tools=True,
         )
 
         assert (

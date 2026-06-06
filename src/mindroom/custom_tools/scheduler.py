@@ -127,6 +127,7 @@ class SchedulerTools(Toolkit):
             client=context.client,
             room_id=context.room_id,
             task_id=task_id,
+            runtime_paths=context.runtime_paths,
         )
         _raise_for_scheduler_error(response_text)
         return response_text

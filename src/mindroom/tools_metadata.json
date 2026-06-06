@@ -111,6 +111,7 @@
       "icon": "SiDiscord",
       "icon_color": "text-indigo-500",
       "name": "discord",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -133,6 +134,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-emerald-500",
       "name": "matrix_api",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -155,6 +157,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-green-500",
       "name": "matrix_message",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -177,6 +180,7 @@
       "icon": "LayoutList",
       "icon_color": "text-blue-500",
       "name": "matrix_room",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -415,6 +419,7 @@
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -486,6 +491,7 @@
       "icon": "SiTelegram",
       "icon_color": "text-blue-500",
       "name": "telegram",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -508,6 +514,7 @@
       "icon": "MessageCircleMore",
       "icon_color": "text-cyan-500",
       "name": "thread_summary",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -532,6 +539,7 @@
       "icon": "Tags",
       "icon_color": "text-emerald-500",
       "name": "thread_tags",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -690,6 +698,7 @@
       "icon": "SiTwilio",
       "icon_color": "text-red-600",
       "name": "twilio",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -762,6 +771,7 @@
       "icon": "SiWebex",
       "icon_color": "text-blue-600",
       "name": "webex",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -948,6 +958,7 @@
       "icon": "SiWhatsapp",
       "icon_color": "text-green-500",
       "name": "whatsapp",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1018,6 +1029,7 @@
       "icon": "FaCog",
       "icon_color": "text-blue-600",
       "name": "airflow",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1065,6 +1077,7 @@
       "icon": "FaCode",
       "icon_color": "text-blue-600",
       "name": "apify",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1137,6 +1150,7 @@
       "icon": "FaAws",
       "icon_color": "text-orange-500",
       "name": "aws_lambda",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1251,6 +1265,7 @@
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
       "name": "bitbucket",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -1387,6 +1402,7 @@
       "icon": "FaCalendarAlt",
       "icon_color": "text-blue-600",
       "name": "cal_com",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1416,6 +1432,7 @@
       "icon": "Calculator",
       "icon_color": "text-blue-500",
       "name": "calculator",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1525,6 +1542,7 @@
       "icon": "VolumeX",
       "icon_color": "text-purple-500",
       "name": "cartesia",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1732,6 +1750,7 @@
       "icon": "Bot",
       "icon_color": "text-orange-500",
       "name": "claude_agent",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1782,6 +1801,7 @@
       "icon": "Code",
       "icon_color": "text-purple-500",
       "name": "coding",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -1808,6 +1828,7 @@
       "icon": "Settings",
       "icon_color": "text-purple-500",
       "name": "config_manager",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -1896,6 +1917,7 @@
       "icon": "SiConfluence",
       "icon_color": "text-blue-600",
       "name": "confluence",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2027,6 +2049,7 @@
       "icon": "Globe",
       "icon_color": "text-blue-500",
       "name": "custom_api",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -2146,6 +2169,7 @@
       "icon": "FaImage",
       "icon_color": "text-green-600",
       "name": "dalle",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2391,6 +2415,7 @@
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
       "name": "daytona",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2475,6 +2500,7 @@
       "icon": "FaMicrophone",
       "icon_color": "text-orange-600",
       "name": "desi_vocal",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2483,7 +2509,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
-      "default_execution_target": "primary",
+      "default_execution_target": "worker",
       "dependencies": [
         "docker"
       ],
@@ -2520,6 +2546,7 @@
       "icon": "SiDocker",
       "icon_color": "text-blue-500",
       "name": "docker",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -2543,6 +2570,7 @@
       "icon": "PackagePlus",
       "icon_color": "text-sky-500",
       "name": "dynamic_tools",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -2620,6 +2648,7 @@
       "icon": "Terminal",
       "icon_color": "text-blue-600",
       "name": "e2b",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2753,6 +2782,7 @@
       "icon": "SiElevenlabs",
       "icon_color": "text-orange-500",
       "name": "eleven_labs",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2838,6 +2868,7 @@
       "icon": "FaRobot",
       "icon_color": "text-purple-600",
       "name": "fal",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3037,6 +3068,7 @@
       "icon": "FaFolder",
       "icon_color": "text-yellow-500",
       "name": "file",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -3135,6 +3167,7 @@
       "icon": "FaFileExport",
       "icon_color": "text-green-600",
       "name": "file_generation",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -3183,6 +3216,7 @@
       "icon": "TrendingUp",
       "icon_color": "text-green-600",
       "name": "financial_datasets_api",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3315,6 +3349,7 @@
       "icon": "SiGooglegemini",
       "icon_color": "text-blue-500",
       "name": "gemini",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3386,6 +3421,7 @@
       "icon": "SiGiphy",
       "icon_color": "text-purple-500",
       "name": "giphy",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3471,6 +3507,7 @@
       "icon": "SiGithub",
       "icon_color": "text-gray-800",
       "name": "github",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3592,6 +3629,7 @@
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -3731,6 +3769,7 @@
       "icon": "SiGooglemaps",
       "icon_color": "text-red-500",
       "name": "google_maps",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3818,6 +3857,7 @@
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
       "name": "google_sheets",
+      "privileged": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -3951,6 +3991,7 @@
       "icon": "TbBrain",
       "icon_color": "text-orange-500",
       "name": "groq",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4098,6 +4139,7 @@
       "icon": "SiJira",
       "icon_color": "text-blue-600",
       "name": "jira",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4140,6 +4182,7 @@
       "icon": "SiLinear",
       "icon_color": "text-purple-600",
       "name": "linear",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4248,6 +4291,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "lumalabs",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4367,6 +4411,7 @@
       "icon": "Video",
       "icon_color": "text-purple-600",
       "name": "modelslabs",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4443,6 +4488,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "moviepy_video_tools",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -4577,6 +4623,7 @@
       "icon": "SiNeo4J",
       "icon_color": "text-blue-500",
       "name": "neo4j",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -4758,6 +4805,7 @@
       "icon": "SiOpenai",
       "icon_color": "text-green-600",
       "name": "openai",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4776,6 +4824,7 @@
       "icon": "Workflow",
       "icon_color": "text-orange-500",
       "name": "openclaw_compat",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -4886,6 +4935,7 @@
       "icon": "WiDaySunny",
       "icon_color": "text-orange-500",
       "name": "openweather",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4998,6 +5048,7 @@
       "icon": "SiPostgresql",
       "icon_color": "text-blue-700",
       "name": "postgres",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -5075,6 +5126,7 @@
       "icon": "SiPython",
       "icon_color": "text-blue-500",
       "name": "python",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -5181,6 +5233,7 @@
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
       "name": "reasoning",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5389,6 +5442,7 @@
       "icon": "AwsRedshift",
       "icon_color": "text-red-600",
       "name": "redshift",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -5460,6 +5514,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "replicate",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -5481,6 +5536,7 @@
       "icon": "Settings",
       "icon_color": "text-indigo-500",
       "name": "self_config",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -5589,6 +5645,7 @@
       "icon": "Terminal",
       "icon_color": "text-green-500",
       "name": "shell",
+      "privileged": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -5636,6 +5693,7 @@
       "icon": "Clock",
       "icon_color": "text-purple-500",
       "name": "sleep",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5661,6 +5719,7 @@
       "icon": "Workflow",
       "icon_color": "text-teal-500",
       "name": "subagents",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5726,6 +5785,7 @@
       "icon": "SiTrello",
       "icon_color": "text-blue-600",
       "name": "trello",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -5837,6 +5897,7 @@
       "icon": "FaChartBar",
       "icon_color": "text-indigo-500",
       "name": "visualization",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5882,6 +5943,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "web_browser_tools",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5965,6 +6027,7 @@
       "icon": "SiZendesk",
       "icon_color": "text-green-600",
       "name": "zendesk",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6048,6 +6111,7 @@
       "icon": "FaAws",
       "icon_color": "text-orange-500",
       "name": "aws_ses",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6141,6 +6205,7 @@
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "email",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6295,6 +6360,7 @@
       "icon": "SiGmail",
       "icon_color": "text-red-500",
       "name": "gmail",
+      "privileged": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -6366,6 +6432,7 @@
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "resend",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6442,6 +6509,7 @@
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6540,6 +6608,7 @@
       "icon": "SiYoutube",
       "icon_color": "text-red-600",
       "name": "youtube",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -6784,6 +6853,7 @@
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6868,6 +6938,7 @@
       "icon": "SiShopify",
       "icon_color": "text-green-600",
       "name": "shopify",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6890,6 +6961,7 @@
       "icon": "Paperclip",
       "icon_color": "text-teal-500",
       "name": "attachments",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -6943,6 +7015,7 @@
       "icon": "SiClickup",
       "icon_color": "text-purple-600",
       "name": "clickup",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6963,6 +7036,7 @@
       "icon": "Minimize2",
       "icon_color": "text-amber-500",
       "name": "compact_context",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7097,6 +7171,7 @@
       "icon": "FaFileCsv",
       "icon_color": "text-green-600",
       "name": "csv",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7117,6 +7192,7 @@
       "icon": "Users",
       "icon_color": "text-blue-500",
       "name": "delegate",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7213,6 +7289,7 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7276,6 +7353,7 @@
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
       "name": "google_calendar",
+      "privileged": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -7352,6 +7430,7 @@
       "icon": "SiGoogledrive",
       "icon_color": "text-green-600",
       "name": "google_drive",
+      "privileged": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -7510,6 +7589,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "mem0",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -7535,6 +7615,7 @@
       "icon": "Brain",
       "icon_color": "text-violet-500",
       "name": "memory",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7632,6 +7713,7 @@
       "icon": "SiNotion",
       "icon_color": "text-gray-800",
       "name": "notion",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -7767,6 +7849,7 @@
       "icon": "FaChartArea",
       "icon_color": "text-blue-500",
       "name": "openbb",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7827,6 +7910,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7852,6 +7936,7 @@
       "icon": "Calendar",
       "icon_color": "text-emerald-500",
       "name": "scheduler",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8034,6 +8119,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "sql",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -8075,6 +8161,7 @@
       "icon": "SiTodoist",
       "icon_color": "text-red-500",
       "name": "todoist",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8226,6 +8313,7 @@
       "icon": "FaChartLine",
       "icon_color": "text-purple-600",
       "name": "yfinance",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8372,6 +8460,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "zep",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8457,6 +8546,7 @@
       "icon": "FaSpider",
       "icon_color": "text-purple-600",
       "name": "agentql",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8530,6 +8620,7 @@
       "icon": "SiArxiv",
       "icon_color": "text-red-600",
       "name": "arxiv",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8650,6 +8741,7 @@
       "icon": "Search",
       "icon_color": "text-blue-600",
       "name": "baidusearch",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8772,6 +8864,7 @@
       "icon": "FaPalette",
       "icon_color": "text-blue-500",
       "name": "brandfetch",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8918,6 +9011,7 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "brightdata",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8953,6 +9047,7 @@
       "icon": "FaChrome",
       "icon_color": "text-orange-500",
       "name": "browser",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9104,6 +9199,7 @@
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
       "name": "browserbase",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -9247,6 +9343,7 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "crawl4ai",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9391,6 +9488,7 @@
       "icon": "SiDuckduckgo",
       "icon_color": "text-orange-500",
       "name": "duckduckgo",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9706,6 +9804,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "exa",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -9864,6 +9963,7 @@
       "icon": "FaSpider",
       "icon_color": "text-orange-500",
       "name": "firecrawl",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -9996,6 +10096,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "googlesearch",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10056,6 +10157,7 @@
       "icon": "FaHackerNews",
       "icon_color": "text-orange-600",
       "name": "hackernews",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10189,6 +10291,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "jina",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10272,6 +10375,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "linkup",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10345,6 +10449,7 @@
       "icon": "FaNewspaper",
       "icon_color": "text-blue-600",
       "name": "newspaper",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10395,6 +10500,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "oxylabs",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10481,6 +10587,7 @@
       "icon": "SiPubmed",
       "icon_color": "text-blue-600",
       "name": "pubmed",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10617,6 +10724,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "scrapegraph",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10681,6 +10789,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "searxng",
+      "privileged": false,
       "setup_type": "none",
       "status": "requires_config"
     },
@@ -10753,6 +10862,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "serpapi",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10899,6 +11009,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "serper",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11008,6 +11119,7 @@
       "icon": "FaSpider",
       "icon_color": "text-red-600",
       "name": "spider",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11213,6 +11325,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "tavily",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11480,6 +11593,7 @@
       "icon": "FaFileAlt",
       "icon_color": "text-teal-500",
       "name": "trafilatura",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11576,6 +11690,7 @@
       "icon": "SiUnsplash",
       "icon_color": "text-gray-800",
       "name": "unsplash",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11613,6 +11728,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "website",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11661,6 +11777,7 @@
       "icon": "SiWikipedia",
       "icon_color": "text-gray-700",
       "name": "wikipedia",
+      "privileged": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11730,6 +11847,7 @@
       "icon": "Home",
       "icon_color": "text-blue-500",
       "name": "homeassistant",
+      "privileged": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -11832,6 +11950,7 @@
       "icon": "SiReddit",
       "icon_color": "text-orange-500",
       "name": "reddit",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11945,6 +12064,7 @@
       "icon": "SiX",
       "icon_color": "text-blue-400",
       "name": "x",
+      "privileged": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -12011,6 +12131,7 @@
       "icon": "SiZoom",
       "icon_color": "text-blue-500",
       "name": "zoom",
+      "privileged": false,
       "setup_type": "oauth",
       "status": "requires_config"
     }

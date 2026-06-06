@@ -93,6 +93,14 @@ def _auto_oauth_mcp_server_config() -> MCPServerConfig:
     )
 
 
+def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve fake public OAuth hosts to a public address for validation tests."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 443))],
+    )
+
+
 class _FakeDiscoveryResponse:
     def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
         self.payload = payload
@@ -232,6 +240,7 @@ async def test_mcp_oauth_provider_discovers_metadata_and_registers_public_client
     runtime_paths = _runtime_paths(tmp_path)
     _FakeDiscoveryClient.gets = []
     _FakeDiscoveryClient.posts = []
+    _allow_example_test_dns(monkeypatch)
     monkeypatch.setattr("mindroom.mcp.oauth.httpx.AsyncClient", _FakeDiscoveryClient)
     provider = mcp_oauth_provider("demo", _auto_oauth_mcp_server_config())
     code_verifier = provider.issue_pkce_code_verifier()
@@ -289,6 +298,7 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
 ) -> None:
     """Bad optional metadata candidates should not abort discovery before later valid candidates."""
     runtime_paths = _runtime_paths(tmp_path)
+    _allow_example_test_dns(monkeypatch)
 
     class _InvalidFirstDiscoveryClient(_FakeDiscoveryClient):
         async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> _FakeDiscoveryResponse:
@@ -318,7 +328,10 @@ async def test_mcp_oauth_discovery_skips_optional_invalid_json_metadata(
 
 
 @pytest.mark.asyncio
-async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(tmp_path: Path) -> None:
+async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Metadata cached under permissive discovery settings must not bypass stricter runtime checks."""
     permissive_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -337,6 +350,7 @@ async def test_mcp_oauth_metadata_cache_includes_runtime_discovery_policy(tmp_pa
         },
     )
 
+    _allow_example_test_dns(monkeypatch)
     metadata = await _resolve_mcp_oauth_metadata("demo", server_config, permissive_paths)
     assert metadata.authorization_url == "http://auth.example.test/authorize"
 
@@ -351,6 +365,7 @@ async def test_mcp_oauth_dynamic_client_registration_is_serialized(
 ) -> None:
     """Concurrent authorization starts should not double-register the same OAuth client."""
     runtime_paths = _runtime_paths(tmp_path)
+    _allow_example_test_dns(monkeypatch)
     first_post_started = asyncio.Event()
     release_first_post = asyncio.Event()
 
@@ -420,7 +435,7 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
     """Discovery must not allow DNS names that resolve to private-network targets."""
     runtime_paths = _runtime_paths(tmp_path)
     monkeypatch.setattr(
-        "mindroom.mcp.oauth.socket.getaddrinfo",
+        "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.0.0.5", 0))],
     )
     to_thread_calls = 0
@@ -439,13 +454,32 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
 
-    with pytest.raises(OAuthProviderError, match="refused unsafe URL host"):
+    with pytest.raises(OAuthProviderError, match="refused unsafe URL"):
         await provider.authorization_uri_async(
             runtime_paths,
             state="state-token",
             code_verifier=code_verifier,
         )
     assert to_thread_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_discovery_rejects_metadata_hostname(tmp_path: Path) -> None:
+    """Shared server-fetch validation should block metadata host aliases even before DNS."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = MCPServerConfig(
+        transport="streamable-http",
+        url="https://mcp.example.test/mcp",
+        auth={
+            "type": "oauth",
+            "discovery": "manual",
+            "authorization_url": "https://metadata.google.internal/authorize",
+            "token_url": "https://auth.example.test/token",
+        },
+    )
+
+    with pytest.raises(OAuthProviderError, match="refused unsafe URL"):
+        await _resolve_mcp_oauth_metadata("demo", server_config, runtime_paths)
 
 
 def test_oauth_provider_allows_public_clients_without_secret_and_empty_scopes(tmp_path: Path) -> None:

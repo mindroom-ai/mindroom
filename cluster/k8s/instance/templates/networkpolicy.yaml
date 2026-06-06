@@ -3,6 +3,19 @@
 {{- if eq $workerBackend "kubernetes" -}}
 {{- $workerPort = (.Values.kubernetesWorkerPort | default 8766) -}}
 {{- end -}}
+{{- $networkPolicy := .Values.networkPolicy | default (dict) -}}
+{{- $dns := $networkPolicy.dns | default (dict) -}}
+{{- $dnsEnabled := true -}}
+{{- if hasKey $dns "enabled" -}}
+{{- $dnsEnabled = $dns.enabled -}}
+{{- end -}}
+{{- $publicInternet := $networkPolicy.publicInternet | default (dict) -}}
+{{- $publicInternetEnabled := true -}}
+{{- if hasKey $publicInternet "enabled" -}}
+{{- $publicInternetEnabled = $publicInternet.enabled -}}
+{{- end -}}
+{{- $publicInternetExcept := get $publicInternet "except" | default (list) -}}
+{{- $publicInternetPorts := $publicInternet.ports | default (list 80 443) -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -53,12 +66,72 @@ spec:
     - port: 8765
     - port: {{ $workerPort }}
   # Allow DNS
-  - ports:
-    - port: 53
-      protocol: UDP
-    - port: 53
-      protocol: TCP
-  # Allow HTTP/HTTPS outbound
-  - ports:
-    - port: 80
-    - port: 443
+  {{- if $dnsEnabled }}
+  - to:
+    {{- toYaml $dns.to | nindent 4 }}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  {{- end }}
+  # Allow public HTTP/HTTPS while excluding metadata, link-local, private, multicast, and reserved networks.
+  {{- if $publicInternetEnabled }}
+  - to:
+    - ipBlock:
+        cidr: {{ $publicInternet.cidr | default "0.0.0.0/0" | quote }}
+        {{- with $publicInternetExcept }}
+        except:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+    ports:
+    {{- range $publicInternetPorts }}
+    - protocol: TCP
+      port: {{ . }}
+    {{- end }}
+  {{- end }}
+  {{- with $networkPolicy.extraEgress }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- with $networkPolicy.workerExtraEgress }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: instance-worker-egress-{{ $.Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app.kubernetes.io/name: mindroom-instance-worker
+    customer: {{ $.Values.customer | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      customer: {{ $.Values.customer | quote }}
+      mindroom.ai/component: worker
+      app.kubernetes.io/managed-by: mindroom
+      app.kubernetes.io/name: mindroom-worker
+  policyTypes:
+  - Egress
+  egress:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $networkPolicy.controlPlaneExtraEgress }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: instance-control-plane-egress-{{ $.Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app.kubernetes.io/name: mindroom-instance-control-plane
+    customer: {{ $.Values.customer | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app: mindroom
+      customer: {{ $.Values.customer | quote }}
+  policyTypes:
+  - Egress
+  egress:
+  {{- toYaml . | nindent 2 }}
+{{- end }}

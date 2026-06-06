@@ -326,6 +326,7 @@ class _ProcessRecord:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
+    privileged=True,
     icon="Terminal",
     icon_color="text-green-500",
     config_fields=[
