@@ -135,7 +135,7 @@ See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for th
 
 ## Worker Backends
 
-The instance and runtime charts support two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+The instance and runtime charts support two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
 
 The dedicated-worker provisioning flow is implemented today.
 

@@ -22,10 +22,11 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 
 ## Common Setup Notes
 
-All ten tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+Most tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+`docker` is marked `setup_type: special` and `requires_config` because Docker daemon access is privileged host control.
 `src/mindroom/api/integrations.py` currently has no dedicated integration endpoints for them because they are local-runtime tools rather than OAuth-backed services.
 
-MindRoom's built-in default worker-routed set is `coding`, `file`, `python`, and `shell`.
+MindRoom's built-in default worker-routed set is `coding`, `docker`, `file`, `python`, and `shell`.
 You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
@@ -307,11 +308,13 @@ ls("src/mindroom")
 `docker` exposes container operations such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
 It also exposes image, volume, and network operations including `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
 On startup, the toolkit checks common Docker socket locations and pings the Docker daemon.
-`docker` defaults to primary execution, so it normally runs beside the main agent process rather than in the worker sandbox.
+MindRoom marks `docker` as worker-routed by default because Docker daemon access is privileged host control.
+In hosted, multi-tenant, or default-unsandboxed deployments, Docker is unavailable unless a worker backend is configured or unsafe local execution is explicitly enabled for local development.
 
 ### Configuration
 
-This tool has no tool-specific inline configuration fields.
+Set `include_tools` to an optional list of Docker command functions to expose, or leave it empty to expose all Docker commands.
+The deployment must provide Docker daemon access to the selected worker runtime if Docker operations should be allowed.
 
 ### Example
 

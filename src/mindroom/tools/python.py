@@ -67,6 +67,7 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
+    consumes_workspace_paths=True,
     icon="SiPython",
     icon_color="text-blue-500",
     config_fields=[

@@ -2049,6 +2049,7 @@ depends_on = [
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.constants",
+    "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.worker_proxy_client",

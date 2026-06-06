@@ -50,7 +50,9 @@ from mindroom.tool_system.metadata import (
     TOOL_REGISTRY,
     ConfigField,
     ToolCategory,
+    ToolExecutionTarget,
     ToolInitOverrideError,
+    ToolMetadata,
     ToolValidationInfo,
     get_tool_by_name,
     register_tool_with_metadata,
@@ -1257,7 +1259,91 @@ def test_save_attachment_to_worker_request_failure_does_not_record_worker_failur
     assert manager.touched == [worker_target.worker_key]
 
 
-@pytest.mark.parametrize("worker_tools_override", [["coding"], ["python"], ["shell", "coding"]])
+def _sandbox_proxy_test_metadata(
+    name: str,
+    *,
+    default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
+    consumes_workspace_paths: bool = False,
+) -> ToolMetadata:
+    return ToolMetadata(
+        name=name,
+        display_name=name,
+        description=name,
+        category=ToolCategory.DEVELOPMENT,
+        default_execution_target=default_execution_target,
+        consumes_workspace_paths=consumes_workspace_paths,
+    )
+
+
+def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default fail-closed proxy routing should come from tool metadata, not a hardcoded name set."""
+    tool_name = "metadata_worker_execution_test"
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        tool_name,
+        _sandbox_proxy_test_metadata(
+            tool_name,
+            default_execution_target=ToolExecutionTarget.WORKER,
+        ),
+    )
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode=None,
+    )
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+
+
+def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attachment saves should follow workspace-consumer metadata, not a hardcoded name set."""
+    consumer_tool = "metadata_workspace_consumer_test"
+    non_consumer_tool = "metadata_non_workspace_consumer_test"
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        consumer_tool,
+        _sandbox_proxy_test_metadata(
+            consumer_tool,
+            default_execution_target=ToolExecutionTarget.WORKER,
+            consumes_workspace_paths=True,
+        ),
+    )
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        non_consumer_tool,
+        _sandbox_proxy_test_metadata(
+            non_consumer_tool,
+            default_execution_target=ToolExecutionTarget.WORKER,
+            consumes_workspace_paths=False,
+        ),
+    )
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    assert (
+        sandbox_proxy_module.attachment_save_uses_worker(
+            runtime_paths=runtime_paths,
+            worker_tools_override=[consumer_tool],
+        )
+        is True
+    )
+    assert (
+        sandbox_proxy_module.attachment_save_uses_worker(
+            runtime_paths=runtime_paths,
+            worker_tools_override=[non_consumer_tool],
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("worker_tools_override", [["coding"], ["docker"], ["python"], ["shell", "coding"]])
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
     worker_tools_override: list[str],
@@ -1270,21 +1356,9 @@ def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
     )
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
-
     assert (
         sandbox_proxy_module.attachment_save_uses_worker(
             runtime_paths=runtime_paths,
-            worker_target=worker_target,
             worker_tools_override=worker_tools_override,
         )
         is True
@@ -1292,7 +1366,6 @@ def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     assert (
         sandbox_proxy_module.attachment_save_uses_worker(
             runtime_paths=runtime_paths,
-            worker_target=worker_target,
             worker_tools_override=["calculator"],
         )
         is False
@@ -1486,6 +1559,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true",
             "OPENAI_BASE_URL": "http://example.invalid/v1",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -1518,6 +1592,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true",
             "OPENAI_BASE_URL": "http://example.invalid/v1",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -4259,7 +4334,6 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
-            worker_scope="shared",
         )
         is True
     )
@@ -4288,15 +4362,11 @@ def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths, worker_scope=None)
-        is True
-    )
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
-            worker_scope=None,
         )
         is False
     )
@@ -4317,15 +4387,11 @@ def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_pr
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths, worker_scope="user")
-        is True
-    )
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
-            worker_scope="user",
         )
         is False
     )
@@ -5030,7 +5096,6 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
-            worker_scope="shared",
         )
         is True
     )
@@ -5062,7 +5127,6 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
-            worker_scope=None,
         )
         is True
     )
@@ -5070,7 +5134,6 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
-            worker_scope=None,
         )
         is False
     )
@@ -5252,8 +5315,9 @@ class TestWorkerToolsOverride:
             is False
         )
 
-    def test_override_still_requires_proxy_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No proxy URL should always disable proxying, even with override."""
+    def test_override_without_proxy_url_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No proxy URL should keep worker-routed execution tools wrapped so calls fail closed."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url=None,
@@ -5266,8 +5330,141 @@ class TestWorkerToolsOverride:
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
             )
+            is True
+        )
+
+    def test_default_static_runner_without_proxy_keeps_execution_tools_local(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plain local static-runner installs should keep execution tools usable."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
             is False
         )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is False
+        )
+
+    def test_unset_mode_with_static_proxy_url_preserves_all_tool_proxying(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A configured static proxy should keep the legacy unset-mode all-tools default."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox-runner:8765",
+            execution_mode=None,
+        )
+
+        assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+
+    def test_explicit_wildcard_without_proxy_url_fails_closed_for_all_tools(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit all-tools routing should not collapse into plain local execution."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+        monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOOLS", "*")
+        runtime_paths = _runtime_paths_from_env()
+
+        assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+
+    def test_unsafe_local_execution_opt_in_disables_explicit_routing_without_backend(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit unsafe env opt-in should permit host execution after explicit routing."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+        monkeypatch.setenv("MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS", "true")
+        runtime_paths = _runtime_paths_from_env()
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=["shell"],
+            )
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_static_runner_shell_call_runs_locally(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plain local static-runner installs should keep shell usable without extra env."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+
+        tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
+        entrypoint = tool.async_functions["run_shell_command"].entrypoint
+        assert entrypoint is not None
+
+        assert await entrypoint("printf local-ok") == "local-ok"
 
     @pytest.mark.parametrize(
         "tool_name",
