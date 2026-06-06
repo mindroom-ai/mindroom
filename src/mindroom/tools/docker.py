@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.metadata import (
+    ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
@@ -26,9 +27,24 @@ if TYPE_CHECKING:
     default_execution_target=ToolExecutionTarget.WORKER,
     icon="SiDocker",
     icon_color="text-blue-500",
-    config_fields=[],
+    config_fields=[
+        ConfigField(
+            name="include_tools",
+            label="Exposed Docker Commands",
+            type="string[]",
+            required=False,
+            default=None,
+            description=(
+                "Optional allowlist of Docker command functions to expose. Leave empty to expose all Docker commands."
+            ),
+        ),
+    ],
     dependencies=["docker"],
     docs_url="https://docs.agno.com/tools/toolkits/local/docker",
+    helper_text=(
+        "Docker is privileged. Use a dedicated worker sandbox, or explicitly opt in to unsafe local execution "
+        "before exposing host Docker access."
+    ),
     function_names=(
         "build_image",
         "connect_container_to_network",

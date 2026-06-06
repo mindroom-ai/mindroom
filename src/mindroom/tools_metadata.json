@@ -2482,7 +2482,20 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
-      "config_fields": [],
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Optional allowlist of Docker command functions to expose. Leave empty to expose all Docker commands.",
+          "label": "Exposed Docker Commands",
+          "name": "include_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        }
+      ],
       "default_execution_target": "worker",
       "dependencies": [
         "docker"
@@ -2516,7 +2529,7 @@
         "stop_container",
         "tag_image"
       ],
-      "helper_text": null,
+      "helper_text": "Docker is privileged. Use a dedicated worker sandbox, or explicitly opt in to unsafe local execution before exposing host Docker access.",
       "icon": "SiDocker",
       "icon_color": "text-blue-500",
       "name": "docker",
