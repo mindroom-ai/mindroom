@@ -145,7 +145,8 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 
 View and modify MindRoom configuration from chat.
 This command is disabled by default.
-Set `authorization.config_command_enabled: true` and use a user in `authorization.global_users` to enable it.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, only users in `authorization.global_users` can use it.
 Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**

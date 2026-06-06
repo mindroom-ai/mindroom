@@ -335,7 +335,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
-                        requester=requester_user_id,
+                        requester=resolved_requester_user_id,
                     )
 
                     # Get the pending change we just registered

@@ -341,12 +341,16 @@ async def handle_confirmation_reaction(
         pending_change: The pending configuration change
 
     """
+    authorization = bot.config.authorization
+    resolved_sender = authorization.resolve_alias(event.sender)
+
     # Only process reactions from the requester
-    if event.sender != pending_change.requester:
+    if resolved_sender != pending_change.requester:
         logger.debug(
             "Ignoring config reaction from non-requester",
             sender=event.sender,
             requester=pending_change.requester,
+            resolved_sender=resolved_sender,
         )
         return
 
@@ -370,8 +374,6 @@ async def handle_confirmation_reaction(
     )
 
     if reaction_key == "✅":
-        authorization = bot.config.authorization
-        resolved_requester = authorization.resolve_alias(event.sender)
         if not authorization.config_command_enabled:
             response_text = "❌ Config command disabled."
             logger.info(
@@ -379,7 +381,7 @@ async def handle_confirmation_reaction(
                 path=pending_change.config_path,
                 requester=event.sender,
             )
-        elif resolved_requester not in authorization.global_users:
+        elif resolved_sender not in authorization.global_users:
             response_text = "❌ Admin only."
             logger.info(
                 "Config change rejected because requester is not admin",

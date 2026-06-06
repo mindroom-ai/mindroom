@@ -46,20 +46,11 @@ def _handler_authorization(
     config_command_enabled: bool,
     global_users: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
-) -> SimpleNamespace:
-    auth_aliases = aliases or {}
-
-    def resolve_alias(sender_id: str) -> str:
-        for canonical, alias_list in auth_aliases.items():
-            if sender_id in alias_list:
-                return canonical
-        return sender_id
-
-    return SimpleNamespace(
+) -> AuthorizationConfig:
+    return AuthorizationConfig(
         config_command_enabled=config_command_enabled,
         global_users=global_users or [],
-        aliases=auth_aliases,
-        resolve_alias=resolve_alias,
+        aliases=aliases or {},
     )
 
 
@@ -647,6 +638,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
             authorization=_handler_authorization(
                 config_command_enabled=True,
                 global_users=["@alice:example.org"],
+                aliases={"@alice:example.org": ["@telegram_alice:example.org"]},
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -659,7 +651,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
-        sender="@alice:example.org",
+        sender="@telegram_alice:example.org",
         event_id="$event",
         source={"content": {"body": "!config set defaults.markdown false"}},
     )
@@ -699,7 +691,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
             room=room,
             event=event,
             command=command,
-            requester_user_id="@alice:example.org",
+            requester_user_id="@telegram_alice:example.org",
         )
 
     mock_register.assert_called_once_with(
@@ -886,6 +878,60 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     bot._send_response.assert_awaited_once_with(
         target=target,
         response_text="❌ Admin only.",
+        skip_mentions=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_path: Path) -> None:
+    """Alias-backed admins should be able to confirm their own pending config changes."""
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@admin:example.org"],
+                aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(
+            build_message_target=MagicMock(return_value=target),
+        ),
+        _send_response=AsyncMock(),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(sender="@telegram_admin:example.org", key="✅", reacts_to="$preview")
+    pending_change = SimpleNamespace(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="defaults.markdown",
+        new_value=False,
+        requester="@admin:example.org",
+    )
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_commands.apply_config_change",
+            new_callable=AsyncMock,
+            return_value="✅ Configuration updated successfully.",
+        ) as mock_apply,
+    ):
+        await handle_confirmation_reaction(bot, room, event, pending_change)
+
+    mock_apply.assert_awaited_once_with(
+        "defaults.markdown",
+        False,
+        runtime_paths=bot.runtime_paths,
+    )
+    bot._send_response.assert_awaited_once_with(
+        target=target,
+        response_text="✅ Configuration updated successfully.",
         skip_mentions=True,
     )
 
