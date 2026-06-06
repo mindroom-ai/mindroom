@@ -825,6 +825,41 @@ async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path: Path) -> None:
+    """Config set preview should redact old and new sensitive leaf values."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.4",
+                        "api_key": "sk-old-config-secret",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(
+        "set models.default.api_key sk-new-config-secret",
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert change_info is not None
+    assert "Configuration Change Preview" in response
+    assert "***redacted***" in response
+    assert "sk-old-config-secret" not in response
+    assert "sk-new-config-secret" not in response
+    assert change_info["old_value"] == "sk-old-config-secret"
+    assert change_info["new_value"] == "sk-new-config-secret"
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path: Path) -> None:
     """Show should return a user-facing error when the config YAML is malformed."""
     config_path = tmp_path / "runtime-config.yaml"

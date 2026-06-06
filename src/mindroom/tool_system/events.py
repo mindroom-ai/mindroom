@@ -453,8 +453,8 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     # Preserve insertion order for easier debugging of tool-call construction.
     for key, value in tool_args.items():
         redacted_value = redact_sensitive_data({key: value})
-        display_value = redacted_value[key] if isinstance(redacted_value, dict) else redacted_value
-        value_text = _to_compact_text(display_value)
+        assert isinstance(redacted_value, dict)
+        value_text = _to_compact_text(redacted_value[key])
         # Collapse newlines so previews stay single-line.
         value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)
