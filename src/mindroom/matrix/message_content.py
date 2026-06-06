@@ -151,6 +151,8 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         The downloaded text content, or None if download failed
 
     """
+    global _mxc_cache_total_bytes
+
     # Check cache first
     current_time = time.time()
     if mxc_url in _mxc_cache:
@@ -160,7 +162,6 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
             logger.debug("mxc_cache_hit", mxc_url=mxc_url)
             return content
         # Expired, remove from cache
-        global _mxc_cache_total_bytes
         _mxc_cache_total_bytes -= _text_size_bytes(content)
         del _mxc_cache[mxc_url]
 

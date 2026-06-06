@@ -30,7 +30,7 @@ Voice audio now inherits the shared media cap through `download_media_bytes`.
 
 Added focused regression tests for oversized plaintext sidecars, oversized encrypted sidecars before decrypt, oversized decrypted sidecars before decode, and MXC cache byte-budget eviction.
 Added focused regression tests for oversized unencrypted media, encrypted media before decrypt, and decrypted media before handler/model handoff.
-Added focused regression tests for direct attachment persistence over the media cap and voice audio cap inheritance.
+Added focused regression tests for direct attachment persistence over the media cap, voice audio cap inheritance, and strict typed voice download responses.
 
 ## Verification
 
@@ -39,15 +39,15 @@ Green run passed after implementation.
 Latest focused verification command:
 
 ```bash
-.venv/bin/python -m pytest tests/test_message_content.py::TestDownloadMxcText tests/test_image_handler.py::TestDownloadImage tests/test_attachments.py::test_register_media_attachment_rejects_payload_over_limit tests/test_voice_handler.py::TestVoiceHandler::test_download_audio_returns_none_when_media_cap_rejects_payload -q -n 0 --no-cov
+.venv/bin/python -m pytest tests/test_message_content.py::TestDownloadMxcText tests/test_image_handler.py::TestDownloadImage tests/test_attachments.py::test_register_media_attachment_rejects_payload_over_limit tests/test_voice_handler.py::TestVoiceHandler::test_download_audio_returns_none_when_media_cap_rejects_payload tests/test_voice_handler_thread.py::test_voice_handler_returns_transcription -q -n 0 --no-cov
 ```
 
-Latest focused result: 25 passed.
+Latest focused result: 27 passed.
 
 Latest ruff command:
 
 ```bash
-.venv/bin/python -m ruff check src/mindroom/matrix/message_content.py src/mindroom/matrix/media.py src/mindroom/attachments.py tests/test_message_content.py tests/test_image_handler.py tests/test_attachments.py tests/test_voice_handler.py
+.venv/bin/python -m ruff check src/mindroom/matrix/message_content.py src/mindroom/matrix/media.py src/mindroom/attachments.py tests/test_message_content.py tests/test_image_handler.py tests/test_attachments.py tests/test_voice_handler.py tests/test_voice_handler_thread.py
 ```
 
 Latest ruff result: all checks passed.
