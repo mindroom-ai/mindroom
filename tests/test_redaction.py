@@ -141,6 +141,12 @@ def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() ->
             "api_keys": ["plain-secret-one", "plain-secret-two"],
             "oauth_tokens": ["plain-oauth-token"],
             "max_tokens": 4096,
+            "usage": {
+                "cache_creation_input_tokens": 2,
+                "cache_read_input_tokens": 3,
+                "input_tokens": 4,
+                "output_tokens": 5,
+            },
             "nested": {"tokens": [{"value": "plain-token"}]},
             "safe_values": ["plain-secret-one"],
         },
@@ -150,6 +156,12 @@ def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() ->
         "api_keys": [REDACTED, REDACTED],
         "oauth_tokens": [REDACTED],
         "max_tokens": 4096,
+        "usage": {
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "input_tokens": 4,
+            "output_tokens": 5,
+        },
         "nested": {"tokens": [{"value": REDACTED}]},
         "safe_values": ["plain-secret-one"],
     }

@@ -93,13 +93,22 @@ _SECRET_CONTAINER_KEYS: frozenset[str] = frozenset(
 )
 _NON_SECRET_KEYS: frozenset[str] = frozenset(
     {
+        "accepted_prediction_tokens",
+        "audio_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cached_tokens",
         "completion_tokens",
         "continuation_token",
+        "input_tokens",
         "max_tokens",
         "next_token",
+        "output_tokens",
         "page_token",
         "pagination_token",
         "prompt_tokens",
+        "reasoning_tokens",
+        "rejected_prediction_tokens",
         "token_budget",
         "token_count",
         "tokens_used",
