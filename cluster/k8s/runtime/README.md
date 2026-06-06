@@ -76,6 +76,46 @@ eventCache:
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
 When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
 
+## Worker Egress Proxy
+
+For dedicated Kubernetes workers, the chart can point worker pods at an existing HTTP proxy Service and render a worker egress NetworkPolicy.
+This keeps the proxy deployment, domain allowlist, approval API token, and persistence in the platform layer while making the runtime chart own worker wiring.
+
+```yaml
+workers:
+  backend: kubernetes
+
+egressProxy:
+  enabled: true
+  service:
+    name: mindroom-egress-proxy
+    namespace: mindroom
+    port: 3128
+  noProxy:
+    - localhost
+    - 127.0.0.1
+    - ::1
+    - internal-api.mindroom.svc.cluster.local
+  networkPolicy:
+    create: true
+    proxyPodSelector:
+      matchLabels:
+        app.kubernetes.io/name: mindroom-egress-proxy
+    extraEgress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: internal-api
+        ports:
+          - protocol: TCP
+            port: 8080
+```
+
+When `egressProxy.injectWorkerProxyEnv` is true, worker pods receive `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and lowercase variants through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`.
+`workers.kubernetes.extraEnv` is still applied after those defaults, so platform values can override individual variables.
+When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
+NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
+
 ## Existing Platform Example
 
 ```yaml

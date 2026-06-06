@@ -676,6 +676,103 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
     }
 
 
+def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_proxy(tmp_path: Path) -> None:
+    """The runtime chart can inject proxy env and egress policy for dedicated workers."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "extraEnv": {
+                            "FOO": "bar",
+                            "NO_PROXY": "custom.local",
+                        }
+                    },
+                },
+                "egressProxy": {
+                    "enabled": True,
+                    "service": {
+                        "name": "egress-proxy",
+                        "namespace": "proxy-system",
+                        "port": 3128,
+                    },
+                    "noProxy": ["localhost", "127.0.0.1"],
+                    "networkPolicy": {
+                        "proxyPodSelector": {"matchLabels": {"app": "egress-proxy"}},
+                        "extraEgress": [
+                            {
+                                "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
+                                "ports": [{"protocol": "TCP", "port": 8080}],
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    mindroom_container = _container(deployment, "mindroom")
+    worker_env = json.loads(_env_by_name(mindroom_container)["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+
+    assert worker_env["HTTP_PROXY"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["HTTPS_PROXY"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["ALL_PROXY"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["http_proxy"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["https_proxy"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["all_proxy"] == "http://egress-proxy.proxy-system.svc.cluster.local:3128"
+    assert worker_env["NO_PROXY"] == "custom.local"
+    assert worker_env["no_proxy"] == "localhost,127.0.0.1"
+    assert worker_env["FOO"] == "bar"
+
+    assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["spec"]["egress"][0]["to"][0] == {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+        "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+    }
+    assert policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "proxy-system"}},
+                "podSelector": {"matchLabels": {"app": "egress-proxy"}},
+            }
+        ],
+        "ports": [{"protocol": "TCP", "port": 3128}],
+    }
+    assert policy["spec"]["egress"][2] == {
+        "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
+        "ports": [{"protocol": "TCP", "port": 8080}],
+    }
+
+
+def test_runtime_chart_rejects_egress_proxy_policy_without_proxy_pod_selector() -> None:
+    """Worker egress policy needs proxy pod labels because NetworkPolicy cannot target Services."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "egressProxy.enabled=true",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required "
+        "when egressProxy.networkPolicy.create=true"
+        in completed.stderr
+    )
+
+
 def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
     """The runtime chart should pass the default service-link setting to generated workers."""
     docs = _render_runtime_chart()

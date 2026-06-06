@@ -13,3 +13,13 @@
 {{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.databaseUrl.existingSecret) (eq .Values.eventCache.postgres.auth.passwordKey (include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" .)) -}}
 {{- fail "eventCache.postgres.auth.passwordKey must differ from the event-cache database URL secret key" -}}
 {{- end -}}
+{{- if and .Values.egressProxy.enabled (ne .Values.workers.backend "kubernetes") -}}
+{{- fail "egressProxy.enabled requires workers.backend=kubernetes" -}}
+{{- end -}}
+{{- if and .Values.egressProxy.enabled (not .Values.egressProxy.service.name) -}}
+{{- fail "egressProxy.service.name is required when egressProxy.enabled=true" -}}
+{{- end -}}
+{{- $proxyPodSelector := .Values.egressProxy.networkPolicy.proxyPodSelector -}}
+{{- if and .Values.egressProxy.enabled .Values.egressProxy.networkPolicy.create (or (not $proxyPodSelector) (not (or $proxyPodSelector.matchLabels $proxyPodSelector.matchExpressions))) -}}
+{{- fail "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required when egressProxy.networkPolicy.create=true" -}}
+{{- end -}}

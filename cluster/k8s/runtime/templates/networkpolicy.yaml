@@ -1,4 +1,6 @@
 {{- if and (eq .Values.workers.backend "kubernetes") .Values.workers.kubernetes.networkPolicy.create }}
+{{- $egressPolicyEnabled := and .Values.egressProxy.enabled .Values.egressProxy.networkPolicy.create -}}
+{{- $proxyNamespace := include "mindroom-runtime.egressProxyNamespace" . -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,6 +19,9 @@ spec:
       {{- end }}
   policyTypes:
     - Ingress
+    {{- if $egressPolicyEnabled }}
+    - Egress
+    {{- end }}
   ingress:
     - from:
         - namespaceSelector:
@@ -28,4 +33,42 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.workers.kubernetes.port }}
+  {{- if $egressPolicyEnabled }}
+  egress:
+    - to:
+        {{- with .Values.egressProxy.networkPolicy.dns.namespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- with $.Values.egressProxy.networkPolicy.dns.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- range .Values.egressProxy.networkPolicy.dns.ipBlocks }}
+        - ipBlock:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - {{- if .Values.egressProxy.networkPolicy.proxyNamespaceSelector }}
+          namespaceSelector:
+            {{- toYaml .Values.egressProxy.networkPolicy.proxyNamespaceSelector | nindent 12 }}
+          {{- else }}
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $proxyNamespace | quote }}
+          {{- end }}
+          podSelector:
+            {{- toYaml .Values.egressProxy.networkPolicy.proxyPodSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.egressProxy.service.port }}
+    {{- with .Values.egressProxy.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
 {{- end }}

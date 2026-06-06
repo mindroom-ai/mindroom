@@ -5,6 +5,7 @@
 {{- $workerAuthSecretName := include "mindroom-runtime.workerAuthSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretName := include "mindroom-runtime.eventCacheDatabaseUrlSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretKey := include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" . -}}
+{{- $workerExtraEnvJson := include "mindroom-runtime.workerExtraEnvJson" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -189,9 +190,9 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE
               value: "true"
             {{- end }}
-            {{- if .Values.workers.kubernetes.extraEnv }}
+            {{- if $workerExtraEnvJson }}
             - name: MINDROOM_KUBERNETES_WORKER_ENV_JSON
-              value: {{ toJson .Values.workers.kubernetes.extraEnv | quote }}
+              value: {{ $workerExtraEnvJson | quote }}
             {{- end }}
             {{- if or .Values.workers.kubernetes.ownerDeploymentName (eq $workerNamespace .Release.Namespace) }}
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME

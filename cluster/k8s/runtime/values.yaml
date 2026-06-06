@@ -258,6 +258,38 @@ workers:
         cpu: 500m
         memory: 1Gi
 
+# Optional external HTTP proxy for dedicated Kubernetes workers.
+# This chart does not deploy the proxy itself. It only points worker pods at an
+# existing proxy Service and, when requested, restricts worker egress so direct
+# internet access must go through that proxy.
+egressProxy:
+  enabled: false
+  injectWorkerProxyEnv: true
+  service:
+    name: mindroom-egress-proxy
+    namespace: ""
+    port: 3128
+    scheme: http
+  noProxy:
+    - localhost
+    - 127.0.0.1
+    - ::1
+  networkPolicy:
+    create: true
+    # Labels selecting the existing proxy pods. NetworkPolicy cannot target a Service directly.
+    proxyPodSelector: {}
+    proxyNamespaceSelector: {}
+    dns:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+      ipBlocks: []
+    # Raw Kubernetes NetworkPolicyEgressRule entries appended after DNS and proxy rules.
+    extraEgress: []
+
 initContainers: []
 extraContainers: []
 extraVolumes: []

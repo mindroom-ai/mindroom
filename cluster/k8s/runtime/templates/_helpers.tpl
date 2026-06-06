@@ -133,6 +133,39 @@ app.kubernetes.io/component: runtime
 {{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.egressProxyNamespace" -}}
+{{- default .Release.Namespace .Values.egressProxy.service.namespace -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressProxyUrl" -}}
+{{- $namespace := include "mindroom-runtime.egressProxyNamespace" . -}}
+{{- printf "%s://%s.%s.svc.cluster.local:%v" .Values.egressProxy.service.scheme .Values.egressProxy.service.name $namespace .Values.egressProxy.service.port -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.workerExtraEnvJson" -}}
+{{- $extraEnv := dict -}}
+{{- if and .Values.egressProxy.enabled .Values.egressProxy.injectWorkerProxyEnv -}}
+{{- $proxyUrl := include "mindroom-runtime.egressProxyUrl" . -}}
+{{- $_ := set $extraEnv "HTTP_PROXY" $proxyUrl -}}
+{{- $_ := set $extraEnv "HTTPS_PROXY" $proxyUrl -}}
+{{- $_ := set $extraEnv "ALL_PROXY" $proxyUrl -}}
+{{- $_ := set $extraEnv "http_proxy" $proxyUrl -}}
+{{- $_ := set $extraEnv "https_proxy" $proxyUrl -}}
+{{- $_ := set $extraEnv "all_proxy" $proxyUrl -}}
+{{- with .Values.egressProxy.noProxy -}}
+{{- $noProxy := join "," . -}}
+{{- $_ := set $extraEnv "NO_PROXY" $noProxy -}}
+{{- $_ := set $extraEnv "no_proxy" $noProxy -}}
+{{- end -}}
+{{- end -}}
+{{- range $key, $value := .Values.workers.kubernetes.extraEnv -}}
+{{- $_ := set $extraEnv $key $value -}}
+{{- end -}}
+{{- if $extraEnv -}}
+{{- toJson $extraEnv -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.eventCacheNamespace" -}}
 {{- default .Release.Namespace .Values.eventCache.namespace -}}
 {{- end -}}
