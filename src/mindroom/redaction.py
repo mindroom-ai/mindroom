@@ -167,6 +167,13 @@ def _is_secret_container_key(value: object) -> bool:
     normalized = _normalize_key(value)
     if normalized in _SECRET_CONTAINER_KEYS:
         return True
+    return _is_secret_container_suffix_key(value)
+
+
+def _is_secret_container_suffix_key(value: object) -> bool:
+    normalized = _normalize_key(value)
+    if normalized in _SECRET_CONTAINER_KEYS:
+        return False
     return any(key != "tokens" and normalized.endswith(f"_{key}") for key in _SECRET_CONTAINER_KEYS)
 
 
@@ -198,6 +205,18 @@ def _mapping_has_secret_context_label(value: Mapping[object, object]) -> bool:
         if isinstance(item, str) and _is_sensitive_key(item):
             return True
     return False
+
+
+def _should_force_redact_container_value(value: object) -> bool:
+    return value is not None and not isinstance(value, bool | int | float)
+
+
+def _should_redact_value_for_key(key: object, value: object) -> bool:
+    if _is_secret_key(key):
+        return True
+    if _is_secret_container_suffix_key(key):
+        return _should_force_redact_container_value(value)
+    return _is_secret_container_key(key)
 
 
 def _redact_matched_token(match: re.Match[str], group_name: str = "token") -> str:
@@ -339,7 +358,7 @@ def _redact_mapping(
             break
         key_text = _safe_str(key)
         redact_key = (
-            _is_sensitive_key(key)
+            _should_redact_value_for_key(key, item)
             or (_is_query_container(parent_key) and _is_redacted_query_key(key))
             or (has_secret_context_label and _is_context_secret_value_key(key))
         )
@@ -390,7 +409,7 @@ def _redact_scalar_value(
     max_string_length: int | None,
     force_redact: bool,
 ) -> _RedactedValue:
-    if force_redact or (parent_key is not None and _is_sensitive_key(parent_key)):
+    if force_redact or (parent_key is not None and _should_redact_value_for_key(parent_key, value)):
         redacted: _RedactedValue = REDACTED
     elif isinstance(value, bytes):
         redacted = "<bytes>"
