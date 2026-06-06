@@ -191,24 +191,25 @@ def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
 
 
-def test_custom_api_tool_rejects_private_endpoint_before_request() -> None:
-    """Custom API calls should not be able to fetch private-network URLs."""
-    tool = custom_api_tools()()
+@pytest.mark.parametrize(
+    ("base_url", "endpoint", "reason"),
+    [
+        (None, "http://127.0.0.1:8000/admin", "private_address"),
+        ("http://169.254.169.254", "/latest/meta-data/", "metadata_address"),
+    ],
+)
+def test_custom_api_tool_rejects_unsafe_url_before_request(
+    base_url: str | None,
+    endpoint: str,
+    reason: str,
+) -> None:
+    """Custom API calls should validate final URLs before making requests."""
+    tool = custom_api_tools()(base_url=base_url)
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
-        tool.make_request("http://127.0.0.1:8000/admin")
+        tool.make_request(endpoint)
 
-    assert exc_info.value.reason == "private_address"
-
-
-def test_custom_api_tool_rejects_private_base_url_before_request() -> None:
-    """Custom API base_url should be validated after endpoint joining."""
-    tool = custom_api_tools()(base_url="http://169.254.169.254")
-
-    with pytest.raises(ServerFetchUrlError) as exc_info:
-        tool.make_request("/latest/meta-data/")
-
-    assert exc_info.value.reason == "metadata_address"
+    assert exc_info.value.reason == reason
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,7 +265,7 @@ async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pyte
             await route_handler(unsafe_route)
             unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
             unsafe_route.continue_.assert_not_called()
-            return SimpleNamespace(fit_markdown="", markdown="public content", text="", html="", success=True)
+            return SimpleNamespace(fit_markdown="", markdown="", text="public content", html="", success=True)
 
     monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
     tool = crawl4ai_tools()()

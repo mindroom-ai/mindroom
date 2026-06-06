@@ -10,7 +10,7 @@ from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, 
 
 if TYPE_CHECKING:
     from agno.tools.crawl4ai import Crawl4aiTools
-    from playwright.async_api import Page, Route
+    from playwright.async_api import Page
 
 
 @register_tool_with_metadata(
@@ -115,10 +115,7 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
             return super().crawl(validated_urls, search_query)
 
         async def _guard_page_context(self, page: Page, **_kwargs: object) -> None:
-            async def route_guard(route: Route) -> None:
-                await continue_or_abort_browser_fetch(route)
-
-            await page.route("**/*", route_guard)
+            await page.route("**/*", continue_or_abort_browser_fetch)
 
         async def _async_crawl(self, url: str, search_query: str | None = None) -> str:
             """Crawl one validated URL with server-fetch guards on Playwright requests."""
@@ -149,6 +146,9 @@ def crawl4ai_tools() -> type[Crawl4aiTools]:  # noqa: C901
                         else:
                             content = result.markdown.raw_markdown
                             log_debug("Using markdown.raw_markdown")
+                    elif result.text:
+                        content = result.text
+                        log_debug("Using text attribute")
                     elif result.html:
                         log_warning("Only HTML available, no markdown extracted")
                         return "Error: Could not extract markdown from page"

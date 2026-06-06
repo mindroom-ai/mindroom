@@ -455,6 +455,17 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
     assert payload["targetId"] == "tab-1"
 
 
+def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    set_input_files = AsyncMock()
+    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
+    page: Any = SimpleNamespace(locator=locator)
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
+
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    return set_input_files
+
+
 @pytest.mark.asyncio
 async def test_browser_upload_rejects_paths_outside_upload_roots(
     monkeypatch: pytest.MonkeyPatch,
@@ -469,14 +480,7 @@ async def test_browser_upload_rejects_paths_outside_upload_roots(
     outside_file = tmp_path / "secret.txt"
     outside_file.write_text("secret", encoding="utf-8")
     tool = BrowserTools(runtime_paths)
-    mock_state = object()
-    set_input_files = AsyncMock()
-    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
-    page: Any = SimpleNamespace(locator=locator)
-    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    set_input_files = _install_upload_tab(tool, monkeypatch)
 
     with pytest.raises(ValueError, match="outside browser upload root"):
         await tool._upload(
@@ -507,14 +511,7 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
     allowed_file.parent.mkdir(parents=True)
     allowed_file.write_text("upload", encoding="utf-8")
     tool = BrowserTools(runtime_paths)
-    mock_state = object()
-    set_input_files = AsyncMock()
-    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
-    page: Any = SimpleNamespace(locator=locator)
-    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    set_input_files = _install_upload_tab(tool, monkeypatch)
 
     payload = await tool._upload(
         profile_name="mindroom",
@@ -545,14 +542,7 @@ async def test_browser_upload_rejects_runtime_storage_secrets(
     secret_file.parent.mkdir(parents=True)
     secret_file.write_text("secret", encoding="utf-8")
     tool = BrowserTools(runtime_paths)
-    mock_state = object()
-    set_input_files = AsyncMock()
-    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
-    page: Any = SimpleNamespace(locator=locator)
-    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    set_input_files = _install_upload_tab(tool, monkeypatch)
 
     with pytest.raises(ValueError, match="outside browser upload root"):
         await tool._upload(

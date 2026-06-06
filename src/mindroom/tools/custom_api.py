@@ -99,10 +99,6 @@ def custom_api_tools() -> type[CustomApiTools]:
     class MindRoomCustomApiTools(CustomApiTools):
         """Custom API toolkit with MindRoom server-fetch URL validation."""
 
-        def _request_url(self, endpoint: str) -> str:
-            url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
-            return validate_server_fetch_url(url)
-
         def make_request(
             self,
             endpoint: str,
@@ -113,7 +109,8 @@ def custom_api_tools() -> type[CustomApiTools]:
             json_data: dict[str, Any] | None = None,
         ) -> str:
             """Make an HTTP request to a validated public HTTP(S) URL."""
-            url = self._request_url(endpoint)
+            url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
+            url = validate_server_fetch_url(url)
             auth = (self.username, self.password) if self.username and self.password else None
             try:
                 with httpx.Client(
