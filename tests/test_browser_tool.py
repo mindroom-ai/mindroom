@@ -304,6 +304,13 @@ def test_browser_metadata_documents_default_output_dir() -> None:
     assert "storage path's browser/ directory" in output_dir_field.description
 
 
+def test_browser_private_network_metadata_defaults_to_false() -> None:
+    """Browser local-network opt-in should expose an explicit secure default."""
+    fields = {field.name: field for field in TOOL_METADATA["browser"].config_fields or []}
+
+    assert fields["allow_private_networks"].default is False
+
+
 def test_browser_metadata_lists_discovery_actions() -> None:
     """Dashboard metadata should expose the callable discovery actions."""
     description = TOOL_METADATA["browser"].description
@@ -355,17 +362,63 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_browser_open_rejects_private_target_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Browser navigation should reject private network targets before opening a tab."""
+async def test_browser_open_rejects_localhost_target_url_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser navigation should reject local dev servers before opening a tab by default."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     open_tab = AsyncMock()
     monkeypatch.setattr(tool, "_open_tab", open_tab)
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
-        await tool.browser(action="open", targetUrl="http://127.0.0.1:8000/admin")
+        await tool.browser(action="open", targetUrl="http://localhost:5173/")
 
-    assert exc_info.value.reason == "private_address"
+    assert exc_info.value.reason == "private_hostname"
     open_tab.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_open_allows_private_target_url_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser local-network opt-in should allow local dev server tabs."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS, allow_private_networks=True)
+    open_tab = AsyncMock(
+        return_value={
+            "action": "open",
+            "profile": "mindroom",
+            "status": "ok",
+            "targetId": "tab-1",
+            "title": "Local",
+            "url": "http://localhost:5173/",
+        },
+    )
+    monkeypatch.setattr(tool, "_open_tab", open_tab)
+
+    raw = await tool.browser(action="open", targetUrl="http://localhost:5173/")
+    payload = json.loads(raw)
+
+    open_tab.assert_awaited_once_with("mindroom", "http://localhost:5173/")
+    assert payload["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_allows_private_target_url_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser local-network opt-in should allow navigating to a local dev server."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS, allow_private_networks=True)
+    navigate = AsyncMock(
+        return_value={
+            "action": "navigate",
+            "profile": "mindroom",
+            "status": "ok",
+            "targetId": "tab-1",
+            "title": "Local",
+            "url": "http://localhost:5173/",
+        },
+    )
+    monkeypatch.setattr(tool, "_navigate", navigate)
+
+    raw = await tool.browser(action="navigate", targetUrl="http://localhost:5173/")
+    payload = json.loads(raw)
+
+    navigate.assert_awaited_once_with("mindroom", "http://localhost:5173/", None)
+    assert payload["status"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -727,6 +780,45 @@ async def test_ensure_profile_route_allows_browser_internal_urls(
 
         route.continue_.assert_awaited_once_with()
         route.abort.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_profile_route_allows_private_urls_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser route guard should apply the local-network opt-in to subresources."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths, allow_private_networks=True)
+    context = _FakeContext(pages=[])
+    _install_fake_persistent_playwright(monkeypatch, context=context)
+
+    await tool._ensure_profile("mindroom")
+
+    route_handler = context.route.await_args.args[1]
+    local_route = SimpleNamespace(
+        request=SimpleNamespace(url="http://localhost:5173/assets/app.js"),
+        abort=AsyncMock(),
+        continue_=AsyncMock(),
+    )
+    await route_handler(local_route)
+
+    local_route.continue_.assert_awaited_once_with()
+    local_route.abort.assert_not_called()
+
+    metadata_route = SimpleNamespace(
+        request=SimpleNamespace(url="http://169.254.169.254/latest/meta-data/"),
+        abort=AsyncMock(),
+        continue_=AsyncMock(),
+    )
+    await route_handler(metadata_route)
+
+    metadata_route.abort.assert_awaited_once_with("blockedbyclient")
+    metadata_route.continue_.assert_not_called()
 
 
 @pytest.mark.asyncio

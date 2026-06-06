@@ -8937,6 +8937,18 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow browser navigation and page subresources to reach trusted private, local, or loopback network addresses. Cloud metadata and link-local addresses stay blocked.",
+          "label": "Allow Private Networks",
+          "name": "allow_private_networks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "default_execution_target": "primary",

@@ -128,6 +128,9 @@ def _validate_ip_address(
         if _is_metadata_ip(checked_address):
             _deny("metadata_address")
 
+        if checked_address.is_loopback and allow_private_networks:
+            continue
+
         if (
             checked_address.is_link_local
             or checked_address.is_multicast

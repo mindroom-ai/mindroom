@@ -112,6 +112,11 @@ def test_validate_server_fetch_url_allows_private_when_explicitly_enabled() -> N
     )
 
 
+def test_validate_server_fetch_url_allows_localhost_when_private_is_enabled() -> None:
+    """The local-network opt-in should support local dev servers."""
+    assert validate_server_fetch_url("http://localhost:5173/", allow_private_networks=True) == "http://localhost:5173/"
+
+
 def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enabled() -> None:
     """The local-network opt-in should not open cloud metadata endpoints."""
     with pytest.raises(ServerFetchUrlError):

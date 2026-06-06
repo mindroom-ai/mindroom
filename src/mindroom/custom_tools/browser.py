@@ -396,9 +396,16 @@ class _BrowserFunctionNotRegisteredError(RuntimeError):
 class BrowserTools(Toolkit):
     """Browser control for MindRoom agents."""
 
-    def __init__(self, runtime_paths: RuntimePaths, *, output_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        output_dir: Path | str | None = None,
+        allow_private_networks: bool = False,
+    ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         self._runtime_paths = runtime_paths
+        self._allow_private_networks = allow_private_networks
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
         self._output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
@@ -542,7 +549,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(target_url)
+            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -588,7 +595,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(target_url)
+            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -1185,7 +1192,13 @@ class BrowserTools(Toolkit):
             except Exception:
                 await playwright.stop()
                 raise
-            await context.route("**/*", continue_or_abort_browser_fetch)
+            await context.route(
+                "**/*",
+                lambda route: continue_or_abort_browser_fetch(
+                    route,
+                    allow_private_networks=self._allow_private_networks,
+                ),
+            )
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
