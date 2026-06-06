@@ -764,6 +764,67 @@ async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_
 
 
 @pytest.mark.asyncio
+async def test_handle_config_command_show_redacts_secrets(tmp_path: Path) -> None:
+    """Config show output should not expose inline provider credentials."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.4",
+                        "api_key": "sk-test-config-secret",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
+
+    assert change_info is None
+    assert "api_key:" in response
+    assert "***redacted***" in response
+    assert "sk-test-config-secret" not in response
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -> None:
+    """Config get output should redact a sensitive leaf value."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.4",
+                        "api_key": "sk-test-config-secret",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(
+        "get models.default.api_key",
+        _runtime_paths_for_config(config_path),
+    )
+
+    assert change_info is None
+    assert "Configuration value for `models.default.api_key`:" in response
+    assert "***redacted***" in response
+    assert "sk-test-config-secret" not in response
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path: Path) -> None:
     """Show should return a user-facing error when the config YAML is malformed."""
     config_path = tmp_path / "runtime-config.yaml"

@@ -26,6 +26,21 @@ def test_api_key_error_with_provider() -> None:
     assert "Authentication failed" in message
 
 
+def test_provider_auth_error_redacts_secret_from_user_message() -> None:
+    """Provider exception text should be redacted before Matrix-visible user output."""
+    error = OpenAIAuthError(
+        message="Incorrect API key provided: sk-test-secret",
+        response=_MOCK_RESPONSE,
+        body=None,
+    )
+
+    message = get_user_friendly_error_message(error, "assistant")
+
+    assert "Authentication failed" in message
+    assert "***redacted***" in message
+    assert "sk-test-secret" not in message
+
+
 def test_401_error() -> None:
     """Test that 401 errors are recognized as auth failures."""
     error = Exception("Error code: 401 - Unauthorized")

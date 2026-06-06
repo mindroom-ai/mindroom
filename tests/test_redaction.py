@@ -132,3 +132,20 @@ def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
     message = redacted["message"]
     assert isinstance(message, str)
     assert "http://[" in message
+
+
+def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
+    """List items under a secret-bearing key should be redacted without changing container shape."""
+    redacted = redact_sensitive_data(
+        {
+            "api_keys": ["plain-secret-one", "plain-secret-two"],
+            "nested": {"tokens": [{"value": "plain-token"}]},
+            "safe_values": ["plain-secret-one"],
+        },
+    )
+
+    assert redacted == {
+        "api_keys": [REDACTED, REDACTED],
+        "nested": {"tokens": [{"value": REDACTED}]},
+        "safe_values": ["plain-secret-one"],
+    }

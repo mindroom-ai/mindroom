@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.response import ToolExecution
 
+from mindroom.redaction import redact_sensitive_data
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -389,6 +391,7 @@ def _format_structured_result_preview(result: object) -> tuple[str, bool] | None
 
 
 def _format_tool_result_preview(result: object) -> tuple[str, bool]:
+    result = redact_sensitive_data(result)
     structured_preview = _format_structured_result_preview(result)
     if structured_preview is not None:
         return structured_preview
@@ -449,7 +452,9 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     truncated = False
     # Preserve insertion order for easier debugging of tool-call construction.
     for key, value in tool_args.items():
-        value_text = _to_compact_text(value)
+        redacted_value = redact_sensitive_data({key: value})
+        display_value = redacted_value[key] if isinstance(redacted_value, dict) else redacted_value
+        value_text = _to_compact_text(display_value)
         # Collapse newlines so previews stay single-line.
         value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)

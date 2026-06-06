@@ -135,6 +135,33 @@ def test_format_tool_combined_with_result() -> None:
     assert trace.truncated is False
 
 
+def test_format_tool_combined_redacts_sensitive_args_and_results() -> None:
+    """Tool trace previews must not expose credentials in Matrix metadata."""
+    _text, trace = format_tool_combined(
+        "custom_api",
+        {
+            "url": "https://api.example.test?token=query-secret",
+            "headers": {"Authorization": "Bearer auth-secret"},
+            "payload": {"api_keys": ["plain-secret-one"]},
+        },
+        {"status": "ok", "access_token": "result-secret", "safe": "kept"},
+    )
+
+    payload = build_tool_trace_content([trace])
+    rendered = render_tool_trace_for_context([trace])
+
+    assert payload is not None
+    trace_event = payload[_TOOL_TRACE_KEY]["events"][0]
+    assert "auth-secret" not in trace_event["args_preview"]
+    assert "plain-secret-one" not in trace_event["args_preview"]
+    assert "result-secret" not in trace_event["result_preview"]
+    assert "auth-secret" not in rendered
+    assert "plain-secret-one" not in rendered
+    assert "result-secret" not in rendered
+    assert "***redacted***" in trace_event["args_preview"]
+    assert "***redacted***" in trace_event["result_preview"]
+
+
 def test_format_tool_combined_truncates_long_result() -> None:
     """Combined formatting should truncate long results."""
     text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
