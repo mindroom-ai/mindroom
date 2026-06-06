@@ -38,6 +38,7 @@ from mindroom.config.matrix import (
     MatrixDeliveryConfig,
     MatrixRoomAccessConfig,
     MatrixSpaceConfig,
+    MatrixSyncConfig,
     MindRoomUserConfig,
 )
 from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
@@ -138,7 +139,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_delivery",
     "worker_egress_brokers",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval", "matrix_sync")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -427,6 +428,10 @@ class Config(BaseModel):
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
+    matrix_sync: MatrixSyncConfig = Field(
+        default_factory=MatrixSyncConfig,
+        description="Matrix event sync transport configuration",
+    )
     timezone: str = Field(
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",

@@ -651,6 +651,13 @@ class TestConsolidatedConfigManager:
         with pytest.raises(ValidationError, match="tool_output_auto_save_threshold_bytes"):
             DefaultsConfig(tool_output_auto_save_threshold_bytes=0)
 
+    def test_matrix_sync_null_section_uses_default_config(self) -> None:
+        """An uncommented blank matrix_sync section should behave like an empty mapping."""
+        config = Config.model_validate({"matrix_sync": None})
+
+        assert config.matrix_sync.mode == "auto"
+        assert config.matrix_sync.sliding_timeline_limit == 20
+
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
         """Duplicate tool names should be rejected even across mixed string and mapping syntax."""
         with pytest.raises(ValueError, match="Duplicate default tools are not allowed: shell"):

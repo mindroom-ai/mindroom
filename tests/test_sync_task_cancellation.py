@@ -14,7 +14,10 @@ from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, _cancel_failure_reason
 from mindroom.config.main import Config
+from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.client_session import PermanentMatrixStartupError
+from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
@@ -579,6 +582,8 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
     bot._sync_shutting_down = False
+    bot.config = Config()
+    bot.rooms = []
     bot.client = FakeClient()
 
     first_task = asyncio.create_task(AgentBot.sync_forever(bot))
@@ -619,6 +624,8 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._first_sync_done = False
     bot._sync_shutting_down = False
     bot._room_member_join_hooks_armed = False
+    bot.config = Config()
+    bot.rooms = []
     bot.client = FakeClient()
     bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
@@ -637,6 +644,130 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     await AgentBot.sync_forever(bot)
 
     assert full_state_values == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_auto_sync_uses_sliding_sync_forever_when_supported() -> None:
+    """Auto sync mode should call the MSC4186 nio loop when the client supports it."""
+    sliding_calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
+            raise AssertionError
+
+        async def sliding_sync_forever(
+            self,
+            *,
+            timeout: int,  # noqa: ASYNC109 - mirrors matrix-nio long-poll timeout.
+            conn_id: str,
+            lists: dict[str, object],
+            room_subscriptions: dict[str, object],
+            extensions: dict[str, object],
+        ) -> None:
+            sliding_calls.append(
+                {
+                    "timeout": timeout,
+                    "conn_id": conn_id,
+                    "lists": lists,
+                    "room_subscriptions": room_subscriptions,
+                    "extensions": extensions,
+                },
+            )
+
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "code"
+    bot._first_sync_done = False
+    bot.rooms = ["!alpha:localhost", "#lobby:localhost", "!beta:localhost"]
+    bot.config = Config(matrix_sync=MatrixSyncConfig(sliding_timeline_limit=7))
+    bot.client = FakeClient()
+
+    await AgentBot.sync_forever(bot)
+
+    assert sliding_calls == [
+        {
+            "timeout": 30000,
+            "conn_id": "mindroom-code",
+            "lists": {
+                "mindroom": {
+                    "ranges": [[0, 99]],
+                    "timeline_limit": 7,
+                    "required_state": [
+                        ["m.room.create", ""],
+                        ["m.room.name", ""],
+                        ["m.room.topic", ""],
+                        ["m.room.avatar", ""],
+                        ["m.room.encryption", ""],
+                        ["m.room.member", "$LAZY"],
+                    ],
+                },
+            },
+            "room_subscriptions": {
+                "!alpha:localhost": {
+                    "timeline_limit": 7,
+                    "required_state": [
+                        ["m.room.create", ""],
+                        ["m.room.name", ""],
+                        ["m.room.topic", ""],
+                        ["m.room.avatar", ""],
+                        ["m.room.encryption", ""],
+                        ["m.room.member", "$LAZY"],
+                    ],
+                },
+                "!beta:localhost": {
+                    "timeline_limit": 7,
+                    "required_state": [
+                        ["m.room.create", ""],
+                        ["m.room.name", ""],
+                        ["m.room.topic", ""],
+                        ["m.room.avatar", ""],
+                        ["m.room.encryption", ""],
+                        ["m.room.member", "$LAZY"],
+                    ],
+                },
+            },
+            "extensions": {
+                "to_device": {"enabled": True},
+                "e2ee": {"enabled": True},
+                "account_data": {"enabled": True},
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_mode_without_support_is_permanent_startup_error() -> None:
+    """Explicit sliding mode should fail permanently when the nio client lacks support."""
+
+    class FakeClient:
+        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
+            raise AssertionError
+
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "code"
+    bot._first_sync_done = False
+    bot.rooms = ["!alpha:localhost"]
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="sliding"))
+    bot.client = FakeClient()
+
+    with pytest.raises(PermanentMatrixStartupError, match="sliding_sync_forever"):
+        await AgentBot.sync_forever(bot)
+
+
+def test_sliding_sync_required_state_is_not_shared_between_requests() -> None:
+    """Sliding sync request builders should not reuse mutable required_state lists."""
+    lists = _sliding_sync_lists(timeline_limit=7)
+    room_subscriptions = _sliding_sync_room_subscriptions(["!alpha:localhost", "!beta:localhost"], timeline_limit=7)
+
+    list_required_state = lists["mindroom"]["required_state"]
+    alpha_required_state = room_subscriptions["!alpha:localhost"]["required_state"]
+    beta_required_state = room_subscriptions["!beta:localhost"]["required_state"]
+
+    assert list_required_state == alpha_required_state == beta_required_state
+    assert list_required_state is not alpha_required_state
+    assert alpha_required_state is not beta_required_state
+    alpha_required_state.append(["m.room.power_levels", ""])
+    assert ["m.room.power_levels", ""] not in beta_required_state
+    assert ["m.room.power_levels", ""] not in _sliding_sync_lists(timeline_limit=7)["mindroom"]["required_state"]
 
 
 @pytest.mark.asyncio
