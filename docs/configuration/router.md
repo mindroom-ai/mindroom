@@ -61,7 +61,7 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!config <operation>` - Manage configuration
+- `!config <operation>` - Manage configuration when explicitly enabled for global admins
 
 Even in single-responder rooms, commands are always processed by the router.
 

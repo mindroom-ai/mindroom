@@ -311,6 +311,9 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 - Arrays use indexes (e.g., `agents.analyst.tools.0` for first tool)
 - String values with spaces must be quoted
 
+**Permission:** Disabled by default.
+Set `authorization.config_command_enabled: true`; caller must also be in `authorization.global_users`.
+
 **Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
 
     # General help - dynamically generated from COMMAND_DOCS

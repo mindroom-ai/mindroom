@@ -28,6 +28,9 @@ authorization:
   # Default for rooms not in room_permissions
   default_room_access: false
 
+  # Optional: enable !config for global admin users
+  config_command_enabled: false
+
   # Optional: per-agent/team/router reply allowlists
   # Keys must match an agent name, team name, "router", or "*"
   # Values are canonical Matrix user IDs or glob patterns (aliases are resolved)
@@ -61,9 +64,14 @@ matrix_room_access:
 - `global_users: []`
 - `room_permissions: {}`
 - `default_room_access: false`
+- `config_command_enabled: false`
 - `agent_reply_permissions: {}`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
+
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` only for trusted single-user or admin-managed environments.
+Even when enabled, callers must be in `authorization.global_users`.
 
 `mindroom_user.username` is a one-time account-creation request used to create the internal Matrix account.
 After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.

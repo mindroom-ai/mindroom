@@ -13,7 +13,7 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!config <operation>` | View and modify configuration |
+| `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
@@ -30,6 +30,9 @@ Commands are subject to the same authorization rules as normal messages.
 The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
 See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, callers must be in `authorization.global_users`.
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
 
@@ -141,6 +144,8 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 ### `!config`
 
 View and modify MindRoom configuration from chat.
+This command is disabled by default.
+Set `authorization.config_command_enabled: true` and use a user in `authorization.global_users` to enable it.
 Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**

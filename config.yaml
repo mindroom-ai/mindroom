@@ -410,6 +410,7 @@ agents:
     tools: []
 authorization:
   default_room_access: false
+  config_command_enabled: false
   global_users:
   - '@test:m-test-4.mindroom.chat'
   room_permissions: {}

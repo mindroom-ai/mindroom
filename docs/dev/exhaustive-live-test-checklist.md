@@ -260,10 +260,10 @@ Expected outcome: Mentions do not revive the removed command and the runtime sti
 - [ ] `CMD-009` Exercise reaction-based interactive prompts that are scoped to one conversation.
 Expected outcome: Reactions outside the intended room, message, or thread do not mutate the interactive workflow.
 
-- [ ] `CMD-010` Use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
+- [ ] `CMD-010` With `authorization.config_command_enabled: true` and a global admin user, use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
 Expected outcome: The router uses the active runtime config path, returns current values correctly, and `set` produces a preview plus confirmation flow before applying the change.
 
-- [ ] `CMD-011` Attempt malformed or invalid `!config set` inputs, including quote-parse failures and runtime-invalid changes.
+- [ ] `CMD-011` Attempt malformed or invalid `!config set` inputs while enabled, including quote-parse failures and runtime-invalid changes.
 Expected outcome: Parse or validation errors are explained clearly and no partial configuration change is applied.
 
 ## 8. Authorization And Room Access Policy

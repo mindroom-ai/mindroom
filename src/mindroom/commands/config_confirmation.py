@@ -370,20 +370,37 @@ async def handle_confirmation_reaction(
     )
 
     if reaction_key == "✅":
-        # User confirmed - apply the change
-        from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
+        authorization = bot.config.authorization
+        resolved_requester = authorization.resolve_alias(event.sender)
+        if not authorization.config_command_enabled:
+            response_text = "❌ Config command disabled."
+            logger.info(
+                "Config change rejected because command is disabled",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
+        elif resolved_requester not in authorization.global_users:
+            response_text = "❌ Admin only."
+            logger.info(
+                "Config change rejected because requester is not admin",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
+        else:
+            # User confirmed - apply the change
+            from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
 
-        response_text = await apply_config_change(
-            pending_change.config_path,
-            pending_change.new_value,
-            runtime_paths=bot.runtime_paths,
-        )
+            response_text = await apply_config_change(
+                pending_change.config_path,
+                pending_change.new_value,
+                runtime_paths=bot.runtime_paths,
+            )
 
-        logger.info(
-            "Config change confirmed",
-            path=pending_change.config_path,
-            requester=event.sender,
-        )
+            logger.info(
+                "Config change confirmed",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
     else:
         # User cancelled
         response_text = "❌ Configuration change cancelled."

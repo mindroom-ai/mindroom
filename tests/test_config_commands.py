@@ -23,7 +23,7 @@ from mindroom.commands.config_commands import (
     apply_config_change,
     handle_config_command,
 )
-from mindroom.commands.config_confirmation import add_confirmation_reactions
+from mindroom.commands.config_confirmation import add_confirmation_reactions, handle_confirmation_reaction
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
@@ -39,6 +39,33 @@ from tests.conftest import make_event_cache_mock, write_config_yaml
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
+
+
+def _handler_authorization(
+    *,
+    config_command_enabled: bool,
+    global_users: list[str] | None = None,
+    aliases: dict[str, list[str]] | None = None,
+) -> SimpleNamespace:
+    auth_aliases = aliases or {}
+
+    def resolve_alias(sender_id: str) -> str:
+        for canonical, alias_list in auth_aliases.items():
+            if sender_id in alias_list:
+                return canonical
+        return sender_id
+
+    return SimpleNamespace(
+        config_command_enabled=config_command_enabled,
+        global_users=global_users or [],
+        aliases=auth_aliases,
+        resolve_alias=resolve_alias,
+    )
+
+
+def test_authorization_config_disables_config_command_by_default() -> None:
+    """Chat config commands should be disabled unless explicitly enabled."""
+    assert AuthorizationConfig().config_command_enabled is False
 
 
 def test_validate_and_persist_config_payload_validates_and_writes_authored_payload(tmp_path: Path) -> None:
@@ -317,7 +344,12 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
     config_path = tmp_path / "custom-config.yaml"
     context = CommandHandlerContext(
         client=AsyncMock(),
-        config=MagicMock(),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@alice:example.org"],
+            ),
+        ),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
@@ -347,6 +379,92 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         )
 
     mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=context.runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None:
+    """Disabled config commands should reject before loading or previewing config."""
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=False,
+                global_users=["@admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        logger=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
+        record_handled_turn=MagicMock(),
+        send_response=AsyncMock(return_value="$reply"),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@admin:example.org",
+        event_id="$event",
+        source={"content": {"body": "!config show"}},
+    )
+    command = Command(type=CommandType.CONFIG, args={"args_text": "show"}, raw_text="!config show")
+
+    with patch(
+        "mindroom.commands.handler.handle_config_command",
+        AsyncMock(return_value=("ok", None)),
+    ) as mock_handle_config_command:
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@admin:example.org",
+        )
+
+    mock_handle_config_command.assert_not_awaited()
+    assert context.send_response.await_args.args[0] == "❌ Config command disabled."
+
+
+@pytest.mark.asyncio
+async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> None:
+    """Enabled config commands should still require a global admin."""
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        logger=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
+        record_handled_turn=MagicMock(),
+        send_response=AsyncMock(return_value="$reply"),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": "!config show"}},
+    )
+    command = Command(type=CommandType.CONFIG, args={"args_text": "show"}, raw_text="!config show")
+
+    with patch(
+        "mindroom.commands.handler.handle_config_command",
+        AsyncMock(return_value=("ok", None)),
+    ) as mock_handle_config_command:
+        await handle_command(
+            context=context,
+            room=room,
+            event=event,
+            command=command,
+            requester_user_id="@alice:example.org",
+        )
+
+    mock_handle_config_command.assert_not_awaited()
+    assert context.send_response.await_args.args[0] == "❌ Admin only."
 
 
 @pytest.mark.asyncio
@@ -525,7 +643,12 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     """Config preview replies should persist confirmation state and record the preview event ID."""
     context = CommandHandlerContext(
         client=AsyncMock(),
-        config=MagicMock(),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@alice:example.org"],
+            ),
+        ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
@@ -609,7 +732,12 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
     """Preview sends should still be recorded if later confirmation setup fails."""
     context = CommandHandlerContext(
         client=AsyncMock(),
-        config=MagicMock(),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@alice:example.org"],
+            ),
+        ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
         conversation_cache=MagicMock(),
@@ -669,6 +797,51 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
             "$event",
             response_event_id="$preview",
         ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp_path: Path) -> None:
+    """Disabling !config should also block already-pending confirmation reactions."""
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=False,
+                global_users=["@admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(
+            build_message_target=MagicMock(return_value=target),
+        ),
+        _send_response=AsyncMock(),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
+    pending_change = SimpleNamespace(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="defaults.markdown",
+        new_value=False,
+        requester="@admin:example.org",
+    )
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
+    ):
+        await handle_confirmation_reaction(bot, room, event, pending_change)
+
+    mock_apply.assert_not_awaited()
+    bot._send_response.assert_awaited_once_with(
+        target=target,
+        response_text="❌ Config command disabled.",
+        skip_mentions=True,
     )
 
 

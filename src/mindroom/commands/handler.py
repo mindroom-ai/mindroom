@@ -298,61 +298,68 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         )
 
     elif command.type == CommandType.CONFIG:
-        # Handle config command
-        args_text = command.args.get("args_text", "")
-        response_text, change_info = await handle_config_command(
-            args_text,
-            runtime_paths=context.runtime_paths,
-        )
-
-        # If we have change_info, this is a config set that needs confirmation
-        if change_info:
-            # Send the preview message
-            raw_response_event_id = await context.send_response(
-                response_text,
-                skip_mentions=True,
-            )
-            response_event_id = _normalized_response_event_id(raw_response_event_id)
-            handled_turn = HandledTurnState.from_source_event_id(
-                event.event_id,
-                response_event_id=response_event_id,
+        authorization = context.config.authorization
+        resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
+        if not authorization.config_command_enabled:
+            response_text = "❌ Config command disabled."
+        elif resolved_requester_user_id not in authorization.global_users:
+            response_text = "❌ Admin only."
+        else:
+            # Handle config command
+            args_text = command.args.get("args_text", "")
+            response_text, change_info = await handle_config_command(
+                args_text,
+                runtime_paths=context.runtime_paths,
             )
 
-            if response_event_id:
-                context.record_handled_turn(handled_turn)
-                # Register the pending change
-                config_confirmation.register_pending_change(
-                    event_id=response_event_id,
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                    config_path=change_info["config_path"],
-                    old_value=change_info["old_value"],
-                    new_value=change_info["new_value"],
-                    requester=requester_user_id,
+            # If we have change_info, this is a config set that needs confirmation
+            if change_info:
+                # Send the preview message
+                raw_response_event_id = await context.send_response(
+                    response_text,
+                    skip_mentions=True,
+                )
+                response_event_id = _normalized_response_event_id(raw_response_event_id)
+                handled_turn = HandledTurnState.from_source_event_id(
+                    event.event_id,
+                    response_event_id=response_event_id,
                 )
 
-                # Get the pending change we just registered
-                pending_change = config_confirmation.get_pending_change(response_event_id)
-
-                # Store in Matrix state for persistence
-                if pending_change:
-                    await config_confirmation.store_pending_change_in_matrix(
-                        context.client,
-                        response_event_id,
-                        pending_change,
+                if response_event_id:
+                    context.record_handled_turn(handled_turn)
+                    # Register the pending change
+                    config_confirmation.register_pending_change(
+                        event_id=response_event_id,
+                        room_id=room.room_id,
+                        thread_id=effective_thread_id,
+                        config_path=change_info["config_path"],
+                        old_value=change_info["old_value"],
+                        new_value=change_info["new_value"],
+                        requester=requester_user_id,
                     )
 
-                # Add reaction buttons
-                await config_confirmation.add_confirmation_reactions(
-                    context.client,
-                    room.room_id,
-                    response_event_id,
-                    config=context.config,
-                )
+                    # Get the pending change we just registered
+                    pending_change = config_confirmation.get_pending_change(response_event_id)
 
-            if response_event_id is None:
-                context.record_handled_turn(handled_turn)
-            return  # Exit early since we've handled the response
+                    # Store in Matrix state for persistence
+                    if pending_change:
+                        await config_confirmation.store_pending_change_in_matrix(
+                            context.client,
+                            response_event_id,
+                            pending_change,
+                        )
+
+                    # Add reaction buttons
+                    await config_confirmation.add_confirmation_reactions(
+                        context.client,
+                        room.room_id,
+                        response_event_id,
+                        config=context.config,
+                    )
+
+                if response_event_id is None:
+                    context.record_handled_turn(handled_turn)
+                return  # Exit early since we've handled the response
 
     elif command.type == CommandType.UNKNOWN:
         # Handle unknown commands

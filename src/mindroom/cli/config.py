@@ -947,6 +947,7 @@ memory:
 
 authorization:
   default_room_access: false
+  config_command_enabled: false
   global_users:
     # Replace with your Matrix user ID (example: @alice:mindroom.chat).
     - {constants.OWNER_MATRIX_USER_ID_PLACEHOLDER}
