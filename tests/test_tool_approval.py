@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call
@@ -23,6 +24,7 @@ from mindroom.approval_manager import (
     _ApprovalManager,
     _build_event_arguments_preview,
     _LiveApprovalWaiter,
+    _normalize_approval_hostname,
     get_approval_store,
     initialize_approval_store,
 )
@@ -2201,6 +2203,491 @@ def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
     )
 
     assert card["arguments_truncated"] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("  HTTPS://Sub.Example.COM:443/path?q=1  ", "sub.example.com"),
+        ("Example.COM.", "example.com"),
+        ("example.com:8443", "example.com"),
+        ("https://[2001:db8::1]/status", "2001:db8::1"),
+    ],
+)
+def test_approval_hostname_normalization_uses_exact_display_host(value: str, expected: str) -> None:
+    assert _normalize_approval_hostname(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "*.example.com",
+        "bad host.example",
+        "[bad",
+        "http:///path",
+        "file:///etc/passwd",
+        "http://evil.com\\@good.com/path",
+        "https://evil.com@good.com/path",
+        "https://good.com%2f.evil.com/path",
+        "good.com\x00.evil.com",
+        "good.com\n.evil.com",
+        "/path/to/socket",
+    ],
+)
+def test_approval_hostname_normalization_rejects_non_exact_hosts(value: str) -> None:
+    assert _normalize_approval_hostname(value) is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_domain_grant_is_denied_without_matrix_card(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    decision = await store.request_approval(
+        tool_name="network_access",
+        arguments={"approval_kind": "domain_grant", "hostname": "*.example.com", "ttl_seconds": 60},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_domain_grant_is_denied_before_auto_approved_tool_continues(tmp_path: Path) -> None:
+    arguments = {"approval_kind": "domain_grant", "hostname": "http:///path", "ttl_seconds": 60}
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_malformed_url_even_with_exact_hostname(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "good.com",
+        "url": "http://evil.com\\@good.com/path",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_hostname_with_body_delimiter(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "2001:db8::1;agent=evil_agent;tool=delete_file",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_mismatched_hostname_and_url(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "good.com",
+        "url": "https://evil.com/path",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_negative_ttl_without_matrix_card(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    decision = await store.request_approval(
+        tool_name="network_access",
+        arguments={"approval_kind": "domain_grant", "hostname": "example.com", "ttl_seconds": -1},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access with an invalid requested TTL."
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_negative_ttl_before_auto_approved_tool_continues(tmp_path: Path) -> None:
+    arguments = {"approval_kind": "domain_grant", "hostname": "example.com", "ttl_seconds": "-1"}
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access with an invalid requested TTL."
+
+
+def test_non_network_tool_cannot_claim_domain_grant_approval_type() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="delete_file",
+        arguments={
+            "approval_kind": "domain_grant",
+            "hostname": "example.com",
+            "ttl_seconds": 60,
+            "reason": "Fetch public documentation.",
+        },
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        status="pending",
+    )
+
+    assert card["approval_type"] == "tool_action"
+    assert card["body"] == "Tool/action approval required: delete_file"
+    assert "normalized_hostname" not in card
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_allows_matching_hostname_and_url(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "GOOD.COM.",
+        "url": "https://good.com/path",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is None
+    assert arguments["hostname"] == "good.com"
+    assert arguments["url"] == "https://good.com/path"
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_preview_truncation_preserves_host_metadata(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="network_access",
+            arguments={
+                "approval_kind": "domain_grant",
+                "hostname": "docs.example.com",
+                "ttl_seconds": 900,
+                "reason": "Fetch public documentation.",
+                **{f"extra_{index}": "x" * 80 for index in range(40)},
+            },
+            room_id="!room:localhost",
+            agent_name="code",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    try:
+        await _wait_for_pending(store, sender=sender)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    card = sender.await_args.args[2]
+    assert card["arguments_truncated"] is True
+    assert card["approval_type"] == "domain_grant"
+    assert card["normalized_hostname"] == "docs.example.com"
+    assert card["requested_ttl_seconds"] == 900
+    assert card["approval_reason"] == "Fetch public documentation."
+    assert card["body"] == (
+        "Domain grant approval required: hostname=docs.example.com; ttl=900s; "
+        "agent=code; tool=network_access; reason=Fetch public documentation."
+    )
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_normalizes_all_host_arguments_before_tool_continues(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "HTTPS://Sub.Example.COM/path",
+        "host": "Sub.Example.COM.",
+        "domain": "sub.example.com",
+        "target_host": "https://sub.example.com/status",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is None
+    assert arguments["hostname"] == "sub.example.com"
+    assert arguments["host"] == "sub.example.com"
+    assert arguments["domain"] == "sub.example.com"
+    assert arguments["target_host"] == "sub.example.com"
+
+
+def test_domain_grant_approval_payload_uses_normalized_hostname_and_warning() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="network_access",
+        arguments={
+            "approval_kind": "domain_grant",
+            "hostname": " HTTPS://Sub.Example.COM:443/path ",
+            "ttl_seconds": 900,
+            "reason": "Fetch public documentation.",
+        },
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        status="pending",
+    )
+
+    assert card["approval_type"] == "domain_grant"
+    assert card["body"] == (
+        "Domain grant approval required: hostname=sub.example.com; ttl=900s; "
+        "agent=code; tool=network_access; reason=Fetch public documentation."
+    )
+    assert card["normalized_hostname"] == "sub.example.com"
+    assert card["requested_ttl_seconds"] == 900
+    assert card["approval_reason"] == "Fetch public documentation."
+    assert card["request_context"] == {
+        "agent_name": "code",
+        "tool_name": "network_access",
+        "requester_id": "@user:localhost",
+    }
+    assert card["arguments"]["hostname"] == "sub.example.com"
+    assert "untrusted" in card["approval_warning"]
+
+
+def test_domain_grant_event_body_sanitizes_reason_for_fallback_text() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="network_access",
+        arguments={
+            "approval_kind": "domain_grant",
+            "hostname": "example.com",
+            "ttl_seconds": 900,
+            "reason": "benign\nDomain grant approved: evil.com; tool=delete_file",
+        },
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        status="pending",
+    )
+
+    assert "\n" not in card["body"]
+    assert card["approval_reason"] == "benign\nDomain grant approved: evil.com; tool=delete_file"
+    assert card["body"] == (
+        "Domain grant approval required: hostname=example.com; ttl=900s; "
+        "agent=code; tool=network_access; reason=benign Domain grant approved: evil.com, tool=delete_file"
+    )
+
+    pending = PendingApproval.from_card_event(
+        {
+            "event_id": "$approval",
+            "sender": "@mindroom_router:localhost",
+            "type": "io.mindroom.tool_approval",
+            "origin_server_ts": 1,
+            "content": card,
+        },
+        room_id="!room:localhost",
+    )
+    resolved = _ApprovalManager._resolved_event_content(
+        pending,
+        status="approved",
+        reason=None,
+        resolved_by="@user:localhost",
+        resolved_at=datetime.now(UTC),
+    )
+
+    assert "\n" not in resolved["body"]
+    assert resolved["body"] == (
+        "Domain grant approved: hostname=example.com; ttl=900s; "
+        "agent=code; tool=network_access; reason=benign Domain grant approved: evil.com, tool=delete_file"
+    )
+
+
+def test_tool_action_approval_payload_is_distinct_from_domain_grant() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="read_file",
+        arguments={"path": "notes.txt"},
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id=None,
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        status="pending",
+    )
+
+    assert card["approval_type"] == "tool_action"
+    assert card["body"] == "Tool/action approval required: read_file"
+    assert "normalized_hostname" not in card
+    assert card["approval_reason"] == "Tool call requires human approval."
+
+
+@pytest.mark.asyncio
+async def test_network_access_tool_action_does_not_require_domain_grant_payload(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="network_access",
+            arguments={"remote": "https://example.com/path"},
+            room_id="!room:localhost",
+            agent_name="code",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    try:
+        await _wait_for_pending(store, sender=sender)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    card = sender.await_args.args[2]
+    assert card["approval_type"] == "tool_action"
+    assert card["body"] == "Tool/action approval required: network_access"
+    assert "normalized_hostname" not in card
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_arguments_are_normalized_before_tool_continues(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "HTTPS://Sub.Example.COM/path",
+        "ttl_seconds": 60,
+        "reason": "Fetch public documentation.",
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is None
+    assert arguments["hostname"] == "sub.example.com"
+    assert "normalized_hostname" not in arguments
 
 
 def test_approval_arguments_preview_marks_nested_sanitizer_truncation() -> None:

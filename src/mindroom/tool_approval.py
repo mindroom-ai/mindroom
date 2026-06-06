@@ -70,7 +70,12 @@ class ToolApprovalScriptError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ToolApprovalCall:
-    """One tool call that may require a Matrix approval card."""
+    """One tool call that may require a Matrix approval card.
+
+    ``arguments`` is the live tool-call argument mapping.
+    Domain-grant normalization updates it in place so the approved tool executes
+    with the same hostname shown in the approval card.
+    """
 
     config: Config
     runtime_paths: RuntimePaths
@@ -236,6 +241,13 @@ async def evaluate_tool_approval(
 
 async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDecision | None:
     """Return a terminal decision when one tool call is denied, or None when it may proceed."""
+    normalized_arguments = approval_manager._normalize_approval_arguments(call.tool_name, call.arguments)
+    if normalized_arguments != call.arguments:
+        call.arguments.clear()
+        call.arguments.update(normalized_arguments)
+    invalid_domain_grant_reason = approval_manager._invalid_domain_grant_reason(call.tool_name, call.arguments)
+    if invalid_domain_grant_reason is not None:
+        return _terminal_decision("denied", invalid_domain_grant_reason)
     policy_arguments = deepcopy(call.arguments)
     requires_approval, timeout_seconds = await evaluate_tool_approval(
         call.config,
