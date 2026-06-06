@@ -836,7 +836,7 @@ class TestDownloadMxcText:
         client = AsyncMock()
         now = time.time()
         for index in range(message_content_module._mxc_cache_max_entries):
-            message_content_module._mxc_cache[f"mxc://server/{index}"] = (str(index), now)
+            message_content_module._cache_mxc_text(f"mxc://server/{index}", str(index), now)
 
         assert await _download_mxc_text(client, "mxc://server/0") == "0"
         client.download.assert_not_called()
