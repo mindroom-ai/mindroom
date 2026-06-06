@@ -108,6 +108,8 @@ from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
+    _MatrixSyncCancellationTimeoutError,
+    _SyncIteration,
     run_with_retry,
     wait_for_matrix_homeserver,
 )
@@ -15216,6 +15218,40 @@ class TestMultiAgentOrchestrator:
             await _run_orchestrator_start_until_ready(orchestrator)
 
         assert call_order[:2] == ["wait_for_homeserver", "initialize"]
+
+    @pytest.mark.asyncio
+    async def test_sync_iteration_cancel_preserves_unresponsive_sync_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup timeouts should keep the stuck sync task available for supervisor hold-open."""
+        release_cancel = asyncio.Event()
+
+        async def slow_cancel() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release_cancel.wait()
+                raise
+
+        sync_task = asyncio.create_task(slow_cancel(), name="matrix_sync_router")
+        bot = MagicMock()
+        bot.agent_name = "router"
+        iteration = _SyncIteration(bot=bot, sync_task=sync_task, watchdog_task=None)
+        await asyncio.sleep(0)
+
+        monkeypatch.setattr("mindroom.orchestration.runtime._MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS", 0.001)
+        try:
+            with pytest.raises(_MatrixSyncCancellationTimeoutError):
+                await iteration.cancel()
+
+            assert iteration.sync_task is sync_task
+            assert not sync_task.done()
+        finally:
+            release_cancel.set()
+            sync_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sync_task
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_returns_when_versions(
