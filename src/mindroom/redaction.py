@@ -106,6 +106,26 @@ _NON_SECRET_KEYS: frozenset[str] = frozenset(
         "total_tokens",
     },
 )
+_CONTEXT_SECRET_LABEL_KEYS: frozenset[str] = frozenset(
+    {
+        "field",
+        "field_name",
+        "header",
+        "key",
+        "name",
+        "param",
+        "parameter",
+        "variable",
+    },
+)
+_CONTEXT_SECRET_VALUE_KEYS: frozenset[str] = frozenset(
+    {
+        "default",
+        "raw_value",
+        "secret_value",
+        "value",
+    },
+)
 _REDACTION_LOOKAHEAD_CHARS = 512
 
 type _RedactedValue = None | bool | int | float | str | list["_RedactedValue"] | dict[str, "_RedactedValue"]
@@ -158,8 +178,7 @@ def _is_secret_container_key(value: object) -> bool:
         return False
     if normalized in _SECRET_CONTAINER_KEYS:
         return True
-    suffix_keys = _SECRET_CONTAINER_KEYS - {"tokens"}
-    return any(normalized.endswith(f"_{key}") for key in suffix_keys)
+    return any(normalized.endswith(f"_{key}") for key in _SECRET_CONTAINER_KEYS)
 
 
 def _is_sensitive_key(value: object) -> bool:
@@ -173,6 +192,23 @@ def _is_query_container(value: str | None) -> bool:
 def _is_redacted_query_key(value: object) -> bool:
     normalized = _normalize_key(value)
     return _is_secret_key(value) or normalized in _OAUTH_QUERY_KEYS or normalized in _URL_QUERY_SECRET_KEYS
+
+
+def _is_context_secret_label_key(value: object) -> bool:
+    return _normalize_key(value) in _CONTEXT_SECRET_LABEL_KEYS
+
+
+def _is_context_secret_value_key(value: object) -> bool:
+    return _normalize_key(value) in _CONTEXT_SECRET_VALUE_KEYS
+
+
+def _mapping_has_secret_context_label(value: Mapping[object, object]) -> bool:
+    for key, item in value.items():
+        if not _is_context_secret_label_key(key):
+            continue
+        if isinstance(item, str) and _is_sensitive_key(item):
+            return True
+    return False
 
 
 def _redact_matched_token(match: re.Match[str], group_name: str = "token") -> str:
@@ -307,12 +343,17 @@ def _redact_mapping(
     force_redact: bool,
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
+    has_secret_context_label = _mapping_has_secret_context_label(value)
     for index, (key, item) in enumerate(value.items()):
         if max_collection_items is not None and index >= max_collection_items:
             redacted["__truncated__"] = f"{len(value) - max_collection_items} more items"
             break
         key_text = _safe_str(key)
-        redact_key = _is_sensitive_key(key) or (_is_query_container(parent_key) and _is_redacted_query_key(key))
+        redact_key = (
+            _is_sensitive_key(key)
+            or (_is_query_container(parent_key) and _is_redacted_query_key(key))
+            or (has_secret_context_label and _is_context_secret_value_key(key))
+        )
         redacted[key_text] = redact_sensitive_data(
             item,
             max_string_length=max_string_length,
