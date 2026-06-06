@@ -216,7 +216,7 @@ async def test_register_media_attachment_rejects_payload_over_limit(
     tmp_path: Path,
 ) -> None:
     """Direct media registration should not persist bytes over the Matrix media cap."""
-    monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
 
     record = await _register_media_attachment(
         storage_path=tmp_path,

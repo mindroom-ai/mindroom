@@ -236,7 +236,7 @@ class TestDownloadImage:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unencrypted Matrix media bytes should be capped before handler/model use."""
-        monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+        monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
@@ -253,7 +253,7 @@ class TestDownloadImage:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Oversized encrypted Matrix media should be rejected before decrypting."""
-        monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+        monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
@@ -281,7 +281,7 @@ class TestDownloadImage:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Decrypted Matrix media bytes should be capped before persistence or model handoff."""
-        monkeypatch.setattr(media_module, "MATRIX_MEDIA_MAX_BYTES", 5, raising=False)
+        monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
         client = AsyncMock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"

@@ -30,7 +30,7 @@ _FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*_FILE_MESSAGE_EVENT_TYPES, *_VIDEO_MESSAG
 _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
-MATRIX_MEDIA_MAX_BYTES = 64 * 1024 * 1024
+_matrix_media_max_bytes = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -100,7 +100,7 @@ def upload_content_uri(upload_result: object) -> str | None:
 
 def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
     """Return whether a Matrix media payload exceeds the runtime ingestion cap."""
-    return media_bytes is not None and len(media_bytes) > MATRIX_MEDIA_MAX_BYTES
+    return media_bytes is not None and len(media_bytes) > _matrix_media_max_bytes
 
 
 async def upload_media_bytes(
@@ -232,7 +232,7 @@ def _media_payload_exceeds_limit_for_event(
         event_id=_event_id_for_log(event),
         stage=stage,
         size_bytes=len(media_bytes),
-        limit_bytes=MATRIX_MEDIA_MAX_BYTES,
+        limit_bytes=_matrix_media_max_bytes,
     )
     return True
 
