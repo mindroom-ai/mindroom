@@ -1778,7 +1778,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
@@ -2920,10 +2920,11 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 
 ## Common Setup Notes
 
-All ten tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+Most tools on this page are exposed as `setup_type: none` in the live tool registry, so they do not require dashboard OAuth setup or credential forms before they appear as available.
+`docker` is marked `setup_type: special` and `requires_config` because Docker daemon access is privileged host control.
 `src/mindroom/api/integrations.py` currently has no dedicated integration endpoints for them because they are local-runtime tools rather than OAuth-backed services.
 
-MindRoom's built-in default worker-routed set is `coding`, `file`, `python`, and `shell`.
+MindRoom's built-in default worker-routed set is `coding`, `docker`, `file`, `python`, and `shell`.
 You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
 When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
@@ -3205,11 +3206,13 @@ ls("src/mindroom")
 `docker` exposes container operations such as `list_containers()`, `run_container()`, `exec_in_container()`, `start_container()`, `stop_container()`, `remove_container()`, `get_container_logs()`, and `inspect_container()`.
 It also exposes image, volume, and network operations including `pull_image()`, `build_image()`, `tag_image()`, `list_volumes()`, `create_volume()`, `list_networks()`, and `connect_container_to_network()`.
 On startup, the toolkit checks common Docker socket locations and pings the Docker daemon.
-`docker` defaults to primary execution, so it normally runs beside the main agent process rather than in the worker sandbox.
+MindRoom marks `docker` as worker-routed by default because Docker daemon access is privileged host control.
+In hosted, multi-tenant, or default-unsandboxed deployments, Docker is unavailable unless a worker backend is configured or unsafe local execution is explicitly enabled for local development.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
+The deployment must provide Docker daemon access to the selected worker runtime if Docker operations should be allowed.
 
 ### Example
 
@@ -13983,7 +13986,7 @@ MindRoom can be deployed in various ways depending on your needs.
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Simplest setup: run only `uvx mindroom run` locally |
-| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while `shell`, `file`, and `python` execute in isolated Docker workers |
+| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while execution tools run in isolated workers |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
@@ -14023,7 +14026,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
-If you want worker-routed tools, especially `shell`, `file`, and `python`, to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ### Full Stack (recommended)
 
@@ -14171,7 +14174,7 @@ MindRoom then:
 ## Optional: Docker worker isolation
 
 If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
-That especially includes `shell`, `file`, and `python`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
+That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
 Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
 They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
 Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools even though the raw file is not mounted.
@@ -14937,7 +14940,10 @@ MindRoom stores data in the `mindroom_data` directory:
 
 ## Sandbox Proxy Isolation
 
-When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
+When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
+The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
+This provides real process-level isolation for code-execution tools.
+Without worker or proxy configuration, selected execution tools fail closed instead of silently running in the MindRoom process unless unsafe local execution is explicitly enabled.
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 
@@ -15230,10 +15236,11 @@ In a live validation, separate `code` and `research` requests produced separate 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
-| `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — proxy disabled for `static_runner`)_ |
+| `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner`; selected execution tools fail closed without it unless unsafe local execution is explicitly enabled | _(required for worker-routed `static_runner` execution)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
-| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses proxy tools list)_ |
-| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy | `*` (all, unless mode is `selective`) |
+| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses default worker-routed tool metadata)_ |
+| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | empty for unset/selective mode, `*` for all mode |
+| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit default local execution of `coding`, `docker`, `file`, `python`, and `shell` when no worker/proxy backend is available | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
@@ -15279,8 +15286,11 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 |------|----------|
 | `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
 | `all` / `sandbox_all` | Every tool call goes through the proxy |
-| `off` / `local` / `disabled` | Proxy disabled even if URL is set |
-| _(unset)_ | If `MINDROOM_SANDBOX_PROXY_TOOLS` is `*` or unset, proxies all tools; if set to a list, proxies only those |
+| `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
+| _(unset)_ | Uses default worker-routed tool metadata and fails closed for local execution tools when no worker/proxy backend is available |
+
+`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` when no worker/proxy backend is available.
+Do not set it in hosted or multi-tenant deployments.
 
 ## Shell env and PATH
 
@@ -15504,13 +15514,14 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `file`, `python`, and `shell` when those tools are enabled for the agent |
+| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `docker`, `file`, `python`, and `shell` when those tools are enabled for the agent |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect.
+With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
+Without that URL, selected execution tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
 ## Worker Scope
@@ -15709,7 +15720,7 @@ See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for th
 
 ## Worker Backends
 
-The instance and runtime charts support two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+The instance and runtime charts support two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
 
 The dedicated-worker provisioning flow is implemented today.
 

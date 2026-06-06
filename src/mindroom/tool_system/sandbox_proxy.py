@@ -35,7 +35,6 @@ from mindroom.tool_system.worker_proxy_client import (
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    WorkerScope,
     resolve_unscoped_worker_key,
     tool_stays_local,
 )
@@ -460,17 +459,14 @@ def _execution_env_payload(
 def attachment_save_uses_worker(
     *,
     runtime_paths: RuntimePaths,
-    worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
 ) -> bool:
     """Return whether attachment saves should land where workspace consumers run."""
-    worker_scope = worker_target.worker_scope if worker_target is not None else None
     return any(
         _sandbox_proxy_enabled_for_tool(
             tool_name,
             runtime_paths=runtime_paths,
             worker_tools_override=worker_tools_override,
-            worker_scope=worker_scope,
         )
         for tool_name in _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS
     )
@@ -526,7 +522,6 @@ def save_attachment_to_worker(
     """Write attachment bytes to the selected worker, returning None when no worker endpoint exists."""
     if not attachment_save_uses_worker(
         runtime_paths=runtime_paths,
-        worker_target=worker_target,
         worker_tools_override=worker_tools_override,
     ):
         return None
@@ -694,7 +689,6 @@ def _sandbox_proxy_enabled_for_tool(
     *,
     runtime_paths: RuntimePaths,
     worker_tools_override: list[str] | None = None,
-    worker_scope: WorkerScope | None = None,
 ) -> bool:
     """Return whether the given tool should execute through the sandbox proxy.
 
@@ -702,7 +696,6 @@ def _sandbox_proxy_enabled_for_tool(
     env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
     means "route nothing through the proxy for this agent".
     """
-    del worker_scope
     proxy_config = sandbox_proxy_config(runtime_paths)
     if proxy_config.runner_mode or tool_stays_local(tool_name):
         return False
@@ -912,7 +905,6 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         runtime_paths=runtime_paths,
         worker_tools_override=worker_tools_override,
-        worker_scope=worker_target.worker_scope if worker_target is not None else None,
     ):
         return toolkit
 

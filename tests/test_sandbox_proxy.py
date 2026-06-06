@@ -1270,21 +1270,9 @@ def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
     )
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
-
     assert (
         sandbox_proxy_module.attachment_save_uses_worker(
             runtime_paths=runtime_paths,
-            worker_target=worker_target,
             worker_tools_override=worker_tools_override,
         )
         is True
@@ -1292,7 +1280,6 @@ def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     assert (
         sandbox_proxy_module.attachment_save_uses_worker(
             runtime_paths=runtime_paths,
-            worker_target=worker_target,
             worker_tools_override=["calculator"],
         )
         is False
@@ -4261,7 +4248,6 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
-            worker_scope="shared",
         )
         is True
     )
@@ -4290,15 +4276,11 @@ def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths, worker_scope=None)
-        is True
-    )
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
-            worker_scope=None,
         )
         is False
     )
@@ -4319,15 +4301,11 @@ def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_pr
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths, worker_scope="user")
-        is True
-    )
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
     assert (
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
-            worker_scope="user",
         )
         is False
     )
@@ -5032,7 +5010,6 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
             "shell",
             runtime_paths=runtime_paths,
             worker_tools_override=["shell"],
-            worker_scope="shared",
         )
         is True
     )
@@ -5064,7 +5041,6 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "shell",
             runtime_paths=runtime_paths,
-            worker_scope=None,
         )
         is True
     )
@@ -5072,7 +5048,6 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
         sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
             "calculator",
             runtime_paths=runtime_paths,
-            worker_scope=None,
         )
         is False
     )

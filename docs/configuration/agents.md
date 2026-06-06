@@ -330,7 +330,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.

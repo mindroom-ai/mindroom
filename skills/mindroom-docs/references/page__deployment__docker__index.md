@@ -146,7 +146,10 @@ MindRoom stores data in the `mindroom_data` directory:
 
 ## Sandbox Proxy Isolation
 
-When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
+When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
+The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
+This provides real process-level isolation for code-execution tools.
+Without worker or proxy configuration, selected execution tools fail closed instead of silently running in the MindRoom process unless unsafe local execution is explicitly enabled.
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 

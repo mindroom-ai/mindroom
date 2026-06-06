@@ -73,27 +73,21 @@ class SelfConfigTools(Toolkit):
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
         return f"## Configuration for '{self.agent_name}':\n\n```yaml\n{yaml_str}```"
 
-    def update_own_config(  # noqa: C901, PLR0912, PLR0911
+    def update_own_config(  # noqa: C901, PLR0911
         self,
         display_name: str | None = None,
         role: str | None = None,
         instructions: list[str] | None = None,
-        tools: list[str] | None = None,
-        model: str | None = None,
         rooms: list[str] | None = None,
         markdown: bool | None = None,
         learning: bool | None = None,
         learning_mode: AgentLearningMode | None = None,
-        knowledge_bases: list[str] | None = None,
-        skills: list[str] | None = None,
-        include_default_tools: bool | None = None,
         show_tool_calls: bool | None = None,
         thread_mode: Literal["thread", "room"] | None = None,
         num_history_runs: int | None = None,
         num_history_messages: int | None = None,
         compress_tool_results: bool | None = None,
         max_tool_calls_from_history: int | None = None,
-        context_files: list[str] | None = None,
     ) -> str:
         """Update this agent's own configuration. Only provided fields are changed.
 
@@ -101,22 +95,16 @@ class SelfConfigTools(Toolkit):
             display_name: Human-readable display name
             role: Description of the agent's purpose
             instructions: List of instructions for the agent
-            tools: List of tool names to enable
-            model: Model name to use
             rooms: List of room names to auto-join
             markdown: Whether to use markdown formatting
             learning: Whether to enable Agno Learning
             learning_mode: Learning mode ("always" or "agentic")
-            knowledge_bases: List of knowledge base IDs
-            skills: List of skill names
-            include_default_tools: Whether to merge defaults.tools
             show_tool_calls: Show tool call details inline in responses
             thread_mode: Conversation threading mode ("thread" or "room")
             num_history_runs: Number of prior runs to include as history
             num_history_messages: Max messages from history
             compress_tool_results: Compress tool results in history (disabled by default because it can invalidate Anthropic/Vertex Claude prompt caches)
             max_tool_calls_from_history: Max tool call messages replayed from history
-            context_files: Workspace-relative file paths loaded into each freshly built agent instance
 
         Returns:
             Success message with changes or an error message.
@@ -138,22 +126,16 @@ class SelfConfigTools(Toolkit):
             ("display_name", display_name),
             ("role", role),
             ("instructions", instructions),
-            ("tools", tools),
-            ("model", model),
             ("rooms", rooms),
             ("markdown", markdown),
             ("learning", learning),
             ("learning_mode", learning_mode),
-            ("knowledge_bases", knowledge_bases),
-            ("skills", skills),
-            ("include_default_tools", include_default_tools),
             ("show_tool_calls", show_tool_calls),
             ("thread_mode", thread_mode),
             ("num_history_runs", num_history_runs),
             ("num_history_messages", num_history_messages),
             ("compress_tool_results", compress_tool_results),
             ("max_tool_calls_from_history", max_tool_calls_from_history),
-            ("context_files", context_files),
         ]
         privileged_updates = sorted(
             field_name
@@ -186,9 +168,7 @@ class SelfConfigTools(Toolkit):
             if validated_value == current_value:
                 continue
             display = field_name.replace("_", " ").title()
-            if field_name == "tools":
-                formatted = ", ".join(validated_agent.tool_names) if validated_agent.tool_names else "(empty)"
-            elif isinstance(validated_value, list):
+            if isinstance(validated_value, list):
                 formatted = ", ".join(str(v) for v in validated_value) if validated_value else "(empty)"
             else:
                 formatted = str(validated_value)

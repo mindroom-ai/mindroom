@@ -541,7 +541,6 @@ class AttachmentTools(Toolkit):
         runtime_paths = self._runtime_paths or context.runtime_paths
         use_worker = attachment_save_uses_worker(
             runtime_paths=runtime_paths,
-            worker_target=self._worker_target,
             worker_tools_override=self._worker_tools_override,
         )
         local_policy = (
