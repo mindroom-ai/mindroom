@@ -470,12 +470,6 @@ def _tool_defaults_to_worker(tool_name: str) -> bool:
     return metadata is not None and metadata.default_execution_target.value == "worker"
 
 
-def _workspace_path_consumer_tool_names() -> tuple[str, ...]:
-    return tuple(
-        sorted(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.consumes_workspace_paths),
-    )
-
-
 def attachment_save_uses_worker(
     *,
     runtime_paths: RuntimePaths,
@@ -488,7 +482,8 @@ def attachment_save_uses_worker(
             runtime_paths=runtime_paths,
             worker_tools_override=worker_tools_override,
         )
-        for tool_name in _workspace_path_consumer_tool_names()
+        for tool_name, metadata in TOOL_METADATA.items()
+        if metadata.consumes_workspace_paths
     )
 
 
