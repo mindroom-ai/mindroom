@@ -456,11 +456,11 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-async def test_browser_upload_rejects_paths_outside_runtime_storage(
+async def test_browser_upload_rejects_paths_outside_upload_roots(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Browser uploads should not read arbitrary local files outside runtime storage."""
+    """Browser uploads should not read arbitrary local files outside upload roots."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",

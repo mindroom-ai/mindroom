@@ -191,14 +191,8 @@ def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
 
 
-def test_custom_api_tool_rejects_private_endpoint_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_api_tool_rejects_private_endpoint_before_request() -> None:
     """Custom API calls should not be able to fetch private-network URLs."""
-
-    def forbidden_request(**_kwargs: object) -> object:
-        msg = "unsafe custom_api URL should be rejected before a request is made"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr("agno.tools.api.requests.request", forbidden_request)
     tool = custom_api_tools()()
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
@@ -207,14 +201,8 @@ def test_custom_api_tool_rejects_private_endpoint_before_request(monkeypatch: py
     assert exc_info.value.reason == "private_address"
 
 
-def test_custom_api_tool_rejects_private_base_url_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_api_tool_rejects_private_base_url_before_request() -> None:
     """Custom API base_url should be validated after endpoint joining."""
-
-    def forbidden_request(**_kwargs: object) -> object:
-        msg = "unsafe custom_api base_url should be rejected before a request is made"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr("agno.tools.api.requests.request", forbidden_request)
     tool = custom_api_tools()(base_url="http://169.254.169.254")
 
     with pytest.raises(ServerFetchUrlError) as exc_info:

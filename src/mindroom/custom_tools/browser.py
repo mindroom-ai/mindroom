@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.tools import Toolkit
-from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, Route, async_playwright
+from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
@@ -323,11 +323,6 @@ def _unknown_browser_action_message(action: str) -> str:
     )
 
 
-def _is_path_inside(path: Path, root: Path) -> bool:
-    """Return whether a resolved path is under a resolved root."""
-    return path.is_relative_to(root)
-
-
 def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
     """Return the Playwright browser cache root for an executable path."""
     if expected_executable_path is None:
@@ -547,7 +542,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
-            target_url = self._validate_browser_target_url(target_url)
+            target_url = validate_server_fetch_url(target_url)
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -593,7 +588,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
-            target_url = self._validate_browser_target_url(target_url)
+            target_url = validate_server_fetch_url(target_url)
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -664,11 +659,6 @@ class BrowserTools(Toolkit):
         if normalized_target not in {None, "host"}:
             msg = f"Unsupported target: {target}"
             raise ValueError(msg)
-
-    @staticmethod
-    def _validate_browser_target_url(target_url: str) -> str:
-        """Validate model-supplied browser navigation URLs."""
-        return validate_server_fetch_url(target_url)
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
@@ -1195,7 +1185,7 @@ class BrowserTools(Toolkit):
             except Exception:
                 await playwright.stop()
                 raise
-            await context.route("**/*", self._route_network_request)
+            await context.route("**/*", continue_or_abort_browser_fetch)
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
@@ -1277,10 +1267,6 @@ class BrowserTools(Toolkit):
     def _next_output_path(self, extension: str) -> Path:
         return self._resolve_output_dir() / f"{uuid4().hex}.{extension}"
 
-    async def _route_network_request(self, route: Route) -> None:
-        """Block browser requests to URLs unsafe for server-side fetching."""
-        await continue_or_abort_browser_fetch(route)
-
     def _resolve_output_dir(self) -> Path:
         """Return the directory used for browser artifacts."""
         if self._output_dir is not None:
@@ -1300,12 +1286,7 @@ class BrowserTools(Toolkit):
         context = get_tool_runtime_context()
         if context is not None and context.storage_path is not None:
             roots.append(context.storage_path.resolve())
-
-        unique_roots: list[Path] = []
-        for root in roots:
-            if root not in unique_roots:
-                unique_roots.append(root)
-        return tuple(unique_roots)
+        return tuple(roots)
 
     def _resolve_upload_path(self, path: str) -> Path:
         """Resolve and confine one browser upload path."""
@@ -1314,7 +1295,7 @@ class BrowserTools(Toolkit):
             msg = f"upload path must be an existing file: {path}"
             raise ValueError(msg)
         roots = self._browser_upload_roots()
-        if any(_is_path_inside(resolved, root) for root in roots):
+        if any(resolved.is_relative_to(root) for root in roots):
             return resolved
         root_list = ", ".join(str(root) for root in roots)
         msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
