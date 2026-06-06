@@ -14,7 +14,14 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, STREAM_STATUS_INTERRUPTED, STREAM_STATUS_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+    STREAM_STATUS_INTERRUPTED,
+    STREAM_STATUS_KEY,
+)
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.stale_stream_cleanup import (
@@ -1313,6 +1320,7 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
                         "body": "Handoff",
                         "msgtype": "m.text",
                         ORIGINAL_SENDER_KEY: USER_ID,
+                        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                         "m.relates_to": _thread_reply_relation("$thread-root", "$user-root"),
                     },
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent-a-original"},
