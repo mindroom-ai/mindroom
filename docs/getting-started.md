@@ -108,6 +108,7 @@ uvx mindroom run
 
 **Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
 Protect the dashboard API in non-localhost environments by setting `MINDROOM_API_KEY` in your `.env`.
+When dashboard auth is unset, config and skill writes are blocked unless `MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES=true` is set for local development.
 
 **Preflight check:** Run `mindroom doctor` before `mindroom run` to verify config, API keys, Matrix connectivity, and storage in one pass.
 

@@ -76,7 +76,8 @@ Key environment variables (set in `.env` or pass directly):
 | `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
-| `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
+| `MINDROOM_API_KEY` | API key for dashboard auth (standalone). If unset, config and skill writes are blocked unless the unsafe local override below is enabled | - |
+| `MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES` | Allow unauthenticated config and skill writes without dashboard auth. Local development only | - (writes blocked) |
 
 To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
 For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Docker Compose service.
@@ -84,6 +85,7 @@ For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Doc
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 
 If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via a same-origin login page before loading the UI.
+If `MINDROOM_API_KEY` is unset, MindRoom still blocks config and skill writes unless `MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES=true` is set for local development.
 
 ## Building from Source
 
