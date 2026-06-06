@@ -3211,7 +3211,7 @@ In hosted, multi-tenant, or default-unsandboxed deployments, Docker is unavailab
 
 ### Configuration
 
-This tool has no tool-specific inline configuration fields.
+Set `include_tools` to an optional list of Docker command functions to expose, or leave it empty to expose all Docker commands.
 The deployment must provide Docker daemon access to the selected worker runtime if Docker operations should be allowed.
 
 ### Example
