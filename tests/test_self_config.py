@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import tempfile
-from inspect import signature
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import yaml
 
 from mindroom.agents import create_agent
 from mindroom.api import config_lifecycle, main
@@ -81,6 +82,44 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
             agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
             models=_DEFAULT_MODELS,
             plugins=["./plugins/bad-name"],
+        ),
+        config_path,
+    )
+    return config_path
+
+
+def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_plugin_tool") -> Path:
+    """Write one config that enables a plugin-defined tool for self-config tests."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='{tool_name}',\n"
+        "    display_name='Plugin Tool',\n"
+        "    description='Plugin-defined tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    write_config_yaml(
+        Config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+            models=_DEFAULT_MODELS,
+            plugins=["./plugins/demo"],
         ),
         config_path,
     )
@@ -203,50 +242,158 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_update_own_config_signature_exposes_only_safe_fields(self) -> None:
-        """Self-config should not expose privileged config fields in its callable API."""
-        exposed_fields = set(signature(SelfConfigTools.update_own_config).parameters) - {"self"}
-        assert exposed_fields == {
-            "compress_tool_results",
-            "display_name",
-            "instructions",
-            "learning",
-            "learning_mode",
-            "markdown",
-            "max_tool_calls_from_history",
-            "num_history_messages",
-            "num_history_runs",
-            "role",
-            "rooms",
-            "show_tool_calls",
-            "thread_mode",
-        }
+    def test_update_tools_valid(self) -> None:
+        """Valid tool names should be accepted."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["googlesearch", "calculator"])
+            assert "Successfully" in result
 
-    def test_update_own_config_schema_excludes_privileged_fields(self) -> None:
-        """Model-facing self-config schema should not advertise privileged config fields."""
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["googlesearch", "calculator"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_allows_openclaw_compat(self) -> None:
+        """openclaw_compat should be accepted in tools updates and expand implied tools."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["openclaw_compat", "python"])
+            assert "Successfully" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
+            effective = reloaded.get_agent_available_tools("coder")
+            assert effective[0] == "openclaw_compat"
+            assert "shell" in effective
+            assert "matrix_message" in effective
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_invalid(self) -> None:
+        """Invalid tool names should be rejected."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["nonexistent_tool"])
+            assert "Error" in result
+            assert "nonexistent_tool" in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_accepts_plugin_tool_from_current_config(self, tmp_path: Path) -> None:
+        """Self-config should accept plugin tools without relying on ambient registry state."""
+        config_path = _plugin_tool_config_path(tmp_path)
+        tool = _self_config_tools(agent_name="coder", config_path=config_path)
+
+        result = tool.update_own_config(tools=["self_config_plugin_tool"])
+
+        assert "Successfully" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agents"]["coder"]["tools"] == ["self_config_plugin_tool"]
+
+    def test_update_tools_blocks_privileged_tool(self) -> None:
+        """Self-config should not allow assigning privileged global-config tools."""
         _, config_path = _make_config(
             agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["self_config"])},
-            knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
-            models={
-                **_DEFAULT_MODELS,
-                "expensive": ModelConfig(provider="openai", id="gpt-4o"),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["config_manager"])
+            assert "Error" in result
+            assert "privileged tools" in result
+            assert "config_manager" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["self_config"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_include_default_tools_blocks_when_defaults_contain_privileged(self) -> None:
+        """Setting include_default_tools=True should be blocked if defaults.tools has privileged tools."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", include_default_tools=False)},
+            defaults=DefaultsConfig(tools=["config_manager"]),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(include_default_tools=True)
+            assert "Error" in result
+            assert "privileged tools" in result
+            assert "config_manager" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].include_default_tools is False
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_include_default_tools_allowed_when_defaults_clean(self) -> None:
+        """Setting include_default_tools=True should succeed when defaults.tools has no privileged tools."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", include_default_tools=False)},
+            defaults=DefaultsConfig(tools=["googlesearch"]),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(include_default_tools=True)
+            assert "Successfully" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].include_default_tools is True
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_include_default_tools_blocks_when_defaults_mapping_contains_privileged(self) -> None:
+        """Blocked-tool checks should inspect normalized names from mapping entries too."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", include_default_tools=False)},
+            defaults=DefaultsConfig(tools=[{"config_manager": None}]),
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(include_default_tools=True)
+
+            assert "Error" in result
+            assert "config_manager" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].include_default_tools is False
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_preserves_retained_inline_overrides(self) -> None:
+        """String-only self-config updates should keep existing overrides for retained tools."""
+        _, config_path = _make_config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    role="Code",
+                    tools=[
+                        {"shell": {"enable_run_shell_command": False}},
+                        {"file": {"enable_delete_file": True}},
+                    ],
+                ),
             },
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            function = tool.functions["update_own_config"]
-            exposed_fields = set((function.parameters.get("properties") or {}).keys())
+            result = tool.update_own_config(tools=["shell", "calculator"])
 
-            assert not exposed_fields.intersection(
-                {
-                    "context_files",
-                    "include_default_tools",
-                    "knowledge_bases",
-                    "model",
-                    "skills",
-                    "tools",
-                },
-            )
+            assert "Successfully" in result
+
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].model_dump(exclude_none=True)["tools"] == [
+                {"shell": {"enable_run_shell_command": False}},
+                "calculator",
+            ]
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -273,38 +420,46 @@ class TestUpdateOwnConfig:
         assert "Could not parse configuration YAML" in result
         assert "Changes were NOT applied." in result
 
-    def test_update_own_config_safe_write_preserves_privileged_fields(self) -> None:
-        """Allowed self-config writes should leave privileged fields unchanged."""
+    def test_update_knowledge_bases_valid(self) -> None:
+        """Valid knowledge base IDs should be accepted."""
         _, config_path = _make_config(
-            agents={
-                "coder": AgentConfig(
-                    display_name="Coder",
-                    role="Code",
-                    tools=["self_config"],
-                    include_default_tools=False,
-                    knowledge_bases=["docs"],
-                    skills=["write-shell-script"],
-                    context_files=["notes.md"],
-                ),
-            },
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
             knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
-            models={
-                **_DEFAULT_MODELS,
-                "expensive": ModelConfig(provider="openai", id="gpt-4o"),
-            },
         )
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
-            result = tool.update_own_config(role="Safer role")
+            result = tool.update_own_config(knowledge_bases=["docs"])
             assert "Successfully" in result
 
             reloaded = load_config_yaml(config_path)
-            assert reloaded.agents["coder"].model == "default"
-            assert reloaded.agents["coder"].skills == ["write-shell-script"]
-            assert reloaded.agents["coder"].context_files == ["notes.md"]
             assert reloaded.agents["coder"].knowledge_bases == ["docs"]
-            assert reloaded.agents["coder"].tool_names == ["self_config"]
-            assert reloaded.agents["coder"].include_default_tools is False
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_knowledge_bases_invalid(self) -> None:
+        """Unknown knowledge base IDs should be rejected."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(knowledge_bases=["missing_kb"])
+            assert "Error" in result
+            assert "missing_kb" in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_knowledge_bases_duplicate(self) -> None:
+        """Duplicate knowledge base IDs should be rejected."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code")},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(knowledge_bases=["docs", "docs"])
+            assert "Error" in result
+            assert "Duplicate" in result
         finally:
             config_path.unlink(missing_ok=True)
 
