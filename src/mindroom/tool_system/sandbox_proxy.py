@@ -227,8 +227,17 @@ def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
     return max(1, min(_MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
 
 
-def _read_proxy_tools(runtime_paths: RuntimePaths, execution_mode: str | None) -> set[str] | None:
-    default = "*" if execution_mode in _SANDBOX_ALL_EXECUTION_MODES else ""
+def _read_proxy_tools(
+    runtime_paths: RuntimePaths,
+    execution_mode: str | None,
+    *,
+    proxy_url: str | None,
+) -> set[str] | None:
+    default = (
+        "*"
+        if execution_mode in _SANDBOX_ALL_EXECUTION_MODES or (execution_mode is None and proxy_url is not None)
+        else ""
+    )
     raw_value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default) or default).strip()
     if raw_value == "*":
         return None
@@ -268,14 +277,15 @@ def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str,
 def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     """Return sandbox proxy settings for one explicit runtime context."""
     execution_mode = _read_execution_mode(runtime_paths)
+    proxy_url = _read_proxy_url(runtime_paths)
     return _SandboxProxyConfig(
         runner_mode=runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
-        proxy_url=_read_proxy_url(runtime_paths),
+        proxy_url=proxy_url,
         proxy_token=_read_proxy_token(runtime_paths),
         proxy_timeout_seconds=_read_proxy_timeout(runtime_paths),
         execution_mode=execution_mode,
         credential_lease_ttl_seconds=_read_credential_lease_ttl(runtime_paths),
-        proxy_tools=_read_proxy_tools(runtime_paths, execution_mode),
+        proxy_tools=_read_proxy_tools(runtime_paths, execution_mode, proxy_url=proxy_url),
         credential_policy=_read_credential_policy(runtime_paths),
     )
 

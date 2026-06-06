@@ -5273,6 +5273,36 @@ class TestWorkerToolsOverride:
             is False
         )
 
+    def test_unset_mode_with_static_proxy_url_preserves_all_tool_proxying(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A configured static proxy should keep the legacy unset-mode all-tools default."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox-runner:8765",
+            execution_mode=None,
+        )
+
+        assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+
     def test_unsafe_local_execution_opt_in_disables_default_execution_tool_proxying(
         self,
         monkeypatch: pytest.MonkeyPatch,

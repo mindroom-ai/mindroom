@@ -286,8 +286,8 @@ In a live validation, separate `code` and `research` requests produced separate 
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner`; selected execution tools fail closed without it unless unsafe local execution is explicitly enabled | _(required for worker-routed `static_runner` execution)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
-| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses default worker-routed tool metadata)_ |
-| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | empty for unset/selective mode, `*` for all mode |
+| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses static proxy all-tools routing when `MINDROOM_SANDBOX_PROXY_URL` is set; otherwise uses default worker-routed execution tools)_ |
+| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit default local execution of `coding`, `docker`, `file`, `python`, and `shell` when no worker/proxy backend is available | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
@@ -335,7 +335,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
 | `all` / `sandbox_all` | Every tool call goes through the proxy |
 | `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
-| _(unset)_ | Uses default worker-routed tool metadata and fails closed for local execution tools when no worker/proxy backend is available |
+| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility; otherwise uses default worker-routed execution tools and fails closed for local execution tools when no worker/proxy backend is available |
 
 `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` when no worker/proxy backend is available.
 Do not set it in hosted or multi-tenant deployments.
