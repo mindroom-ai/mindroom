@@ -4508,7 +4508,6 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
             config,
             room.room_id,
             runtime_paths_for(config),
-            room_alias=None,
         )
         # Should not handle edit for unauthorized user
         mock_handle_edit.assert_not_called()
