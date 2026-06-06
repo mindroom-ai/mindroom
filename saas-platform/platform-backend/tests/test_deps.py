@@ -87,7 +87,10 @@ class TestDeps:
         self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock
     ):
         """Test user verification creates account if not exists."""
-        from backend.deps import verify_user
+        from backend.deps import _auth_cache, verify_user
+
+        _auth_cache.clear()
+        token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
 
         # Setup mock user
         mock_user = Mock()
@@ -106,7 +109,7 @@ class TestDeps:
         mock_supabase.table().insert().execute.return_value = Mock(data={"id": "new_user_123"})
 
         # Test
-        result = await verify_user("Bearer new-user-token")
+        result = await verify_user(f"Bearer {token}")
 
         # Verify
         assert result["user_id"] == "new_user_123"
@@ -116,6 +119,8 @@ class TestDeps:
         insert_call = mock_supabase.table().insert.call_args[0][0]
         assert insert_call["id"] == "new_user_123"
         assert insert_call["email"] == "new@example.com"
+        assert sha256(token.encode()).hexdigest() in _auth_cache
+        _auth_cache.clear()
 
     @pytest.mark.asyncio
     async def test_verify_user_cache_hit(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
@@ -200,8 +205,9 @@ class TestDeps:
 
         _auth_cache.clear()
         token = _jwt_with_exp(datetime.now(UTC) - timedelta(seconds=1))
-        _auth_cache[token] = AuthCacheEntry(
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        cache_key = sha256(token.encode()).hexdigest()
+        _auth_cache[cache_key] = AuthCacheEntry(
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
             user_data={
                 "user_id": "cached_user",
                 "account_id": "cached_user",
@@ -214,6 +220,7 @@ class TestDeps:
             await verify_user(f"Bearer {token}")
 
         assert exc_info.value.status_code == 401
+        assert cache_key not in _auth_cache
         _auth_cache.clear()
 
     @pytest.mark.asyncio

@@ -197,7 +197,7 @@ async def verify_user(authorization: str = Header(None), request: Request = None
         except Exception:
             logger.info(f"Account not found for user {account_id}, creating...")
             try:
-                now = datetime.now(UTC).isoformat()
+                now_iso = now.isoformat()
                 create_result = (
                     sb.table("accounts")
                     .insert(
@@ -207,8 +207,8 @@ async def verify_user(authorization: str = Header(None), request: Request = None
                             "full_name": user.user.user_metadata.get("full_name", "")
                             if user.user.user_metadata
                             else "",
-                            "created_at": now,
-                            "updated_at": now,
+                            "created_at": now_iso,
+                            "updated_at": now_iso,
                         }
                     )
                     .execute()
