@@ -11,13 +11,12 @@ from fastapi.testclient import TestClient
 from main import app
 
 
-MIGRATION_SQL = Path(__file__).resolve().parents[2] / "supabase/migrations/000_consolidated_complete_schema.sql"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "supabase/migrations"
+BASELINE_MIGRATION_SQL = MIGRATIONS_DIR / "000_consolidated_complete_schema.sql"
+ACCOUNT_GRANTS_MIGRATION_SQL = MIGRATIONS_DIR / "002_restrict_account_grants.sql"
 
 
-def test_accounts_migration_restricts_authenticated_updates_to_profile_columns() -> None:
-    """Authenticated users may update profile fields, not admin/billing/status columns."""
-    sql = MIGRATION_SQL.read_text(encoding="utf-8")
-
+def assert_account_grants_restricted(sql: str) -> None:
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE accounts TO authenticated;" not in sql
     assert "REVOKE INSERT, UPDATE ON TABLE accounts FROM authenticated;" in sql
     assert (
@@ -26,6 +25,16 @@ def test_accounts_migration_restricts_authenticated_updates_to_profile_columns()
     ) in sql
     for privileged_column in ("tier", "is_admin", "status", "stripe_customer_id", "deleted_at"):
         assert f"GRANT UPDATE ({privileged_column}) ON TABLE accounts TO authenticated;" not in sql
+
+
+def test_accounts_baseline_migration_restricts_authenticated_updates_to_profile_columns() -> None:
+    """Fresh databases restrict authenticated writes to profile fields."""
+    assert_account_grants_restricted(BASELINE_MIGRATION_SQL.read_text(encoding="utf-8"))
+
+
+def test_accounts_incremental_migration_restricts_existing_authenticated_grants() -> None:
+    """Existing databases receive the same account grant restriction."""
+    assert_account_grants_restricted(ACCOUNT_GRANTS_MIGRATION_SQL.read_text(encoding="utf-8"))
 
 
 class TestAccountsEndpoints:
