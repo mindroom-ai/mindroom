@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, verify_user, verify_write_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 
@@ -681,7 +681,7 @@ async def save_config(
     request: Request,
     response: Response,
     new_config: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
@@ -715,7 +715,7 @@ async def save_raw_config_source(
     request: Request,
     response: Response,
     payload: RawConfigSourceRequest,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
@@ -763,7 +763,7 @@ async def update_agent(
     request: Request,
     agent_id: str,
     agent_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Update a specific agent."""
 
@@ -782,7 +782,7 @@ async def update_agent(
 async def create_agent(
     request: Request,
     agent_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, Any]:
     """Create a new agent."""
 
@@ -801,7 +801,7 @@ async def create_agent(
 async def delete_agent(
     request: Request,
     agent_id: str,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Delete an agent."""
 
@@ -827,7 +827,7 @@ async def update_team(
     request: Request,
     team_id: str,
     team_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Update a specific team."""
 
@@ -846,7 +846,7 @@ async def update_team(
 async def create_team(
     request: Request,
     team_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, Any]:
     """Create a new team."""
 
@@ -865,7 +865,7 @@ async def create_team(
 async def delete_team(
     request: Request,
     team_id: str,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Delete a team."""
 
@@ -894,7 +894,7 @@ async def update_model(
     request: Request,
     model_id: str,
     model_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Update a model configuration."""
 
@@ -924,7 +924,7 @@ async def get_room_models(request: Request, _user: Annotated[dict, Depends(verif
 async def update_room_models(
     request: Request,
     room_models: dict[str, str],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[dict, Depends(verify_write_user)],
 ) -> dict[str, bool]:
     """Update room-specific model overrides."""
 

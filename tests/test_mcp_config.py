@@ -135,6 +135,38 @@ def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
     assert "mcp_chrome_devtools" in config.get_agent_available_tools("code")
 
 
+def test_config_rejects_mcp_stdio_cwd_escape(tmp_path: Path) -> None:
+    """MCP stdio cwd should stay under runtime-owned roots."""
+    runtime_paths = _runtime_paths(tmp_path)
+    with pytest.raises(ConfigRuntimeValidationError, match=r"mcp_servers\.demo\.cwd must stay"):
+        Config.validate_with_runtime(
+            {
+                "mcp_servers": {
+                    "demo": {
+                        "transport": "stdio",
+                        "command": "npx",
+                        "cwd": str(tmp_path.parent / "outside"),
+                    },
+                },
+                "agents": {},
+            },
+            runtime_paths,
+        )
+
+
+def test_config_rejects_knowledge_path_escape(tmp_path: Path) -> None:
+    """Knowledge base roots should stay under runtime-owned roots."""
+    runtime_paths = _runtime_paths(tmp_path)
+    with pytest.raises(ConfigRuntimeValidationError, match=r"knowledge_bases\.docs\.path must stay"):
+        Config.validate_with_runtime(
+            {
+                "knowledge_bases": {"docs": {"path": str(tmp_path.parent / "outside-docs")}},
+                "agents": {},
+            },
+            runtime_paths,
+        )
+
+
 def test_config_rejects_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
     """Keep MCP tools restricted to shared-scope integrations."""
     runtime_paths = _runtime_paths(tmp_path)

@@ -61,6 +61,7 @@ from mindroom.constants import (
     matrix_state_file,
     resolve_config_relative_path,
     runtime_matrix_homeserver,
+    validate_runtime_control_path,
 )
 from mindroom.git_urls import credential_free_repo_url
 
@@ -374,6 +375,11 @@ def _raw_tools_entries(data: dict[object, object], section: str) -> list[object]
     section_data = cast("dict[object, object]", raw_section)
     tools = section_data.get("tools")
     return list(tools) if isinstance(tools, list) else []
+
+
+def _stdio_command_uses_path(command: str) -> bool:
+    """Return whether an MCP stdio command is a path instead of a PATH lookup name."""
+    return "/" in command or "\\" in command or command.startswith((".", "~"))
 
 
 class Config(BaseModel):
@@ -1057,6 +1063,7 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool = False,
+        execute_plugin_modules_for_validation: bool = True,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         config = cls.model_validate(normalized_config_data(data), context={"runtime_paths": runtime_paths})
@@ -1064,16 +1071,46 @@ class Config(BaseModel):
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 
         try:
-            if tolerate_plugin_load_errors:
+            config._validate_runtime_control_paths(runtime_paths)
+        except ValueError as exc:
+            raise ConfigRuntimeValidationError(str(exc)) from exc
+
+        try:
+            if tolerate_plugin_load_errors or not execute_plugin_modules_for_validation:
                 config._validate_authored_tool_entries(
                     runtime_paths,
-                    tolerate_plugin_load_errors=True,
+                    tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                    execute_plugin_modules_for_validation=execute_plugin_modules_for_validation,
                 )
             else:
                 config._validate_authored_tool_entries(runtime_paths)
         except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
+
+    def _validate_runtime_control_paths(self, runtime_paths: RuntimePaths) -> None:
+        """Reject privileged runtime config paths outside config/storage roots."""
+        for base_id, base_config in self.knowledge_bases.items():
+            validate_runtime_control_path(
+                base_config.path,
+                runtime_paths,
+                field_name=f"knowledge_bases.{base_id}.path",
+            )
+        for server_id, server_config in self.mcp_servers.items():
+            if server_config.transport != "stdio":
+                continue
+            if server_config.cwd is not None:
+                validate_runtime_control_path(
+                    server_config.cwd,
+                    runtime_paths,
+                    field_name=f"mcp_servers.{server_id}.cwd",
+                )
+            if server_config.command is not None and _stdio_command_uses_path(server_config.command):
+                validate_runtime_control_path(
+                    server_config.command,
+                    runtime_paths,
+                    field_name=f"mcp_servers.{server_id}.command",
+                )
 
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
@@ -1418,6 +1455,7 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool = False,
+        execute_plugin_modules_for_validation: bool = True,
     ) -> None:
         """Validate authored tool references against one resolved validation snapshot."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
@@ -1427,6 +1465,7 @@ class Config(BaseModel):
             runtime_paths,
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            execute_plugin_modules=execute_plugin_modules_for_validation,
         )
         self._unavailable_plugin_tool_names = {
             tool_name
@@ -1903,6 +1942,7 @@ def load_config(
     runtime_paths: RuntimePaths,
     *,
     tolerate_plugin_load_errors: bool = False,
+    execute_plugin_modules_for_validation: bool = True,
 ) -> Config:
     """Load and validate one config against an explicit runtime context."""
     path = runtime_paths.config_path
@@ -1917,6 +1957,7 @@ def load_config(
         data,
         runtime_paths,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        execute_plugin_modules_for_validation=execute_plugin_modules_for_validation,
     )
     logger.info("loaded_agent_configuration", path=str(path))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
@@ -1928,12 +1969,14 @@ def load_config_or_user_error(
     *,
     footer: str | None = None,
     tolerate_plugin_load_errors: bool = False,
+    execute_plugin_modules_for_validation: bool = True,
 ) -> tuple[Config | None, str | None]:
     """Load config or return one shared user-facing invalid-configuration message."""
     try:
         return load_config(
             runtime_paths,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            execute_plugin_modules_for_validation=execute_plugin_modules_for_validation,
         ), None
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         return None, format_invalid_config_message(exc, footer=footer)

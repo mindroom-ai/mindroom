@@ -149,6 +149,7 @@ def _load_config_result(
             data,
             runtime_paths,
             tolerate_plugin_load_errors=True,
+            execute_plugin_modules_for_validation=False,
         )
         validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
@@ -260,7 +261,11 @@ def _validated_config_payload(
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[Config, dict[str, Any]]:
     """Normalize and validate one config payload against the active runtime."""
-    validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
+    validated_config = Config.validate_with_runtime(
+        raw_config,
+        runtime_paths,
+        execute_plugin_modules_for_validation=False,
+    )
     return validated_config, validated_config.authored_model_dump()
 
 
@@ -455,7 +460,10 @@ def _validate_raw_config_source(
         validation_path = Path(tmp.name)
     validation_runtime_paths = replace(runtime_paths, config_path=validation_path)
     try:
-        runtime_config = load_runtime_config_model(validation_runtime_paths)
+        runtime_config = load_runtime_config_model(
+            validation_runtime_paths,
+            execute_plugin_modules_for_validation=False,
+        )
         return runtime_config, runtime_config.authored_model_dump()
     finally:
         validation_path.unlink(missing_ok=True)

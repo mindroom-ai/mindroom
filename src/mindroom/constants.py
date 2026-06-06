@@ -159,6 +159,22 @@ class RuntimePaths:
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def validate_runtime_control_path(
+    raw_path: str | Path,
+    runtime_paths: RuntimePaths,
+    *,
+    field_name: str,
+) -> Path:
+    """Resolve one privileged config path and require it to stay under runtime-owned roots."""
+    resolved_path = resolve_config_relative_path(raw_path, runtime_paths)
+    allowed_roots = (runtime_paths.config_dir.resolve(), runtime_paths.storage_root.resolve())
+    if any(resolved_path == root or resolved_path.is_relative_to(root) for root in allowed_roots):
+        return resolved_path
+    allowed = ", ".join(str(root) for root in allowed_roots)
+    msg = f"{field_name} must stay under the runtime config directory or storage root ({allowed}); got {resolved_path}"
+    raise ValueError(msg)
+
+
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
     if process_env is not None:
         return dict(process_env)

@@ -82,7 +82,10 @@ def test_client(temp_config_file: Path) -> TestClient:
     from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES": "true"},
+    )
     main.initialize_api_app(main.app, runtime_paths)
 
     # Force reload of config

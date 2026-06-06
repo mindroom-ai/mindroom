@@ -112,6 +112,7 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
         yield streams
 
     monkeypatch.setattr(transport_module, "sse_client", fake_sse_client)
+    monkeypatch.setattr(transport_module, "validate_server_fetch_url", lambda url: url)
     server_config = MCPServerConfig(
         transport="sse",
         url="https://mcp.example/sse",
@@ -155,6 +156,7 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
         yield read_stream, write_stream, lambda: "session-id"
 
     monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    monkeypatch.setattr(transport_module, "validate_server_fetch_url", lambda url: url)
     server_config = MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example/mcp",
@@ -186,6 +188,18 @@ async def test_open_sse_requires_runtime_url(tmp_path: Path) -> None:
     handle = build_transport_handle("demo", server_config, runtime_paths)
 
     with pytest.raises(ValueError, match="sse MCP servers require url"):
+        async with handle.opener():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_open_remote_transport_rejects_private_urls(tmp_path: Path) -> None:
+    """Remote MCP transports should reject private-network URLs before opening clients."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = MCPServerConfig(transport="sse", url="http://127.0.0.1:8000/sse")
+    handle = build_transport_handle("demo", server_config, runtime_paths)
+
+    with pytest.raises(ValueError, match="URL is not allowed for server-side fetching"):
         async with handle.opener():
             pass
 

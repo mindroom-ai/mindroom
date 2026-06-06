@@ -33,6 +33,7 @@ _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _REDIRECT_TARGET_DECODE_PASSES = 5
+_UNSAFE_CONTROL_PLANE_WRITES_ENV = "MINDROOM_UNSAFE_ALLOW_UNAUTHENTICATED_CONTROL_PLANE_WRITES"
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/homeassistant/callback",
@@ -858,6 +859,36 @@ async def verify_user(
     auth_user = {"user_id": user.id, "email": user.email}
     request.scope["auth_user"] = auth_user
     return auth_user
+
+
+def _dashboard_auth_configured(auth_state: ApiAuthState) -> bool:
+    """Return whether write endpoints have any dashboard auth boundary configured."""
+    settings = auth_state.settings
+    return bool(
+        settings.trusted_upstream.enabled
+        or settings.mindroom_api_key
+        or (settings.supabase_url and settings.supabase_anon_key and auth_state.supabase_auth is not None),
+    )
+
+
+async def verify_write_user(
+    request: Request,
+    authorization: str | None = Header(None),
+) -> dict[str, Any]:
+    """Validate API write auth and fail closed when dashboard auth is not configured."""
+    auth_user = await verify_user(request, authorization)
+    auth_state = _request_auth_state(request)
+    if _dashboard_auth_configured(auth_state):
+        return auth_user
+    if auth_state.runtime_paths.env_flag(_UNSAFE_CONTROL_PLANE_WRITES_ENV):
+        return auth_user
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Control-plane writes require dashboard auth. "
+            f"Set {_UNSAFE_CONTROL_PLANE_WRITES_ENV}=true only for unsafe local development."
+        ),
+    )
 
 
 @router.post("/api/auth/session", include_in_schema=False)

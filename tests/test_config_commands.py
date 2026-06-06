@@ -33,6 +33,7 @@ from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
+from mindroom.redaction import REDACTED
 from mindroom.tool_system.plugins import PluginReloadResult
 from tests.conftest import make_event_cache_mock, write_config_yaml
 
@@ -1052,7 +1053,7 @@ async def test_handle_config_command_show_redacts_secrets(tmp_path: Path) -> Non
 
     assert change_info is None
     assert "api_key:" in response
-    assert "***redacted***" in response
+    assert REDACTED in response
     assert "sk-test-config-secret" not in response
 
 
@@ -1063,29 +1064,24 @@ async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {
-                    "default": {
-                        "provider": "openai",
-                        "id": "gpt-5.4",
-                        "api_key": "sk-test-config-secret",
-                    },
-                },
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "voice": {"enabled": False, "stt": {"provider": "openai", "model": "whisper-1", "api_key": "sk-old"}},
             },
         ),
         encoding="utf-8",
     )
 
     response, change_info = await handle_config_command(
-        "get models.default.api_key",
+        "get voice.stt.api_key",
         _runtime_paths_for_config(config_path),
     )
 
     assert change_info is None
-    assert "Configuration value for `models.default.api_key`:" in response
-    assert "***redacted***" in response
-    assert "sk-test-config-secret" not in response
+    assert "Configuration value for `voice.stt.api_key`:" in response
+    assert REDACTED in response
+    assert "sk-old" not in response
 
 
 @pytest.mark.asyncio
@@ -1095,32 +1091,55 @@ async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path:
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {
-                    "default": {
-                        "provider": "openai",
-                        "id": "gpt-5.4",
-                        "api_key": "sk-old-config-secret",
-                    },
-                },
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                "voice": {"enabled": False, "stt": {"provider": "openai", "model": "whisper-1", "api_key": "sk-old"}},
             },
         ),
         encoding="utf-8",
     )
 
     response, change_info = await handle_config_command(
-        "set models.default.api_key sk-new-config-secret",
+        "set voice.stt.api_key sk-new",
         _runtime_paths_for_config(config_path),
     )
 
     assert change_info is not None
     assert "Configuration Change Preview" in response
-    assert "***redacted***" in response
-    assert "sk-old-config-secret" not in response
-    assert "sk-new-config-secret" not in response
-    assert change_info["old_value"] == "sk-old-config-secret"
-    assert change_info["new_value"] == "sk-new-config-secret"
+    assert REDACTED in response
+    assert "sk-old" not in response
+    assert "sk-new" not in response
+    assert change_info["old_value"] == "sk-old"
+    assert change_info["new_value"] == "sk-new"
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_rejects_privileged_config_paths(tmp_path: Path) -> None:
+    """Chat config get/set should not expose privileged config roots."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+
+    get_response, get_change_info = await handle_config_command("get models.default", runtime_paths)
+    set_response, set_change_info = await handle_config_command(
+        'set mcp_servers.remote.url "https://example.com/sse"',
+        runtime_paths,
+    )
+
+    assert get_change_info is None
+    assert set_change_info is None
+    assert "`models.default` is restricted" in get_response
+    assert "`mcp_servers.remote.url` is restricted" in set_response
 
 
 @pytest.mark.asyncio
@@ -1138,8 +1157,8 @@ async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(tmp_path: Path) -> None:
-    """Set previews should surface plugin manifest validation failures as user errors."""
+async def test_handle_config_command_set_rejects_plugin_config_path(tmp_path: Path) -> None:
+    """Set previews should reject privileged plugin config changes from chat."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1165,13 +1184,12 @@ async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(t
     )
 
     assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Invalid plugin name" in response
+    assert "`plugins` is restricted" in response
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_returns_malformed_plugin_manifest_error(tmp_path: Path) -> None:
-    """Set previews should surface malformed plugin manifests as user errors."""
+async def test_handle_config_command_set_rejects_malformed_plugin_config_path(tmp_path: Path) -> None:
+    """Set previews should reject privileged plugin config changes before plugin validation."""
     plugin_root = tmp_path / "plugins" / "bad-manifest"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1197,8 +1215,7 @@ async def test_handle_config_command_set_returns_malformed_plugin_manifest_error
     )
 
     assert change_info is None
-    assert "Invalid configuration" in response
-    assert "Plugin tools_module must be a string" in response
+    assert "`plugins` is restricted" in response
 
 
 @pytest.mark.asyncio

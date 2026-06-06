@@ -6,6 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.tool_system.skills as skills_module
+from mindroom import constants
+from mindroom.api import config_lifecycle, main
 from mindroom.api import skills as skills_api_module
 
 
@@ -81,6 +83,35 @@ def test_update_skill(
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert skill_file.read_text(encoding="utf-8") == updated_content
+
+
+def test_update_skill_requires_auth_without_unsafe_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skill writes should fail closed when dashboard auth is not configured."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
+
+    _write_skill(tmp_path)
+    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [tmp_path])
+    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    client = TestClient(main.app)
+
+    response = client.put("/api/skills/test-skill", json={"content": "---"})
+
+    assert response.status_code == 403
+    assert "Control-plane writes require dashboard auth" in response.json()["detail"]
 
 
 def test_update_skill_forbidden(

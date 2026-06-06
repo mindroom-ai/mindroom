@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 import shutil
+from typing import Annotated
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from mindroom.api.auth import verify_write_user
 from mindroom.constants import safe_replace
 from mindroom.tool_system.skills import get_user_skills_dir, list_skill_listings, resolve_skill_listing, skill_can_edit
 
@@ -82,7 +84,11 @@ async def get_skill(skill_name: str) -> SkillDetail:
 
 
 @router.put("/{skill_name}")
-async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str, bool]:
+async def update_skill(
+    skill_name: str,
+    payload: SkillUpdateRequest,
+    _user: Annotated[dict, Depends(verify_write_user)],
+) -> dict[str, bool]:
     """Update a skill's SKILL.md content."""
     listing = resolve_skill_listing(skill_name)
     if listing is None:
@@ -102,7 +108,10 @@ async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str
 
 
 @router.post("")
-async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
+async def create_skill(
+    payload: CreateSkillRequest,
+    _user: Annotated[dict, Depends(verify_write_user)],
+) -> SkillSummary:
     """Create a new user skill."""
     name = payload.name.strip()
     if not name:
@@ -131,7 +140,10 @@ async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
 
 
 @router.delete("/{skill_name}")
-async def delete_skill(skill_name: str) -> dict[str, bool]:
+async def delete_skill(
+    skill_name: str,
+    _user: Annotated[dict, Depends(verify_write_user)],
+) -> dict[str, bool]:
     """Delete a user skill."""
     listing = resolve_skill_listing(skill_name)
     if listing is None:

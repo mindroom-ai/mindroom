@@ -1910,6 +1910,69 @@ def test_unavailable_plugin_tool_is_validation_only_not_runtime_metadata(tmp_pat
         assert validation_snapshot["broken_plugin_tool"].unavailable_due_to_plugin_load_error is True
 
 
+def test_validate_with_runtime_can_skip_plugin_module_execution(tmp_path: Path) -> None:
+    """Preview validation should accept literal plugin tool metadata without executing plugin code."""
+    plugin_root = tmp_path / "plugins" / "no-exec"
+    plugin_root.mkdir(parents=True)
+    marker_path = tmp_path / "plugin-executed"
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "no_exec_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from pathlib import Path\n"
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        f"Path({str(marker_path)!r}).write_text('executed', encoding='utf-8')\n"
+        "class NoExecTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='no_exec', tools=[])\n"
+        "@register_tool_with_metadata(\n"
+        "    name='no_exec_tool',\n"
+        "    display_name='No Exec Tool',\n"
+        "    description='Declared without execution',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def no_exec_tools():\n"
+        "    return NoExecTool\n",
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    payload = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "tools": ["no_exec_tool"]}},
+        "plugins": ["./plugins/no-exec"],
+    }
+
+    with _preserved_plugin_loader_state():
+        config = Config.validate_with_runtime(
+            payload,
+            runtime_paths,
+            execute_plugin_modules_for_validation=False,
+        )
+
+    assert "no_exec_tool" not in config.get_agent_available_tools("assistant")
+    assert not marker_path.exists()
+
+
+def test_validate_with_runtime_rejects_local_plugin_path_escape(tmp_path: Path) -> None:
+    """Local plugin paths should stay inside runtime-owned roots."""
+    outside_plugin = tmp_path.parent / "outside-plugin"
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    payload = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "agents": {},
+        "plugins": [str(outside_plugin)],
+    }
+
+    with pytest.raises(ConfigRuntimeValidationError, match=r"plugins\[\]\.path must stay"):
+        Config.validate_with_runtime(
+            payload,
+            runtime_paths,
+            execute_plugin_modules_for_validation=False,
+        )
+
+
 def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

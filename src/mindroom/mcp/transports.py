@@ -15,6 +15,7 @@ from mcp.client.stdio import StdioServerParameters, get_default_environment, std
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.message import SessionMessage
 
+from mindroom.constants import validate_runtime_control_path
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
 
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -81,6 +82,10 @@ def _server_fetch_mcp_http_client(
     return httpx.AsyncClient(**kwargs)
 
 
+def _stdio_command_uses_path(command: str) -> bool:
+    return "/" in command or "\\" in command or command.startswith((".", "~"))
+
+
 def _build_stdio_server_parameters(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths | None = None,
@@ -90,16 +95,34 @@ def _build_stdio_server_parameters(
         msg = "stdio MCP servers require command"
         raise ValueError(msg)
     env = server_config.env
+    command = server_config.command
+    cwd = server_config.cwd
     if runtime_paths is not None:
         env = _interpolate_mcp_env(server_config.env, runtime_paths)
+        if _stdio_command_uses_path(command):
+            command = str(
+                validate_runtime_control_path(
+                    command,
+                    runtime_paths,
+                    field_name="mcp stdio command",
+                ),
+            )
+        if cwd is not None:
+            cwd = str(
+                validate_runtime_control_path(
+                    cwd,
+                    runtime_paths,
+                    field_name="mcp stdio cwd",
+                ),
+            )
     return StdioServerParameters(
-        command=server_config.command,
+        command=command,
         args=list(server_config.args),
         env={
             **get_default_environment(),
             **env,
         },
-        cwd=server_config.cwd,
+        cwd=cwd,
     )
 
 

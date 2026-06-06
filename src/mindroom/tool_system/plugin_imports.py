@@ -12,7 +12,7 @@ from types import ModuleType
 from typing import Any
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import RuntimePaths, validate_runtime_control_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 
@@ -155,14 +155,32 @@ def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
         msg = f"Configured plugin module could not be resolved: {plugin_path}"
         raise PluginValidationError(msg)
 
-    relative = resolve_config_relative_path(plugin_path, runtime_paths)
-    if relative.exists():
-        return relative
+    relative: Path | None = None
+    if parsed_python_spec is None:
+        try:
+            relative = validate_runtime_control_path(
+                plugin_path,
+                runtime_paths,
+                field_name="plugins[].path",
+            )
+        except ValueError as exc:
+            raise PluginValidationError(str(exc)) from exc
+        if relative.exists():
+            return relative
 
     module_root = _resolve_python_plugin_root(plugin_path)
     if module_root is not None:
         return module_root
 
+    if relative is None:
+        try:
+            relative = validate_runtime_control_path(
+                plugin_path,
+                runtime_paths,
+                field_name="plugins[].path",
+            )
+        except ValueError as exc:
+            raise PluginValidationError(str(exc)) from exc
     return relative
 
 

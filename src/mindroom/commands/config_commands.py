@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -24,6 +25,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+_RESTRICTED_CONFIG_ROOTS = frozenset(
+    {
+        "authorization",
+        "knowledge_bases",
+        "mcp_servers",
+        "models",
+        "plugins",
+        "prompts",
+        "worker_egress_brokers",
+    },
+)
+_RESTRICTED_CONFIG_PREFIXES = frozenset({"debug", "llm_request_log_dir", "memory.embedder"})
 
 
 def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
@@ -179,6 +192,25 @@ def _redact_value_for_display(value: Any, path: str | None = None) -> Any:  # no
     return redacted[key] if isinstance(redacted, dict) else redacted
 
 
+def _is_restricted_config_path(config_path: str) -> bool:
+    """Return whether a chat config path targets privileged control-plane config."""
+    normalized = config_path.strip()
+    if not normalized:
+        return False
+    root = normalized.split(".", 1)[0]
+    return root in _RESTRICTED_CONFIG_ROOTS or any(
+        normalized == prefix or normalized.startswith(f"{prefix}.") or prefix.startswith(f"{normalized}.")
+        for prefix in _RESTRICTED_CONFIG_PREFIXES
+    )
+
+
+def _restricted_config_path_message(config_path: str) -> str:
+    return (
+        f"❌ `{config_path}` is restricted. "
+        "Use the authenticated dashboard/API or edit config.yaml directly for privileged config."
+    )
+
+
 async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     args_text: str,
     runtime_paths: RuntimePaths,
@@ -203,6 +235,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         runtime_paths,
         footer=load_error_footer,
         tolerate_plugin_load_errors=True,
+        execute_plugin_modules_for_validation=False,
     )
     if load_error:
         return load_error, None
@@ -223,6 +256,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             )
 
         config_path_str = args[0]
+        if _is_restricted_config_path(config_path_str):
+            return _restricted_config_path_message(config_path_str), None
         try:
             value = _get_nested_value(config_dict, config_path_str)
         except (KeyError, IndexError) as e:
@@ -239,6 +274,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             )
 
         config_path_str = args[0]
+        if _is_restricted_config_path(config_path_str):
+            return _restricted_config_path_message(config_path_str), None
         # Join remaining args as the value (handles unquoted strings with spaces)
         value_str = " ".join(args[1:])
 
@@ -252,14 +289,18 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             old_value = None  # Path doesn't exist yet
 
         # Create a copy to test the change
-        test_config_dict = config_dict.copy()
+        test_config_dict = deepcopy(config_dict)
 
         try:
             # Verify the path exists or can be created
             _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            Config.validate_with_runtime(test_config_dict, runtime_paths)
+            Config.validate_with_runtime(
+                test_config_dict,
+                runtime_paths,
+                execute_plugin_modules_for_validation=False,
+            )
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except (ValidationError, ConfigRuntimeValidationError) as e:
@@ -332,11 +373,15 @@ async def apply_config_change(
     path = runtime_paths.config_path
 
     try:
+        if _is_restricted_config_path(config_path_str):
+            return _restricted_config_path_message(config_path_str)
+
         # Load the current configuration
         config, load_error = load_config_or_user_error(
             runtime_paths,
             footer=_CONFIG_CHANGE_REJECTED_MESSAGE,
             tolerate_plugin_load_errors=True,
+            execute_plugin_modules_for_validation=False,
         )
         if load_error:
             return load_error

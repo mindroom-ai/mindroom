@@ -958,28 +958,89 @@ def _execute_validation_plugin_module(
     return validation_module_name
 
 
+def _validate_plugin_module_sources(plugin_base: plugin_module._PluginBase) -> None:
+    """Parse plugin module sources without importing or executing them."""
+    for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path, plugin_base.oauth_module_path):
+        if module_path is None:
+            continue
+        try:
+            ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            msg = f"Plugin module source validation failed for {module_path}: {exc}"
+            raise ToolMetadataValidationError(msg) from exc
+
+
+def _builtin_tool_state_with_mcp(config: Config) -> _ResolvedToolState:
+    """Return builtin plus MCP tool state without plugin additions."""
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
+
+    builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
+    builtin_metadata = BUILTIN_TOOL_METADATA.copy()
+    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
+    _merge_mcp_tool_state(
+        builtin_registry,
+        builtin_metadata,
+        mcp_registry,
+        mcp_metadata,
+    )
+    return _ResolvedToolState(builtin_registry, builtin_metadata, {})
+
+
+def _unavailable_plugin_metadata_without_execution(
+    plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]],
+    *,
+    tolerate_plugin_load_errors: bool,
+) -> dict[str, ToolMetadata]:
+    """Return literal plugin tool metadata after parsing sources without executing modules."""
+    unavailable_tool_metadata: dict[str, ToolMetadata] = {}
+    for plugin_base, plugin_entry, _ in plugin_bases:
+        try:
+            _validate_plugin_module_sources(plugin_base)
+        except Exception as exc:
+            if not tolerate_plugin_load_errors:
+                raise
+            plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+        unavailable_tool_metadata.update(_unavailable_tool_metadata_from_failed_plugin(plugin_base, {}))
+    return unavailable_tool_metadata
+
+
+def _resolved_tool_state_without_plugin_execution(
+    plugin_bases: list[tuple[plugin_module._PluginBase, Any, int]],
+    config: Config,
+    *,
+    tolerate_plugin_load_errors: bool,
+) -> _ResolvedToolState:
+    """Return validation metadata for plugins without importing or executing plugin code."""
+    resolved_state = _builtin_tool_state_with_mcp(config)
+    unavailable_tool_metadata = _unavailable_plugin_metadata_without_execution(
+        plugin_bases,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+    unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
+        unavailable_tool_metadata,
+        resolved_state.tool_registry,
+        resolved_state.tool_metadata,
+    )
+    return _ResolvedToolState(
+        resolved_state.tool_registry,
+        resolved_state.tool_metadata,
+        unavailable_tool_metadata,
+    )
+
+
 def _resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
+    execute_plugin_modules: bool = True,
 ) -> _ResolvedToolState:
     """Return registry and metadata visible for one runtime config without mutating global state."""
     import mindroom.tools  # noqa: F401, PLC0415
-    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
     plugin_entries = config.plugins
     if not plugin_entries:
-        builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
-        builtin_metadata = BUILTIN_TOOL_METADATA.copy()
-        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-        _merge_mcp_tool_state(
-            builtin_registry,
-            builtin_metadata,
-            mcp_registry,
-            mcp_metadata,
-        )
-        return _ResolvedToolState(builtin_registry, builtin_metadata, {})
+        return _builtin_tool_state_with_mcp(config)
 
     plugin_bases = plugin_module._collect_plugin_bases(
         plugin_entries,
@@ -988,6 +1049,13 @@ def _resolved_tool_state_for_runtime(
     )
 
     plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
+
+    if not execute_plugin_modules:
+        return _resolved_tool_state_without_plugin_execution(
+            plugin_bases,
+            config,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
 
     validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
     unavailable_tool_metadata: dict[str, ToolMetadata] = {}
@@ -1039,6 +1107,8 @@ def _resolved_tool_state_for_runtime(
         active_plugins.extend(candidate_active_plugins)
 
     desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
+    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
+
     mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
     _merge_mcp_tool_state(
         desired_registry,
@@ -1184,12 +1254,14 @@ def resolved_tool_validation_snapshot_for_runtime(
     config: Config,
     *,
     tolerate_plugin_load_errors: bool = False,
+    execute_plugin_modules: bool = True,
 ) -> dict[str, ToolValidationInfo]:
     """Return validation-only tool state visible for one runtime config."""
     resolved_state = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        execute_plugin_modules=execute_plugin_modules,
     )
     validation_metadata = {
         **resolved_state.tool_metadata,
