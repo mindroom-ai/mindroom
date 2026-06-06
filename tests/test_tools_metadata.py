@@ -17,6 +17,7 @@ import mindroom.tool_system.metadata as metadata_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
@@ -45,6 +46,8 @@ from mindroom.tool_system.registry_state import (
     restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
+from mindroom.tools.crawl4ai import crawl4ai_tools
+from mindroom.tools.custom_api import custom_api_tools
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
@@ -184,6 +187,54 @@ def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     fields = {field.name: field for field in homeassistant.config_fields or []}
 
     assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
+
+
+def test_custom_api_tool_rejects_private_endpoint_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API calls should not be able to fetch private-network URLs."""
+
+    def forbidden_request(**_kwargs: object) -> object:
+        msg = "unsafe custom_api URL should be rejected before a request is made"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("agno.tools.api.requests.request", forbidden_request)
+    tool = custom_api_tools()()
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.make_request("http://127.0.0.1:8000/admin")
+
+    assert exc_info.value.reason == "private_address"
+
+
+def test_custom_api_tool_rejects_private_base_url_before_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API base_url should be validated after endpoint joining."""
+
+    def forbidden_request(**_kwargs: object) -> object:
+        msg = "unsafe custom_api base_url should be rejected before a request is made"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("agno.tools.api.requests.request", forbidden_request)
+    tool = custom_api_tools()(base_url="http://169.254.169.254")
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.make_request("/latest/meta-data/")
+
+    assert exc_info.value.reason == "metadata_address"
+
+
+def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI should reject unsafe URLs before starting browser-backed crawling."""
+
+    async def forbidden_crawl(*_args: object, **_kwargs: object) -> str:
+        msg = "unsafe crawl4ai URL should be rejected before crawling starts"
+        raise AssertionError(msg)
+
+    tool = crawl4ai_tools()()
+    monkeypatch.setattr(tool, "_async_crawl", forbidden_crawl)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.crawl("http://127.0.0.1:8000/private")
+
+    assert exc_info.value.reason == "private_address"
 
 
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

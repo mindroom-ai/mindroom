@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from typing import TYPE_CHECKING, Any, Literal
 
+import httpx
+
+from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -92,4 +96,55 @@ def custom_api_tools() -> type[CustomApiTools]:
     """Return Custom API tools for making HTTP requests to external APIs."""
     from agno.tools.api import CustomApiTools
 
-    return CustomApiTools
+    class MindRoomCustomApiTools(CustomApiTools):
+        """Custom API toolkit with MindRoom server-fetch URL validation."""
+
+        def _request_url(self, endpoint: str) -> str:
+            url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
+            return validate_server_fetch_url(url)
+
+        def make_request(
+            self,
+            endpoint: str,
+            method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"] = "GET",
+            params: dict[str, Any] | None = None,
+            data: dict[str, Any] | None = None,
+            headers: dict[str, str] | None = None,
+            json_data: dict[str, Any] | None = None,
+        ) -> str:
+            """Make an HTTP request to a validated public HTTP(S) URL."""
+            url = self._request_url(endpoint)
+            auth = (self.username, self.password) if self.username and self.password else None
+            try:
+                with httpx.Client(
+                    transport=ServerFetchHTTPTransport(verify=self.verify_ssl),
+                    follow_redirects=True,
+                ) as client:
+                    response = client.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        data=data,
+                        json=json_data,
+                        headers=self._get_headers(headers),
+                        auth=auth,
+                        timeout=self.timeout,
+                    )
+
+                try:
+                    response_data: object = response.json()
+                except ValueError:
+                    response_data = {"text": response.text}
+
+                result: dict[str, object] = {
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    "data": response_data,
+                }
+                if not response.is_success:
+                    result["error"] = "Request failed"
+                return json.dumps(result, indent=2)
+            except httpx.RequestError as e:
+                return json.dumps({"error": f"Request failed: {e}"}, indent=2)
+
+    return MindRoomCustomApiTools

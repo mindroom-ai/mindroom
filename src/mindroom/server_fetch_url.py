@@ -10,13 +10,16 @@ from urllib.parse import urljoin, urlsplit
 import httpcore
 import httpx
 from httpcore._backends.anyio import AnyIOBackend
+from httpx._config import DEFAULT_LIMITS, create_ssl_context
 
 if TYPE_CHECKING:
+    import ssl
     from collections.abc import Awaitable, Callable, Iterable
     from typing import NoReturn
     from urllib.parse import SplitResult
 
     from httpcore._backends.base import SOCKET_OPTION
+    from httpx._types import CertTypes
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _GENERIC_DENY_MESSAGE = "URL is not allowed for server-side fetching"
@@ -386,10 +389,33 @@ async def _connect_validated_async(
 class ServerFetchHTTPTransport(httpx.HTTPTransport):
     """HTTPX transport that validates server-fetch URLs and dialed addresses."""
 
-    def __init__(self, *, allow_private_networks: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allow_private_networks: bool = False,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
+        http1: bool = True,
+        http2: bool = False,
+        limits: httpx.Limits = DEFAULT_LIMITS,
+        local_address: str | None = None,
+        retries: int = 0,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
+    ) -> None:
         self._allow_private_networks = allow_private_networks
+        ssl_context = create_ssl_context(verify=verify, cert=cert, trust_env=trust_env)
         self._pool: httpcore.ConnectionPool = httpcore.ConnectionPool(
+            ssl_context=ssl_context,
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            http1=http1,
+            http2=http2,
+            local_address=local_address,
             network_backend=_ServerFetchSyncNetworkBackend(allow_private_networks=allow_private_networks),
+            retries=retries,
+            socket_options=socket_options,
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -409,10 +435,33 @@ class ServerFetchHTTPTransport(httpx.HTTPTransport):
 class ServerFetchAsyncHTTPTransport(httpx.AsyncHTTPTransport):
     """Async HTTPX transport that validates server-fetch URLs and dialed addresses."""
 
-    def __init__(self, *, allow_private_networks: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allow_private_networks: bool = False,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
+        http1: bool = True,
+        http2: bool = False,
+        limits: httpx.Limits = DEFAULT_LIMITS,
+        local_address: str | None = None,
+        retries: int = 0,
+        socket_options: Iterable[SOCKET_OPTION] | None = None,
+    ) -> None:
         self._allow_private_networks = allow_private_networks
+        ssl_context = create_ssl_context(verify=verify, cert=cert, trust_env=trust_env)
         self._pool: httpcore.AsyncConnectionPool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl_context,
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            http1=http1,
+            http2=http2,
+            local_address=local_address,
             network_backend=_ServerFetchAsyncNetworkBackend(allow_private_networks=allow_private_networks),
+            retries=retries,
+            socket_options=socket_options,
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

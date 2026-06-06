@@ -17,10 +17,11 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.tools import Toolkit
-from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, Route, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 from mindroom.logging_config import get_logger
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -321,6 +322,15 @@ def _unknown_browser_action_message(action: str) -> str:
     )
 
 
+def _is_path_inside(path: Path, root: Path) -> bool:
+    """Return whether a resolved path is under a resolved root."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
     """Return the Playwright browser cache root for an executable path."""
     if expected_executable_path is None:
@@ -443,7 +453,7 @@ class BrowserTools(Toolkit):
             return
         self._close_task = loop.create_task(self._close_profiles())
 
-    async def browser(  # noqa: C901, PLR0911, PLR0912
+    async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         action: str,
         target: str | None = None,
@@ -540,6 +550,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
+            target_url = self._validate_browser_target_url(target_url)
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -585,6 +596,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
+            target_url = self._validate_browser_target_url(target_url)
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -655,6 +667,11 @@ class BrowserTools(Toolkit):
         if normalized_target not in {None, "host"}:
             msg = f"Unsupported target: {target}"
             raise ValueError(msg)
+
+    @staticmethod
+    def _validate_browser_target_url(target_url: str) -> str:
+        """Validate model-supplied browser navigation URLs."""
+        return validate_server_fetch_url(target_url)
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
@@ -822,7 +839,7 @@ class BrowserTools(Toolkit):
         if selector is None:
             msg = "upload requires inputRef, ref, or element"
             raise ValueError(msg)
-        normalized_paths = [str(Path(path).expanduser()) for path in paths]
+        normalized_paths = [str(self._resolve_upload_path(path)) for path in paths]
         locator = tab.page.locator(selector).first
         await locator.set_input_files(normalized_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
         return {
@@ -1181,6 +1198,7 @@ class BrowserTools(Toolkit):
             except Exception:
                 await playwright.stop()
                 raise
+            await context.route("**/*", self._route_network_request)
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
@@ -1262,6 +1280,15 @@ class BrowserTools(Toolkit):
     def _next_output_path(self, extension: str) -> Path:
         return self._resolve_output_dir() / f"{uuid4().hex}.{extension}"
 
+    async def _route_network_request(self, route: Route) -> None:
+        """Block browser requests to URLs unsafe for server-side fetching."""
+        try:
+            validate_server_fetch_url(route.request.url)
+        except ServerFetchUrlError:
+            await route.abort("blockedbyclient")
+            return
+        await route.continue_()
+
     def _resolve_output_dir(self) -> Path:
         """Return the directory used for browser artifacts."""
         if self._output_dir is not None:
@@ -1274,6 +1301,32 @@ class BrowserTools(Toolkit):
         self._output_dir = (storage_root / "browser").resolve()
         self._output_dir.mkdir(parents=True, exist_ok=True)
         return self._output_dir
+
+    def _browser_upload_roots(self) -> tuple[Path, ...]:
+        """Return roots whose files can be read by browser upload."""
+        roots = [self._runtime_paths.storage_root.resolve(), self._resolve_output_dir().resolve()]
+        context = get_tool_runtime_context()
+        if context is not None and context.storage_path is not None:
+            roots.append(context.storage_path.resolve())
+
+        unique_roots: list[Path] = []
+        for root in roots:
+            if root not in unique_roots:
+                unique_roots.append(root)
+        return tuple(unique_roots)
+
+    def _resolve_upload_path(self, path: str) -> Path:
+        """Resolve and confine one browser upload path."""
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            msg = f"upload path must be an existing file: {path}"
+            raise ValueError(msg)
+        roots = self._browser_upload_roots()
+        if any(_is_path_inside(resolved, root) for root in roots):
+            return resolved
+        root_list = ", ".join(str(root) for root in roots)
+        msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
+        raise ValueError(msg)
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

@@ -61,6 +61,7 @@ post_params  # unused variable (src/mindroom/workers/backends/kubernetes_resourc
 response_type  # unused variable (src/mindroom/workers/backends/kubernetes_resources.py)
 collection_formats  # unused variable (src/mindroom/workers/backends/kubernetes_resources.py)
 _.invite_user  # unused method (src/mindroom/hooks/types.py)
+_.make_request  # unused method (src/mindroom/tools/custom_api.py)
 _.do_CONNECT  # unused method (src/mindroom/egress/agent_vault_bridge.py)
 _.do_DELETE  # unused method (src/mindroom/egress/agent_vault_bridge.py)
 _.do_GET  # unused method (src/mindroom/egress/agent_vault_bridge.py)

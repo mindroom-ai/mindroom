@@ -25,6 +25,7 @@ from mindroom.custom_tools.browser import (
     _persistent_launch_kwargs,
     _profile_dir,
 )
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
@@ -351,6 +352,34 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_browser_open_rejects_private_target_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser navigation should reject private network targets before opening a tab."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    open_tab = AsyncMock()
+    monkeypatch.setattr(tool, "_open_tab", open_tab)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        await tool.browser(action="open", targetUrl="http://127.0.0.1:8000/admin")
+
+    assert exc_info.value.reason == "private_address"
+    open_tab.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_rejects_unsupported_target_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser navigation should reject local-file and non-HTTP URL schemes."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    navigate = AsyncMock()
+    monkeypatch.setattr(tool, "_navigate", navigate)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        await tool.browser(action="navigate", targetUrl="file:///etc/passwd")
+
+    assert exc_info.value.reason == "unsupported_scheme"
+    navigate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_browser_rejects_non_host_targets() -> None:
     """MindRoom browser currently supports host only."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
@@ -424,6 +453,81 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_browser_upload_rejects_paths_outside_runtime_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser uploads should not read arbitrary local files outside runtime storage."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    outside_file = tmp_path / "secret.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+    tool = BrowserTools(runtime_paths)
+    mock_state = object()
+    set_input_files = AsyncMock()
+    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
+    page: Any = SimpleNamespace(locator=locator)
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
+
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    with pytest.raises(ValueError, match="outside browser upload root"):
+        await tool._upload(
+            profile_name="mindroom",
+            target_id=None,
+            paths=[str(outside_file)],
+            ref="e1",
+            input_ref=None,
+            element=None,
+            timeout_ms=None,
+        )
+
+    set_input_files.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_browser_upload_allows_paths_inside_tool_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser uploads should allow files produced inside the active tool storage root."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    allowed_file = runtime_paths.storage_root / "browser" / "upload.txt"
+    allowed_file.parent.mkdir(parents=True)
+    allowed_file.write_text("upload", encoding="utf-8")
+    tool = BrowserTools(runtime_paths)
+    mock_state = object()
+    set_input_files = AsyncMock()
+    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
+    page: Any = SimpleNamespace(locator=locator)
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
+
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    payload = await tool._upload(
+        profile_name="mindroom",
+        target_id=None,
+        paths=[str(allowed_file)],
+        ref="e1",
+        input_ref=None,
+        element=None,
+        timeout_ms=None,
+    )
+
+    set_input_files.assert_awaited_once_with([str(allowed_file)], timeout=30_000)
+    assert payload["paths"] == [str(allowed_file)]
+
+
+@pytest.mark.asyncio
 async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fill act fails when no field resolves to a usable selector."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
@@ -455,6 +559,7 @@ class _FakeContext:
         self.pages = list(pages or [])
         self.fresh_page = _FakePage()
         self.new_page = AsyncMock(return_value=self.fresh_page)
+        self.route = AsyncMock()
         self.close = AsyncMock()
 
 
@@ -509,6 +614,38 @@ async def test_ensure_profile_uses_runtime_browser_executable(
     assert launch_kwargs["executable_path"] == "/opt/custom-browser"
     context.new_page.assert_awaited_once_with()
     assert state.active_target_id is not None
+
+
+@pytest.mark.asyncio
+async def test_ensure_profile_installs_server_fetch_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser contexts should validate every routed network request URL."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    context = _FakeContext(pages=[])
+    _install_fake_persistent_playwright(monkeypatch, context=context)
+
+    await tool._ensure_profile("mindroom")
+
+    context.route.assert_awaited_once()
+    route_pattern, route_handler = context.route.await_args.args
+    assert route_pattern == "**/*"
+
+    unsafe_route = SimpleNamespace(
+        request=SimpleNamespace(url="http://127.0.0.1/admin"),
+        abort=AsyncMock(),
+        continue_=AsyncMock(),
+    )
+    await route_handler(unsafe_route)
+
+    unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
+    unsafe_route.continue_.assert_not_called()
 
 
 @pytest.mark.asyncio

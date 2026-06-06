@@ -14,9 +14,11 @@ from mindroom.mcp.transports import (
     _build_stdio_server_parameters,
     _interpolate_mcp_env,
     _interpolate_mcp_headers,
+    _server_fetch_mcp_http_client,
     _TransportStreams,
     build_transport_handle,
 )
+from mindroom.server_fetch_url import ServerFetchUrlError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -30,6 +32,15 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
         process_env={"API_TOKEN": "secret-token", "EXTRA_ARG": "value"},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _public_dns_for_mcp_transport_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep remote transport tests focused on URL policy instead of live DNS."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 443))],
     )
 
 
@@ -113,6 +124,8 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
     async with handle.opener() as opened_streams:
         assert opened_streams == streams
 
+    httpx_client_factory = captured.pop("httpx_client_factory")
+    assert httpx_client_factory is _server_fetch_mcp_http_client
     assert captured == {
         "url": "https://mcp.example/sse",
         "headers": {"Authorization": "Bearer secret-token"},
@@ -154,6 +167,8 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
     async with handle.opener() as streams:
         assert streams == (read_stream, write_stream)
 
+    httpx_client_factory = captured.pop("httpx_client_factory")
+    assert httpx_client_factory is _server_fetch_mcp_http_client
     assert captured == {
         "url": "https://mcp.example/mcp",
         "headers": {"X-Token": "secret-token"},
@@ -184,3 +199,74 @@ async def test_open_streamable_http_requires_runtime_url(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="streamable-http MCP servers require url"):
         async with handle.opener():
             pass
+
+
+@pytest.mark.asyncio
+async def test_open_sse_rejects_private_transport_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Remote MCP transports should reject private-network URLs before opening clients."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    @asynccontextmanager
+    async def fake_sse_client(
+        url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[_TransportStreams]:
+        del url, kwargs
+        msg = "unsafe MCP URL should be rejected before the SSE client opens"
+        raise AssertionError(msg)
+        yield cast("_TransportStreams", (object(), object()))
+
+    monkeypatch.setattr(transport_module, "sse_client", fake_sse_client)
+    server_config = MCPServerConfig(transport="sse", url="http://127.0.0.1:8000/sse")
+    handle = build_transport_handle("demo", server_config, runtime_paths)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        async with handle.opener():
+            pass
+
+    assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_open_streamable_http_rejects_metadata_transport_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Remote MCP transports should reject cloud metadata URLs before opening clients."""
+    runtime_paths = _runtime_paths(tmp_path)
+
+    @asynccontextmanager
+    async def fake_streamablehttp_client(
+        url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[tuple[object, object, object]]:
+        del url, kwargs
+        msg = "unsafe MCP URL should be rejected before the streamable HTTP client opens"
+        raise AssertionError(msg)
+        yield object(), object(), lambda: "session-id"
+
+    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    server_config = MCPServerConfig(
+        transport="streamable-http",
+        url="http://169.254.169.254/latest/meta-data/",
+    )
+    handle = build_transport_handle("demo", server_config, runtime_paths)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        async with handle.opener():
+            pass
+
+    assert exc_info.value.reason == "metadata_address"
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_client_factory_rejects_private_request_url() -> None:
+    """The MCP HTTP client factory should validate redirects and request URLs through server-fetch transport."""
+    async with _server_fetch_mcp_http_client() as client:
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            await client.get("http://127.0.0.1:8000/mcp")
+
+    assert exc_info.value.reason == "private_address"
