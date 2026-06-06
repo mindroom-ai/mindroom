@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 import hmac
@@ -69,7 +70,7 @@ def _cached_user_data(token: str, now: datetime) -> dict[str, Any] | None:
         return None
 
     _auth_cache.move_to_end(cache_key)
-    return entry.user_data
+    return deepcopy(entry.user_data)
 
 
 def _store_auth_cache(token: str, user_data: dict[str, Any], now: datetime) -> None:
@@ -78,7 +79,7 @@ def _store_auth_cache(token: str, user_data: dict[str, Any], now: datetime) -> N
         return
 
     cache_key = _auth_cache_key(token)
-    _auth_cache[cache_key] = AuthCacheEntry(expires_at=expires_at, user_data=user_data)
+    _auth_cache[cache_key] = AuthCacheEntry(expires_at=expires_at, user_data=deepcopy(user_data))
     _auth_cache.move_to_end(cache_key)
     while len(_auth_cache) > AUTH_CACHE_MAX_ENTRIES:
         _auth_cache.popitem(last=False)

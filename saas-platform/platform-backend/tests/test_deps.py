@@ -199,6 +199,36 @@ class TestDeps:
         _auth_cache.clear()
 
     @pytest.mark.asyncio
+    async def test_verify_user_cache_does_not_share_mutable_user_data(
+        self, mock_supabase: MagicMock, mock_auth_client: MagicMock
+    ):
+        """Request handlers must not be able to mutate cached auth data."""
+        from backend.deps import _auth_cache, verify_user
+
+        _auth_cache.clear()
+        token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
+        mock_user = Mock()
+        mock_user.user.id = "user_123"
+        mock_user.user.email = "test@example.com"
+        mock_user.user.user_metadata = {"full_name": "Test User"}
+        mock_auth_client.auth.get_user.return_value = mock_user
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"id": "user_123", "email": "test@example.com"}
+        )
+
+        result = await verify_user(f"Bearer {token}")
+        result["email"] = "mutated@example.com"
+        result["account"]["email"] = "mutated@example.com"
+        mock_auth_client.auth.get_user.reset_mock()
+
+        cached_result = await verify_user(f"Bearer {token}")
+
+        assert cached_result["email"] == "test@example.com"
+        assert cached_result["account"]["email"] == "test@example.com"
+        mock_auth_client.auth.get_user.assert_not_called()
+        _auth_cache.clear()
+
+    @pytest.mark.asyncio
     async def test_verify_user_does_not_accept_expired_cached_token(self, mock_auth_client: MagicMock):
         """Expired JWTs must not be accepted through a stale auth cache hit."""
         from backend.deps import AuthCacheEntry, _auth_cache, verify_user
