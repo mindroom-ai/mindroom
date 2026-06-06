@@ -75,6 +75,7 @@ class TestResolvedMessageExtraction:
     def setup_method(self) -> None:
         """Clear cache before each test."""
         message_content_module._mxc_cache.clear()
+        message_content_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
@@ -735,6 +736,7 @@ class TestDownloadMxcText:
     def setup_method(self) -> None:
         """Clear cache before each test."""
         message_content_module._mxc_cache.clear()
+        message_content_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:
@@ -872,6 +874,7 @@ class TestCanonicalContentResolution:
     def setup_method(self) -> None:
         """Clear cache before each test."""
         message_content_module._mxc_cache.clear()
+        message_content_module._mxc_cache_total_bytes = 0
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_content_metadata(self) -> None:

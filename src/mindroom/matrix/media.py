@@ -244,6 +244,9 @@ def _validated_download_body(
     if isinstance(response, nio.DownloadError):
         logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
         return None
+    if not isinstance(response, nio.DownloadResponse):
+        logger.error("Media download returned invalid response", event_id=_event_id_for_log(event), error=str(response))
+        return None
     body = response.body
     if not isinstance(body, bytes):
         logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))

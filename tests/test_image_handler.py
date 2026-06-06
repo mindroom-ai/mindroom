@@ -21,6 +21,10 @@ from mindroom.matrix.media import (
 )
 
 
+def _download_response(body: bytes) -> nio.DownloadResponse:
+    return nio.DownloadResponse(body=body, content_type="application/octet-stream", filename=None)
+
+
 class TestExtractCaption:
     """Test MSC2530-based caption extraction."""
 
@@ -129,9 +133,7 @@ class TestDownloadImage:
         event.url = "mxc://example.org/abc123"
         event.source = {"content": {"info": {"mimetype": "image/png"}}}
 
-        response = MagicMock()
-        response.body = b"image_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"image_data")
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
@@ -158,9 +160,7 @@ class TestDownloadImage:
             },
         }
 
-        response = MagicMock()
-        response.body = b"encrypted_image_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"encrypted_image_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_image_data"
@@ -185,9 +185,7 @@ class TestDownloadImage:
         event.url = "mxc://example.org/mismatch"
         event.source = {"content": {"info": {"mimetype": "image/jpeg"}}}
 
-        response = MagicMock()
-        response.body = b"\x89PNG\r\n\x1a\nrest"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"\x89PNG\r\n\x1a\nrest")
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
@@ -201,8 +199,7 @@ class TestDownloadImage:
         event.event_id = "$test_event"
         event.url = "mxc://example.org/fail"
 
-        error_response = MagicMock(spec=nio.DownloadError)
-        client.download.return_value = error_response
+        client.download.return_value = nio.DownloadError("download failed")
 
         result = await image_handler.download_image(client, event)
         assert result is None
@@ -221,6 +218,19 @@ class TestDownloadImage:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_download_media_bytes_returns_none_on_invalid_response(self) -> None:
+        """Malformed Matrix download responses should fail closed."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/invalid"
+        client.download.return_value = object()
+
+        result = await download_media_bytes(client, event)
+
+        assert result is None
+
+    @pytest.mark.asyncio
     async def test_download_media_bytes_rejects_unencrypted_payload_over_limit(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -231,9 +241,7 @@ class TestDownloadImage:
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/too-large"
-        response = MagicMock()
-        response.body = b"123456"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"123456")
 
         result = await download_media_bytes(client, event)
 
@@ -259,9 +267,7 @@ class TestDownloadImage:
                 },
             },
         }
-        response = MagicMock()
-        response.body = b"123456"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"123456")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             result = await download_media_bytes(client, event)
@@ -289,9 +295,7 @@ class TestDownloadImage:
                 },
             },
         }
-        response = MagicMock()
-        response.body = b"small"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"small")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment", return_value=b"123456"):
             result = await download_media_bytes(client, event)
@@ -315,9 +319,7 @@ class TestDownloadImage:
             },
         }
 
-        response = MagicMock()
-        response.body = b"encrypted_image_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"encrypted_image_data")
 
         result = await image_handler.download_image(client, event)
         assert result is None
@@ -339,9 +341,7 @@ class TestDownloadImage:
             },
         }
 
-        response = MagicMock()
-        response.body = b"encrypted_image_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"encrypted_image_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.side_effect = ValueError("bad ciphertext")
@@ -358,9 +358,7 @@ class TestDownloadImage:
         event.url = "mxc://example.org/notype"
         event.source = {"content": {}}
 
-        response = MagicMock()
-        response.body = b"image_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"image_data")
 
         result = await image_handler.download_image(client, event)
         assert isinstance(result, Image)
@@ -384,9 +382,7 @@ class TestDownloadImage:
             },
         }
 
-        response = MagicMock()
-        response.body = b"encrypted_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"encrypted_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_data"
@@ -413,9 +409,7 @@ class TestDownloadImage:
             },
         }
 
-        response = MagicMock()
-        response.body = b"encrypted_data"
-        client.download.return_value = response
+        client.download.return_value = _download_response(b"encrypted_data")
 
         with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment") as mock_decrypt:
             mock_decrypt.return_value = b"decrypted_data"

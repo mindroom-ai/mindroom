@@ -26,6 +26,7 @@ _cache_ttl = 3600.0  # 1 hour TTL
 _mxc_cache_max_entries = 500
 _mxc_text_max_bytes = 2 * 1024 * 1024
 _mxc_cache_max_bytes = 16 * 1024 * 1024
+_mxc_cache_total_bytes = 0
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -108,15 +109,24 @@ def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool
 
 
 def _cache_mxc_text(mxc_url: str, text: str, timestamp: float) -> None:
-    if _mxc_text_exceeds_limit(text):
+    global _mxc_cache_total_bytes
+
+    size_bytes = _text_size_bytes(text)
+    if size_bytes > _mxc_text_max_bytes:
         logger.warning(
             "mxc_text_cache_entry_exceeds_byte_limit",
             mxc_url=mxc_url,
-            size_bytes=_text_size_bytes(text),
+            size_bytes=size_bytes,
             limit_bytes=_mxc_text_max_bytes,
         )
         return
+    if not _mxc_cache:
+        _mxc_cache_total_bytes = 0
+    if mxc_url in _mxc_cache:
+        previous_text, _ = _mxc_cache[mxc_url]
+        _mxc_cache_total_bytes -= _text_size_bytes(previous_text)
     _mxc_cache[mxc_url] = (text, timestamp)
+    _mxc_cache_total_bytes += size_bytes
     _mxc_cache.move_to_end(mxc_url)
     _clean_expired_cache()
 
@@ -150,6 +160,8 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
             logger.debug("mxc_cache_hit", mxc_url=mxc_url)
             return content
         # Expired, remove from cache
+        global _mxc_cache_total_bytes
+        _mxc_cache_total_bytes -= _text_size_bytes(content)
         del _mxc_cache[mxc_url]
 
     if event_cache is not None and room_id is not None:
@@ -393,20 +405,25 @@ async def _resolve_canonical_content(
 
 def _clean_expired_cache() -> None:
     """Remove expired entries, then evict oldest live entries until within the LRU bound."""
+    global _mxc_cache_total_bytes
+
     current_time = time.time()
     expired_keys = [key for key, (_, timestamp) in _mxc_cache.items() if current_time - timestamp >= _cache_ttl]
     for key in expired_keys:
+        text, _ = _mxc_cache[key]
+        _mxc_cache_total_bytes -= _text_size_bytes(text)
         del _mxc_cache[key]
     evicted_entries = 0
-    total_bytes = sum(_text_size_bytes(text) for text, _ in _mxc_cache.values())
-    while len(_mxc_cache) > _mxc_cache_max_entries or total_bytes > _mxc_cache_max_bytes:
+    if not _mxc_cache:
+        _mxc_cache_total_bytes = 0
+    while len(_mxc_cache) > _mxc_cache_max_entries or _mxc_cache_total_bytes > _mxc_cache_max_bytes:
         _, (evicted_text, _) = _mxc_cache.popitem(last=False)
-        total_bytes -= _text_size_bytes(evicted_text)
+        _mxc_cache_total_bytes -= _text_size_bytes(evicted_text)
         evicted_entries += 1
     if expired_keys or evicted_entries:
         logger.debug(
             "mxc_cache_cleaned",
             expired_entries=len(expired_keys),
             evicted_entries=evicted_entries,
-            cache_bytes=total_bytes,
+            cache_bytes=_mxc_cache_total_bytes,
         )
