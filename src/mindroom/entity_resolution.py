@@ -10,8 +10,7 @@ from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
-    managed_room_key_from_alias_localpart,
-    room_alias_localpart,
+    room_alias_identifier_candidates,
 )
 
 if TYPE_CHECKING:
@@ -143,14 +142,7 @@ def _add_room_alias_identifiers(
     room_alias: str,
     runtime_paths: RuntimePaths,
 ) -> None:
-    identifiers.append(room_alias)
-    localpart = room_alias_localpart(room_alias)
-    if localpart is None:
-        return
-    identifiers.append(localpart)
-    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
-    if managed_room_key is not None:
-        identifiers.append(managed_room_key)
+    identifiers.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
 
 
 def configured_routable_entity_ids_for_room(

@@ -80,6 +80,19 @@ def room_alias_localpart(room_alias: str) -> str | None:
     return room_alias[1:].split(":", 1)[0]
 
 
+def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Return alias, localpart, and managed-room key identifiers for one Matrix alias."""
+    identifiers = [room_alias]
+    localpart = room_alias_localpart(room_alias)
+    if not localpart:
+        return identifiers
+    identifiers.append(localpart)
+    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
+    if managed_room_key:
+        identifiers.append(managed_room_key)
+    return identifiers
+
+
 def extract_server_name_from_homeserver(homeserver: str, runtime_paths: RuntimePaths) -> str:
     """Extract the Matrix server name from a homeserver URL."""
     if server_name := runtime_matrix_server_name(runtime_paths):

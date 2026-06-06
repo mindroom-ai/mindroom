@@ -17,7 +17,7 @@ from mindroom.entity_resolution import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
+from mindroom.matrix_identifiers import room_alias_identifier_candidates
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -30,18 +30,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _room_alias_permission_lookup_keys(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Build permission keys derived from one trusted Matrix room alias."""
-    keys = [room_alias]
-    localpart = room_alias_localpart(room_alias)
-    if localpart:
-        keys.append(localpart)
-        managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
-        if managed_room_key:
-            keys.append(managed_room_key)
-    return keys
-
-
 def _room_permission_lookup_keys(
     room_id: str,
     runtime_paths: RuntimePaths,
@@ -50,13 +38,11 @@ def _room_permission_lookup_keys(
     room_key: str | None = None,
 ) -> list[str]:
     """Build room identifiers that can be used as authorization map keys."""
-    keys = [room_id]
-    if room_id.startswith("#"):
-        keys.extend(_room_alias_permission_lookup_keys(room_id, runtime_paths))
+    keys = room_alias_identifier_candidates(room_id, runtime_paths) if room_id.startswith("#") else [room_id]
     if room_key:
         keys.append(room_key)
     if room_alias:
-        keys.extend(_room_alias_permission_lookup_keys(room_alias, runtime_paths))
+        keys.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
     return list(dict.fromkeys(keys))
 
 
