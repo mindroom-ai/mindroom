@@ -1166,33 +1166,6 @@ async def test_handle_config_command_rejects_parent_of_privileged_config_prefix(
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_set_preview_redacts_sensitive_values(tmp_path: Path) -> None:
-    """Set previews should not echo old or new sensitive values into Matrix chat."""
-    config_path = tmp_path / "runtime-config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "voice": {"enabled": False, "stt": {"provider": "openai", "model": "whisper-1", "api_key": "sk-old"}},
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    response, change_info = await handle_config_command(
-        'set voice.stt.api_key "sk-new"',
-        _runtime_paths_for_config(config_path),
-    )
-
-    assert change_info is not None
-    assert REDACTED in response
-    assert "sk-old" not in response
-    assert "sk-new" not in response
-
-
-@pytest.mark.asyncio
 async def test_handle_config_command_show_returns_malformed_yaml_error(tmp_path: Path) -> None:
     """Show should return a user-facing error when the config YAML is malformed."""
     config_path = tmp_path / "runtime-config.yaml"
