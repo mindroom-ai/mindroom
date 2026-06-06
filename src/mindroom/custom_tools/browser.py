@@ -20,8 +20,9 @@ from agno.tools import Toolkit
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, Route, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.logging_config import get_logger
-from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -1282,12 +1283,7 @@ class BrowserTools(Toolkit):
 
     async def _route_network_request(self, route: Route) -> None:
         """Block browser requests to URLs unsafe for server-side fetching."""
-        try:
-            validate_server_fetch_url(route.request.url)
-        except ServerFetchUrlError:
-            await route.abort("blockedbyclient")
-            return
-        await route.continue_()
+        await continue_or_abort_browser_fetch(route)
 
     def _resolve_output_dir(self) -> Path:
         """Return the directory used for browser artifacts."""

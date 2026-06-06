@@ -1,0 +1,30 @@
+"""Shared Playwright request guard for server-side browser tools."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
+
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+
+if TYPE_CHECKING:
+    from playwright.async_api import Route
+
+_BROWSER_INTERNAL_SCHEMES = frozenset({"about", "blob", "data"})
+
+
+def _validate_browser_fetch_url(url: str) -> str:
+    """Validate a browser request URL while allowing non-network browser internals."""
+    if urlsplit(url).scheme.lower() in _BROWSER_INTERNAL_SCHEMES:
+        return url
+    return validate_server_fetch_url(url)
+
+
+async def continue_or_abort_browser_fetch(route: Route) -> None:
+    """Continue public browser fetches and abort unsafe server-side destinations."""
+    try:
+        _validate_browser_fetch_url(route.request.url)
+    except ServerFetchUrlError:
+        await route.abort("blockedbyclient")
+        return
+    await route.continue_()

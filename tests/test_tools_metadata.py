@@ -5,9 +5,11 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Never
+from unittest.mock import AsyncMock
 
+import agno.tools.crawl4ai as agno_crawl4ai
 import pytest
 from agno.tools import Toolkit
 
@@ -235,6 +237,53 @@ def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.Monk
         tool.crawl("http://127.0.0.1:8000/private")
 
     assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI should install a Playwright route guard before crawling."""
+    installed_hook = None
+
+    class FakeCrawlerStrategy:
+        def set_hook(self, name: str, hook: object) -> None:
+            nonlocal installed_hook
+            assert name == "on_page_context_created"
+            installed_hook = hook
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            del config
+            self.crawler_strategy = FakeCrawlerStrategy()
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del config
+            assert url == "https://example.com"
+            assert installed_hook is not None
+            page = SimpleNamespace(route=AsyncMock())
+            await installed_hook(page)
+            route_handler = page.route.await_args.args[1]
+            unsafe_route = SimpleNamespace(
+                request=SimpleNamespace(url="http://127.0.0.1/admin"),
+                abort=AsyncMock(),
+                continue_=AsyncMock(),
+            )
+            await route_handler(unsafe_route)
+            unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
+            unsafe_route.continue_.assert_not_called()
+            return SimpleNamespace(fit_markdown="", markdown="public content", text="", html="", success=True)
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    tool = crawl4ai_tools()()
+
+    result = await tool._async_crawl("https://example.com")
+
+    assert result == "public content"
 
 
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

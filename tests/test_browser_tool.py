@@ -649,6 +649,36 @@ async def test_ensure_profile_installs_server_fetch_route(
 
 
 @pytest.mark.asyncio
+async def test_ensure_profile_route_allows_browser_internal_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser routing should not block browser-internal non-network URLs."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    context = _FakeContext(pages=[])
+    _install_fake_persistent_playwright(monkeypatch, context=context)
+
+    await tool._ensure_profile("mindroom")
+
+    route_handler = context.route.await_args.args[1]
+    for internal_url in ("about:blank", "blob:https://example.com/blob-id", "data:text/html,hello"):
+        route = SimpleNamespace(
+            request=SimpleNamespace(url=internal_url),
+            abort=AsyncMock(),
+            continue_=AsyncMock(),
+        )
+        await route_handler(route)
+
+        route.continue_.assert_awaited_once_with()
+        route.abort.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_ensure_profile_creates_user_data_dir_on_disk(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

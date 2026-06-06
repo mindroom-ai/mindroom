@@ -43,6 +43,15 @@ def _clear_discovery_cache() -> None:
     _DYNAMIC_CLIENT_REGISTRATION_LOCKS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _allow_example_test_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve fake public OAuth hostnames through the shared server-fetch validator."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
+    )
+
+
 def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
     """Importing the MCP registry first should not trigger OAuth registry cycles."""
     subprocess.run(
@@ -420,7 +429,7 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
     """Discovery must not allow DNS names that resolve to private-network targets."""
     runtime_paths = _runtime_paths(tmp_path)
     monkeypatch.setattr(
-        "mindroom.mcp.oauth.socket.getaddrinfo",
+        "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("10.0.0.5", 0))],
     )
     to_thread_calls = 0
@@ -439,13 +448,32 @@ async def test_mcp_oauth_discovery_rejects_hostname_resolving_to_private_address
     code_verifier = provider.issue_pkce_code_verifier()
     assert code_verifier is not None
 
-    with pytest.raises(OAuthProviderError, match="refused unsafe URL host"):
+    with pytest.raises(OAuthProviderError, match="refused unsafe URL"):
         await provider.authorization_uri_async(
             runtime_paths,
             state="state-token",
             code_verifier=code_verifier,
         )
     assert to_thread_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_discovery_rejects_metadata_hostname(tmp_path: Path) -> None:
+    """Discovery must reject cloud metadata hostnames through the shared validator."""
+    runtime_paths = _runtime_paths(tmp_path)
+    server_config = MCPServerConfig(
+        transport="streamable-http",
+        url="https://mcp.example.test/mcp",
+        auth={
+            "type": "oauth",
+            "discovery": "manual",
+            "authorization_url": "https://metadata.google.internal/authorize",
+            "token_url": "https://auth.example.test/token",
+        },
+    )
+
+    with pytest.raises(OAuthProviderError, match="refused unsafe URL"):
+        await _resolve_mcp_oauth_metadata("demo", server_config, runtime_paths)
 
 
 def test_oauth_provider_allows_public_clients_without_secret_and_empty_scopes(tmp_path: Path) -> None:
