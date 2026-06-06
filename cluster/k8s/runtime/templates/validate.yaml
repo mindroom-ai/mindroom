@@ -13,13 +13,23 @@
 {{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.databaseUrl.existingSecret) (eq .Values.eventCache.postgres.auth.passwordKey (include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" .)) -}}
 {{- fail "eventCache.postgres.auth.passwordKey must differ from the event-cache database URL secret key" -}}
 {{- end -}}
+{{- $egressPolicyEnabled := and .Values.egressProxy.enabled .Values.egressProxy.networkPolicy.create -}}
 {{- if and .Values.egressProxy.enabled (ne .Values.workers.backend "kubernetes") -}}
 {{- fail "egressProxy.enabled requires workers.backend=kubernetes" -}}
 {{- end -}}
 {{- if and .Values.egressProxy.enabled (not .Values.egressProxy.service.name) -}}
 {{- fail "egressProxy.service.name is required when egressProxy.enabled=true" -}}
 {{- end -}}
+{{- if and $egressPolicyEnabled (not .Values.workers.kubernetes.networkPolicy.create) -}}
+{{- fail "egressProxy.networkPolicy.create=true requires workers.kubernetes.networkPolicy.create=true" -}}
+{{- end -}}
 {{- $proxyPodSelector := .Values.egressProxy.networkPolicy.proxyPodSelector -}}
-{{- if and .Values.egressProxy.enabled .Values.egressProxy.networkPolicy.create (or (not $proxyPodSelector) (not (or $proxyPodSelector.matchLabels $proxyPodSelector.matchExpressions))) -}}
+{{- if and $egressPolicyEnabled (or (not (kindIs "map" $proxyPodSelector)) (not (or $proxyPodSelector.matchLabels $proxyPodSelector.matchExpressions))) -}}
 {{- fail "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required when egressProxy.networkPolicy.create=true" -}}
+{{- end -}}
+{{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
+{{- $dnsPodSelector := .Values.egressProxy.networkPolicy.dns.podSelector -}}
+{{- $dnsIpBlocks := .Values.egressProxy.networkPolicy.dns.ipBlocks -}}
+{{- if and $egressPolicyEnabled (not (or (kindIs "map" $dnsNamespaceSelector) (kindIs "map" $dnsPodSelector) $dnsIpBlocks)) -}}
+{{- fail "egressProxy.networkPolicy.dns requires namespaceSelector, podSelector, or ipBlocks when egressProxy.networkPolicy.create=true" -}}
 {{- end -}}

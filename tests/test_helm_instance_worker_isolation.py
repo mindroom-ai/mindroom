@@ -690,7 +690,7 @@ def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_prox
                         "extraEnv": {
                             "FOO": "bar",
                             "NO_PROXY": "custom.local",
-                        }
+                        },
                     },
                 },
                 "egressProxy": {
@@ -707,12 +707,12 @@ def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_prox
                             {
                                 "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
                                 "ports": [{"protocol": "TCP", "port": 8080}],
-                            }
+                            },
                         ],
                     },
                 },
-            }
-        )
+            },
+        ),
     )
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
@@ -744,7 +744,7 @@ def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_prox
             {
                 "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "proxy-system"}},
                 "podSelector": {"matchLabels": {"app": "egress-proxy"}},
-            }
+            },
         ],
         "ports": [{"protocol": "TCP", "port": 3128}],
     }
@@ -752,6 +752,107 @@ def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_prox
         "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
         "ports": [{"protocol": "TCP", "port": 8080}],
     }
+
+
+def test_runtime_chart_dns_policy_renders_empty_namespace_selector_with_pod_selector(tmp_path: Path) -> None:
+    """An explicit empty DNS namespaceSelector should still render with the podSelector."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+                "egressProxy": {
+                    "enabled": True,
+                    "networkPolicy": {
+                        "proxyPodSelector": {"matchLabels": {"app": "egress-proxy"}},
+                        "dns": {
+                            # Helm deep-merges maps, so null deletes default labels and leaves {}.
+                            "namespaceSelector": {"matchLabels": None},
+                            "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+                            "ipBlocks": [],
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert policy["spec"]["egress"][0]["to"] == [
+        {
+            "namespaceSelector": {},
+            "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+        },
+    ]
+
+
+def test_runtime_chart_rejects_egress_proxy_policy_without_dns_destinations(tmp_path: Path) -> None:
+    """Worker egress policy should not render a DNS rule with no destination peers."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+                "egressProxy": {
+                    "enabled": True,
+                    "networkPolicy": {
+                        "proxyPodSelector": {"matchLabels": {"app": "egress-proxy"}},
+                        "dns": {
+                            "namespaceSelector": None,
+                            "podSelector": None,
+                            "ipBlocks": [],
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "egressProxy.networkPolicy.dns requires namespaceSelector, podSelector, or ipBlocks "
+        "when egressProxy.networkPolicy.create=true" in completed.stderr
+    )
+
+
+def test_runtime_chart_rejects_egress_proxy_policy_without_worker_network_policy() -> None:
+    """Proxy egress rules only apply when the worker NetworkPolicy is rendered."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.kubernetes.networkPolicy.create=false",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "egressProxy.enabled=true",
+        "egressProxy.networkPolicy.proxyPodSelector.matchLabels.app=egress-proxy",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "egressProxy.networkPolicy.create=true requires workers.kubernetes.networkPolicy.create=true"
+        in completed.stderr
+    )
 
 
 def test_runtime_chart_rejects_egress_proxy_policy_without_proxy_pod_selector() -> None:
@@ -768,8 +869,7 @@ def test_runtime_chart_rejects_egress_proxy_policy_without_proxy_pod_selector() 
     assert completed.returncode != 0
     assert (
         "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required "
-        "when egressProxy.networkPolicy.create=true"
-        in completed.stderr
+        "when egressProxy.networkPolicy.create=true" in completed.stderr
     )
 
 

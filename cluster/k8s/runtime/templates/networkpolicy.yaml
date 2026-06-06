@@ -1,6 +1,10 @@
 {{- if and (eq .Values.workers.backend "kubernetes") .Values.workers.kubernetes.networkPolicy.create }}
 {{- $egressPolicyEnabled := and .Values.egressProxy.enabled .Values.egressProxy.networkPolicy.create -}}
 {{- $proxyNamespace := include "mindroom-runtime.egressProxyNamespace" . -}}
+{{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
+{{- $dnsPodSelector := .Values.egressProxy.networkPolicy.dns.podSelector -}}
+{{- $hasDnsNamespaceSelector := kindIs "map" $dnsNamespaceSelector -}}
+{{- $hasDnsPodSelector := kindIs "map" $dnsPodSelector -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -36,12 +40,15 @@ spec:
   {{- if $egressPolicyEnabled }}
   egress:
     - to:
-        {{- with .Values.egressProxy.networkPolicy.dns.namespaceSelector }}
-        - namespaceSelector:
-            {{- toYaml . | nindent 12 }}
-          {{- with $.Values.egressProxy.networkPolicy.dns.podSelector }}
+        {{- if or $hasDnsNamespaceSelector $hasDnsPodSelector }}
+        -
+          {{- if $hasDnsNamespaceSelector }}
+          namespaceSelector:
+            {{- toYaml $dnsNamespaceSelector | nindent 12 }}
+          {{- end }}
+          {{- if $hasDnsPodSelector }}
           podSelector:
-            {{- toYaml . | nindent 12 }}
+            {{- toYaml $dnsPodSelector | nindent 12 }}
           {{- end }}
         {{- end }}
         {{- range .Values.egressProxy.networkPolicy.dns.ipBlocks }}
