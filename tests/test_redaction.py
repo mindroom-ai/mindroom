@@ -16,6 +16,7 @@ def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() 
         },
         "tokens": [
             {"access_token": "access-secret"},
+            {"apiToken": "api-token-secret"},
             {"refreshToken": "refresh-secret"},
             {"id-token": "id-secret"},
             {"client_secret": "client-secret"},
@@ -32,6 +33,7 @@ def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() 
         },
         "tokens": [
             {"access_token": REDACTED},
+            {"apiToken": REDACTED},
             {"refreshToken": REDACTED},
             {"id-token": REDACTED},
             {"client_secret": REDACTED},
@@ -141,6 +143,7 @@ def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() ->
             "api_keys": ["plain-secret-one", "plain-secret-two"],
             "oauth_tokens": ["plain-oauth-token"],
             "max_tokens": 4096,
+            "next_token": "cursor-value",
             "usage": {
                 "cache_creation_input_tokens": 2,
                 "cache_read_input_tokens": 3,
@@ -156,6 +159,7 @@ def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() ->
         "api_keys": [REDACTED, REDACTED],
         "oauth_tokens": [REDACTED],
         "max_tokens": 4096,
+        "next_token": "cursor-value",
         "usage": {
             "cache_creation_input_tokens": 2,
             "cache_read_input_tokens": 3,

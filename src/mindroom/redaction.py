@@ -47,13 +47,17 @@ _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
         "api_key",
+        "api_token",
         "authorization",
+        "auth_token",
+        "bearer_token",
         "client_secret",
         "cookie",
         "id_token",
         "password",
         "refresh_token",
         "secret",
+        "session_token",
         "set_cookie",
         "token",
     },
@@ -81,38 +85,19 @@ _SECRET_KEY_VARIANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = tuple(
 )
 _SECRET_CONTAINER_KEYS: frozenset[str] = frozenset(
     {
+        "access_tokens",
         "api_keys",
+        "api_tokens",
+        "auth_tokens",
         "client_secrets",
         "credentials",
         "id_tokens",
+        "oauth_tokens",
         "passwords",
         "refresh_tokens",
         "secrets",
+        "session_tokens",
         "tokens",
-    },
-)
-_NON_SECRET_KEYS: frozenset[str] = frozenset(
-    {
-        "accepted_prediction_tokens",
-        "audio_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "cached_tokens",
-        "completion_tokens",
-        "continuation_token",
-        "input_tokens",
-        "max_tokens",
-        "next_token",
-        "output_tokens",
-        "page_token",
-        "pagination_token",
-        "prompt_tokens",
-        "reasoning_tokens",
-        "rejected_prediction_tokens",
-        "token_budget",
-        "token_count",
-        "tokens_used",
-        "total_tokens",
     },
 )
 _CONTEXT_SECRET_LABEL_KEYS: frozenset[str] = frozenset(
@@ -163,11 +148,13 @@ def _normalize_key(value: object) -> str:
 
 def _is_secret_key(value: object) -> bool:
     normalized = _normalize_key(value)
-    if normalized in _NON_SECRET_KEYS:
-        return False
     parts = tuple(part for part in normalized.split("_") if part)
     compact = normalized.replace("_", "")
     for key, compact_key, key_parts in _SECRET_KEY_VARIANTS:
+        if key == "token":
+            if normalized == key or compact == compact_key:
+                return True
+            continue
         if (
             normalized == key
             or normalized.endswith(f"_{key}")
@@ -183,11 +170,9 @@ def _is_secret_key(value: object) -> bool:
 
 def _is_secret_container_key(value: object) -> bool:
     normalized = _normalize_key(value)
-    if normalized in _NON_SECRET_KEYS:
-        return False
     if normalized in _SECRET_CONTAINER_KEYS:
         return True
-    return any(normalized.endswith(f"_{key}") for key in _SECRET_CONTAINER_KEYS)
+    return any(key != "tokens" and normalized.endswith(f"_{key}") for key in _SECRET_CONTAINER_KEYS)
 
 
 def _is_sensitive_key(value: object) -> bool:
