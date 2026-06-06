@@ -31,12 +31,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _safe_current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+def _safe_current_internal_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
     try:
         return current_internal_sender_ids(config, runtime_paths)
     except MissingManagedEntityAccountError:
         logger.warning("internal_sender_ids_unavailable_before_account_preparation")
-        return set()
+        return frozenset()
 
 
 def _room_alias_permission_lookup_keys(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
@@ -96,9 +96,9 @@ def is_authorized_sender(
         config: Application configuration
         room_id: Room ID for permission checks
         runtime_paths: Explicit runtime context for Matrix identity resolution
-        room_alias: Optional Matrix canonical alias from room state. This value
-            is not trusted for permission-key lookup unless persisted managed
-            room state for room_id agrees.
+        room_alias: Accepted for call-site compatibility but intentionally
+            ignored. Caller-supplied canonical aliases are mutable Matrix room
+            state and are never used for permission-key lookup.
 
     Returns:
         True if the sender is authorized, False otherwise
@@ -116,10 +116,7 @@ def is_authorized_sender(
         return True
 
     room_permissions = config.authorization.room_permissions
-    # Matrix canonical aliases are mutable room state, so do not let the
-    # caller-provided alias re-key an arbitrary room for authorization.
-    del room_alias
-
+    _ = room_alias
     # Check room-specific permissions by direct room identifiers first. A room
     # ID is stable; a direct alias target is an explicit caller target rather
     # than room state content.
