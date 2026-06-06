@@ -103,6 +103,7 @@ class SchedulerTools(Toolkit):
         response_text = await list_scheduled_tasks(
             client=context.client,
             room_id=context.room_id,
+            runtime_paths=context.runtime_paths,
             thread_id=context.resolved_thread_id,
             config=context.config,
         )
@@ -127,6 +128,7 @@ class SchedulerTools(Toolkit):
             client=context.client,
             room_id=context.room_id,
             task_id=task_id,
+            runtime_paths=context.runtime_paths,
         )
         _raise_for_scheduler_error(response_text)
         return response_text

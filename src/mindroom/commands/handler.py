@@ -263,6 +263,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = await list_scheduled_tasks(
             client=context.client,
             room_id=room.room_id,
+            runtime_paths=context.runtime_paths,
             thread_id=effective_thread_id,
             config=context.config,
         )
@@ -275,6 +276,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = await cancel_all_scheduled_tasks(
                 client=context.client,
                 room_id=room.room_id,
+                runtime_paths=context.runtime_paths,
             )
         else:
             # Cancel specific task
@@ -283,6 +285,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 task_id=task_id,
+                runtime_paths=context.runtime_paths,
             )
 
     elif command.type == CommandType.EDIT_SCHEDULE:

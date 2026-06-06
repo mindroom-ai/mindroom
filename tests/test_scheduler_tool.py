@@ -222,6 +222,7 @@ async def test_list_schedules_tool_calls_backend() -> None:
     mock_list.assert_awaited_once_with(
         client=context.client,
         room_id=context.room_id,
+        runtime_paths=context.runtime_paths,
         thread_id=context.resolved_thread_id,
         config=context.config,
     )
@@ -274,6 +275,7 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         client=context.client,
         room_id=context.room_id,
         task_id="task123",
+        runtime_paths=context.runtime_paths,
     )
 
 

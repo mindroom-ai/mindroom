@@ -5,10 +5,16 @@ from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
-from mindroom.api.schedules import UpdateScheduleRequest, update_schedule
+from mindroom.api import config_lifecycle
+from mindroom.api.schedules import UpdateScheduleRequest, _authorized_api_room_requester_id, update_schedule
+from mindroom.config.main import Config
 from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
+from tests.api.conftest import use_trusted_upstream_runtime
+from tests.identity_helpers import persist_entity_accounts
 
 
 def _task(
@@ -86,7 +92,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
+        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks) as get_tasks_mock,
     ):
         response = test_client.get("/api/schedules")
 
@@ -100,6 +106,8 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     assert tasks_by_id["cron1234"]["cron_expression"] == "0 9 * * *"
     assert tasks_by_id["cron1234"]["new_thread"] is True
     assert tasks_by_id["cron1234"]["thread_id"] is None
+    assert get_tasks_mock.await_args.kwargs["require_trusted"] is True
+    assert get_tasks_mock.await_args.kwargs["runtime_paths"] is not None
 
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
@@ -118,7 +126,7 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
+        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks) as get_tasks_mock,
     ):
         response = test_client.get("/api/schedules")
 
@@ -127,6 +135,7 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
     assert len(data["tasks"]) == 1
     assert data["tasks"][0]["task_id"] == "badcron1"
     assert data["tasks"][0]["next_run_at"] is None
+    assert get_tasks_mock.await_args.kwargs["require_trusted"] is True
 
 
 def test_update_schedule_once_success(test_client: TestClient) -> None:
@@ -162,7 +171,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task) as get_task_mock,
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
         response = test_client.put(
@@ -188,6 +197,88 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert save_mock.await_args.kwargs["task_id"] == "abc12345"
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
+    assert get_task_mock.await_args.kwargs["require_trusted"] is True
+    assert get_task_mock.await_args.kwargs["runtime_paths"] is not None
+
+
+def test_update_schedule_rebinds_created_by_to_authenticated_matrix_user(test_client: TestClient) -> None:
+    """API edits should not preserve the victim creator identity."""
+    use_trusted_upstream_runtime(test_client.app)
+    mock_client = _mock_matrix_client()
+    existing_task = _task(
+        "abc12345",
+        execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC),
+        message="@mindroom_test_agent original",
+    )
+    existing_task.workflow.created_by = "@victim:example.org"
+    save_mock = AsyncMock(
+        side_effect=lambda **kwargs: ScheduledTaskRecord(
+            task_id=kwargs["task_id"],
+            room_id=kwargs["room_id"],
+            status="pending",
+            created_at=existing_task.created_at,
+            workflow=kwargs["workflow"],
+        ),
+    )
+
+    config_lifecycle.require_api_state(test_client.app).snapshot.config_data["authorization"] = {
+        "default_room_access": True,
+    }
+    runtime_config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(test_client.app)
+    persist_entity_accounts(
+        runtime_config,
+        runtime_paths,
+        usernames={"router": "mindroom_router", "test_agent": "mindroom_test_agent"},
+    )
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
+    ):
+        response = test_client.put(
+            "/api/schedules/abc12345",
+            json={
+                "room_id": "test_room",
+                "schedule_type": "once",
+                "execute_at": "2026-03-01T10:00:00Z",
+                "message": "@mindroom_test_agent updated",
+            },
+            headers={"X-Trusted-User": "editor", "X-Trusted-Matrix-User": "@editor:example.org"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["created_by"] == "@editor:example.org"
+    assert save_mock.await_args.kwargs["workflow"].created_by == "@editor:example.org"
+
+
+def test_schedule_api_does_not_fall_back_to_owner_when_auth_user_lacks_matrix_identity() -> None:
+    """Authenticated API users without a Matrix identity must not inherit owner Matrix access."""
+    api_request = Request({"type": "http", "headers": []})
+    api_request.scope["auth_user"] = {"user_id": "dashboard-user"}
+    runtime_paths = MagicMock()
+    runtime_paths.env_value.return_value = "@owner:server"
+    runtime_config = Config(authorization={"default_room_access": False, "global_users": ["@owner:server"]})
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authorized_api_room_requester_id(api_request, runtime_config, runtime_paths, "!room:server")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "Schedule access requires a Matrix requester identity"
+
+
+def test_list_schedules_requires_matrix_identity_for_unfiltered_request(test_client: TestClient) -> None:
+    """All-room listing should fail closed when API auth has no Matrix identity."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    config_lifecycle.load_config_into_app(runtime_paths, test_client.app)
+
+    response = test_client.get(
+        "/api/schedules",
+        headers={"X-Trusted-User": "dashboard-user", "X-Trusted-Email": "dashboard@example.org"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Schedule access requires a Matrix requester identity"
 
 
 @pytest.mark.asyncio
@@ -223,11 +314,14 @@ async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting()
     )
     save_mock = AsyncMock(return_value=updated_task)
     api_request = MagicMock()
+    api_request.scope = {"auth_user": {"user_id": "standalone"}}
+    runtime_paths = MagicMock()
+    runtime_paths.env_value.return_value = None
 
     with (
         patch(
             "mindroom.api.schedules.config_lifecycle.read_committed_runtime_config",
-            return_value=(runtime_config, MagicMock()),
+            return_value=(runtime_config, runtime_paths),
         ),
         patch("mindroom.api.schedules.resolve_room_aliases", return_value=["test_room"]),
         patch("mindroom.api.schedules.get_room_alias_from_id", return_value=None),
@@ -284,33 +378,51 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
 def test_cancel_schedule_success(test_client: TestClient) -> None:
     """Cancel endpoint should return success wrapper."""
     mock_client = _mock_matrix_client()
-    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     cancel_mock = AsyncMock(return_value="✅ Cancelled task `abc12345`")
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+    assert response.json()["message"] == "Cancelled task `abc12345`"
     assert cancel_mock.await_args.kwargs["task_id"] == "abc12345"
     assert cancel_mock.await_args.kwargs["room_id"] == "test_room"
+    assert cancel_mock.await_args.kwargs["runtime_paths"] is not None
+    assert cancel_mock.await_args.kwargs["cancel_in_memory"] is False
 
 
 def test_cancel_schedule_not_found(test_client: TestClient) -> None:
     """Cancel endpoint should return 404 when task does not exist."""
     mock_client = _mock_matrix_client()
+    cancel_mock = AsyncMock(return_value="❌ Task `missing` not found.")
     with (
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=None),
+        patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/missing?room_id=test_room")
 
     assert response.status_code == 404
+    assert response.json()["detail"] == "Task `missing` not found."
+
+
+def test_cancel_schedule_non_pending_returns_conflict(test_client: TestClient) -> None:
+    """Cancel endpoint must not return success when the scheduler rejects a no-op."""
+    mock_client = _mock_matrix_client()
+    cancel_mock = AsyncMock(return_value="❌ Task `done123` is not pending.")
+    with (
+        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
+        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
+    ):
+        response = test_client.delete("/api/schedules/done123?room_id=test_room")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Task `done123` is not pending."
 
 
 def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
