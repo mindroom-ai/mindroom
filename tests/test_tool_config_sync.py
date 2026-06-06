@@ -22,6 +22,10 @@ IGNORED_AGNO_PARAMS = {
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
 }
+IGNORED_EXTRA_CONFIG_FIELDS = {
+    # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
+    "docker": {"include_tools"},
+}
 
 
 def test_dalle_default_model_is_accepted_by_agno() -> None:
@@ -99,7 +103,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
     config_field_names = set(config_field_map.keys())
 
     missing_fields = agno_param_names - config_field_names
-    extra_fields = config_field_names - agno_param_names
+    extra_fields = config_field_names - agno_param_names - IGNORED_EXTRA_CONFIG_FIELDS.get(tool_name, set())
 
     # Build error message if there are issues
     errors = []
