@@ -846,6 +846,51 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
 
 
 @pytest.mark.asyncio
+async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Path) -> None:
+    """Confirmation should fail if hot reload removed the requester from global admins."""
+    target = MessageTarget.resolve("!room:example.org", None, "$preview")
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@other-admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(
+            build_message_target=MagicMock(return_value=target),
+        ),
+        _send_response=AsyncMock(),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
+    pending_change = SimpleNamespace(
+        room_id="!room:example.org",
+        thread_id=None,
+        config_path="defaults.markdown",
+        new_value=False,
+        requester="@admin:example.org",
+    )
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
+    ):
+        await handle_confirmation_reaction(bot, room, event, pending_change)
+
+    mock_apply.assert_not_awaited()
+    bot._send_response.assert_awaited_once_with(
+        target=target,
+        response_text="❌ Admin only.",
+        skip_mentions=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_uses_explicit_runtime_paths(tmp_path: Path) -> None:
     """Direct config commands should use the provided runtime context."""
     config_path = tmp_path / "runtime-config.yaml"
