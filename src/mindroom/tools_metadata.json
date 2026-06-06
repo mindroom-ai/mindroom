@@ -2483,7 +2483,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
-      "default_execution_target": "primary",
+      "default_execution_target": "worker",
       "dependencies": [
         "docker"
       ],
@@ -2520,8 +2520,8 @@
       "icon": "SiDocker",
       "icon_color": "text-blue-500",
       "name": "docker",
-      "setup_type": "none",
-      "status": "available"
+      "setup_type": "special",
+      "status": "requires_config"
     },
     {
       "agent_override_fields": null,

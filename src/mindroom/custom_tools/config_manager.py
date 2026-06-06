@@ -42,7 +42,7 @@ def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata])
     return tool_name in tool_metadata
 
 
-def preserve_tool_overrides(
+def _preserve_tool_overrides(
     existing_entries: list[ToolConfigEntry],
     updated_tool_names: list[str],
 ) -> list[ToolConfigEntry]:
@@ -51,7 +51,7 @@ def preserve_tool_overrides(
     return [existing_by_name.get(tool_name, ToolConfigEntry(name=tool_name)) for tool_name in updated_tool_names]
 
 
-def validate_knowledge_bases(
+def _validate_knowledge_bases(
     knowledge_bases: list[str],
     configured_knowledge_bases: set[str],
 ) -> str | None:
@@ -623,7 +623,7 @@ class ConfigManagerTools(Toolkit):
             if agent_name in config.agents:
                 return f"Error: Agent '{agent_name}' already exists. Use manage_agent with operation='update' to modify it."
 
-            knowledge_base_error = validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
+            knowledge_base_error = _validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
             if knowledge_base_error:
                 return knowledge_base_error
 
@@ -704,7 +704,7 @@ class ConfigManagerTools(Toolkit):
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
             if knowledge_bases is not None:
-                knowledge_base_error = validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
+                knowledge_base_error = _validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
                 if knowledge_base_error:
                     return knowledge_base_error
 
@@ -719,7 +719,7 @@ class ConfigManagerTools(Toolkit):
                 changes.append(f"Role -> {role}")
 
             if tools is not None and tools != agent.tool_names:
-                agent.tools = preserve_tool_overrides(agent.tools, tools)
+                agent.tools = _preserve_tool_overrides(agent.tools, tools)
                 changes.append(f"Tools -> {', '.join(tools) if tools else '(empty)'}")
 
             if instructions is not None and instructions != agent.instructions:

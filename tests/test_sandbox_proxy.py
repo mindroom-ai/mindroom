@@ -1486,6 +1486,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true",
             "OPENAI_BASE_URL": "http://example.invalid/v1",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -1518,6 +1519,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true",
             "OPENAI_BASE_URL": "http://example.invalid/v1",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -5252,8 +5254,9 @@ class TestWorkerToolsOverride:
             is False
         )
 
-    def test_override_still_requires_proxy_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No proxy URL should always disable proxying, even with override."""
+    def test_override_without_proxy_url_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No proxy URL should keep worker-routed execution tools wrapped so calls fail closed."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url=None,
@@ -5266,8 +5269,77 @@ class TestWorkerToolsOverride:
                 runtime_paths=runtime_paths,
                 worker_tools_override=["shell"],
             )
+            is True
+        )
+
+    def test_default_execution_tool_without_proxy_url_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset sandbox config should not silently run execution tools in the primary runtime."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
             is False
         )
+
+    def test_unsafe_local_execution_opt_in_disables_default_execution_tool_proxying(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit unsafe env opt-in should permit host execution for local execution tools."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+        monkeypatch.setenv("MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS", "true")
+        runtime_paths = _runtime_paths_from_env()
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_unsandboxed_shell_call_raises_instead_of_running_locally(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default local shell calls should fail closed when no sandbox URL or worker backend exists."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+
+        tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
+        entrypoint = tool.async_functions["run_shell_command"].entrypoint
+        assert entrypoint is not None
+
+        with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_URL must be set"):
+            await entrypoint("printf should-not-run")
 
     @pytest.mark.parametrize(
         "tool_name",

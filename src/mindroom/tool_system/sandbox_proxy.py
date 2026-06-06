@@ -65,6 +65,10 @@ _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
+_UNSANDBOXED_EXECUTION_TOOL_NAMES = frozenset({"coding", "docker", "file", "python", "shell"})
+_SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
+_SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
+_UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 
 
 class _AttachmentSavePayloadFields(TypedDict):
@@ -225,7 +229,7 @@ def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
 
 
 def _read_proxy_tools(runtime_paths: RuntimePaths, execution_mode: str | None) -> set[str] | None:
-    default = "" if execution_mode in {"selective", "sandbox_selective"} else "*"
+    default = "*" if execution_mode in _SANDBOX_ALL_EXECUTION_MODES else ""
     raw_value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default) or default).strip()
     if raw_value == "*":
         return None
@@ -659,6 +663,32 @@ def _portable_tool_init_overrides(
     return portable_overrides
 
 
+def _sandbox_proxy_requested_for_tool(
+    *,
+    tool_name: str,
+    proxy_config: _SandboxProxyConfig,
+    worker_tools_override: list[str] | None,
+) -> bool:
+    """Return whether config requests worker/proxy routing for one tool."""
+    if worker_tools_override is not None:
+        requested = tool_name in worker_tools_override
+    elif proxy_config.execution_mode in _UNSAFE_LOCAL_EXECUTION_MODES:
+        requested = False
+    elif proxy_config.execution_mode in _SANDBOX_ALL_EXECUTION_MODES:
+        requested = True
+    elif proxy_config.execution_mode in _SANDBOX_SELECTIVE_EXECUTION_MODES:
+        requested = proxy_config.proxy_tools is None or tool_name in proxy_config.proxy_tools
+    elif proxy_config.execution_mode is not None:
+        requested = False
+    elif proxy_config.proxy_tools is None:
+        requested = True
+    elif proxy_config.proxy_tools:
+        requested = tool_name in proxy_config.proxy_tools
+    else:
+        requested = tool_name in _UNSANDBOXED_EXECUTION_TOOL_NAMES
+    return requested
+
+
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
@@ -672,24 +702,16 @@ def _sandbox_proxy_enabled_for_tool(
     env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
     means "route nothing through the proxy for this agent".
     """
+    del worker_scope
     proxy_config = sandbox_proxy_config(runtime_paths)
     if proxy_config.runner_mode or tool_stays_local(tool_name):
         return False
 
-    if worker_tools_override is not None:
-        requested = tool_name in worker_tools_override
-    elif proxy_config.execution_mode in {"off", "local", "disabled"}:
-        requested = False
-    else:
-        requested = proxy_config.execution_mode in {"all", "sandbox_all"}
-        if not requested:
-            requested = proxy_config.proxy_tools is None or tool_name in proxy_config.proxy_tools
-
-    if not requested:
-        return False
-
-    backend_name = primary_worker_backend_name(runtime_paths)
-    if backend_name == "static_runner" and proxy_config.proxy_url is None and worker_scope is None:
+    if not _sandbox_proxy_requested_for_tool(
+        tool_name=tool_name,
+        proxy_config=proxy_config,
+        worker_tools_override=worker_tools_override,
+    ):
         return False
 
     if primary_worker_backend_available(
@@ -701,7 +723,16 @@ def _sandbox_proxy_enabled_for_tool(
 
     # Dedicated-worker backends must fail closed when routing is intended but the
     # provider config is incomplete; otherwise tools silently execute locally.
-    return primary_worker_backend_is_dedicated(runtime_paths)
+    if primary_worker_backend_is_dedicated(runtime_paths):
+        return True
+
+    # Execution tools also fail closed on the default static backend. To allow
+    # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
+    # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
+    return not (
+        tool_name in _UNSANDBOXED_EXECUTION_TOOL_NAMES
+        and runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
+    )
 
 
 def _call_proxy_sync(

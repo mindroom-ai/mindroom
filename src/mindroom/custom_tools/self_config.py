@@ -12,16 +12,30 @@ from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
-_SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
+_SELF_CONFIG_MUTABLE_FIELDS = frozenset(
+    {
+        "compress_tool_results",
+        "display_name",
+        "instructions",
+        "learning",
+        "learning_mode",
+        "markdown",
+        "max_tool_calls_from_history",
+        "num_history_messages",
+        "num_history_runs",
+        "role",
+        "rooms",
+        "show_tool_calls",
+        "thread_mode",
+    },
+)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
 
 
@@ -120,41 +134,11 @@ class SelfConfigTools(Toolkit):
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."
 
-        # Validate tools against known tool metadata
-        if tools is not None:
-            tool_metadata = resolved_tool_metadata_for_runtime(
-                self.runtime_paths,
-                config,
-                tolerate_plugin_load_errors=True,
-            )
-            invalid_tools = [t for t in tools if t not in tool_metadata]
-            if invalid_tools:
-                return f"Error: Unknown tools: {', '.join(invalid_tools)}"
-            blocked_tools = sorted({t for t in tools if t in _SELF_CONFIG_BLOCKED_TOOLS})
-            if blocked_tools:
-                return f"Error: Self-config cannot assign privileged tools: {', '.join(blocked_tools)}"
-
-        # Block include_default_tools if defaults.tools contains privileged tools
-        if include_default_tools is True:
-            inherited_blocked = sorted({t for t in config.defaults.tool_names if t in _SELF_CONFIG_BLOCKED_TOOLS})
-            if inherited_blocked:
-                return (
-                    f"Error: Cannot enable include_default_tools because defaults.tools "
-                    f"contains privileged tools: {', '.join(inherited_blocked)}"
-                )
-
-        # Validate knowledge bases
-        if knowledge_bases is not None:
-            kb_error = validate_knowledge_bases(knowledge_bases, set(config.knowledge_bases))
-            if kb_error:
-                return kb_error
-
-        agent = config.agents[self.agent_name]
         requested_updates: list[tuple[str, object]] = [
             ("display_name", display_name),
             ("role", role),
             ("instructions", instructions),
-            ("tools", preserve_tool_overrides(agent.tools, tools) if tools is not None else None),
+            ("tools", tools),
             ("model", model),
             ("rooms", rooms),
             ("markdown", markdown),
@@ -171,6 +155,16 @@ class SelfConfigTools(Toolkit):
             ("max_tool_calls_from_history", max_tool_calls_from_history),
             ("context_files", context_files),
         ]
+        privileged_updates = sorted(
+            field_name
+            for field_name, value in requested_updates
+            if value is not None and field_name not in _SELF_CONFIG_MUTABLE_FIELDS
+        )
+        if privileged_updates:
+            formatted_fields = ", ".join(field_name.replace("_", " ") for field_name in privileged_updates)
+            return f"Error: Self-config cannot change privileged fields: {formatted_fields}"
+
+        agent = config.agents[self.agent_name]
         non_null_updates = {field_name: value for field_name, value in requested_updates if value is not None}
 
         candidate_agent_data = agent.model_dump()

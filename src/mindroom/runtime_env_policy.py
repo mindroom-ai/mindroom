@@ -145,6 +145,7 @@ SANDBOX_RUNTIME_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
         "runner_port": "MINDROOM_SANDBOX_RUNNER_PORT",
         "runner_subprocess_timeout_seconds": "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS",
         "shared_storage_root": "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
+        "unsafe_allow_local_execution_tools": "MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS",
         "worker_endpoint": "MINDROOM_SANDBOX_WORKER_ENDPOINT",
         "worker_idle_timeout_seconds": "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS",
     },

@@ -191,7 +191,7 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
 async def test_attachments_tool_get_attachment_mindroom_output_path_writes_primary_workspace(
     tmp_path: Path,
 ) -> None:
-    """Saving an attachment without a worker target should write bytes into the primary workspace."""
+    """Unsafe-local opt-in should write attachment bytes into the primary workspace."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tool = AttachmentTools(tool_output_workspace_root=workspace)
@@ -205,7 +205,13 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     )
     assert attachment is not None
 
-    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+    with tool_runtime_context(
+        _tool_context(
+            tmp_path,
+            attachment_ids=(attachment.attachment_id,),
+            process_env={"MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true"},
+        ),
+    ):
         payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
 
     saved_path = workspace / "inputs" / "sample.txt"
