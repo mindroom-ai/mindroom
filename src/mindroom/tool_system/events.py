@@ -450,11 +450,11 @@ def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     parts: list[str] = []
     truncated = False
+    redacted_args = redact_sensitive_data(tool_args)
+    assert isinstance(redacted_args, dict)
     # Preserve insertion order for easier debugging of tool-call construction.
-    for key, value in tool_args.items():
-        redacted_value = redact_sensitive_data({key: value})
-        assert isinstance(redacted_value, dict)
-        value_text = _to_compact_text(redacted_value[key])
+    for key, value in redacted_args.items():
+        value_text = _to_compact_text(value)
         # Collapse newlines so previews stay single-line.
         value_text = value_text.replace("\n", " ")
         value_preview, value_truncated = _truncate(value_text, _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS)

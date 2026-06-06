@@ -570,6 +570,19 @@ def test_format_tool_started_redacts_nested_secret_args() -> None:
     assert "***redacted***" in trace.args_preview
 
 
+def test_format_tool_started_redacts_top_level_key_value_secret_args() -> None:
+    """Top-level label/value arg pairs should keep sibling context during redaction."""
+    _text, trace = _format_tool_started(
+        "set_env",
+        {"name": "OPENAI_API_KEY", "value": "my-custom-key-format"},
+    )
+
+    assert trace.args_preview is not None
+    assert "name=OPENAI_API_KEY" in trace.args_preview
+    assert "my-custom-key-format" not in trace.args_preview
+    assert "value=***redacted***" in trace.args_preview
+
+
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
     """Pending marker produced by format_tool_started should be completed in-place by id."""
     pending_text, _ = _format_tool_started(
