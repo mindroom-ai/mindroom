@@ -5392,6 +5392,38 @@ class TestWorkerToolsOverride:
             is True
         )
 
+    def test_explicit_wildcard_without_proxy_url_fails_closed_for_all_tools(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit all-tools routing should not collapse into plain local execution."""
+        monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+        _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url=None,
+            execution_mode=None,
+        )
+        monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOOLS", "*")
+        runtime_paths = _runtime_paths_from_env()
+
+        assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "shell",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "calculator",
+                runtime_paths=runtime_paths,
+                worker_tools_override=None,
+            )
+            is True
+        )
+
     def test_unsafe_local_execution_opt_in_disables_explicit_routing_without_backend(
         self,
         monkeypatch: pytest.MonkeyPatch,
