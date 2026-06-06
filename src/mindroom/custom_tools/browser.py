@@ -1296,7 +1296,7 @@ class BrowserTools(Toolkit):
 
     def _browser_upload_roots(self) -> tuple[Path, ...]:
         """Return roots whose files can be read by browser upload."""
-        roots = [self._runtime_paths.storage_root.resolve(), self._resolve_output_dir().resolve()]
+        roots = [self._resolve_output_dir().resolve()]
         context = get_tool_runtime_context()
         if context is not None and context.storage_path is not None:
             roots.append(context.storage_path.resolve())

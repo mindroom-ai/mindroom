@@ -531,6 +531,44 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
 
 
 @pytest.mark.asyncio
+async def test_browser_upload_rejects_runtime_storage_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser uploads should only read browser artifacts, not all runtime state."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    secret_file = runtime_paths.storage_root / "credentials" / "secret.json"
+    secret_file.parent.mkdir(parents=True)
+    secret_file.write_text("secret", encoding="utf-8")
+    tool = BrowserTools(runtime_paths)
+    mock_state = object()
+    set_input_files = AsyncMock()
+    locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
+    page: Any = SimpleNamespace(locator=locator)
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
+
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    with pytest.raises(ValueError, match="outside browser upload root"):
+        await tool._upload(
+            profile_name="mindroom",
+            target_id=None,
+            paths=[str(secret_file)],
+            ref="e1",
+            input_ref=None,
+            element=None,
+            timeout_ms=None,
+        )
+
+    set_input_files.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fill act fails when no field resolves to a usable selector."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
@@ -658,6 +696,17 @@ async def test_ensure_profile_installs_server_fetch_route(
     unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
     unsafe_route.continue_.assert_not_called()
     assert to_thread_calls == 1
+
+    malformed_route = SimpleNamespace(
+        request=SimpleNamespace(url="http://[::1"),
+        abort=AsyncMock(),
+        continue_=AsyncMock(),
+    )
+    await route_handler(malformed_route)
+
+    malformed_route.abort.assert_awaited_once_with("blockedbyclient")
+    malformed_route.continue_.assert_not_called()
+    assert to_thread_calls == 2
 
 
 @pytest.mark.asyncio
