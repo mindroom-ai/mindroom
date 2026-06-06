@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -123,7 +124,7 @@ async def _open_remote_transport(
     if server_config.url is None:
         msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
-    url = validate_server_fetch_url(server_config.url)
+    url = await asyncio.to_thread(validate_server_fetch_url, server_config.url)
     headers = {
         **_interpolate_mcp_headers(server_config.headers, runtime_paths),
         **(dict(extra_headers) if extra_headers is not None else {}),

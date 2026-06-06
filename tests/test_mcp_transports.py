@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
@@ -199,6 +200,44 @@ async def test_open_streamable_http_requires_runtime_url(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="streamable-http MCP servers require url"):
         async with handle.opener():
             pass
+
+
+@pytest.mark.asyncio
+async def test_open_sse_validates_transport_url_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Offload URL validation because DNS resolution can block."""
+    runtime_paths = _runtime_paths(tmp_path)
+    loop_thread_id = threading.get_ident()
+    validator_thread_ids: list[int] = []
+    streams = cast("_TransportStreams", (object(), object()))
+
+    def fake_validate_server_fetch_url(url: str) -> str:
+        validator_thread_ids.append(threading.get_ident())
+        if threading.get_ident() == loop_thread_id:
+            msg = "URL validation should not run on the event-loop thread"
+            raise AssertionError(msg)
+        return url
+
+    @asynccontextmanager
+    async def fake_sse_client(
+        url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[_TransportStreams]:
+        del url, kwargs
+        yield streams
+
+    monkeypatch.setattr(transport_module, "validate_server_fetch_url", fake_validate_server_fetch_url)
+    monkeypatch.setattr(transport_module, "sse_client", fake_sse_client)
+    server_config = MCPServerConfig(transport="sse", url="https://mcp.example/sse")
+    handle = build_transport_handle("demo", server_config, runtime_paths)
+
+    async with handle.opener() as opened_streams:
+        assert opened_streams == streams
+
+    assert validator_thread_ids
+    assert loop_thread_id not in validator_thread_ids
 
 
 @pytest.mark.asyncio
