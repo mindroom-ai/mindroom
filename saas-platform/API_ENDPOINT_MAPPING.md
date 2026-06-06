@@ -235,13 +235,13 @@ This document maps all backend API endpoints to their corresponding frontend usa
 - **Backend**: `backend/routes/sso.py`
 - **Frontend Usage**:
   - `platform-frontend/src/lib/api.ts` (setSsoCookie)
-- **Purpose**: Set SSO cookie for seamless instance access across subdomains
+- **Purpose**: Set API-host SSO cookie for platform API and Matrix OIDC
 
 ### DELETE `/my/sso-cookie`
 - **Backend**: `backend/routes/sso.py`
 - **Frontend Usage**:
   - `platform-frontend/src/lib/api.ts` (clearSsoCookie)
-- **Purpose**: Clear SSO cookie on logout
+- **Purpose**: Clear API-host SSO cookie on logout
 
 ## Analysis & Recommendations
 

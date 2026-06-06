@@ -3,7 +3,6 @@
 from datetime import timedelta
 from typing import Annotated
 
-from backend.config import PLATFORM_DOMAIN
 from backend.deps import _extract_bearer_token, limiter, verify_user
 from backend.models import StatusResponse
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -11,20 +10,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 router = APIRouter()
 
 
-def _legacy_wildcard_cookie_domain() -> str | None:
-    """Return the old superdomain cookie scope so it can be expired."""
-    if not PLATFORM_DOMAIN:
-        return None
-    if PLATFORM_DOMAIN.startswith("."):
-        return PLATFORM_DOMAIN
-    return f".{PLATFORM_DOMAIN}"
-
-
-def _expire_sso_cookie(response: Response, *, domain: str | None = None) -> None:
+def _expire_sso_cookie(response: Response) -> None:
     response.set_cookie(
         key="mindroom_jwt",
         value="",
-        domain=domain,
         path="/",
         secure=True,
         httponly=True,
@@ -50,10 +39,6 @@ async def set_sso_cookie(
     except HTTPException:
         raise HTTPException(status_code=401, detail="Missing bearer token") from None
 
-    legacy_domain = _legacy_wildcard_cookie_domain()
-    if legacy_domain:
-        _expire_sso_cookie(response, domain=legacy_domain)
-
     response.set_cookie(
         key="mindroom_jwt",
         value=token,
@@ -71,7 +56,4 @@ async def set_sso_cookie(
 async def clear_sso_cookie(request: Request, response: Response) -> dict[str, str]:  # noqa: ARG001
     """Clear the SSO cookie on logout."""
     _expire_sso_cookie(response)
-    legacy_domain = _legacy_wildcard_cookie_domain()
-    if legacy_domain:
-        _expire_sso_cookie(response, domain=legacy_domain)
     return {"status": "cleared"}
