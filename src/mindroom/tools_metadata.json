@@ -436,6 +436,7 @@
         "list_channels",
         "list_users",
         "search_messages",
+        "search_workspace",
         "send_message",
         "send_message_thread",
         "upload_file"
@@ -3226,13 +3227,16 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
+        "python-docx",
         "reportlab"
       ],
-      "description": "Generate JSON, CSV, PDF, and text files from data",
+      "description": "Generate JSON, CSV, PDF, DOCX, HTML, and text files from data",
       "display_name": "File Generation",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/file_generation",
       "function_names": [
         "generate_csv_file",
+        "generate_docx_file",
+        "generate_html_file",
         "generate_json_file",
         "generate_pdf_file",
         "generate_text_file"

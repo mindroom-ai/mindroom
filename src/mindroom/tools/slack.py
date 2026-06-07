@@ -166,6 +166,7 @@ if TYPE_CHECKING:
         "list_channels",
         "list_users",
         "search_messages",
+        "search_workspace",
         "send_message",
         "send_message_thread",
         "upload_file",

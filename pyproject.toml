@@ -172,6 +172,7 @@ fal = [
 ]
 file = []
 file_generation = [
+  "python-docx>=1.2.0",
   "reportlab",
 ]
 financial_datasets_api = [

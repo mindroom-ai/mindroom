@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="file_generation",
     display_name="File Generation",
-    description="Generate JSON, CSV, PDF, and text files from data",
+    description="Generate JSON, CSV, PDF, DOCX, HTML, and text files from data",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
@@ -84,12 +84,19 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
-    dependencies=["reportlab"],
+    dependencies=["python-docx", "reportlab"],
     docs_url="https://docs.agno.com/tools/toolkits/others/file_generation",
-    function_names=("generate_csv_file", "generate_json_file", "generate_pdf_file", "generate_text_file"),
+    function_names=(
+        "generate_csv_file",
+        "generate_docx_file",
+        "generate_html_file",
+        "generate_json_file",
+        "generate_pdf_file",
+        "generate_text_file",
+    ),
 )
 def file_generation_tools() -> type[FileGenerationTools]:
-    """Return File Generation tools for creating JSON, CSV, PDF, and text files."""
+    """Return File Generation tools for creating JSON, CSV, PDF, DOCX, HTML, and text files."""
     from agno.tools.file_generation import FileGenerationTools
 
     return FileGenerationTools
