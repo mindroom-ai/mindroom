@@ -11,7 +11,38 @@ from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from agno.tools.api import CustomApiTools
+
+_SENSITIVE_RESPONSE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "authentication-info",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "www-authenticate",
+        "x-api-key",
+        "x-auth-token",
+        "x-access-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    },
+)
+_SENSITIVE_RESPONSE_HEADER_MARKERS = ("api-key", "apikey", "secret", "token")
+
+
+def _sanitize_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return response headers safe for tool-visible output."""
+    return {name: value for name, value in headers.items() if not _is_sensitive_response_header(name)}
+
+
+def _is_sensitive_response_header(name: str) -> bool:
+    normalized_name = name.strip().lower()
+    return normalized_name in _SENSITIVE_RESPONSE_HEADER_NAMES or any(
+        marker in normalized_name for marker in _SENSITIVE_RESPONSE_HEADER_MARKERS
+    )
 
 
 @register_tool_with_metadata(
@@ -135,7 +166,7 @@ def custom_api_tools() -> type[CustomApiTools]:
 
                 result: dict[str, object] = {
                     "status_code": response.status_code,
-                    "headers": dict(response.headers),
+                    "headers": _sanitize_response_headers(response.headers),
                     "data": response_data,
                 }
                 if not response.is_success:

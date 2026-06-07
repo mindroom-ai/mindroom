@@ -4,22 +4,17 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from typing import TYPE_CHECKING
-from urllib.parse import urljoin, urlsplit
+import ssl  # noqa: TC003 - Required for runtime get_type_hints on public transport constructors.
+from collections.abc import Awaitable, Callable, Iterable  # noqa: TC003
+from typing import NoReturn
+from urllib.parse import SplitResult, urljoin, urlsplit
 
 import httpcore
 import httpx
 from httpcore._backends.anyio import AnyIOBackend
+from httpcore._backends.base import SOCKET_OPTION  # noqa: TC002
 from httpx._config import DEFAULT_LIMITS, create_ssl_context
-
-if TYPE_CHECKING:
-    import ssl
-    from collections.abc import Awaitable, Callable, Iterable
-    from typing import NoReturn
-    from urllib.parse import SplitResult
-
-    from httpcore._backends.base import SOCKET_OPTION
-    from httpx._types import CertTypes
+from httpx._types import CertTypes  # noqa: TC002
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _GENERIC_DENY_MESSAGE = "URL is not allowed for server-side fetching"

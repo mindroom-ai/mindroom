@@ -580,6 +580,46 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
     assert payload["paths"] == [str(allowed_file)]
 
 
+def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path: Path) -> None:
+    """Reusable browser tools should not let later calls upload files from a prior context."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+
+    def runtime_context(storage_path: Path) -> ToolRuntimeContext:
+        return ToolRuntimeContext(
+            agent_name="general",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            requester_id="@alice:example.org",
+            client=MagicMock(),
+            config=MagicMock(),
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            storage_path=storage_path,
+        )
+
+    first_storage_path = tmp_path / "first-context"
+    second_storage_path = tmp_path / "second-context"
+    first_file = first_storage_path / "browser" / "artifact.txt"
+    first_file.parent.mkdir(parents=True)
+    first_file.write_text("from first context", encoding="utf-8")
+
+    with tool_runtime_context(runtime_context(first_storage_path)):
+        assert tool._resolve_output_dir() == first_file.parent.resolve()
+
+    with (
+        tool_runtime_context(runtime_context(second_storage_path)),
+        pytest.raises(ValueError, match="outside browser upload root"),
+    ):
+        tool._resolve_upload_path(str(first_file))
+
+
 @pytest.mark.asyncio
 async def test_browser_upload_rejects_runtime_storage_secrets(
     monkeypatch: pytest.MonkeyPatch,

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import socket
+from typing import get_type_hints
 
 import httpx
 import pytest
 
 from mindroom.server_fetch_url import (
+    ServerFetchAsyncHTTPTransport,
     ServerFetchHTTPTransport,
     ServerFetchUrlError,
     validate_server_fetch_redirect_url,
@@ -18,6 +20,15 @@ from mindroom.server_fetch_url import (
 def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]]]:
     family = socket.AF_INET6 if ":" in ip_address else socket.AF_INET
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, 443))]
+
+
+@pytest.mark.parametrize("transport_cls", [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport])
+def test_server_fetch_transport_type_hints_resolve_at_runtime(transport_cls: type[object]) -> None:
+    """Transport constructor annotations should support runtime type inspection."""
+    hints = get_type_hints(transport_cls.__init__)
+
+    assert "verify" in hints
+    assert "socket_options" in hints
 
 
 def test_validate_server_fetch_url_allows_public_http_urls(monkeypatch: pytest.MonkeyPatch) -> None:

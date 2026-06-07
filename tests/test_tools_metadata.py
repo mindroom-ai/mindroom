@@ -17,6 +17,7 @@ import mindroom.tool_system.metadata as metadata_module
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
+import mindroom.tools.custom_api as custom_api_module
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.server_fetch_url import ServerFetchUrlError
@@ -210,6 +211,57 @@ def test_custom_api_tool_rejects_unsafe_url_before_request(
         tool.make_request(endpoint)
 
     assert exc_info.value.reason == reason
+
+
+def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API output should keep safe response headers without exposing credentials."""
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+        is_success = True
+
+        def __init__(self) -> None:
+            self.headers = {
+                "content-type": "application/json",
+                "x-request-id": "req-123",
+                "set-cookie": "session=secret",
+                "authorization": "Bearer secret",
+                "proxy-authorization": "Basic secret",
+                "cookie": "session=secret",
+                "www-authenticate": "Bearer challenge",
+                "authentication-info": "nextnonce=secret",
+                "x-api-key": "secret",
+                "x-auth-token": "secret",
+            }
+
+        def json(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def request(self, **_kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
+    monkeypatch.setattr(custom_api_module.httpx, "Client", FakeClient)
+
+    tool = custom_api_tools()()
+
+    payload = json.loads(tool.make_request("https://example.com/data"))
+
+    assert payload["headers"] == {
+        "content-type": "application/json",
+        "x-request-id": "req-123",
+    }
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:

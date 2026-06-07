@@ -408,7 +408,8 @@ class BrowserTools(Toolkit):
         self._allow_private_networks = allow_private_networks
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
-        self._output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
+        self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
+        self._output_dir = self._configured_output_dir
         if self._output_dir is not None:
             self._output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
@@ -1295,8 +1296,13 @@ class BrowserTools(Toolkit):
 
     def _browser_upload_roots(self) -> tuple[Path, ...]:
         """Return roots whose files can be read by browser upload."""
-        roots = [self._resolve_output_dir().resolve()]
         context = get_tool_runtime_context()
+        if self._configured_output_dir is not None:
+            roots = [self._configured_output_dir.resolve()]
+        elif context is not None and context.storage_path is not None:
+            roots = [(context.storage_path / "browser").resolve()]
+        else:
+            roots = [(self._runtime_paths.storage_root / "browser").resolve()]
         if context is not None and context.storage_path is not None:
             roots.append(context.storage_path.resolve())
         return tuple(roots)
