@@ -221,6 +221,40 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
     assert output_dir.is_dir()
 
 
+def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_path: Path) -> None:
+    """Reusable browser tools should write artifacts under the active context."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+
+    def runtime_context(storage_path: Path) -> ToolRuntimeContext:
+        return ToolRuntimeContext(
+            agent_name="general",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            requester_id="@alice:example.org",
+            client=MagicMock(),
+            config=MagicMock(),
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            storage_path=storage_path,
+        )
+
+    first_storage_path = tmp_path / "first-context"
+    second_storage_path = tmp_path / "second-context"
+
+    with tool_runtime_context(runtime_context(first_storage_path)):
+        assert tool._resolve_output_dir() == (first_storage_path / "browser").resolve()
+
+    with tool_runtime_context(runtime_context(second_storage_path)):
+        assert tool._resolve_output_dir() == (second_storage_path / "browser").resolve()
+
+
 @pytest.mark.asyncio
 async def test_browser_unknown_action_raises() -> None:
     """Unknown browser actions are rejected."""

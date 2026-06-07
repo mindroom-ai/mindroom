@@ -233,6 +233,8 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
                 "authentication-info": "nextnonce=secret",
                 "x-api-key": "secret",
                 "x-auth-token": "secret",
+                "x-ratelimit-remaining-tokens": "99",
+                "x-total-tokens": "100",
             }
 
         def json(self) -> dict[str, str]:
@@ -261,6 +263,8 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
     assert payload["headers"] == {
         "content-type": "application/json",
         "x-request-id": "req-123",
+        "x-ratelimit-remaining-tokens": "99",
+        "x-total-tokens": "100",
     }
 
 
