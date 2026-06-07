@@ -657,6 +657,16 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
+    if tool_name == "dynamic_workflow":
+        from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
+
+        return _wrap_direct_agent_toolkit_for_output_files(
+            DynamicWorkflowTools(),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+
     if tool_name == "dynamic_tools":
         from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
 

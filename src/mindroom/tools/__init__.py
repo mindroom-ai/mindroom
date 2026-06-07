@@ -20,6 +20,7 @@ from mindroom.tools import (
     compact_context,  # noqa: F401
     delegate,  # noqa: F401
     dynamic_tools,  # noqa: F401
+    dynamic_workflow,  # noqa: F401
     memory,  # noqa: F401
     self_config,  # noqa: F401
 )

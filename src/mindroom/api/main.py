@@ -22,6 +22,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
+from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
@@ -626,6 +627,7 @@ app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
+app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 
 @app.get("/api/health")

@@ -3141,6 +3141,18 @@
         },
         {
           "authored_override": true,
+          "default": false,
+          "description": null,
+          "label": "Save Files",
+          "name": "save_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable JSON Generation",
@@ -7379,6 +7391,33 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Create, update, run, and inspect reusable multi-agent Dynamic Workflows",
+      "display_name": "Dynamic Workflows",
+      "docs_url": null,
+      "function_names": [
+        "create_workflow",
+        "validate_workflow",
+        "update_workflow",
+        "run_workflow",
+        "get_workflow_run",
+        "list_workflows",
+        "list_workflow_revisions"
+      ],
+      "helper_text": null,
+      "icon": "Workflow",
+      "icon_color": "text-violet-500",
+      "name": "dynamic_workflow",
       "setup_type": "none",
       "status": "available"
     },
