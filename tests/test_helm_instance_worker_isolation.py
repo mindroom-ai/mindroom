@@ -17,6 +17,7 @@ def _render_chart(
     chart_dir: Path,
     *set_args: str,
     release_name: str = "mindroom-demo",
+    namespace: str | None = None,
     set_string_args: tuple[str, ...] = (),
     values_files: tuple[Path, ...] = (),
 ) -> list[dict[str, Any]]:
@@ -24,6 +25,7 @@ def _render_chart(
         chart_dir,
         *set_args,
         release_name=release_name,
+        namespace=namespace,
         set_string_args=set_string_args,
         values_files=values_files,
     )
@@ -35,6 +37,7 @@ def _run_helm_template(
     chart_dir: Path,
     *set_args: str,
     release_name: str = "mindroom-demo",
+    namespace: str | None = None,
     set_string_args: tuple[str, ...] = (),
     values_files: tuple[Path, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
@@ -47,6 +50,7 @@ def _run_helm_template(
             "template",
             release_name,
             str(chart_dir),
+            *(("--namespace", namespace) if namespace else ()),
             *(arg for value in values_files for arg in ("--values", str(value))),
             *(arg for value in set_args for arg in ("--set", value)),
             *(arg for value in set_string_args for arg in ("--set-string", value)),
@@ -752,6 +756,346 @@ def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_prox
         "to": [{"podSelector": {"matchLabels": {"app": "internal-api"}}}],
         "ports": [{"protocol": "TCP", "port": 8080}],
     }
+
+
+def test_runtime_chart_can_deploy_chart_managed_approved_egress_proxy(tmp_path: Path) -> None:
+    """Approved egress should render the proxy side and wire workers through it."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {
+                    "enabled": True,
+                    "image": {"tag": "v0.1.0"},
+                    "allowlist": {"domains": ["example.com", ".docs.example.com"]},
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    proxy_name = "mindroom-runtime-egress-proxy"
+    proxy_config_name = f"{proxy_name}-config"
+    proxy_pvc_name = f"{proxy_name}-data"
+    runtime_deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    proxy_deployment = _resource(docs, "Deployment", proxy_name)
+    proxy_service = _resource(docs, "Service", proxy_name)
+    proxy_config = _resource(docs, "ConfigMap", proxy_config_name)
+    proxy_pvc = _resource(docs, "PersistentVolumeClaim", proxy_pvc_name)
+    proxy_role = _resource(docs, "Role", proxy_name)
+    proxy_role_binding = _resource(docs, "RoleBinding", proxy_name)
+    proxy_service_account = _resource(docs, "ServiceAccount", proxy_name)
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    proxy_policy = _resource(docs, "NetworkPolicy", f"{proxy_name}-ingress")
+    runtime_container = _container(runtime_deployment, "mindroom")
+    proxy_container = _container(proxy_deployment, "approved-egress-proxy")
+    runtime_env = _env_by_name(runtime_container)
+    proxy_env = _env_by_name(proxy_container)
+    worker_env = json.loads(runtime_env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+
+    assert proxy_config["data"]["allowed-domains.txt"] == "example.com\n.docs.example.com\n"
+    assert proxy_pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert proxy_service_account["automountServiceAccountToken"] is True
+    assert proxy_role["rules"] == [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+        {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get"]},
+    ]
+    assert proxy_role_binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": proxy_name, "namespace": "default"},
+    ]
+
+    assert proxy_container["image"] == "ghcr.io/mindroom-ai/mindroom-egress-proxy:v0.1.0"
+    assert proxy_container["ports"] == [
+        {"name": "proxy", "containerPort": 3128, "protocol": "TCP"},
+        {"name": "policy-api", "containerPort": 8080, "protocol": "TCP"},
+    ]
+    assert proxy_env["POD_NAMESPACE"]["value"] == "default"
+    assert proxy_env["MINDROOM_EGRESS_PROXY_LISTEN_PORT"]["value"] == "3128"
+    assert proxy_env["MINDROOM_APPROVED_EGRESS_API_PORT"]["value"] == "8080"
+    assert proxy_env["MINDROOM_EGRESS_ALLOWLIST_PATH"]["value"] == "/etc/mindroom-egress/allowed-domains.txt"
+    assert proxy_env["MINDROOM_EGRESS_DB_PATH"]["value"] == "/var/lib/mindroom-egress/grants.sqlite3"
+    assert proxy_env["MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS"]["value"] == "21600"
+    assert proxy_env["MINDROOM_APPROVED_EGRESS_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "mindroom-runtime-sandbox-proxy",
+        "key": "MINDROOM_SANDBOX_PROXY_TOKEN",
+    }
+    assert proxy_deployment["spec"]["template"]["spec"]["volumes"] == [
+        {"name": "allowlist", "configMap": {"name": proxy_config_name}},
+        {"name": "data", "persistentVolumeClaim": {"claimName": proxy_pvc_name}},
+    ]
+
+    assert proxy_service["spec"]["ports"] == [
+        {"name": "proxy", "port": 3128, "targetPort": "proxy", "protocol": "TCP"},
+        {"name": "policy-api", "port": 8080, "targetPort": "policy-api", "protocol": "TCP"},
+    ]
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_API_URL"]["value"] == (
+        "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:8080"
+    )
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH"]["value"] == (
+        "/etc/mindroom-egress/allowed-domains.txt"
+    )
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "mindroom-runtime-sandbox-proxy",
+        "key": "MINDROOM_SANDBOX_PROXY_TOKEN",
+    }
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS"]["value"] == "21600"
+    assert {
+        "name": "approved-egress-allowlist",
+        "mountPath": "/etc/mindroom-egress/allowed-domains.txt",
+        "subPath": "allowed-domains.txt",
+        "readOnly": True,
+    } in runtime_container["volumeMounts"]
+
+    assert worker_env["HTTP_PROXY"] == "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:3128"
+    assert worker_policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": proxy_name,
+                        "app.kubernetes.io/instance": "mindroom-runtime",
+                        "app.kubernetes.io/component": "approved-egress-proxy",
+                    },
+                },
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 3128}],
+    }
+    assert proxy_policy["spec"]["ingress"] == [
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "mindroom.ai/component": "worker",
+                            "app.kubernetes.io/managed-by": "mindroom",
+                            "app.kubernetes.io/name": "mindroom-worker",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"port": 3128, "protocol": "TCP"}],
+        },
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "mindroom-runtime",
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/component": "runtime",
+                        },
+                    },
+                },
+            ],
+            "ports": [{"port": 8080, "protocol": "TCP"}],
+        },
+    ]
+
+
+def test_runtime_chart_approved_egress_uses_worker_namespace_for_pod_lookup_and_rbac() -> None:
+    """The proxy runs in the release namespace but reads worker pods from the worker namespace."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.kubernetes.namespace=mindroom-workers",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        release_name="mindroom-runtime",
+        namespace="mindroom-runtime-system",
+    )
+    proxy_name = "mindroom-runtime-egress-proxy"
+    proxy_deployment = _resource(docs, "Deployment", proxy_name)
+    proxy_role = _resource(docs, "Role", proxy_name)
+    proxy_role_binding = _resource(docs, "RoleBinding", proxy_name)
+    proxy_service_account = _resource(docs, "ServiceAccount", proxy_name)
+    proxy_container = _container(proxy_deployment, "approved-egress-proxy")
+    proxy_env = _env_by_name(proxy_container)
+
+    assert proxy_deployment["metadata"].get("namespace", "mindroom-runtime-system") == "mindroom-runtime-system"
+    assert proxy_service_account["metadata"].get("namespace", "mindroom-runtime-system") == "mindroom-runtime-system"
+    assert proxy_env["POD_NAMESPACE"]["value"] == "mindroom-workers"
+    assert proxy_role["metadata"]["namespace"] == "mindroom-workers"
+    assert proxy_role_binding["metadata"]["namespace"] == "mindroom-workers"
+    assert proxy_role_binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": proxy_name, "namespace": "mindroom-runtime-system"},
+    ]
+
+
+def test_runtime_chart_approved_egress_ignores_external_proxy_scheme_and_namespace_selector(
+    tmp_path: Path,
+) -> None:
+    """Chart-managed approved egress should not inherit external proxy routing values."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
+                "egressProxy": {
+                    "service": {
+                        "name": "external-proxy",
+                        "namespace": "external-proxy",
+                        "port": 9443,
+                        "scheme": "https",
+                    },
+                    "networkPolicy": {
+                        "proxyNamespaceSelector": {"matchLabels": {"name": "external-proxy"}},
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    runtime_deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+    runtime_container = _container(runtime_deployment, "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+    worker_env = json.loads(runtime_env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+
+    assert worker_env["HTTP_PROXY"] == "http://mindroom-runtime-egress-proxy.default.svc.cluster.local:3128"
+    assert worker_policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "default"}},
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "mindroom-runtime-egress-proxy",
+                        "app.kubernetes.io/instance": "mindroom-runtime",
+                        "app.kubernetes.io/component": "approved-egress-proxy",
+                    },
+                },
+            },
+        ],
+        "ports": [{"protocol": "TCP", "port": 3128}],
+    }
+
+
+def test_runtime_chart_approved_egress_ignores_external_proxy_namespace_selector(
+    tmp_path: Path,
+) -> None:
+    """Chart-managed approved egress should always select its own namespace."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
+                "egressProxy": {
+                    "networkPolicy": {
+                        "proxyNamespaceSelector": {"matchLabels": {"name": "external-proxy"}},
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    worker_policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert worker_policy["spec"]["egress"][1]["to"][0]["namespaceSelector"] == {
+        "matchLabels": {"kubernetes.io/metadata.name": "default"},
+    }
+
+
+def test_runtime_chart_does_not_render_approved_egress_resources_by_default() -> None:
+    """Disabled approved egress must leave the runtime chart on the existing worker path."""
+    docs = _render_runtime_chart()
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    runtime_env_names = {env["name"] for env in _container(deployment, "mindroom")["env"]}
+    rendered_proxy_resources = [
+        doc
+        for doc in docs
+        if doc.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == "approved-egress-proxy"
+    ]
+
+    assert rendered_proxy_resources == []
+    assert "MINDROOM_APPROVED_EGRESS_API_URL" not in runtime_env_names
+    assert "MINDROOM_APPROVED_EGRESS_TOKEN" not in runtime_env_names
+
+
+def test_runtime_chart_rejects_approved_egress_without_pinned_proxy_image() -> None:
+    """Operators should pin the optional proxy image before enabling the firewall path."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "approvedEgress.image.tag or approvedEgress.image.digest is required" in completed.stderr
+
+
+def test_runtime_chart_rejects_approved_egress_without_token_secret() -> None:
+    """The policy API and plugin should not render without a bearer-token Secret."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "approvedEgress.enabled requires approvedEgress.token.existingSecret "
+        "or workers.sandbox.proxyToken" in completed.stderr
+    )
+
+
+def test_runtime_chart_rejects_approved_egress_existing_service_account_without_name() -> None:
+    """Existing approved egress ServiceAccounts must be named explicitly."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        "approvedEgress.serviceAccount.create=false",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "approvedEgress.serviceAccount.name is required when "
+        "approvedEgress.serviceAccount.create=false" in completed.stderr
+    )
 
 
 def test_runtime_chart_dns_policy_renders_empty_namespace_selector_with_pod_selector(tmp_path: Path) -> None:
