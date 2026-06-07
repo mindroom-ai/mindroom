@@ -49,11 +49,32 @@ if TYPE_CHECKING:
             default=True,
         ),
         ConfigField(
+            name="enable_docx_generation",
+            label="Enable DOCX Generation",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="enable_txt_generation",
             label="Enable TXT Generation",
             type="boolean",
             required=False,
             default=True,
+        ),
+        ConfigField(
+            name="enable_html_generation",
+            label="Enable HTML Generation",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="save_files",
+            label="Save Files",
+            type="boolean",
+            required=False,
+            default=False,
         ),
         ConfigField(
             name="all",

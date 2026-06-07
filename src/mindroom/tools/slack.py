@@ -42,6 +42,13 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
+            name="save_downloads",
+            label="Save Downloads",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
+        ConfigField(
             name="enable_send_message",
             label="Enable Send Message",
             type="boolean",
@@ -86,6 +93,13 @@ if TYPE_CHECKING:
         ConfigField(
             name="enable_search_messages",
             label="Enable Search Messages",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
+        ConfigField(
+            name="enable_search_workspace",
+            label="Enable Search Workspace",
             type="boolean",
             required=False,
             default=False,

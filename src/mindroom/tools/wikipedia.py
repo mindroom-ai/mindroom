@@ -28,6 +28,13 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
+            name="auto_suggest",
+            label="Auto Suggest",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="all",
             label="All",
             type="boolean",

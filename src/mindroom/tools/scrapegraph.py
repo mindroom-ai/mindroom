@@ -56,13 +56,6 @@ if TYPE_CHECKING:
             default=False,
         ),
         ConfigField(
-            name="enable_agentic_crawler",
-            label="Enable Agentic Crawler",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
             name="enable_scrape",
             label="Enable Scrape",
             type="boolean",
@@ -77,6 +70,27 @@ if TYPE_CHECKING:
             default=False,
         ),
         ConfigField(
+            name="headers",
+            label="Headers",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="crawl_poll_interval",
+            label="Crawl Poll Interval",
+            type="number",
+            required=False,
+            default=3,
+        ),
+        ConfigField(
+            name="crawl_max_wait",
+            label="Crawl Max Wait",
+            type="number",
+            required=False,
+            default=180,
+        ),
+        ConfigField(
             name="all",
             label="All",
             type="boolean",
@@ -86,7 +100,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["scrapegraph-py"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
-    function_names=("agentic_crawler", "crawl", "markdownify", "scrape", "searchscraper", "smartscraper"),
+    function_names=("crawl", "markdownify", "scrape", "searchscraper", "smartscraper"),
 )
 def scrapegraph_tools() -> type[ScrapeGraphTools]:
     """Return ScrapeGraph tools for web data extraction."""
