@@ -233,6 +233,12 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
                 "authentication-info": "nextnonce=secret",
                 "x-api-key": "secret",
                 "x-auth-token": "secret",
+                "x-api-token": "secret",
+                "api-token": "secret",
+                "x-token": "secret",
+                "token": "secret",
+                "x-amz-security-token": "secret",
+                "x_api_token": "secret",
                 "x-ratelimit-remaining-tokens": "99",
                 "x-total-tokens": "100",
             }

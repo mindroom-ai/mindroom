@@ -28,6 +28,8 @@ _SENSITIVE_RESPONSE_HEADER_NAMES = frozenset(
         "x-access-token",
         "x-csrf-token",
         "x-xsrf-token",
+        "token",
+        "x-token",
     },
 )
 _SENSITIVE_RESPONSE_HEADER_MARKERS = (
@@ -35,11 +37,13 @@ _SENSITIVE_RESPONSE_HEADER_MARKERS = (
     "apikey",
     "secret",
     "access-token",
+    "api-token",
     "auth-token",
     "bearer-token",
     "csrf-token",
     "id-token",
     "refresh-token",
+    "security-token",
     "session-token",
     "xsrf-token",
 )
@@ -51,7 +55,7 @@ def _sanitize_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
 
 
 def _is_sensitive_response_header(name: str) -> bool:
-    normalized_name = name.strip().lower()
+    normalized_name = name.strip().lower().replace("_", "-")
     return normalized_name in _SENSITIVE_RESPONSE_HEADER_NAMES or any(
         marker in normalized_name for marker in _SENSITIVE_RESPONSE_HEADER_MARKERS
     )
