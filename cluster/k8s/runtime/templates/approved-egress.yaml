@@ -1,0 +1,222 @@
+{{- if .Values.approvedEgress.enabled }}
+{{- $name := include "mindroom-runtime.approvedEgressName" . -}}
+{{- $tokenSecretName := include "mindroom-runtime.approvedEgressTokenSecretName" . -}}
+{{- $tokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
+{{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+{{- $allowlist := "" -}}
+{{- if .Values.approvedEgress.allowlist.domains -}}
+{{- $allowlist = printf "%s\n" (join "\n" .Values.approvedEgress.allowlist.domains) -}}
+{{- end -}}
+{{- if not .Values.approvedEgress.allowlist.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mindroom-runtime.approvedEgressConfigMapName" . }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+data:
+  {{ .Values.approvedEgress.allowlist.key }}: {{ $allowlist | quote }}
+{{- end }}
+{{- if .Values.approvedEgress.serviceAccount.create }}
+{{- if not .Values.approvedEgress.allowlist.existingConfigMap }}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mindroom-runtime.approvedEgressServiceAccountName" . }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+  {{- with .Values.approvedEgress.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: {{ .Values.approvedEgress.serviceAccount.automountServiceAccountToken }}
+{{- end }}
+{{- if .Values.approvedEgress.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workerNamespace }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $workerNamespace }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mindroom-runtime.approvedEgressServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+{{- end }}
+{{- if and .Values.approvedEgress.persistence.enabled (not .Values.approvedEgress.persistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mindroom-runtime.approvedEgressClaimName" . }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.approvedEgress.persistence.storageClassName }}
+  storageClassName: {{ .Values.approvedEgress.persistence.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.approvedEgress.persistence.size | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 8 }}
+        {{- with .Values.approvedEgress.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.approvedEgress.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mindroom-runtime.approvedEgressServiceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.approvedEgress.serviceAccount.automountServiceAccountToken }}
+      enableServiceLinks: false
+      {{- with .Values.approvedEgress.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: approved-egress-proxy
+          image: {{ include "mindroom-runtime.approvedEgressImage" . | quote }}
+          imagePullPolicy: {{ .Values.approvedEgress.image.pullPolicy }}
+          env:
+            - name: POD_NAMESPACE
+              value: {{ $workerNamespace | quote }}
+            - name: MINDROOM_EGRESS_PROXY_LISTEN_PORT
+              value: {{ .Values.approvedEgress.service.proxyPort | quote }}
+            - name: MINDROOM_APPROVED_EGRESS_API_PORT
+              value: {{ .Values.approvedEgress.service.apiPort | quote }}
+            - name: MINDROOM_EGRESS_ALLOWLIST_PATH
+              value: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
+            - name: MINDROOM_EGRESS_DB_PATH
+              value: {{ include "mindroom-runtime.approvedEgressDbPath" . | quote }}
+            {{- if .Values.approvedEgress.maxTtlSeconds }}
+            - name: MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS
+              value: {{ .Values.approvedEgress.maxTtlSeconds | quote }}
+            {{- end }}
+            {{- if .Values.approvedEgress.logLevel }}
+            - name: MINDROOM_APPROVED_EGRESS_LOG_LEVEL
+              value: {{ .Values.approvedEgress.logLevel | quote }}
+            {{- end }}
+            - name: MINDROOM_APPROVED_EGRESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $tokenSecretName }}
+                  key: {{ $tokenSecretKey }}
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.approvedEgress.service.proxyPort }}
+              protocol: TCP
+            - name: policy-api
+              containerPort: {{ .Values.approvedEgress.service.apiPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: policy-api
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: policy-api
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.approvedEgress.resources | nindent 12 }}
+          {{- with .Values.approvedEgress.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: allowlist
+              mountPath: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
+              subPath: {{ .Values.approvedEgress.allowlist.key | quote }}
+              readOnly: true
+            - name: data
+              mountPath: {{ .Values.approvedEgress.dataPath | quote }}
+      volumes:
+        - name: allowlist
+          configMap:
+            name: {{ include "mindroom-runtime.approvedEgressConfigMapName" . }}
+        - name: data
+          {{- if .Values.approvedEgress.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.approvedEgressClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+  {{- with .Values.approvedEgress.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.approvedEgress.service.proxyPort }}
+      targetPort: proxy
+      protocol: TCP
+    - name: policy-api
+      port: {{ .Values.approvedEgress.service.apiPort }}
+      targetPort: policy-api
+      protocol: TCP
+{{- end }}

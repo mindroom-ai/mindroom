@@ -133,18 +133,141 @@ app.kubernetes.io/component: runtime
 {{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.approvedEgressName" -}}
+{{- default (printf "%s-egress-proxy" (include "mindroom-runtime.fullname" .) | trunc 63 | trimSuffix "-") .Values.approvedEgress.service.name -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressServiceAccountName" -}}
+{{- if .Values.approvedEgress.serviceAccount.create -}}
+{{- default (include "mindroom-runtime.approvedEgressName" .) .Values.approvedEgress.serviceAccount.name -}}
+{{- else -}}
+{{- .Values.approvedEgress.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressConfigMapName" -}}
+{{- if .Values.approvedEgress.allowlist.existingConfigMap -}}
+{{- .Values.approvedEgress.allowlist.existingConfigMap -}}
+{{- else -}}
+{{- printf "%s-config" (include "mindroom-runtime.approvedEgressName" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressClaimName" -}}
+{{- if .Values.approvedEgress.persistence.existingClaim -}}
+{{- .Values.approvedEgress.persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-data" (include "mindroom-runtime.approvedEgressName" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressTokenSecretName" -}}
+{{- if .Values.approvedEgress.token.existingSecret -}}
+{{- .Values.approvedEgress.token.existingSecret -}}
+{{- else -}}
+{{- include "mindroom-runtime.proxyTokenSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressTokenSecretKey" -}}
+{{- if .Values.approvedEgress.token.existingSecret -}}
+{{- .Values.approvedEgress.token.key -}}
+{{- else -}}
+{{- .Values.workers.sandbox.proxyToken.key -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressImage" -}}
+{{- $image := .Values.approvedEgress.image -}}
+{{- if and $image.tag $image.digest -}}
+{{- printf "%s:%s@%s" $image.repository $image.tag $image.digest -}}
+{{- else if $image.digest -}}
+{{- printf "%s@%s" $image.repository $image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $image.repository $image.tag -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "mindroom-runtime.approvedEgressName" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: approved-egress-proxy
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+{{ include "mindroom-runtime.approvedEgressSelectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressPodSelector" -}}
+matchLabels:
+  {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 2 }}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressNetworkPolicyName" -}}
+{{- default (printf "%s-ingress" (include "mindroom-runtime.approvedEgressName" .)) .Values.approvedEgress.networkPolicy.name -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressDbPath" -}}
+{{- printf "%s/%s" (.Values.approvedEgress.dataPath | trimSuffix "/") .Values.approvedEgress.dbFileName -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressApiUrl" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%v" (include "mindroom-runtime.approvedEgressName" .) .Release.Namespace .Values.approvedEgress.service.apiPort -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressProxyEnabled" -}}
+{{- if or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}true{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.egressProxyNamespace" -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- .Release.Namespace -}}
+{{- else -}}
 {{- default .Release.Namespace .Values.egressProxy.service.namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressProxyServiceName" -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- include "mindroom-runtime.approvedEgressName" . -}}
+{{- else -}}
+{{- .Values.egressProxy.service.name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressProxyServicePort" -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- .Values.approvedEgress.service.proxyPort -}}
+{{- else -}}
+{{- .Values.egressProxy.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.egressProxyPodSelector" -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- include "mindroom-runtime.approvedEgressPodSelector" . -}}
+{{- else -}}
+{{- toYaml .Values.egressProxy.networkPolicy.proxyPodSelector -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.egressProxyUrl" -}}
 {{- $namespace := include "mindroom-runtime.egressProxyNamespace" . -}}
-{{- printf "%s://%s.%s.svc.cluster.local:%v" .Values.egressProxy.service.scheme .Values.egressProxy.service.name $namespace .Values.egressProxy.service.port -}}
+{{- $serviceName := include "mindroom-runtime.egressProxyServiceName" . -}}
+{{- $servicePort := include "mindroom-runtime.egressProxyServicePort" . -}}
+{{- $scheme := .Values.egressProxy.service.scheme -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- $scheme = "http" -}}
+{{- end -}}
+{{- printf "%s://%s.%s.svc.cluster.local:%v" $scheme $serviceName $namespace $servicePort -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}
 {{- $extraEnv := dict -}}
-{{- if and .Values.egressProxy.enabled .Values.egressProxy.injectWorkerProxyEnv -}}
+{{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.injectWorkerProxyEnv -}}
 {{- $proxyUrl := include "mindroom-runtime.egressProxyUrl" . -}}
 {{- $_ := set $extraEnv "HTTP_PROXY" $proxyUrl -}}
 {{- $_ := set $extraEnv "HTTPS_PROXY" $proxyUrl -}}

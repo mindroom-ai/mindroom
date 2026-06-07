@@ -78,8 +78,37 @@ When using `config.existingConfigMap` or custom `config.data`, keep that config'
 
 ## Worker Egress Proxy
 
-For dedicated Kubernetes workers, the chart can point worker pods at an existing HTTP proxy Service and render a worker egress NetworkPolicy.
-This keeps the proxy deployment, domain allowlist, approval API token, and persistence in the platform layer while making the runtime chart own worker wiring.
+For dedicated Kubernetes workers, the chart can either deploy the approved egress proxy or point workers at an existing HTTP proxy Service.
+In both modes, the worker egress NetworkPolicy keeps worker internet access on the proxy path instead of allowing direct public egress.
+
+Use `approvedEgress` when you want the runtime chart to manage the proxy side too:
+
+```yaml
+workers:
+  backend: kubernetes
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+
+approvedEgress:
+  enabled: true
+  image:
+    tag: v0.1.0
+  allowlist:
+    domains:
+      - example.com
+      - .docs.example.com
+```
+
+This renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, and proxy ingress NetworkPolicy.
+By default, chart-managed proxy resources use the release-derived `<fullname>-egress-proxy` name; set `approvedEgress.service.name` only when an explicit shared name is required.
+The control-plane pod receives `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS`.
+The control-plane pod also mounts the same allowlist file so the approved egress plugin can avoid asking for domains that are already static-allowed.
+The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
+Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
+
+Use `egressProxy` when another chart or platform layer already manages the proxy:
 
 ```yaml
 workers:
@@ -113,8 +142,9 @@ egressProxy:
 
 When `egressProxy.injectWorkerProxyEnv` is true, worker pods receive `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and lowercase variants through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`.
 `workers.kubernetes.extraEnv` is still applied after those defaults, so platform values can override individual variables.
+When `approvedEgress.enabled` is true, the chart automatically points worker proxy settings and the worker egress policy at the chart-managed proxy.
 When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
-NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
+For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
 
 ## Existing Platform Example
 

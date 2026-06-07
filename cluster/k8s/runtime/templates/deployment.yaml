@@ -6,6 +6,8 @@
 {{- $eventCacheDatabaseUrlSecretName := include "mindroom-runtime.eventCacheDatabaseUrlSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretKey := include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" . -}}
 {{- $workerExtraEnvJson := include "mindroom-runtime.workerExtraEnvJson" . -}}
+{{- $approvedEgressTokenSecretName := include "mindroom-runtime.approvedEgressTokenSecretName" . -}}
+{{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -131,6 +133,25 @@ spec:
                 secretKeyRef:
                   name: {{ $proxyTokenSecretName }}
                   key: {{ .Values.workers.sandbox.proxyToken.key }}
+            {{- end }}
+            {{- if .Values.approvedEgress.enabled }}
+            - name: MINDROOM_APPROVED_EGRESS_API_URL
+              value: {{ include "mindroom-runtime.approvedEgressApiUrl" . | quote }}
+            - name: MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH
+              value: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
+            - name: MINDROOM_APPROVED_EGRESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $approvedEgressTokenSecretName }}
+                  key: {{ $approvedEgressTokenSecretKey }}
+            {{- if .Values.approvedEgress.maxTtlSeconds }}
+            - name: MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS
+              value: {{ .Values.approvedEgress.maxTtlSeconds | quote }}
+            {{- end }}
+            {{- if .Values.approvedEgress.sandboxProxyTimeoutSeconds }}
+            - name: MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS
+              value: {{ .Values.approvedEgress.sandboxProxyTimeoutSeconds | quote }}
+            {{- end }}
             {{- end }}
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
@@ -277,6 +298,12 @@ spec:
               readOnly: true
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.approvedEgress.enabled }}
+            - name: approved-egress-allowlist
+              mountPath: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
+              subPath: {{ .Values.approvedEgress.allowlist.key | quote }}
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -343,6 +370,11 @@ spec:
         - name: {{ include "mindroom-runtime.storageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.storageClaimName" . }}
+        {{- if .Values.approvedEgress.enabled }}
+        - name: approved-egress-allowlist
+          configMap:
+            name: {{ include "mindroom-runtime.approvedEgressConfigMapName" . }}
+        {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
         - name: sandbox-workspace
           emptyDir: {}

@@ -13,18 +13,19 @@
 {{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.databaseUrl.existingSecret) (eq .Values.eventCache.postgres.auth.passwordKey (include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" .)) -}}
 {{- fail "eventCache.postgres.auth.passwordKey must differ from the event-cache database URL secret key" -}}
 {{- end -}}
-{{- $egressPolicyEnabled := and .Values.egressProxy.enabled .Values.egressProxy.networkPolicy.create -}}
-{{- if and .Values.egressProxy.enabled (ne .Values.workers.backend "kubernetes") -}}
-{{- fail "egressProxy.enabled requires workers.backend=kubernetes" -}}
+{{- $egressProxyEnabled := or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}
+{{- $egressPolicyEnabled := and $egressProxyEnabled .Values.egressProxy.networkPolicy.create -}}
+{{- if and $egressProxyEnabled (ne .Values.workers.backend "kubernetes") -}}
+{{- fail "egressProxy.enabled or approvedEgress.enabled requires workers.backend=kubernetes" -}}
 {{- end -}}
-{{- if and .Values.egressProxy.enabled (not .Values.egressProxy.service.name) -}}
-{{- fail "egressProxy.service.name is required when egressProxy.enabled=true" -}}
+{{- if and $egressProxyEnabled (not (include "mindroom-runtime.egressProxyServiceName" .)) -}}
+{{- fail "egress proxy service name is required when egressProxy.enabled=true or approvedEgress.enabled=true" -}}
 {{- end -}}
 {{- if and $egressPolicyEnabled (not .Values.workers.kubernetes.networkPolicy.create) -}}
 {{- fail "egressProxy.networkPolicy.create=true requires workers.kubernetes.networkPolicy.create=true" -}}
 {{- end -}}
 {{- $proxyPodSelector := .Values.egressProxy.networkPolicy.proxyPodSelector -}}
-{{- if and $egressPolicyEnabled (or (not (kindIs "map" $proxyPodSelector)) (not (or $proxyPodSelector.matchLabels $proxyPodSelector.matchExpressions))) -}}
+{{- if and $egressPolicyEnabled (not .Values.approvedEgress.enabled) (or (not (kindIs "map" $proxyPodSelector)) (not (or $proxyPodSelector.matchLabels $proxyPodSelector.matchExpressions))) -}}
 {{- fail "egressProxy.networkPolicy.proxyPodSelector with matchLabels or matchExpressions is required when egressProxy.networkPolicy.create=true" -}}
 {{- end -}}
 {{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
@@ -32,4 +33,33 @@
 {{- $dnsIpBlocks := .Values.egressProxy.networkPolicy.dns.ipBlocks -}}
 {{- if and $egressPolicyEnabled (not (or (kindIs "map" $dnsNamespaceSelector) (kindIs "map" $dnsPodSelector) $dnsIpBlocks)) -}}
 {{- fail "egressProxy.networkPolicy.dns requires namespaceSelector, podSelector, or ipBlocks when egressProxy.networkPolicy.create=true" -}}
+{{- end -}}
+{{- if .Values.approvedEgress.enabled -}}
+{{- if not .Values.approvedEgress.image.repository -}}
+{{- fail "approvedEgress.image.repository is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if not (or .Values.approvedEgress.image.tag .Values.approvedEgress.image.digest) -}}
+{{- fail "approvedEgress.image.tag or approvedEgress.image.digest is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if and (not .Values.approvedEgress.serviceAccount.create) (not .Values.approvedEgress.serviceAccount.name) -}}
+{{- fail "approvedEgress.serviceAccount.name is required when approvedEgress.serviceAccount.create=false" -}}
+{{- end -}}
+{{- if not (include "mindroom-runtime.approvedEgressTokenSecretName" .) -}}
+{{- fail "approvedEgress.enabled requires approvedEgress.token.existingSecret or workers.sandbox.proxyToken" -}}
+{{- end -}}
+{{- if not (include "mindroom-runtime.approvedEgressTokenSecretKey" .) -}}
+{{- fail "approvedEgress token key is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.approvedEgress.allowlist.key -}}
+{{- fail "approvedEgress.allowlist.key is required when approvedEgress.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.approvedEgress.allowlist.existingConfigMap .Values.approvedEgress.allowlist.domains -}}
+{{- fail "approvedEgress.allowlist.domains cannot be set when approvedEgress.allowlist.existingConfigMap is set" -}}
+{{- end -}}
+{{- if not .Values.egressProxy.networkPolicy.create -}}
+{{- fail "approvedEgress.enabled requires egressProxy.networkPolicy.create=true so workers cannot bypass the proxy" -}}
+{{- end -}}
+{{- if and .Values.approvedEgress.persistence.enabled (not .Values.approvedEgress.persistence.existingClaim) (not .Values.approvedEgress.persistence.size) -}}
+{{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
+{{- end -}}
 {{- end -}}

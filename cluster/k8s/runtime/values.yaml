@@ -259,9 +259,9 @@ workers:
         memory: 1Gi
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
-# This chart does not deploy the proxy itself. It only points worker pods at an
-# existing proxy Service and, when requested, restricts worker egress so direct
-# internet access must go through that proxy.
+# This chart can point worker pods at an existing proxy Service and, when
+# requested, restrict worker egress so direct internet access must go through
+# that proxy.
 egressProxy:
   enabled: false
   injectWorkerProxyEnv: true
@@ -289,6 +289,74 @@ egressProxy:
       ipBlocks: []
     # Raw Kubernetes NetworkPolicyEgressRule entries appended after DNS and proxy rules.
     extraEgress: []
+
+# Optional chart-managed approved egress proxy for dedicated Kubernetes workers.
+# Enabling this deploys the proxy side and automatically points worker proxy
+# settings at it. Worker direct egress still depends on the worker NetworkPolicy.
+approvedEgress:
+  enabled: false
+  image:
+    repository: ghcr.io/mindroom-ai/mindroom-egress-proxy
+    # Pin a tag or digest before enabling this feature.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: true
+  rbac:
+    create: true
+  service:
+    # Leave empty for <fullname>-egress-proxy.
+    name: ""
+    proxyPort: 3128
+    apiPort: 8080
+    annotations: {}
+  token:
+    # Leave empty to reuse workers.sandbox.proxyToken.
+    existingSecret: ""
+    key: MINDROOM_SANDBOX_PROXY_TOKEN
+  allowlist:
+    domains: []
+    existingConfigMap: ""
+    key: allowed-domains.txt
+    mountPath: /etc/mindroom-egress/allowed-domains.txt
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 10Gi
+    storageClassName: ""
+  dataPath: /var/lib/mindroom-egress
+  dbFileName: grants.sqlite3
+  maxTtlSeconds: 21600
+  sandboxProxyTimeoutSeconds: ""
+  logLevel: info
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+  networkPolicy:
+    create: true
+    name: ""
 
 initContainers: []
 extraContainers: []
