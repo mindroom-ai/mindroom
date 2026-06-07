@@ -43,6 +43,7 @@ class _MindRoomFileTools(AgnoFileTools):
         max_file_length: int = 10000000,
         max_file_lines: int = 100000,
         line_separator: str = "\n",
+        exclude_patterns: list[str] | None = None,
         all: bool = False,  # noqa: A002
         restrict_to_base_dir: bool = True,
         **kwargs: object,
@@ -61,6 +62,7 @@ class _MindRoomFileTools(AgnoFileTools):
             max_file_length=max_file_length,
             max_file_lines=max_file_lines,
             line_separator=line_separator,
+            exclude_patterns=exclude_patterns,
             all=all,
             **cast("dict[str, Any]", kwargs),
         )
@@ -328,6 +330,17 @@ class _MindRoomFileTools(AgnoFileTools):
             type="text",
             required=False,
             default="\n",
+        ),
+        ConfigField(
+            name="exclude_patterns",
+            label="Search Content Exclude Patterns",
+            type="string[]",
+            required=False,
+            default=None,
+            description=(
+                "Fnmatch-style path component patterns excluded from content search. "
+                "Leave unset to use Agno defaults; set an empty list to disable exclusions."
+            ),
         ),
         ConfigField(
             name="all",

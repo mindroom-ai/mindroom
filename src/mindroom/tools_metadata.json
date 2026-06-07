@@ -3073,6 +3073,18 @@
         },
         {
           "authored_override": true,
+          "default": null,
+          "description": "Fnmatch-style path component patterns excluded from content search. Leave unset to use Agno defaults; set an empty list to disable exclusions.",
+          "label": "Search Content Exclude Patterns",
+          "name": "exclude_patterns",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
