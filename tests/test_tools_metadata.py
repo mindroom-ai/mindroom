@@ -20,6 +20,7 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
 from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
@@ -269,6 +270,20 @@ def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.
     assert payload["headers"] == {
         "content-type": "application/json",
         "x-request-id": "req-123",
+        "set-cookie": REDACTED,
+        "authorization": REDACTED,
+        "proxy-authorization": REDACTED,
+        "cookie": REDACTED,
+        "www-authenticate": REDACTED,
+        "authentication-info": REDACTED,
+        "x-api-key": REDACTED,
+        "x-auth-token": REDACTED,
+        "x-api-token": REDACTED,
+        "api-token": REDACTED,
+        "x-token": REDACTED,
+        "token": REDACTED,
+        "x-amz-security-token": REDACTED,
+        "x_api_token": REDACTED,
         "x-ratelimit-remaining-tokens": "99",
         "x-total-tokens": "100",
     }

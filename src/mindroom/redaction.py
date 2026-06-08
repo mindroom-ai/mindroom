@@ -48,6 +48,7 @@ _SECRET_KEYS: frozenset[str] = frozenset(
         "access_token",
         "api_key",
         "api_token",
+        "authentication_info",
         "authorization",
         "auth_token",
         "bearer_token",
@@ -57,9 +58,12 @@ _SECRET_KEYS: frozenset[str] = frozenset(
         "password",
         "refresh_token",
         "secret",
+        "security_token",
         "session_token",
         "set_cookie",
         "token",
+        "www_authenticate",
+        "x_token",
     },
 )
 _OAUTH_QUERY_KEYS: frozenset[str] = frozenset({"code", "state"})
