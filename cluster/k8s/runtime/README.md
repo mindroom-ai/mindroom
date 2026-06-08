@@ -225,8 +225,6 @@ The control-plane pod also mounts the same allowlist file so the built-in `appro
 The control-plane pod also receives `MINDROOM_APPROVED_EGRESS_ENABLED=true`, so MindRoom adds `approved_egress` and the required Matrix approval rule at runtime even when you use `config.data` or `config.existingConfigMap`.
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
-Do not install a separate approved egress plugin for new deployments.
-Existing manual plugin entries are tolerated during migration, but the built-in tool is the source of truth.
 
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 

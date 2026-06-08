@@ -7,9 +7,8 @@ import json
 import os
 import unicodedata
 from dataclasses import dataclass
-from http.client import HTTPMessage
 from pathlib import Path
-from typing import IO
+from typing import TYPE_CHECKING
 from urllib import parse, request
 
 from agno.tools import Toolkit
@@ -20,6 +19,10 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import resolve_worker_key
+
+if TYPE_CHECKING:
+    from http.client import HTTPMessage
+    from typing import IO
 
 _DEFAULT_MAX_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_POLICY_API_URL = "http://mindroom-egress-proxy:8080"

@@ -27,7 +27,6 @@ BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {}
 PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
 _TOOL_REGISTRY_STATE_LOCK = threading.RLock()
 PLUGIN_REGISTRATION_SCOPE = threading.local()
-_LEGACY_APPROVED_EGRESS_PLUGIN_MODULE_PREFIX = f"{PLUGIN_MODULE_PREFIX}approved_egress_"
 
 
 class ToolMetadataValidationError(ValueError):
@@ -181,18 +180,11 @@ def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
     )
 
 
-def _is_legacy_approved_egress_tool_collision(module_name: str, tool_name: str) -> bool:
-    return tool_name == "approved_egress" and module_name.startswith(_LEGACY_APPROVED_EGRESS_PLUGIN_MODULE_PREFIX)
-
-
-def _reject_plugin_builtin_tool_collision(module_name: str, tool_name: str) -> bool:
+def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
     """Fail plugin registration when it reuses a built-in tool name."""
     if tool_name in BUILTIN_TOOL_METADATA:
-        if _is_legacy_approved_egress_tool_collision(module_name, tool_name):
-            return True
         msg = f"Plugin tool '{tool_name}' conflicts with built-in tool '{tool_name}'."
         raise ToolMetadataValidationError(msg)
-    return False
 
 
 def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
@@ -210,8 +202,7 @@ def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
 
 def register_plugin_tool_metadata(module_name: str, metadata: ToolMetadata) -> None:
     """Store one plugin tool in the per-module overlay cache."""
-    if _reject_plugin_builtin_tool_collision(module_name, metadata.name):
-        return
+    _reject_plugin_builtin_tool_collision(metadata.name)
     module_registrations = _plugin_registration_store().setdefault(module_name, {})
     if metadata.name in module_registrations:
         msg = f"Plugin tool '{metadata.name}' is registered multiple times in plugin module '{module_name}'."

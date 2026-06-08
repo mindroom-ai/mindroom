@@ -48,7 +48,6 @@ tool_approval:
 ```
 
 You can assign `approved_egress` to individual agents instead of `defaults.tools` if only some agents should request network access.
-Do not add a `plugins:` entry for approved egress in new deployments.
 The toolkit is built into MindRoom and uses the chart-provided policy API URL, token, allowlist path, and TTL settings.
 
 ## Runtime Behavior
@@ -69,10 +68,3 @@ Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
 Keep `request_network_access` behind `tool_approval`.
 Use a static allowlist for hostnames that should never require approval.
 Use short `approvedEgress.maxTtlSeconds` values for temporary grants.
-
-## Migration
-
-Deployments that manually installed an approved egress plugin can remove the plugin install step.
-Remove the approved egress `plugins:` entry after the MindRoom runtime includes the built-in toolkit.
-Keep the proxy image, token Secret, allowlist, worker proxy env, NetworkPolicy, and tool approval rule.
-Existing manual plugin entries are tolerated so upgrades do not fail immediately, but the built-in toolkit is the source of truth for new deployments.

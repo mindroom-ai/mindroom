@@ -7,7 +7,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,8 +16,10 @@ from mindroom.tools import approved_egress as approved_egress_module
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.tools import Toolkit
 
-def _approved_egress_tool() -> Any:
+
+def _approved_egress_tool() -> Toolkit:
     return approved_egress_module.approved_egress_tools()()
 
 
@@ -80,9 +82,8 @@ def test_request_network_access_posts_worker_key_grant(
             self.end_headers()
             self.wfile.write(response)
 
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             del format, args
-            return
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
