@@ -55,9 +55,9 @@ The toolkit is built into MindRoom and uses the chart-provided policy API URL, t
 Agents call `request_network_access(hostname, ttl_minutes, reason)` when a worker needs one blocked external hostname.
 The tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API.
 If the hostname already matches the static allowlist, the tool reports that no dynamic grant is needed.
-For `worker_scope: user_agent`, the tool creates a `worker_key` grant for the exact requester-owned worker.
-For shared or unscoped workers, the tool creates an `agent` grant.
-For `worker_scope: user`, the tool rejects the request because one user-scoped worker can serve multiple agents.
+When `worker_scope: user_agent` is active, the tool creates a `worker_key` grant for the exact requester-owned worker.
+Shared or unscoped workers receive an `agent` grant.
+Requests for `worker_scope: user` are rejected because one user-scoped worker can serve multiple agents.
 
 ## Secure Minimum
 

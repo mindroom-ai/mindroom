@@ -177,6 +177,36 @@ def test_post_grant_surfaces_policy_error_body(monkeypatch: pytest.MonkeyPatch) 
         server.server_close()
 
 
+def test_post_grant_rejects_success_payload_from_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Policy API HTTP errors must never create grants."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            response = json.dumps({"ok": True, "grant": {"expires_at": 123}}).encode()
+            self.send_response(500)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_API_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_TOKEN", "token")
+
+    try:
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            approved_egress_module._post_grant({"hostname": "docs.example.com"})
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
 def test_request_network_access_posts_grant_without_blocking_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -294,9 +294,15 @@ def _read_policy_response(req: request.Request) -> bytes:
             return response.read(256 * 1024)
     except error.HTTPError as exc:
         response_body = exc.read(256 * 1024)
+        detail = str(exc.reason)
         if response_body:
-            return response_body
-        msg = f"approved egress policy service returned HTTP {exc.code}: {exc.reason}"
+            try:
+                parsed = _parse_policy_response(response_body)
+            except RuntimeError:
+                detail = response_body.decode("utf-8", errors="replace")[:512] or detail
+            else:
+                detail = str(parsed.get("error") or response_body.decode("utf-8", errors="replace")[:512] or detail)
+        msg = f"approved egress policy service returned HTTP {exc.code}: {detail}"
         raise RuntimeError(msg) from exc
 
 
