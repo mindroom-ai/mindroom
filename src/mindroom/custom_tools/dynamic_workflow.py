@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -609,7 +610,7 @@ async def _aexecute_room_agent_participant(
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
-    room = context.room or nio.MatrixRoom(room_id=context.room_id, own_user_id="")
+    room = _candidate_resolution_room(context)
     candidates = responder_candidate_entities_from_cached_room(
         room,
         context.requester_id,
@@ -623,6 +624,17 @@ def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
         if name in context.config.agents:
             names.add(name)
     return names
+
+
+def _candidate_resolution_room(context: ToolRuntimeContext) -> nio.MatrixRoom:
+    if context.room is not None:
+        return context.room
+    rooms = context.client.rooms
+    if isinstance(rooms, Mapping):
+        room = rooms.get(context.room_id)
+        if isinstance(room, nio.MatrixRoom):
+            return room
+    return nio.MatrixRoom(room_id=context.room_id, own_user_id="")
 
 
 def _validate_room_agent_reference_for_context(

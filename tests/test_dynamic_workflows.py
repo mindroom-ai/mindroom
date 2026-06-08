@@ -1494,6 +1494,29 @@ def test_dynamic_workflow_tool_rejects_unavailable_room_agent_during_validation(
     assert "not available to this requester in this room" in result["message"]
 
 
+def test_dynamic_workflow_tool_uses_cached_client_room_when_context_room_is_missing(tmp_path: Path) -> None:
+    """Room-agent validation should use the client's cached current room before falling back to an empty room."""
+    tool = DynamicWorkflowTools()
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    client = AsyncMock()
+    client.rooms = {context.room_id: context.room}
+    context = replace(context, client=client, room=None)
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "room_agent",
+                "agent": "specialist",
+            },
+        ],
+    )
+
+    with tool_runtime_context(context):
+        result = _tool_payload(tool.validate_workflow(spec))
+
+    assert result["status"] == "ok"
+
+
 def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_path: Path) -> None:
     """Saved revisions should not bypass the caller's current active model policy."""
     tool = DynamicWorkflowTools()
