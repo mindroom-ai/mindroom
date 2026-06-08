@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import os
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
-from urllib import parse, request
+from typing import TYPE_CHECKING, cast
+from urllib import error, parse, request
 
 from agno.tools import Toolkit
 
@@ -287,6 +288,30 @@ class _NoRedirectHandler(request.HTTPRedirectHandler):
 _NO_REDIRECT_OPENER = request.build_opener(_NoRedirectHandler)
 
 
+def _read_policy_response(req: request.Request) -> bytes:
+    try:
+        with _NO_REDIRECT_OPENER.open(req, timeout=10) as response:
+            return response.read(256 * 1024)
+    except error.HTTPError as exc:
+        response_body = exc.read(256 * 1024)
+        if response_body:
+            return response_body
+        msg = f"approved egress policy service returned HTTP {exc.code}: {exc.reason}"
+        raise RuntimeError(msg) from exc
+
+
+def _parse_policy_response(response_body: bytes) -> dict[str, object]:
+    try:
+        parsed = json.loads(response_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        msg = "approved egress policy service returned invalid JSON"
+        raise RuntimeError(msg) from exc
+    if not isinstance(parsed, dict):
+        msg = "approved egress policy service returned a non-object response"
+        raise RuntimeError(msg)  # noqa: TRY004
+    return parsed
+
+
 def _post_grant(payload: dict[str, object]) -> dict[str, object]:
     body = json.dumps(payload, sort_keys=True).encode("utf-8")
     req = request.Request(  # noqa: S310 - _policy_api_url validates scheme and host.
@@ -298,12 +323,7 @@ def _post_grant(payload: dict[str, object]) -> dict[str, object]:
         },
         method="POST",
     )
-    with _NO_REDIRECT_OPENER.open(req, timeout=10) as response:
-        response_body = response.read(256 * 1024)
-    parsed = json.loads(response_body.decode("utf-8"))
-    if not isinstance(parsed, dict):
-        msg = "approved egress policy service returned a non-object response"
-        raise RuntimeError(msg)  # noqa: TRY004
+    parsed = _parse_policy_response(_read_policy_response(req))
     if parsed.get("ok") is not True:
         msg = str(parsed.get("error") or "approved egress policy service rejected the grant")
         raise RuntimeError(msg)
@@ -311,7 +331,7 @@ def _post_grant(payload: dict[str, object]) -> dict[str, object]:
     if not isinstance(grant, dict):
         msg = "approved egress policy service response is missing the grant"
         raise RuntimeError(msg)  # noqa: TRY004
-    return grant
+    return cast("dict[str, object]", grant)
 
 
 class _ApprovedEgressTools(Toolkit):
@@ -355,19 +375,21 @@ class _ApprovedEgressTools(Toolkit):
             msg = "request_network_access requires a live MindRoom Matrix tool context"
             raise RuntimeError(msg)
         subject = _grant_subject(context.agent_name)
-        grant = _post_grant(
-            {
-                "hostname": host,
-                "subject_type": subject.subject_type,
-                "subject": subject.subject,
-                "agent_name": context.agent_name,
-                "requester_id": context.requester_id,
-                "room_id": context.room_id,
-                "thread_id": context.resolved_thread_id or context.thread_id,
-                "ttl_seconds": effective_ttl_seconds,
-                "approved_by": context.requester_id,
-                "reason": normalized_reason,
-            },
+        payload: dict[str, object] = {
+            "hostname": host,
+            "subject_type": subject.subject_type,
+            "subject": subject.subject,
+            "agent_name": context.agent_name,
+            "requester_id": context.requester_id,
+            "room_id": context.room_id,
+            "thread_id": context.resolved_thread_id or context.thread_id,
+            "ttl_seconds": effective_ttl_seconds,
+            "approved_by": context.requester_id,
+            "reason": normalized_reason,
+        }
+        grant = await asyncio.to_thread(
+            _post_grant,
+            payload,
         )
         expiry = grant.get("expires_at")
         capped = " Deployment policy capped the requested TTL." if effective_ttl_seconds < requested_ttl_seconds else ""

@@ -5,10 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.tool_entries import raw_tool_entry_name
-from mindroom.constants import RuntimePaths
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 _APPROVED_EGRESS_ENABLED_ENV = "MINDROOM_APPROVED_EGRESS_ENABLED"
 _APPROVED_EGRESS_TOOL_NAME = "approved_egress"
