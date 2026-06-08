@@ -933,8 +933,6 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
     """Bounded shutdown should interrupt same-window reservation waits already in progress."""
     shutting_down = False
     wait_entered = asyncio.Event()
-    target_reservation: IngressOrderReservation | None = None
-
     gate = CoalescingGate(
         dispatch_batch=AsyncMock(),
         debounce_seconds=lambda: 0.01,
@@ -942,6 +940,8 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
         is_shutting_down=lambda: shutting_down,
     )
     key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    front_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
+    target_reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
 
     original_wait_for_reservations = gate._wait_for_reservations
 
@@ -949,7 +949,7 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
         wait_gate: _GateEntry,
         reservations: list[IngressOrderReservation],
     ) -> None:
-        if target_reservation is not None and target_reservation in reservations:
+        if target_reservation in reservations:
             wait_entered.set()
         await original_wait_for_reservations(wait_gate, reservations)
 
@@ -958,15 +958,14 @@ async def test_shutdown_timeout_reaches_already_running_same_window_reservation_
     await gate.admit(
         key,
         ready_result=ReadyPendingEvent(pending_event=_pending(_text_event("$text:localhost", "typed", 1000))),
+        order_reservation=front_reservation,
     )
-    reservation = gate.reserve_order(room_id=key.room_id, requester_user_id=key.requester_user_id)
-    target_reservation = reservation
     await asyncio.wait_for(wait_entered.wait(), timeout=5.0)
 
     shutting_down = True
     result = await gate.drain_all(ready_timeout_seconds=0.05)
 
-    assert reservation.released is True
+    assert target_reservation.released is True
     assert result.completed is False
     assert result.released_reservation_count == 1
 
