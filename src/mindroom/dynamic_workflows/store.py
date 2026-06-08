@@ -9,9 +9,6 @@ import html
 import json
 import re
 import secrets
-import signal
-import threading
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,8 +16,6 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import yaml
-
-from mindroom.dynamic_workflows.runner import ParticipantExecutor, execute_workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -47,14 +42,31 @@ _PERMISSION_KEYS = frozenset(
         "data",
     },
 )
+_SPEC_KEYS = frozenset(
+    {
+        "schema_version",
+        "id",
+        "name",
+        "description",
+        "kind",
+        "inputs",
+        "participants",
+        "workflow",
+        "outputs",
+        "permissions",
+    },
+)
+_REVISION_METADATA_KEYS = frozenset({"revision", "revision_reason", "updated_by", "updated_at"})
+_ROOM_AGENT_PARTICIPANT_KEYS = frozenset({"id", "kind", "agent", "model", "tools"})
+_EPHEMERAL_PARTICIPANT_KEYS = frozenset({"id", "kind", "name", "role", "description", "model", "tools", "instructions"})
+_AGENT_STEP_KEYS = frozenset({"id", "type", "participant", *_AGENT_STEP_TEMPLATE_FIELDS})
+_TRANSFORM_STEP_KEYS = frozenset({"id", "type", "template", "text"})
+_REPORT_STEP_KEYS = frozenset({"id", "type", "body_template", "from_step", "title"})
+_OUTPUT_KEYS = frozenset({"id", "type", "from_step"})
 
 
 class DynamicWorkflowError(ValueError):
     """Raised when a Dynamic Workflow operation is invalid."""
-
-
-class _SyncWorkflowTimeoutError(TimeoutError):
-    """Raised when a synchronous Dynamic Workflow run exceeds its runtime cap."""
 
 
 @dataclass(frozen=True)
@@ -166,7 +178,7 @@ class DynamicWorkflowStore:
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
         with _workflow_lock(workflow_dir):
             summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
-            current_spec = self._load_revision(workflow_dir, summary.active_revision)
+            current_spec = _workflow_spec_payload(self._load_revision(workflow_dir, summary.active_revision))
             patched_spec = _recursive_merge(current_spec, patch)
             validated_patched_spec = validate_workflow_spec(patched_spec)
             if spec_validator is not None:
@@ -225,44 +237,6 @@ class DynamicWorkflowStore:
             return []
         return sorted(path.stem for path in revisions_dir.glob("*.yaml"))
 
-    def run_workflow(
-        self,
-        *,
-        workflow_id: str,
-        scope: str,
-        owner_id: str,
-        input_data: dict[str, object],
-        requested_by: str,
-        base_url: str | None = None,
-        participant_executor: ParticipantExecutor | None = None,
-    ) -> DynamicWorkflowRun:
-        """Execute the active revision and persist run artifacts."""
-        run = self.start_workflow_run(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            input_data=input_data,
-            requested_by=requested_by,
-            base_url=base_url,
-        )
-        spec = self.load_workflow_revision(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            revision=run.revision,
-        )
-        try:
-            spec = validate_workflow_spec(spec)
-            validate_workflow_input(spec, input_data)
-        except DynamicWorkflowError as exc:
-            return self.fail_workflow_run(run, error=str(exc))
-        try:
-            with sync_workflow_runtime_limit(spec):
-                execution = execute_workflow_spec(spec, input_data, participant_executor=participant_executor)
-        except Exception as exc:
-            return self.fail_workflow_run(run, error=str(exc))
-        return self.complete_workflow_run(run, execution)
-
     def load_workflow_revision(
         self,
         *,
@@ -273,7 +247,7 @@ class DynamicWorkflowStore:
     ) -> dict[str, object]:
         """Load one immutable workflow revision."""
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        return self._load_revision(workflow_dir, revision)
+        return _workflow_spec_payload(self._load_revision(workflow_dir, revision))
 
     def start_workflow_run(
         self,
@@ -455,6 +429,7 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
         msg = "Workflow spec must be a mapping."
         raise DynamicWorkflowError(msg)
     normalized = copy.deepcopy(spec)
+    _reject_unsupported_fields(normalized, _SPEC_KEYS, "Workflow spec")
     workflow_id = _required_text(normalized, "id")
     _validate_id(workflow_id, "id")
     normalized["id"] = workflow_id
@@ -491,42 +466,6 @@ def workflow_runtime_seconds(spec: dict[str, object]) -> int:
     if value is None:
         return _MAX_WORKFLOW_RUNTIME_SECONDS
     return _positive_int_permission(value, "max_runtime_seconds", maximum=_MAX_WORKFLOW_RUNTIME_SECONDS)
-
-
-@contextmanager
-def sync_workflow_runtime_limit(spec: dict[str, object]) -> Iterator[None]:
-    """Enforce permissions.max_runtime_seconds for synchronous workflow execution."""
-    timeout_seconds = workflow_runtime_seconds(spec)
-    if threading.current_thread() is not threading.main_thread():
-        msg = (
-            "Synchronous Dynamic Workflow runs require the async execution path "
-            "to enforce permissions.max_runtime_seconds outside the main thread."
-        )
-        raise DynamicWorkflowError(msg)
-
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_timer = signal.getitimer(signal.ITIMER_REAL)
-    started_at = time.monotonic()
-
-    def raise_timeout(_signum: int, _frame: object) -> None:
-        raise _SyncWorkflowTimeoutError(_workflow_timeout_message(timeout_seconds))
-
-    signal.signal(signal.SIGALRM, raise_timeout)
-    signal.setitimer(signal.ITIMER_REAL, float(timeout_seconds))
-    try:
-        yield
-    except _SyncWorkflowTimeoutError as exc:
-        raise DynamicWorkflowError(str(exc)) from exc
-    finally:
-        elapsed = time.monotonic() - started_at
-        signal.setitimer(signal.ITIMER_REAL, 0.0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_timer[0] > 0:
-            signal.setitimer(signal.ITIMER_REAL, max(previous_timer[0] - elapsed, 1e-6), previous_timer[1])
-
-
-def _workflow_timeout_message(timeout_seconds: float) -> str:
-    return f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds})."
 
 
 def _input_schema(spec: dict[str, object]) -> dict[str, object] | None:
@@ -644,6 +583,7 @@ def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
 
 
 def _validate_room_agent_participant(participant: dict[str, object], context: str) -> None:
+    _reject_unsupported_fields(participant, _ROOM_AGENT_PARTICIPANT_KEYS, context)
     agent_name = _required_text(participant, "agent", context=context)
     participant["agent"] = agent_name
     if "model" in participant and participant.get("model") not in (None, ""):
@@ -655,6 +595,7 @@ def _validate_room_agent_participant(participant: dict[str, object], context: st
 
 
 def _validate_ephemeral_agent_participant(participant: dict[str, object], context: str) -> None:
+    _reject_unsupported_fields(participant, _EPHEMERAL_PARTICIPANT_KEYS, context)
     if participant.get("tools") not in (None, []):
         msg = f"{context} ephemeral_agent participants cannot use tools yet."
         raise DynamicWorkflowError(msg)
@@ -688,10 +629,13 @@ def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participan
         step_type = _step_type(step, context)
         step["type"] = step_type
         if step_type == "agent_step":
+            _reject_unsupported_fields(step, _AGENT_STEP_KEYS, context)
             _validate_agent_step(step, context, participant_ids, step_ids)
         elif step_type == "transform_step":
+            _reject_unsupported_fields(step, _TRANSFORM_STEP_KEYS, context)
             _validate_template_choice(step, context, ("template", "text"), step_ids)
         elif step_type == "report_step":
+            _reject_unsupported_fields(step, _REPORT_STEP_KEYS, context)
             _validate_report_step(step, context, step_ids)
         step_ids.add(step_id)
     return step_ids
@@ -803,6 +747,11 @@ def _validate_permission_data(permissions: dict[str, object]) -> None:
         msg = "Workflow permission 'data' must be a mapping."
         raise DynamicWorkflowError(msg)
     normalized = _object_mapping(cast("Mapping[object, object]", data))
+    supported_fields = {"matrix_history", "attachments", "knowledge_bases"}
+    unsupported_fields = sorted(set(normalized) - supported_fields)
+    if unsupported_fields:
+        msg = f"Workflow permission data.{unsupported_fields[0]} is not supported."
+        raise DynamicWorkflowError(msg)
     for field_name in ("matrix_history", "attachments"):
         value = normalized.get(field_name)
         if value is not None and value != "none":
@@ -811,6 +760,9 @@ def _validate_permission_data(permissions: dict[str, object]) -> None:
     knowledge_bases = normalized.get("knowledge_bases", [])
     if not isinstance(knowledge_bases, list) or not all(isinstance(base, str) for base in knowledge_bases):
         msg = "Workflow permission data.knowledge_bases must be a list of strings."
+        raise DynamicWorkflowError(msg)
+    if knowledge_bases:
+        msg = "Workflow permission data.knowledge_bases must be empty until workflow data grants are supported."
         raise DynamicWorkflowError(msg)
     permissions["data"] = normalized
 
@@ -895,6 +847,7 @@ def _validate_outputs(spec: dict[str, object], step_ids: set[str]) -> None:
                 msg = f"{context} references unknown step '{from_step}'."
                 raise DynamicWorkflowError(msg)
             output["from_step"] = from_step
+        _reject_unsupported_fields(output, _OUTPUT_KEYS, context)
         outputs.append(output)
     spec["outputs"] = outputs
 
@@ -918,6 +871,13 @@ def _required_mapping_list(data: dict[str, object], key: str, item_label: str) -
         items.append(_object_mapping(cast("Mapping[object, object]", raw_item)))
     data[key] = items
     return items
+
+
+def _reject_unsupported_fields(data: dict[str, object], allowed_fields: frozenset[str], context: str) -> None:
+    unsupported_fields = sorted(set(data) - allowed_fields)
+    if unsupported_fields:
+        msg = f"{context} contains unsupported field '{unsupported_fields[0]}'."
+        raise DynamicWorkflowError(msg)
 
 
 def _validate_template_choice(
@@ -1057,6 +1017,10 @@ def _revision_spec(
     revision_spec["updated_by"] = updated_by
     revision_spec["updated_at"] = now
     return revision_spec
+
+
+def _workflow_spec_payload(revision_spec: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in revision_spec.items() if key not in _REVISION_METADATA_KEYS}
 
 
 def _recursive_merge(base: dict[str, object], patch: dict[str, object]) -> dict[str, object]:
@@ -1220,13 +1184,13 @@ def _load_yaml_mapping(path: Path) -> dict[str, object]:
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        msg = f"YAML mapping was not found at {path}."
+        msg = "YAML mapping was not found."
         raise DynamicWorkflowError(msg) from exc
     except yaml.YAMLError as exc:
-        msg = f"Failed to parse YAML mapping at {path}: {exc}"
+        msg = f"Failed to parse YAML mapping: {exc}"
         raise DynamicWorkflowError(msg) from exc
     if not isinstance(data, dict):
-        msg = f"Expected YAML mapping at {path}."
+        msg = "Expected YAML mapping."
         raise DynamicWorkflowError(msg)
     return data
 
@@ -1235,13 +1199,13 @@ def _load_json_mapping(path: Path) -> dict[str, object]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        msg = f"JSON mapping was not found at {path}."
+        msg = "JSON mapping was not found."
         raise DynamicWorkflowError(msg) from exc
     except json.JSONDecodeError as exc:
-        msg = f"Failed to parse JSON mapping at {path}: {exc}"
+        msg = f"Failed to parse JSON mapping: {exc}"
         raise DynamicWorkflowError(msg) from exc
     if not isinstance(data, dict):
-        msg = f"Expected JSON mapping at {path}."
+        msg = "Expected JSON mapping."
         raise DynamicWorkflowError(msg)
     return data
 

@@ -10,6 +10,7 @@ from starlette.requests import Request
 
 from mindroom.api import main
 from mindroom.api.dynamic_workflows import _authorize_private_report_request
+from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
@@ -40,6 +41,7 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
     """Private report URLs should serve Dynamic Workflow HTML artifacts."""
     runtime_paths = main._app_runtime_paths(test_client.app)
     store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -47,7 +49,7 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
         created_by="general",
         reason="initial design",
     )
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -74,15 +76,20 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
 
 def test_private_dynamic_workflow_report_returns_404_for_unknown_run_id(test_client: TestClient) -> None:
     """Private report URLs should return 404 for unknown Dynamic Workflow runs."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+
     response = test_client.get("/reports/private/agent/general/competitor-research-report/run_missing")
 
     assert response.status_code == 404
+    assert response.json()["detail"] == "Private Dynamic Workflow report was not found."
+    assert str(runtime_paths.storage_root) not in response.text
 
 
 def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(test_client: TestClient) -> None:
     """Private report URLs should not leak reports across authenticated hosted users."""
     runtime_paths = use_trusted_upstream_runtime(test_client.app)
     store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -90,7 +97,7 @@ def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(tes
         created_by="general",
         reason="initial design",
     )
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -115,6 +122,7 @@ def test_private_dynamic_workflow_report_accepts_access_token_for_hosted_user(te
     """Private report bearer URLs should work when dashboard and Matrix identities differ."""
     runtime_paths = use_trusted_upstream_runtime(test_client.app)
     store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -122,7 +130,7 @@ def test_private_dynamic_workflow_report_accepts_access_token_for_hosted_user(te
         created_by="general",
         reason="initial design",
     )
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -149,6 +157,7 @@ def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client
     """Private report auth should deny Supabase users that do not match the run requester."""
     runtime_paths = main._app_runtime_paths(test_client.app)
     store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -156,7 +165,7 @@ def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client
         created_by="general",
         reason="initial design",
     )
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",

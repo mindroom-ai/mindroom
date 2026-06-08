@@ -53,7 +53,7 @@ async def private_dynamic_workflow_report(
             run_id=run_id,
         )
     except DynamicWorkflowError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Private Dynamic Workflow report was not found.") from exc
 
     response = FileResponse(report_path, media_type="text/html")
     response.headers["Content-Security-Policy"] = _REPORT_CSP

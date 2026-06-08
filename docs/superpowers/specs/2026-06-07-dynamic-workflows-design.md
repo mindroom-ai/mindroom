@@ -172,15 +172,12 @@ This matches the product concept and hides Agno implementation details.
 
 ```python
 create_workflow(spec: dict, scope: str = "agent", reason: str | None = None) -> dict
-update_workflow(workflow_id: str, patch: dict, reason: str) -> dict
-validate_workflow(workflow_id: str | None = None, spec: dict | None = None) -> dict
+validate_workflow(spec: dict) -> dict
+update_workflow(workflow_id: str, patch: dict, reason: str, scope: str = "agent") -> dict
 run_workflow(workflow_id: str, input: dict, scope: str = "agent") -> dict
-get_workflow_run(run_id: str) -> dict
-list_workflows(scope: str | None = None) -> dict
-list_workflow_revisions(workflow_id: str) -> dict
-publish_workflow_revision(workflow_id: str, revision: str) -> dict
-rollback_workflow(workflow_id: str, to_revision: str) -> dict
-archive_workflow(workflow_id: str) -> dict
+get_workflow_run(workflow_id: str, run_id: str, scope: str = "agent") -> dict
+list_workflows(scope: str = "agent") -> dict
+list_workflow_revisions(workflow_id: str, scope: str = "agent") -> dict
 ```
 
 The tool should be configurable per agent.
@@ -218,11 +215,6 @@ participants:
   - id: existing_researcher
     kind: room_agent
     agent: researcher
-    memory_mode: read_only
-  - id: source_reader
-    kind: room_agent
-    agent: research
-    memory_mode: read_only
   - id: critic
     kind: ephemeral_agent
     name: Source Critic
@@ -239,24 +231,16 @@ workflow:
     participant: existing_researcher
     prompt: Create a research plan for {input.topic}.
   - id: gather
-    type: parallel_map
-    participant: source_reader
-    input_from: plan
-    max_parallel: 6
+    type: transform_step
+    template: "Source notes for {input.topic}: use the research plan from {steps.plan}."
   - id: check
     type: agent_step
     participant: critic
-    input_from:
-      - plan
-      - gather
-    prompt: Cross-check claims and reject unsupported claims.
+    prompt: "Cross-check the plan and source notes. Plan: {steps.plan}\nNotes: {steps.gather}"
   - id: write
     type: agent_step
     participant: writer
-    input_from:
-      - gather
-      - check
-    prompt: Write a cited report in Markdown.
+    prompt: "Write a cited report in Markdown from these notes: {steps.gather}\nCritique: {steps.check}"
 outputs:
   - id: report_markdown
     type: markdown
@@ -266,8 +250,8 @@ outputs:
     from_step: write
 permissions:
   max_runtime_seconds: 1800
-  max_concurrent_agents: 8
-  max_total_agents: 64
+  max_concurrent_agents: 1
+  max_total_agents: 3
   models:
     - claude-haiku-4-5
     - claude-sonnet-4-6
@@ -495,17 +479,17 @@ The same Dynamic Workflow framework can then support other repeatable workflows.
 - Upgrade Agno to a factory-capable version.
 - Add Dynamic Workflow storage under `MINDROOM_STORAGE_PATH`.
 - Add declarative workflow spec schema.
-- Add `create_workflow`, `validate_workflow`, `run_workflow`, and `get_workflow_run`.
-- Support ephemeral agents with model and tool allowlists.
-- Reject Matrix context and attachment grants until they are wired into execution.
+- Add `create_workflow`, `validate_workflow`, `update_workflow`, `run_workflow`, `get_workflow_run`, `list_workflows`, and `list_workflow_revisions`.
+- Support ephemeral agents with a model allowlist.
+- Support room agent participants without durable memory, tools, skills, credentials, or knowledge.
+- Reject Matrix context, attachment, knowledge, and tool grants until they are wired into execution.
 - Store run records and artifacts.
 - Add private report serving.
 - Implement deep research as a bundled declarative Dynamic Workflow.
 
-### Phase 2: Room Agents, Updates, and Dashboard
+### Phase 2: Grants, Publishing, and Dashboard
 
-- Add room agent participants.
-- Add `update_workflow`, `publish_workflow_revision`, `rollback_workflow`, and `list_workflow_revisions`.
+- Add publish, rollback, and archive actions.
 - Add approval cards for workflow activation and permission expansion.
 - Add full room-agent memory, tool, skill, and knowledge grants.
 - Add dashboard Dynamic Workflow library and run detail page.

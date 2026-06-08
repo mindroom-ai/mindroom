@@ -319,6 +319,10 @@ def test_update_workflow_rejects_workflow_id_changes(tmp_path: Path) -> None:
 def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) -> None:
     """Running a workflow should pin the active revision and write a private report artifact."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(
+        store,
+        participant_executor=lambda **_: "Report about Agno factories.",
+    )
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -327,14 +331,13 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
         reason="initial design",
     )
 
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
         input_data={"topic": "Agno factories"},
         requested_by="general",
         base_url="https://acme.mindroom.chat",
-        participant_executor=lambda **_: "Report about Agno factories.",
     )
 
     loaded = store.get_workflow_run(
@@ -356,31 +359,6 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
     report_html = report_path.read_text(encoding="utf-8")
     assert "Competitor Research Report" in report_html
     assert "Agno factories" in report_html
-
-
-def test_store_run_workflow_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Store-level sync runs should share the same runtime cap as service runs."""
-    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-    monkeypatch.setattr("mindroom.dynamic_workflows.store.workflow_runtime_seconds", lambda _spec: 0.01)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
-
-    run = store.run_workflow(
-        workflow_id="competitor-research-report",
-        scope="agent",
-        owner_id="general",
-        input_data={"topic": "Agno factories"},
-        requested_by="general",
-        participant_executor=lambda **_kwargs: time.sleep(1),
-    )
-
-    assert run.status == "failed"
-    assert "max_runtime_seconds" in str(run.error)
 
 
 def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: Path) -> None:
@@ -478,9 +456,101 @@ def test_validate_workflow_spec_rejects_unimplemented_thread_data_permissions(tm
         )
 
 
+def test_validate_workflow_spec_rejects_unimplemented_knowledge_data_permissions(tmp_path: Path) -> None:
+    """Workflow specs should not declare knowledge access the runner does not provide."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="knowledge_bases"):
+        store.validate_workflow(
+            _workflow_spec(
+                permissions={
+                    "tools": [],
+                    "data": {
+                        "matrix_history": "none",
+                        "attachments": "none",
+                        "knowledge_bases": ["reference"],
+                    },
+                },
+            ),
+        )
+
+
+def test_validate_workflow_spec_rejects_unknown_data_permissions(tmp_path: Path) -> None:
+    """Workflow specs should not accept unimplemented data permission namespaces."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="external_db"):
+        store.validate_workflow(
+            _workflow_spec(
+                permissions={
+                    "tools": [],
+                    "data": {
+                        "matrix_history": "none",
+                        "attachments": "none",
+                        "knowledge_bases": [],
+                        "external_db": "customers",
+                    },
+                },
+            ),
+        )
+
+
+def test_validate_workflow_spec_rejects_unsupported_participant_fields(tmp_path: Path) -> None:
+    """Workflow specs should not accept participant fields the runner ignores."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="memory_mode"):
+        store.validate_workflow(
+            _workflow_spec(
+                participants=[
+                    {
+                        "id": "researcher",
+                        "kind": "room_agent",
+                        "agent": "general",
+                        "memory_mode": "read_only",
+                    },
+                ],
+                workflow=[
+                    {
+                        "id": "write",
+                        "type": "agent_step",
+                        "participant": "researcher",
+                        "prompt": "Write a cited report.",
+                    },
+                ],
+            ),
+        )
+
+
+def test_validate_workflow_spec_rejects_unsupported_agent_step_fields(tmp_path: Path) -> None:
+    """Workflow specs should not accept control-flow fields the runner ignores."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="input_from"):
+        store.validate_workflow(
+            _workflow_spec(
+                workflow=[
+                    {
+                        "id": "plan",
+                        "type": "transform_step",
+                        "template": "Plan for {input.topic}.",
+                    },
+                    {
+                        "id": "write",
+                        "type": "agent_step",
+                        "participant": "writer",
+                        "input_from": "plan",
+                        "prompt": "Write from {steps.plan}.",
+                    },
+                ],
+            ),
+        )
+
+
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
     """Running a workflow should execute declared steps and persist their outputs."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
     store.create_workflow(
         spec=_workflow_spec(
             workflow=[
@@ -507,7 +577,7 @@ def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> Non
         reason="initial design",
     )
 
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -673,7 +743,7 @@ def test_service_sync_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pyte
         return "late"
 
     service = DynamicWorkflowService(store, participant_executor=slow_executor)
-    monkeypatch.setattr("mindroom.dynamic_workflows.store.workflow_runtime_seconds", lambda _spec: 0.01)
+    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.01)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -859,18 +929,20 @@ def test_get_workflow_run_wraps_json_decoder_errors(tmp_path: Path) -> None:
     run_path.parent.mkdir(parents=True, exist_ok=True)
     run_path.write_text("{", encoding="utf-8")
 
-    with pytest.raises(DynamicWorkflowError, match="Failed to parse JSON mapping"):
+    with pytest.raises(DynamicWorkflowError, match="Failed to parse JSON mapping") as exc_info:
         store.get_workflow_run(
             workflow_id="competitor-research-report",
             scope="agent",
             owner_id="general",
             run_id="run_corrupt",
         )
+    assert str(tmp_path) not in str(exc_info.value)
 
 
 def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(tmp_path: Path) -> None:
     """Failed workflow execution should still persist a run record and error report."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -891,7 +963,7 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     ]
     revision_path.write_text(yaml.safe_dump(revision, sort_keys=False), encoding="utf-8")
 
-    run = store.run_workflow(
+    run = service.run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",

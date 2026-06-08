@@ -665,7 +665,7 @@ async def _aexecute_ephemeral_agent_participant(
 ) -> object:
     tools = participant.get("tools", [])
     if tools not in (None, []):
-        msg = "Ephemeral Dynamic Workflow agents cannot use tools; use room_agent participants for configured tools."
+        msg = "Dynamic Workflow participants cannot use tools until workflow tool grants are supported."
         raise DynamicWorkflowError(msg)
     participant_id = _required_participant_text(participant, "id")
     model_name = _resolve_participant_model_name(
