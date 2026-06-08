@@ -357,6 +357,62 @@ def test_runtime_chart_rejects_content_bundle_images_without_digest() -> None:
     assert "contentBundles[0].image must include @sha256:" in completed.stderr
 
 
+def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
+    """Generated init container names must stay unique."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "contentBundles[1].name=team-config",
+        "contentBundles[1].image=ghcr.io/example/other-config@sha256:"
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert 'contentBundles[1].name "team-config" is used more than once' in completed.stderr
+
+
+def test_runtime_chart_rejects_content_bundle_names_that_would_be_truncated() -> None:
+    """Bundle names must fit in generated Kubernetes init container names."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        f"contentBundles[0].name={'a' * 49}",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "contentBundles[0].name must be 48 characters or fewer" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("target_path", "message"),
+    [
+        ("/app/agent_data", "contentBundles[0].targetPath cannot be equal to storage.mountPath /app/agent_data"),
+        ("/app/content/team-config", "contentBundles[0].targetPath must be under storage.mountPath /app/agent_data"),
+    ],
+)
+def test_runtime_chart_rejects_content_bundle_target_paths_outside_storage(target_path: str, message: str) -> None:
+    """Bundle copy targets must stay inside runtime storage."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        f"contentBundles[0].targetPath={target_path}",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
     """Shared-namespace instances must not get cross-tenant Secret permissions."""
     docs = _render_instance_chart()
