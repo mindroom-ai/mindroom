@@ -105,7 +105,6 @@ class DynamicWorkflowRun:
     artifacts: dict[str, str]
     report_url: str | None
     requested_by: str
-    report_access_token: str | None
     started_at: str
     completed_at: str | None
     error: str | None = None
@@ -281,7 +280,6 @@ class DynamicWorkflowStore:
             artifacts={},
             report_url=_private_report_url(base_url, scope, owner_id, workflow_id, run_id),
             requested_by=requested_by,
-            report_access_token=None,
             started_at=_utc_now(),
             completed_at=None,
             error=None,
@@ -312,7 +310,6 @@ class DynamicWorkflowStore:
             artifacts=artifacts,
             report_url=run.report_url,
             requested_by=run.requested_by,
-            report_access_token=run.report_access_token,
             started_at=run.started_at,
             completed_at=_utc_now(),
             error=str(execution.error) if execution.error is not None else None,
@@ -344,7 +341,6 @@ class DynamicWorkflowStore:
             artifacts=artifacts,
             report_url=run.report_url,
             requested_by=run.requested_by,
-            report_access_token=run.report_access_token,
             started_at=run.started_at,
             completed_at=_utc_now(),
             error=error,
@@ -1162,7 +1158,6 @@ def _run_to_json(run: DynamicWorkflowRun) -> dict[str, object]:
         "artifacts": run.artifacts,
         "report_url": run.report_url,
         "requested_by": run.requested_by,
-        "report_access_token": run.report_access_token,
         "started_at": run.started_at,
         "completed_at": run.completed_at,
         "error": run.error,
@@ -1189,7 +1184,6 @@ def _run_from_json(data: dict[str, object]) -> DynamicWorkflowRun:
         artifacts={str(key): str(value) for key, value in artifacts.items()} if isinstance(artifacts, dict) else {},
         report_url=str(data["report_url"]) if data.get("report_url") is not None else None,
         requested_by=str(data["requested_by"]),
-        report_access_token=str(data["report_access_token"]) if data.get("report_access_token") is not None else None,
         started_at=str(data["started_at"]),
         completed_at=str(data["completed_at"]) if data.get("completed_at") is not None else None,
         error=str(data["error"]) if data.get("error") is not None else None,

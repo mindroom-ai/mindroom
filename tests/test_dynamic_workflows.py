@@ -26,7 +26,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
-from mindroom.dynamic_workflows.runner import execute_workflow_spec
+from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
@@ -353,7 +353,6 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
         f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}",
     )
     assert "access_token=" not in run.report_url
-    assert run.report_access_token is None
     assert loaded.status == "completed"
     assert loaded.artifacts["report_html"].endswith("/report.html")
     report_path = tmp_path / "mindroom_data" / loaded.artifacts["report_html"]
@@ -1352,6 +1351,50 @@ def test_agno_workflow_factory_step_executor_runs_participant(tmp_path: Path) ->
     assert isinstance(output, StepOutput)
     assert output.success is True
     assert output.content == "Executed by Agno factory participant."
+
+
+def test_agno_workflow_run_fails_and_stops_when_step_execution_fails(tmp_path: Path) -> None:
+    """Agno workflow runs should not continue after a Dynamic Workflow step failure."""
+    prompts: list[str] = []
+
+    def participant_executor(
+        *,
+        participant: dict[str, object],
+        prompt: str,
+        input_data: dict[str, object],
+        step_outputs: dict[str, object],
+    ) -> str:
+        del participant, input_data, step_outputs
+        prompts.append(prompt)
+        msg = "provider auth failed"
+        raise DynamicWorkflowExecutionError(msg)
+
+    factory = build_agno_workflow_factory(
+        _workflow_spec(
+            workflow=[
+                {
+                    "id": "write",
+                    "type": "agent_step",
+                    "participant": "writer",
+                    "prompt": "Write about {input.topic}.",
+                },
+                {
+                    "id": "after",
+                    "type": "transform_step",
+                    "template": "Should not run for {input.topic}.",
+                },
+            ],
+            outputs=[{"id": "result", "type": "text", "from_step": "after"}],
+        ),
+        db_file=tmp_path / "dynamic-workflow-agno.db",
+        participant_executor=participant_executor,
+    )
+    workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
+
+    with pytest.raises(DynamicWorkflowExecutionError, match="provider auth failed"):
+        workflow.run(input={"topic": "Agno factories"}, user_id="@user:localhost")
+
+    assert prompts == ["Write about Agno factories."]
 
 
 def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:

@@ -8,10 +8,7 @@ from agno.db.sqlite import SqliteDb
 from agno.workflow import Step, Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
-from mindroom.dynamic_workflows.runner import (
-    DynamicWorkflowExecutionError,
-    execute_workflow_step,
-)
+from mindroom.dynamic_workflows.runner import execute_workflow_step
 from mindroom.dynamic_workflows.store import validate_workflow_spec
 
 if TYPE_CHECKING:
@@ -97,22 +94,13 @@ def _build_step(
     def executor(step_input: StepInput) -> StepOutput:
         input_data = step_input.input if isinstance(step_input.input, dict) else {}
         previous_outputs = _previous_step_outputs(step_input.previous_step_outputs)
-        try:
-            result = execute_workflow_step(
-                step,
-                input_data=input_data,
-                step_outputs=previous_outputs,
-                participant_executor=participant_executor,
-                participants_by_id=participants_by_id,
-            )
-        except DynamicWorkflowExecutionError as exc:
-            return StepOutput(
-                step_name=step_id,
-                step_id=step_id,
-                content="",
-                success=False,
-                error=str(exc),
-            )
+        result = execute_workflow_step(
+            step,
+            input_data=input_data,
+            step_outputs=previous_outputs,
+            participant_executor=participant_executor,
+            participants_by_id=participants_by_id,
+        )
         return StepOutput(
             step_name=step_id,
             step_id=step_id,
@@ -126,6 +114,8 @@ def _build_step(
         step_id=step_id,
         description=description,
         executor=executor,
+        max_retries=0,
+        on_error="fail",
     )
 
 
