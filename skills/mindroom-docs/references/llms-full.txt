@@ -2793,7 +2793,7 @@ See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and nami
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
@@ -8109,17 +8109,18 @@ search_zep_memory(query="release notes", search_scope="edges")
 
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
 
 ## Tools On This Page
 
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
+- [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
 - [`config_manager`] - Inspect MindRoom config and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
@@ -8127,13 +8128,14 @@ Use these tools when you need multi-agent coordination, runtime config changes, 
 
 ## Common Setup Notes
 
-All six entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All seven entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
 `agents.<name>.allow_self_config` or `defaults.allow_self_config` auto-enables [`self_config`].
 [`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
 [`subagents`] requires a live Matrix tool runtime context with `room_id`, `requester_id`, Matrix client access, and a writable storage path.
+[`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
@@ -8264,6 +8266,114 @@ delegate_task(
 - Recursive delegation is supported, but only up to a maximum depth of 3.
 - Use [`subagents`] when you need an ongoing threaded workflow.
 - Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+
+## [`dynamic_workflow`]
+
+`dynamic_workflow` lets an agent save a reusable workflow, publish immutable revisions, run the active revision, and inspect stored run records.
+
+### What It Does
+
+`dynamic_workflow` exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`.
+All calls return JSON strings with a `status` field and operation-specific payload data.
+Saved specs live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
+Each update creates a new immutable `revisions/<revision>.yaml` file and updates the small `workflow.yaml` pointer file.
+Each run pins the active revision at start time, writes a `runs/<run_id>.json` record, and writes `report.md`, `report.html`, and `step_outputs.json` under that run's artifact directory.
+If `MINDROOM_PUBLIC_URL` is set, successful and failed run payloads include a private report URL under `/reports/private/...`.
+Private report routes authorize the dashboard requester against the run's `requested_by` identity.
+If `MINDROOM_PUBLIC_URL` is unset, the report artifacts are still persisted on disk and listed in the run payload.
+
+### Configuration
+
+Enable the tool by adding `dynamic_workflow` to the agent that should be allowed to create and run workflows.
+The current implementation supports agent-scoped workflows from agent tools.
+Room and tenant scopes are reserved for a future approval policy, so tool calls with `scope="room"` or `scope="tenant"` return an error today.
+
+```yaml
+agents:
+  coordinator:
+    display_name: Coordinator
+    role: Build and run reusable Dynamic Workflows
+    model: sonnet
+    tools:
+      - dynamic_workflow
+```
+
+### Spec Shape
+
+Workflow specs are declarative JSON/YAML objects with `schema_version: 1`.
+The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`.
+`kind` must be `workflow`.
+`inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
+Participants can be `ephemeral_agent` or `room_agent`.
+An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
+Ephemeral participant `tools` must be empty until explicit workflow tool grants exist.
+A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
+Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
+Step types are `transform_step`, `agent_step`, and `report_step`.
+`transform_step` renders a template without calling a model.
+`agent_step` renders a prompt and sends it to the selected participant.
+`report_step` renders Markdown report content from input and prior step outputs.
+Outputs declare `id`, `type`, and `from_step`.
+Output `type` may be `text`, `markdown`, `json`, or `html_report`.
+Permissions currently support runtime and model caps.
+`permissions.tools` must be empty, and `permissions.data` must keep `matrix_history`, `attachments`, and `knowledge_bases` disabled until approval-backed data grants exist.
+
+### Example
+
+```python
+create_workflow(
+    spec={
+        "schema_version": 1,
+        "id": "brief-report",
+        "name": "Brief Report",
+        "description": "Create a short HTML report from one topic.",
+        "kind": "workflow",
+        "inputs": {
+            "type": "object",
+            "required": ["topic"],
+            "properties": {"topic": {"type": "string"}},
+        },
+        "participants": [
+            {
+                "id": "writer",
+                "kind": "ephemeral_agent",
+                "name": "Report Writer",
+                "model": "claude-sonnet-4-6",
+                "tools": [],
+            },
+        ],
+        "workflow": [
+            {
+                "id": "write",
+                "type": "agent_step",
+                "participant": "writer",
+                "prompt": "Write a concise cited report about {input.topic}.",
+            },
+        ],
+        "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
+        "permissions": {
+            "max_runtime_seconds": 1800,
+            "max_concurrent_agents": 4,
+            "max_total_agents": 8,
+            "models": ["claude-sonnet-4-6"],
+            "tools": [],
+            "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
+        },
+    },
+    reason="initial report workflow",
+)
+run_workflow("brief-report", {"topic": "Agno factories"})
+list_workflows()
+get_workflow_run("brief-report", "run_...")
+```
+
+### Notes
+
+- Dynamic Workflow runs execute synchronously on the current tool call path today.
+- Long-running background workflow management, approval cards, public report publishing, broad tool grants, Matrix history grants, attachment grants, and knowledge-base grants are future work.
+- Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
+- Room-agent participants can reuse only agents that normal room routing would expose to the requester.
+- Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
 
 ## [`config_manager`]
 
@@ -9150,7 +9260,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 | **Project Management** | github, jira, linear, clickup, notion, trello, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
-| **Agent Orchestration** | subagents, delegate, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
+| **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
 

@@ -24,7 +24,7 @@ icon: lucide/box
 | **Project Management** | github, jira, linear, clickup, notion, trello, todoist | [→ project-management](project-management.md) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](calendar-and-scheduling.md) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](memory-and-storage.md) |
-| **Agent Orchestration** | subagents, delegate, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](agent-orchestration.md) |
+| **Agent Orchestration** | subagents, delegate, dynamic_workflow, claude_agent, config_manager, openclaw_compat | [→ agent-orchestration](agent-orchestration.md) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](automation-and-platforms.md) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](location-commerce-and-home.md) |
 
