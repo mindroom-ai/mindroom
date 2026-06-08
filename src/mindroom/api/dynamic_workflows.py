@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from mindroom.api.config_lifecycle import api_runtime_paths
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
 
 router = APIRouter(tags=["dynamic-workflows"])
 
@@ -37,6 +37,13 @@ async def private_dynamic_workflow_report(
     """Serve one private Dynamic Workflow HTML report from runtime storage."""
     store = DynamicWorkflowStore(api_runtime_paths(request).storage_root)
     try:
+        run = store.get_workflow_run(
+            scope=scope,
+            owner_id=owner_key,
+            workflow_id=workflow_id,
+            run_id=run_id,
+        )
+        _authorize_private_report_request(request, run)
         report_path = store.private_report_html_path(
             scope=scope,
             owner_key=owner_key,
@@ -49,3 +56,14 @@ async def private_dynamic_workflow_report(
     response = FileResponse(report_path, media_type="text/html")
     response.headers["Content-Security-Policy"] = _REPORT_CSP
     return response
+
+
+def _authorize_private_report_request(request: Request, run: DynamicWorkflowRun) -> None:
+    auth_user = request.scope.get("auth_user")
+    if not isinstance(auth_user, dict):
+        raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")
+    if auth_user.get("user_id") == "standalone":
+        return
+    if auth_user.get("matrix_user_id") == run.requested_by or auth_user.get("user_id") == run.requested_by:
+        return
+    raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")

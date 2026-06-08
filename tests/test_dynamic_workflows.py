@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -13,6 +14,7 @@ import nio
 import pytest
 import yaml
 from agno.factory import RequestContext
+from agno.run.agent import RunStatus
 from agno.workflow import Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
@@ -373,7 +375,6 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         input_data={},
         requested_by="general",
         base_url="https://acme.mindroom.chat",
-        background=False,
     )
 
     loaded = store.get_workflow_run(
@@ -404,6 +405,31 @@ def test_validate_workflow_spec_rejects_invalid_input_schema_type(tmp_path: Path
             created_by="general",
             reason="bad schema",
         )
+
+
+def test_validate_workflow_spec_rejects_excessive_agent_steps(tmp_path: Path) -> None:
+    """Workflow permissions should cap the amount of LLM work one run can trigger."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="max_total_agents"):
+        store.validate_workflow(
+            _workflow_spec(
+                workflow=[
+                    {"id": "write_a", "type": "agent_step", "participant": "writer", "prompt": "Write A."},
+                    {"id": "write_b", "type": "agent_step", "participant": "writer", "prompt": "Write B."},
+                ],
+                outputs=[{"id": "report", "type": "text", "from_step": "write_b"}],
+                permissions={"max_total_agents": 1, "tools": []},
+            ),
+        )
+
+
+def test_validate_workflow_spec_rejects_tool_permission_until_grants_exist(tmp_path: Path) -> None:
+    """Workflow specs should not request ambient tool access before grants are modeled."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="tools"):
+        store.validate_workflow(_workflow_spec(permissions={"tools": ["shell"]}))
 
 
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
@@ -518,8 +544,8 @@ def test_agent_step_fails_without_participant_executor() -> None:
     assert execution.error == "Agent step 'write' requires a participant executor."
 
 
-def test_service_returns_running_run_for_background_execution(tmp_path: Path) -> None:
-    """Background runs should persist a running record and return before step execution completes."""
+def test_service_completes_tool_runs_without_raw_background_thread(tmp_path: Path) -> None:
+    """Tool-triggered workflow runs should complete on the managed execution path."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     service = DynamicWorkflowService(store)
     store.create_workflow(
@@ -546,7 +572,6 @@ def test_service_returns_running_run_for_background_execution(tmp_path: Path) ->
         input_data={"topic": "Agno factories"},
         requested_by="general",
         base_url="https://acme.mindroom.chat",
-        background=True,
     )
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",
@@ -555,8 +580,9 @@ def test_service_returns_running_run_for_background_execution(tmp_path: Path) ->
         run_id=run.run_id,
     )
 
-    assert run.status == "running"
-    assert loaded.status in {"running", "completed"}
+    assert run.status == "completed"
+    assert loaded.status == "completed"
+    assert loaded.outputs["brief"] == "Research brief for Agno factories."
     assert run.report_url == (
         f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}"
     )
@@ -793,9 +819,19 @@ def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     """Runtime-aware tool should scope workflows to current agent and storage root."""
     tool = DynamicWorkflowTools()
     context = _make_context(tmp_path)
+    transform_spec = _workflow_spec(
+        workflow=[
+            {
+                "id": "research",
+                "type": "transform_step",
+                "template": "Research brief for {input.topic}.",
+            },
+        ],
+        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+    )
 
     with tool_runtime_context(context):
-        created = _tool_payload(tool.create_workflow(_workflow_spec(), reason="initial design"))
+        created = _tool_payload(tool.create_workflow(transform_spec, reason="initial design"))
         listed = _tool_payload(tool.list_workflows())
         run = _tool_payload(
             tool.run_workflow(
@@ -807,10 +843,33 @@ def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     assert created["status"] == "ok"
     assert created["workflow_id"] == "competitor-research-report"
     assert listed["workflows"][0]["workflow_id"] == "competitor-research-report"
-    assert run["status"] == "running"
+    assert run["status"] == "completed"
+    assert run["outputs"]["brief"] == "Research brief for Agno factories."
     assert run["report_url"].startswith(
         "https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/run_",
     )
+
+
+def test_dynamic_workflow_tool_json_schemas_allow_arbitrary_json_values() -> None:
+    """Tool-call schemas should accept scalar, array, and object values inside JSON payload fields."""
+    tool = DynamicWorkflowTools()
+    async_functions = tool.get_async_functions()
+
+    spec_schema = async_functions["create_workflow"].parameters["properties"]["spec"]
+    patch_schema = async_functions["update_workflow"].parameters["properties"]["patch"]
+    input_schema = async_functions["run_workflow"].parameters["properties"]["input"]
+
+    for schema in (spec_schema, patch_schema, input_schema):
+        value_schema = schema["additionalProperties"]
+        assert {entry["type"] for entry in value_schema["anyOf"]} >= {
+            "object",
+            "array",
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "null",
+        }
 
 
 def test_dynamic_workflow_tool_scopes_private_agent_workflows_by_requester(tmp_path: Path) -> None:
@@ -935,31 +994,89 @@ def test_room_agent_participant_rejects_model_override(tmp_path: Path) -> None:
 def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path: Path) -> None:
     """Room-agent participants should execute as that agent without durable workflow side effects."""
     context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"]),
+                "specialist": AgentConfig(
+                    display_name="Specialist Agent",
+                    model="default",
+                    knowledge_bases=["reference"],
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "large": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+            },
+            room_models={"lobby": "large"},
+            knowledge_bases={"reference": {"path": str(tmp_path / "knowledge")}},
+        ),
+        context.runtime_paths,
+    )
+    runtime_paths = runtime_paths_for(config)
+    (runtime_paths.storage_root / "matrix_state.yaml").write_text(
+        yaml.safe_dump(
+            {"rooms": {"lobby": {"room_id": "!room:localhost", "alias": "#lobby:localhost", "name": "Lobby"}}},
+        ),
+        encoding="utf-8",
+    )
+    persist_entity_accounts(config, runtime_paths)
+    context = replace(context, config=config, runtime_paths=runtime_paths)
+    parent_loop = asyncio.new_event_loop()
 
     async def fake_arun(prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
         runtime_context = get_tool_runtime_context()
         assert runtime_context is not None
+        assert asyncio.get_running_loop() is parent_loop
         assert runtime_context.agent_name == "specialist"
         assert runtime_context.session_id == session_id
-        assert runtime_context.active_model_name == "default"
-        assert "competitor-research-report:run_1:specialist" in session_id
+        assert runtime_context.active_model_name == "large"
+        assert "competitor-research-report:run_1:writer_a" in session_id
         assert prompt == "Write a report."
         assert user_id == "@user:localhost"
-        return SimpleNamespace(content="done")
+        return SimpleNamespace(content="done", status=RunStatus.completed)
 
     fake_agent = SimpleNamespace(arun=fake_arun)
-    with patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock:
-        result = dynamic_workflow_module._execute_room_agent_participant(
-            context,
-            {"id": "specialist", "kind": "room_agent", "agent": "specialist"},
-            "Write a report.",
-            run_scope="competitor-research-report:run_1",
-        )
+    knowledge = SimpleNamespace()
+    with (
+        patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock,
+        patch(
+            "mindroom.custom_tools.dynamic_workflow.resolve_agent_knowledge_access",
+            return_value=SimpleNamespace(knowledge=knowledge),
+        ),
+    ):
+        asyncio.set_event_loop(parent_loop)
+        try:
+            result = parent_loop.run_until_complete(
+                dynamic_workflow_module._aexecute_room_agent_participant(
+                    context,
+                    {"id": "writer_a", "kind": "room_agent", "agent": "specialist"},
+                    "Write a report.",
+                    run_scope="competitor-research-report:run_1",
+                ),
+            )
+        finally:
+            asyncio.set_event_loop(None)
+            parent_loop.close()
 
     assert result == "done"
     create_kwargs = create_agent_mock.call_args.kwargs
-    assert create_kwargs["session_id"].endswith(":dynamic_workflow:competitor-research-report:run_1:specialist")
-    assert create_kwargs["active_model_name"] == "default"
+    assert create_kwargs["session_id"].endswith(":dynamic_workflow:competitor-research-report:run_1:writer_a")
+    assert create_kwargs["active_model_name"] == "large"
+    assert create_kwargs["knowledge"] is knowledge
     assert create_kwargs["persist_runtime_state"] is False
     assert create_kwargs["execution_identity"].agent_name == "specialist"
     assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
+
+
+def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
+    """Participant failures from Agno should become failed workflow steps, not normal content."""
+    context = _make_context(tmp_path)
+
+    async def fake_arun(_prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+        assert user_id == "@user:localhost"
+        assert session_id == context.session_id
+        return SimpleNamespace(content="provider auth failed", status=RunStatus.error)
+
+    with pytest.raises(dynamic_workflow_module.DynamicWorkflowExecutionError, match="provider auth failed"):
+        asyncio.run(dynamic_workflow_module._arun_agent(context, SimpleNamespace(arun=fake_arun), "Write."))

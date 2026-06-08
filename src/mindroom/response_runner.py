@@ -1392,9 +1392,15 @@ class ResponseRunner:
                 session_id,
             ),
         )
+        runtime_model = self.deps.runtime.config.resolve_runtime_model(
+            entity_name=self.deps.agent_name,
+            room_id=resolved_target.room_id,
+            runtime_paths=self.deps.runtime_paths,
+        )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
+            active_model_name=runtime_model.model_name,
             session_id=session_id,
             attachment_ids=request.attachment_ids,
             correlation_id=request.correlation_id,

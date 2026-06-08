@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.api import main
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
@@ -71,6 +72,38 @@ def test_private_dynamic_workflow_report_returns_404_for_unknown_run_id(test_cli
     response = test_client.get("/reports/private/agent/general/competitor-research-report/run_missing")
 
     assert response.status_code == 404
+
+
+def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(test_client: TestClient) -> None:
+    """Private report URLs should not leak reports across authenticated hosted users."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = store.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers=trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.com",
+            matrix_user_id="@bob:example.org",
+        ),
+    )
+
+    assert response.status_code == 403
 
 
 def test_private_dynamic_workflow_report_rejects_unscoped_run_id(test_client: TestClient) -> None:

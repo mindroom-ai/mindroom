@@ -10,14 +10,18 @@ from uuid import uuid4
 
 import nio
 from agno.agent import Agent
+from agno.run.agent import RunStatus
 from agno.tools import Toolkit
+from agno.tools.function import Function
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -27,25 +31,136 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.dynamic_workflows.runner import ParticipantExecutor
+    from collections.abc import Callable
+
+    from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
+
+_JSON_VALUE_SCHEMA: dict[str, object] = {
+    "anyOf": [
+        {"type": "object", "additionalProperties": True},
+        {"type": "array", "items": {}},
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "integer"},
+        {"type": "boolean"},
+        {"type": "null"},
+    ],
+}
+_JSON_OBJECT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": _JSON_VALUE_SCHEMA,
+}
+
+
+def _tool_function(function_name: str, entrypoint: Callable[..., object]) -> Function:
+    return Function(
+        name=function_name,
+        description=_TOOL_DESCRIPTIONS[function_name],
+        parameters=_TOOL_PARAMETERS[function_name],
+        entrypoint=entrypoint,
+        skip_entrypoint_processing=True,
+    )
+
+
+_TOOL_DESCRIPTIONS = {
+    "create_workflow": "Create a Dynamic Workflow from a declarative workflow spec.",
+    "validate_workflow": "Validate a declarative Dynamic Workflow spec without saving it.",
+    "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
+    "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
+    "get_workflow_run": "Read one Dynamic Workflow run record.",
+    "list_workflows": "List Dynamic Workflows available in one scope.",
+    "list_workflow_revisions": "List immutable revisions for one Dynamic Workflow.",
+}
+
+
+_TOOL_PARAMETERS: dict[str, dict[str, object]] = {
+    "create_workflow": {
+        "type": "object",
+        "properties": {
+            "spec": _JSON_OBJECT_SCHEMA,
+            "scope": {"type": "string"},
+            "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        },
+        "required": ["spec"],
+    },
+    "validate_workflow": {
+        "type": "object",
+        "properties": {"spec": _JSON_OBJECT_SCHEMA},
+        "required": ["spec"],
+    },
+    "update_workflow": {
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "string"},
+            "patch": _JSON_OBJECT_SCHEMA,
+            "reason": {"type": "string"},
+            "scope": {"type": "string"},
+        },
+        "required": ["workflow_id", "patch", "reason"],
+    },
+    "run_workflow": {
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "string"},
+            "input": _JSON_OBJECT_SCHEMA,
+            "scope": {"type": "string"},
+        },
+        "required": ["workflow_id", "input"],
+    },
+    "get_workflow_run": {
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "scope": {"type": "string"},
+        },
+        "required": ["workflow_id", "run_id"],
+    },
+    "list_workflows": {
+        "type": "object",
+        "properties": {"scope": {"type": "string"}},
+    },
+    "list_workflow_revisions": {
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "string"},
+            "scope": {"type": "string"},
+        },
+        "required": ["workflow_id"],
+    },
+}
 
 
 class DynamicWorkflowTools(Toolkit):
     """Tools that let an agent create, update, inspect, and run Dynamic Workflows."""
 
     def __init__(self) -> None:
-        super().__init__(
-            name="dynamic_workflow",
-            tools=[
-                self.create_workflow,
-                self.validate_workflow,
-                self.update_workflow,
-                self.run_workflow,
-                self.get_workflow_run,
-                self.list_workflows,
-                self.list_workflow_revisions,
-            ],
-        )
+        super().__init__(name="dynamic_workflow", tools=[])
+        self._register_functions()
+
+    def _register_functions(self) -> None:
+        sync_functions = {
+            "create_workflow": self.create_workflow,
+            "validate_workflow": self.validate_workflow,
+            "update_workflow": self.update_workflow,
+            "run_workflow": self.run_workflow,
+            "get_workflow_run": self.get_workflow_run,
+            "list_workflows": self.list_workflows,
+            "list_workflow_revisions": self.list_workflow_revisions,
+        }
+        async_functions = {
+            "create_workflow": self.acreate_workflow,
+            "validate_workflow": self.avalidate_workflow,
+            "update_workflow": self.aupdate_workflow,
+            "run_workflow": self.arun_workflow,
+            "get_workflow_run": self.aget_workflow_run,
+            "list_workflows": self.alist_workflows,
+            "list_workflow_revisions": self.alist_workflow_revisions,
+        }
+        for function_name, entrypoint in sync_functions.items():
+            self.functions[function_name] = _tool_function(function_name, entrypoint)
+        for function_name, entrypoint in async_functions.items():
+            self.async_functions[function_name] = _tool_function(function_name, entrypoint)
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -152,9 +267,8 @@ class DynamicWorkflowTools(Toolkit):
                 scope=scope,
                 owner_id=owner_id,
                 input_data=input,
-                requested_by=context.agent_name,
+                requested_by=context.requester_id,
                 base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
-                background=True,
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
@@ -244,6 +358,84 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
         return self._payload("ok", workflow_id=workflow_id, revisions=revisions)
 
+    async def acreate_workflow(
+        self,
+        spec: dict[str, Any],
+        scope: str = "agent",
+        reason: str | None = None,
+    ) -> str:
+        """Create a Dynamic Workflow from a declarative workflow spec."""
+        return self.create_workflow(spec, scope=scope, reason=reason)
+
+    async def avalidate_workflow(self, spec: dict[str, Any]) -> str:
+        """Validate a declarative Dynamic Workflow spec without saving it."""
+        return self.validate_workflow(spec)
+
+    async def aupdate_workflow(
+        self,
+        workflow_id: str,
+        patch: dict[str, Any],
+        reason: str,
+        scope: str = "agent",
+    ) -> str:
+        """Create and publish a new Dynamic Workflow revision from a patch."""
+        return self.update_workflow(workflow_id, patch, reason, scope=scope)
+
+    async def arun_workflow(
+        self,
+        workflow_id: str,
+        input: dict[str, Any],  # noqa: A002
+        scope: str = "agent",
+    ) -> str:
+        """Run a Dynamic Workflow and persist step outputs plus report artifacts."""
+        context = get_tool_runtime_context()
+        if context is None:
+            return self._context_error()
+        try:
+            store, owner_id = _store_and_owner(context, scope)
+            service = DynamicWorkflowService(
+                store,
+                async_participant_executor=_aparticipant_executor(context, workflow_id),
+            )
+            run = await service.arun_workflow(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                input_data=input,
+                requested_by=context.requester_id,
+                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+            )
+        except DynamicWorkflowError as exc:
+            return self._payload("error", workflow_id=workflow_id, message=str(exc))
+        return self._payload(
+            run.status,
+            workflow_id=run.workflow_id,
+            run_id=run.run_id,
+            revision=run.revision,
+            report_url=run.report_url,
+            artifacts=run.artifacts,
+            outputs=run.outputs,
+            error=run.error,
+            step_count=len(run.steps),
+        )
+
+    async def aget_workflow_run(
+        self,
+        workflow_id: str,
+        run_id: str,
+        scope: str = "agent",
+    ) -> str:
+        """Read one Dynamic Workflow run record."""
+        return self.get_workflow_run(workflow_id, run_id, scope=scope)
+
+    async def alist_workflows(self, scope: str = "agent") -> str:
+        """List Dynamic Workflows available in one scope."""
+        return self.list_workflows(scope=scope)
+
+    async def alist_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
+        """List immutable revisions for one Dynamic Workflow."""
+        return self.list_workflow_revisions(workflow_id, scope=scope)
+
 
 def _store(context: ToolRuntimeContext) -> DynamicWorkflowStore:
     return DynamicWorkflowStore(context.runtime_paths.storage_root)
@@ -305,6 +497,22 @@ def _participant_executor(context: ToolRuntimeContext, workflow_id: str) -> Part
     return execute
 
 
+def _aparticipant_executor(context: ToolRuntimeContext, workflow_id: str) -> AsyncParticipantExecutor:
+    run_scope = f"{workflow_id}:{uuid4().hex}"
+
+    async def execute(
+        *,
+        participant: dict[str, object],
+        prompt: str,
+        input_data: dict[str, object],
+        step_outputs: dict[str, object],
+    ) -> object:
+        del input_data, step_outputs
+        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope)
+
+    return execute
+
+
 def _execute_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
@@ -321,7 +529,33 @@ def _execute_participant(
     raise DynamicWorkflowError(msg)
 
 
+async def _aexecute_participant(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+    prompt: str,
+    *,
+    run_scope: str,
+) -> object:
+    participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
+    if participant_kind == "room_agent":
+        return await _aexecute_room_agent_participant(context, participant, prompt, run_scope=run_scope)
+    if participant_kind == "ephemeral_agent":
+        return await _aexecute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope)
+    msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
+    raise DynamicWorkflowError(msg)
+
+
 def _execute_room_agent_participant(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+    prompt: str,
+    *,
+    run_scope: str = "manual",
+) -> object:
+    return asyncio.run(_aexecute_room_agent_participant(context, participant, prompt, run_scope=run_scope))
+
+
+async def _aexecute_room_agent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
@@ -343,9 +577,14 @@ def _execute_room_agent_participant(
         msg = "Room agent participants use their configured model; model overrides are only available to ephemeral agents."
         raise DynamicWorkflowError(msg)
 
-    agent_config = context.config.get_agent(agent_name)
-    active_model_name = agent_config.model
-    session_id = _participant_session_id(context, agent_name, run_scope=run_scope)
+    participant_id = _required_participant_text(participant, "id")
+    runtime_model = context.config.resolve_runtime_model(
+        entity_name=agent_name,
+        room_id=context.room_id,
+        runtime_paths=context.runtime_paths,
+    )
+    active_model_name = runtime_model.model_name
+    session_id = _participant_session_id(context, participant_id, run_scope=run_scope)
     participant_context = replace(
         context,
         agent_name=agent_name,
@@ -353,6 +592,12 @@ def _execute_room_agent_participant(
         session_id=session_id,
     )
     execution_identity = build_execution_identity_from_runtime_context(participant_context)
+    knowledge_resolution = resolve_agent_knowledge_access(
+        agent_name,
+        context.config,
+        context.runtime_paths,
+        execution_identity=execution_identity,
+    )
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import create_agent  # noqa: PLC0415
 
@@ -363,11 +608,12 @@ def _execute_room_agent_participant(
         execution_identity=execution_identity,
         session_id=session_id,
         hook_registry=context.hook_registry,
+        knowledge=knowledge_resolution.knowledge,
         active_model_name=active_model_name,
         include_interactive_questions=False,
         persist_runtime_state=False,
     )
-    return _run_agent(participant_context, agent, prompt)
+    return await _arun_agent(participant_context, agent, prompt)
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
@@ -388,6 +634,16 @@ def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
 
 
 def _execute_ephemeral_agent_participant(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+    prompt: str,
+    *,
+    run_scope: str,
+) -> object:
+    return asyncio.run(_aexecute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope))
+
+
+async def _aexecute_ephemeral_agent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
@@ -421,20 +677,21 @@ def _execute_ephemeral_agent_participant(
         active_model_name=model_name,
         session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
     )
-    return _run_agent(participant_context, agent, prompt)
+    return await _arun_agent(participant_context, agent, prompt)
 
 
-def _run_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
-    async def run() -> object:
+async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
+    with tool_runtime_context(context):
         response = await agent.arun(
             prompt,
             user_id=context.requester_id,
             session_id=context.session_id,
         )
-        return response.content if response.content is not None else ""
-
-    with tool_runtime_context(context):
-        return asyncio.run(run())
+    content = response.content if response.content is not None else ""
+    if response.status != RunStatus.completed:
+        message = str(content) if content else f"Agent run ended with status {response.status.value}."
+        raise DynamicWorkflowExecutionError(message)
+    return content
 
 
 def _participant_session_id(context: ToolRuntimeContext, participant_id: str, *, run_scope: str) -> str:

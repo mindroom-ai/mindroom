@@ -28,6 +28,21 @@ _SCOPES = frozenset({"agent", "room", "tenant"})
 _PARTICIPANT_KINDS = frozenset({"ephemeral_agent", "room_agent"})
 _AGENT_STEP_TEMPLATE_FIELDS = ("prompt", "response_template", "output_template", "template")
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
+_MAX_WORKFLOW_PARTICIPANTS = 8
+_MAX_WORKFLOW_STEPS = 64
+_MAX_WORKFLOW_AGENT_STEPS = 16
+_MAX_WORKFLOW_RUNTIME_SECONDS = 3600
+_MAX_WORKFLOW_CONCURRENT_AGENTS = 8
+_PERMISSION_KEYS = frozenset(
+    {
+        "max_runtime_seconds",
+        "max_concurrent_agents",
+        "max_total_agents",
+        "models",
+        "tools",
+        "data",
+    },
+)
 
 
 class DynamicWorkflowError(ValueError):
@@ -441,6 +456,7 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     participant_ids = _validate_participants(participants)
     workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
     step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
+    _validate_workflow_limits(normalized, participants, workflow_steps)
     _validate_outputs(normalized, step_ids)
     return normalized
 
@@ -452,6 +468,15 @@ def validate_workflow_input(spec: dict[str, object], input_data: dict[str, objec
         return
     _validate_required_inputs(_input_required_fields(inputs), input_data)
     _validate_input_property_types(_input_properties(inputs), input_data)
+
+
+def workflow_runtime_seconds(spec: dict[str, object]) -> int:
+    """Return the validated runtime cap for one workflow spec."""
+    permissions = _permissions_mapping(spec)
+    value = permissions.get("max_runtime_seconds")
+    if value is None:
+        return _MAX_WORKFLOW_RUNTIME_SECONDS
+    return _positive_int_permission(value, "max_runtime_seconds", maximum=_MAX_WORKFLOW_RUNTIME_SECONDS)
 
 
 def _input_schema(spec: dict[str, object]) -> dict[str, object] | None:
@@ -620,6 +645,124 @@ def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participan
             _validate_report_step(step, context, step_ids)
         step_ids.add(step_id)
     return step_ids
+
+
+def _validate_workflow_limits(
+    spec: dict[str, object],
+    participants: list[dict[str, object]],
+    workflow_steps: list[dict[str, object]],
+) -> None:
+    if len(participants) > _MAX_WORKFLOW_PARTICIPANTS:
+        msg = f"Workflow participants cannot exceed {_MAX_WORKFLOW_PARTICIPANTS}."
+        raise DynamicWorkflowError(msg)
+    if len(workflow_steps) > _MAX_WORKFLOW_STEPS:
+        msg = f"Workflow steps cannot exceed {_MAX_WORKFLOW_STEPS}."
+        raise DynamicWorkflowError(msg)
+
+    permissions = _permissions_mapping(spec)
+    unknown_permissions = sorted(set(permissions) - _PERMISSION_KEYS)
+    if unknown_permissions:
+        msg = f"Workflow permissions contain unsupported keys: {', '.join(unknown_permissions)}."
+        raise DynamicWorkflowError(msg)
+
+    runtime_seconds = permissions.get("max_runtime_seconds")
+    if runtime_seconds is not None:
+        permissions["max_runtime_seconds"] = _positive_int_permission(
+            runtime_seconds,
+            "max_runtime_seconds",
+            maximum=_MAX_WORKFLOW_RUNTIME_SECONDS,
+        )
+
+    max_concurrent_agents = permissions.get("max_concurrent_agents")
+    if max_concurrent_agents is not None:
+        permissions["max_concurrent_agents"] = _positive_int_permission(
+            max_concurrent_agents,
+            "max_concurrent_agents",
+            maximum=_MAX_WORKFLOW_CONCURRENT_AGENTS,
+        )
+
+    agent_step_count = sum(1 for step in workflow_steps if step.get("type") == "agent_step")
+    max_total_agents = permissions.get("max_total_agents")
+    if max_total_agents is None:
+        max_total_agents = _MAX_WORKFLOW_AGENT_STEPS
+    max_total_agents = _positive_int_permission(
+        max_total_agents,
+        "max_total_agents",
+        maximum=_MAX_WORKFLOW_AGENT_STEPS,
+    )
+    permissions["max_total_agents"] = max_total_agents
+    if agent_step_count > max_total_agents:
+        msg = f"Workflow agent steps cannot exceed permissions.max_total_agents ({max_total_agents})."
+        raise DynamicWorkflowError(msg)
+
+    _validate_permission_models(permissions)
+    _validate_permission_tools(permissions)
+    _validate_permission_data(permissions)
+    spec["permissions"] = permissions
+
+
+def _permissions_mapping(spec: dict[str, object]) -> dict[str, object]:
+    raw_permissions = spec.get("permissions", {})
+    if raw_permissions is None:
+        return {}
+    if not isinstance(raw_permissions, dict):
+        msg = "Workflow spec field 'permissions' must be a mapping."
+        raise DynamicWorkflowError(msg)
+    permissions = _object_mapping(cast("Mapping[object, object]", raw_permissions))
+    spec["permissions"] = permissions
+    return permissions
+
+
+def _positive_int_permission(value: object, field_name: str, *, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        msg = f"Workflow permission '{field_name}' must be an integer."
+        raise DynamicWorkflowError(msg)
+    if value < 1 or value > maximum:
+        msg = f"Workflow permission '{field_name}' must be between 1 and {maximum}."
+        raise DynamicWorkflowError(msg)
+    return value
+
+
+def _validate_permission_models(permissions: dict[str, object]) -> None:
+    models = permissions.get("models")
+    if models is None:
+        return
+    if not isinstance(models, list) or not all(isinstance(model, str) and model.strip() for model in models):
+        msg = "Workflow permission 'models' must be a list of non-empty strings."
+        raise DynamicWorkflowError(msg)
+    permissions["models"] = [cast("str", model).strip() for model in models]
+
+
+def _validate_permission_tools(permissions: dict[str, object]) -> None:
+    tools = permissions.get("tools", [])
+    if not isinstance(tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in tools):
+        msg = "Workflow permission 'tools' must be a list of non-empty strings."
+        raise DynamicWorkflowError(msg)
+    if tools:
+        msg = "Workflow permission 'tools' must be empty until Dynamic Workflow tool grants are supported."
+        raise DynamicWorkflowError(msg)
+    permissions["tools"] = []
+
+
+def _validate_permission_data(permissions: dict[str, object]) -> None:
+    data = permissions.get("data", {})
+    if data is None:
+        permissions["data"] = {}
+        return
+    if not isinstance(data, dict):
+        msg = "Workflow permission 'data' must be a mapping."
+        raise DynamicWorkflowError(msg)
+    normalized = _object_mapping(cast("Mapping[object, object]", data))
+    for field_name in ("matrix_history", "attachments"):
+        value = normalized.get(field_name)
+        if value is not None and value not in {"none", "current_thread"}:
+            msg = f"Workflow permission data.{field_name} must be 'none' or 'current_thread'."
+            raise DynamicWorkflowError(msg)
+    knowledge_bases = normalized.get("knowledge_bases", [])
+    if not isinstance(knowledge_bases, list) or not all(isinstance(base, str) for base in knowledge_bases):
+        msg = "Workflow permission data.knowledge_bases must be a list of strings."
+        raise DynamicWorkflowError(msg)
+    permissions["data"] = normalized
 
 
 def _step_type(step: dict[str, object], context: str) -> str:
