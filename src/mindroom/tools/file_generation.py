@@ -28,13 +28,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="save_files",
-            label="Save Files",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
             name="enable_json_generation",
             label="Enable JSON Generation",
             type="boolean",

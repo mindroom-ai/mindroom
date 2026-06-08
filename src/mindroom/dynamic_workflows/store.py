@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import html
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -17,11 +19,13 @@ import yaml
 from mindroom.dynamic_workflows.runner import execute_workflow_spec
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
+_STEP_TYPES = frozenset({"agent_step", "report_step", "transform_step"})
 _SCOPES = frozenset({"agent", "room", "tenant"})
+_TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 
 
 class DynamicWorkflowError(ValueError):
@@ -85,26 +89,33 @@ class DynamicWorkflowStore:
         validated_spec = validate_workflow_spec(spec)
         workflow_id = str(validated_spec["id"])
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        if workflow_dir.exists():
-            msg = f"Dynamic Workflow '{workflow_id}' already exists in {scope} scope."
-            raise DynamicWorkflowError(msg)
+        with _workflow_lock(workflow_dir):
+            if workflow_dir.exists():
+                msg = f"Dynamic Workflow '{workflow_id}' already exists in {scope} scope."
+                raise DynamicWorkflowError(msg)
 
-        now = _utc_now()
-        revision = "000001"
-        revision_spec = _revision_spec(validated_spec, revision=revision, reason=reason, updated_by=created_by, now=now)
-        summary = DynamicWorkflowSummary(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            active_revision=revision,
-            name=str(validated_spec["name"]),
-            description=str(validated_spec.get("description", "")),
-            created_by=created_by,
-            created_at=now,
-            updated_at=now,
-        )
-        _atomic_write_yaml(workflow_dir / "revisions" / f"{revision}.yaml", revision_spec)
-        _atomic_write_yaml(workflow_dir / "workflow.yaml", _summary_to_yaml(summary))
+            now = _utc_now()
+            revision = "000001"
+            revision_spec = _revision_spec(
+                validated_spec,
+                revision=revision,
+                reason=reason,
+                updated_by=created_by,
+                now=now,
+            )
+            summary = DynamicWorkflowSummary(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                active_revision=revision,
+                name=str(validated_spec["name"]),
+                description=str(validated_spec.get("description", "")),
+                created_by=created_by,
+                created_at=now,
+                updated_at=now,
+            )
+            _atomic_write_yaml(workflow_dir / "revisions" / f"{revision}.yaml", revision_spec)
+            _atomic_write_yaml(workflow_dir / "workflow.yaml", _summary_to_yaml(summary))
         return summary
 
     def validate_workflow(self, spec: dict[str, object]) -> dict[str, object]:
@@ -122,33 +133,39 @@ class DynamicWorkflowStore:
         reason: str,
     ) -> DynamicWorkflowSummary:
         """Create and publish a new revision by applying a recursive patch."""
-        summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        current_spec = self._load_revision(workflow_dir, summary.active_revision)
-        next_revision = self._next_revision(workflow_dir)
-        patched_spec = _recursive_merge(current_spec, patch)
-        revision_spec = _revision_spec(
-            validate_workflow_spec(patched_spec),
-            revision=next_revision,
-            reason=reason,
-            updated_by=updated_by,
-            now=_utc_now(),
-        )
-        now = _utc_now()
-        updated_summary = DynamicWorkflowSummary(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            active_revision=next_revision,
-            name=str(revision_spec["name"]),
-            description=str(revision_spec.get("description", "")),
-            created_by=summary.created_by,
-            created_at=summary.created_at,
-            updated_at=now,
-            archived=summary.archived,
-        )
-        _atomic_write_yaml(workflow_dir / "revisions" / f"{next_revision}.yaml", revision_spec)
-        _atomic_write_yaml(workflow_dir / "workflow.yaml", _summary_to_yaml(updated_summary))
+        with _workflow_lock(workflow_dir):
+            summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
+            current_spec = self._load_revision(workflow_dir, summary.active_revision)
+            patched_spec = _recursive_merge(current_spec, patch)
+            validated_patched_spec = validate_workflow_spec(patched_spec)
+            if str(validated_patched_spec["id"]) != workflow_id:
+                msg = "Workflow ID is immutable and cannot be changed by update_workflow."
+                raise DynamicWorkflowError(msg)
+
+            next_revision = self._next_revision(workflow_dir)
+            now = _utc_now()
+            revision_spec = _revision_spec(
+                validated_patched_spec,
+                revision=next_revision,
+                reason=reason,
+                updated_by=updated_by,
+                now=now,
+            )
+            updated_summary = DynamicWorkflowSummary(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                active_revision=next_revision,
+                name=str(revision_spec["name"]),
+                description=str(revision_spec.get("description", "")),
+                created_by=summary.created_by,
+                created_at=summary.created_at,
+                updated_at=now,
+                archived=summary.archived,
+            )
+            _atomic_write_yaml(workflow_dir / "revisions" / f"{next_revision}.yaml", revision_spec)
+            _atomic_write_yaml(workflow_dir / "workflow.yaml", _summary_to_yaml(updated_summary))
         return updated_summary
 
     def get_workflow(self, *, workflow_id: str, scope: str, owner_id: str) -> DynamicWorkflowSummary:
@@ -237,6 +254,7 @@ class DynamicWorkflowStore:
         run_id: str,
     ) -> DynamicWorkflowRun:
         """Load one workflow run."""
+        _validate_id(run_id, "run_id")
         run_path = self._workflow_dir(scope, owner_id, workflow_id) / "runs" / f"{run_id}.json"
         return _run_from_json(_load_json_mapping(run_path))
 
@@ -244,8 +262,11 @@ class DynamicWorkflowStore:
         """Find the private HTML report for one run ID."""
         _validate_id(run_id, "run_id")
         matches = list(self._root.glob(f"*/*/*/artifacts/{run_id}/report.html"))
-        if len(matches) != 1:
+        if not matches:
             msg = f"Private report for run '{run_id}' was not found."
+            raise DynamicWorkflowError(msg)
+        if len(matches) > 1:
+            msg = f"Multiple private reports found for run '{run_id}'."
             raise DynamicWorkflowError(msg)
         return matches[0]
 
@@ -276,18 +297,206 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     normalized = copy.deepcopy(spec)
     workflow_id = _required_text(normalized, "id")
     _validate_id(workflow_id, "id")
-    _required_text(normalized, "name")
+    normalized["id"] = workflow_id
+    normalized["name"] = _required_text(normalized, "name")
     kind = _required_text(normalized, "kind")
     if kind != "workflow":
         msg = "Workflow spec kind must be 'workflow'."
         raise DynamicWorkflowError(msg)
-    if not isinstance(normalized.get("workflow"), list) or not normalized["workflow"]:
-        msg = "Workflow spec must include at least one workflow step."
-        raise DynamicWorkflowError(msg)
-    if not isinstance(normalized.get("participants"), list) or not normalized["participants"]:
-        msg = "Workflow spec must include at least one participant."
-        raise DynamicWorkflowError(msg)
+    normalized["kind"] = kind
+
+    participants = _required_mapping_list(normalized, "participants", "Participant")
+    participant_ids = _validate_participants(participants)
+    workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
+    step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
+    _validate_outputs(normalized, step_ids)
     return normalized
+
+
+def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
+    participant_ids: set[str] = set()
+    for index, participant in enumerate(participants):
+        context = f"Participant at index {index}"
+        participant_id = _required_text(participant, "id", context=context)
+        _validate_id(participant_id, f"{context} id")
+        if participant_id in participant_ids:
+            msg = f"Duplicate participant id '{participant_id}'."
+            raise DynamicWorkflowError(msg)
+        participant["id"] = participant_id
+        participant_ids.add(participant_id)
+        if "kind" in participant:
+            participant["kind"] = _required_text(participant, "kind", context=context)
+    return participant_ids
+
+
+def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participant_ids: set[str]) -> set[str]:
+    step_ids: set[str] = set()
+    for index, step in enumerate(workflow_steps):
+        context = f"Workflow step at index {index}"
+        step_id = _required_text(step, "id", context=context)
+        _validate_id(step_id, f"{context} id")
+        if step_id in step_ids:
+            msg = f"Duplicate workflow step id '{step_id}'."
+            raise DynamicWorkflowError(msg)
+        step["id"] = step_id
+
+        step_type = _step_type(step, context)
+        step["type"] = step_type
+        if step_type == "agent_step":
+            _validate_agent_step(step, context, participant_ids, step_ids)
+        elif step_type == "transform_step":
+            _validate_template_choice(step, context, ("template", "text"), step_ids)
+        elif step_type == "report_step":
+            _validate_report_step(step, context, step_ids)
+        step_ids.add(step_id)
+    return step_ids
+
+
+def _step_type(step: dict[str, object], context: str) -> str:
+    raw_step_type = step.get("type", "agent_step")
+    if not isinstance(raw_step_type, str) or not raw_step_type.strip():
+        msg = f"{context} field 'type' must be a non-empty string."
+        raise DynamicWorkflowError(msg)
+    step_type = raw_step_type.strip()
+    if step_type not in _STEP_TYPES:
+        msg = f"Unsupported workflow step type '{step_type}'."
+        raise DynamicWorkflowError(msg)
+    return step_type
+
+
+def _validate_agent_step(
+    step: dict[str, object],
+    context: str,
+    participant_ids: set[str],
+    available_step_ids: set[str],
+) -> None:
+    participant = _required_text(step, "participant", context=context)
+    if participant not in participant_ids:
+        msg = f"{context} references unknown participant '{participant}'."
+        raise DynamicWorkflowError(msg)
+    step["participant"] = participant
+    _validate_template_choice(
+        step,
+        context,
+        ("response_template", "output_template", "template", "prompt"),
+        available_step_ids,
+    )
+
+
+def _validate_report_step(step: dict[str, object], context: str, available_step_ids: set[str]) -> None:
+    if "body_template" in step:
+        body_template = _required_text(step, "body_template", context=context)
+        step["body_template"] = body_template
+        _validate_template_references(body_template, available_step_ids, f"{context} field 'body_template'")
+    else:
+        from_step = _required_text(step, "from_step", context=context)
+        if from_step not in available_step_ids:
+            msg = f"{context} references unknown prior step '{from_step}'."
+            raise DynamicWorkflowError(msg)
+        step["from_step"] = from_step
+
+    if "title" in step:
+        title = _required_text(step, "title", context=context)
+        step["title"] = title
+        _validate_template_references(title, available_step_ids, f"{context} field 'title'")
+
+
+def _validate_outputs(spec: dict[str, object], step_ids: set[str]) -> None:
+    raw_outputs = spec.get("outputs", [])
+    if raw_outputs is None:
+        spec["outputs"] = []
+        return
+    if not isinstance(raw_outputs, list):
+        msg = "Workflow spec field 'outputs' must be a list."
+        raise DynamicWorkflowError(msg)
+    outputs: list[dict[str, object]] = []
+    output_ids: set[str] = set()
+    for index, raw_output in enumerate(raw_outputs):
+        context = f"Workflow output at index {index}"
+        if not isinstance(raw_output, dict):
+            msg = f"{context} must be a mapping."
+            raise DynamicWorkflowError(msg)
+        output = _object_mapping(cast("Mapping[object, object]", raw_output))
+        output_id = _required_text(output, "id", context=context)
+        _validate_id(output_id, f"{context} id")
+        if output_id in output_ids:
+            msg = f"Duplicate workflow output id '{output_id}'."
+            raise DynamicWorkflowError(msg)
+        output["id"] = output_id
+        output_ids.add(output_id)
+        if "type" in output:
+            output["type"] = _required_text(output, "type", context=context)
+        if "from_step" in output:
+            from_step = _required_text(output, "from_step", context=context)
+            if from_step not in step_ids:
+                msg = f"{context} references unknown step '{from_step}'."
+                raise DynamicWorkflowError(msg)
+            output["from_step"] = from_step
+        outputs.append(output)
+    spec["outputs"] = outputs
+
+
+def _required_mapping_list(data: dict[str, object], key: str, item_label: str) -> list[dict[str, object]]:
+    value = data.get(key)
+    if value is None:
+        msg = f"Workflow spec field '{key}' is missing."
+        raise DynamicWorkflowError(msg)
+    if not isinstance(value, list):
+        msg = f"Workflow spec field '{key}' must be a list."
+        raise DynamicWorkflowError(msg)
+    if not value:
+        msg = f"Workflow spec field '{key}' cannot be empty."
+        raise DynamicWorkflowError(msg)
+    items: list[dict[str, object]] = []
+    for index, raw_item in enumerate(value):
+        if not isinstance(raw_item, dict):
+            msg = f"{item_label} at index {index} must be a mapping."
+            raise DynamicWorkflowError(msg)
+        items.append(_object_mapping(cast("Mapping[object, object]", raw_item)))
+    data[key] = items
+    return items
+
+
+def _validate_template_choice(
+    step: dict[str, object],
+    context: str,
+    field_names: tuple[str, ...],
+    available_step_ids: set[str],
+) -> None:
+    for field_name in field_names:
+        if field_name not in step:
+            continue
+        template = _required_text(step, field_name, context=context)
+        step[field_name] = template
+        _validate_template_references(template, available_step_ids, f"{context} field '{field_name}'")
+        return
+    fields = ", ".join(field_names)
+    msg = f"{context} must include one of: {fields}."
+    raise DynamicWorkflowError(msg)
+
+
+def _validate_template_references(template: str, available_step_ids: set[str], context: str) -> None:
+    for match in _TEMPLATE_REF_RE.finditer(template):
+        reference = match.group(1)
+        if reference.startswith("input."):
+            parts = reference.split(".")
+            if len(parts) < 2 or any(not part for part in parts[1:]):
+                msg = f"{context} contains invalid template reference '{reference}'."
+                raise DynamicWorkflowError(msg)
+            continue
+        if reference.startswith("steps."):
+            parts = reference.split(".")
+            if len(parts) == 2 or (len(parts) == 3 and parts[2] == "content"):
+                step_id = parts[1]
+            else:
+                msg = f"{context} contains unsupported template reference '{reference}'."
+                raise DynamicWorkflowError(msg)
+            if step_id not in available_step_ids:
+                msg = f"{context} references unknown prior step '{step_id}'."
+                raise DynamicWorkflowError(msg)
+            continue
+        msg = f"{context} contains unknown template reference '{reference}'."
+        raise DynamicWorkflowError(msg)
 
 
 def _render_report_html(*, title: str, markdown: str) -> str:
@@ -424,12 +633,19 @@ def _run_from_json(data: dict[str, object]) -> DynamicWorkflowRun:
     )
 
 
-def _required_text(data: dict[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value.strip():
-        msg = f"Workflow spec field '{key}' must be a non-empty string."
+def _required_text(data: dict[str, object], key: str, *, context: str = "Workflow spec") -> str:
+    if key not in data:
+        msg = f"{context} field '{key}' is missing."
         raise DynamicWorkflowError(msg)
-    return value.strip()
+    value = data[key]
+    if not isinstance(value, str):
+        msg = f"{context} field '{key}' must be a string."
+        raise DynamicWorkflowError(msg)
+    stripped = value.strip()
+    if not stripped:
+        msg = f"{context} field '{key}' cannot be empty."
+        raise DynamicWorkflowError(msg)
+    return stripped
 
 
 def _validate_scope(scope: str) -> None:
@@ -477,6 +693,9 @@ def _load_yaml_mapping(path: Path) -> dict[str, object]:
     except FileNotFoundError as exc:
         msg = f"YAML mapping was not found at {path}."
         raise DynamicWorkflowError(msg) from exc
+    except yaml.YAMLError as exc:
+        msg = f"Failed to parse YAML mapping at {path}: {exc}"
+        raise DynamicWorkflowError(msg) from exc
     if not isinstance(data, dict):
         msg = f"Expected YAML mapping at {path}."
         raise DynamicWorkflowError(msg)
@@ -488,6 +707,9 @@ def _load_json_mapping(path: Path) -> dict[str, object]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         msg = f"JSON mapping was not found at {path}."
+        raise DynamicWorkflowError(msg) from exc
+    except json.JSONDecodeError as exc:
+        msg = f"Failed to parse JSON mapping at {path}: {exc}"
         raise DynamicWorkflowError(msg) from exc
     if not isinstance(data, dict):
         msg = f"Expected JSON mapping at {path}."
@@ -508,3 +730,15 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     tmp_path.replace(path)
+
+
+@contextmanager
+def _workflow_lock(workflow_dir: Path) -> Iterator[None]:
+    lock_path = workflow_dir.with_name(f".{workflow_dir.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

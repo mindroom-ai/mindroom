@@ -226,6 +226,9 @@ def _store(context: ToolRuntimeContext) -> DynamicWorkflowStore:
 
 
 def _store_and_owner(context: ToolRuntimeContext, scope: str) -> tuple[DynamicWorkflowStore, str]:
+    if not context.agent_name:
+        msg = "Agent name is missing in the tool runtime context."
+        raise DynamicWorkflowError(msg)
     return _store(context), _owner_id(context, scope)
 
 
@@ -233,6 +236,9 @@ def _owner_id(context: ToolRuntimeContext, scope: str) -> str:
     if scope == "agent":
         return context.agent_name
     if scope == "room":
+        if not context.room_id:
+            msg = "Room ID is missing in the tool runtime context."
+            raise DynamicWorkflowError(msg)
         return context.room_id
     if scope == "tenant":
         return "tenant"

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import pytest
 import yaml
 from agno.factory import RequestContext
 from agno.workflow import Workflow, WorkflowFactory
@@ -16,7 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
-from mindroom.dynamic_workflows.store import DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -179,6 +182,67 @@ def test_update_workflow_creates_new_revision_without_mutating_old_one(tmp_path:
     assert second_revision["revision_reason"] == "tighten report style"
 
 
+def test_concurrent_update_workflow_creates_distinct_revisions(tmp_path: Path) -> None:
+    """Concurrent updates should serialize revision numbering for one workflow."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(description="Original description."),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    def update_description(description: str) -> str:
+        summary = store.update_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            patch={"description": description},
+            updated_by="general",
+            reason=description,
+        )
+        return summary.active_revision
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        revisions = sorted(
+            future.result()
+            for future in [
+                executor.submit(update_description, "First update."),
+                executor.submit(update_description, "Second update."),
+            ]
+        )
+
+    assert revisions == ["000002", "000003"]
+    assert store.list_workflow_revisions(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+    ) == ["000001", "000002", "000003"]
+
+
+def test_update_workflow_rejects_workflow_id_changes(tmp_path: Path) -> None:
+    """Workflow revisions should not mutate the persisted workflow identity."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    with pytest.raises(DynamicWorkflowError, match="Workflow ID is immutable"):
+        store.update_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            patch={"id": "different-workflow"},
+            updated_by="general",
+            reason="bad patch",
+        )
+
+
 def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) -> None:
     """Running a workflow should pin the active revision and write a private report artifact."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -272,24 +336,90 @@ def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> Non
     assert "Research brief for Agno factories: sources checked." in report_html
 
 
-def test_run_workflow_records_failed_run_when_step_reference_is_missing(tmp_path: Path) -> None:
-    """Failed workflow execution should still persist a run record and error report."""
+def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
+    """Workflow specs should reject malformed step entries before they are persisted."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="Workflow step at index 0 field 'id' is missing"):
+        store.validate_workflow(
+            _workflow_spec(
+                workflow=[
+                    {
+                        "type": "transform_step",
+                        "template": "Research brief for {input.topic}.",
+                    },
+                ],
+            ),
+        )
+
+
+def test_get_workflow_run_rejects_traversal_run_id(tmp_path: Path) -> None:
+    """Run lookup should reject path traversal before building the run filename."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     store.create_workflow(
-        spec=_workflow_spec(
-            workflow=[
-                {
-                    "id": "write",
-                    "type": "report_step",
-                    "body_template": "{steps.missing}",
-                },
-            ],
-        ),
+        spec=_workflow_spec(),
         scope="agent",
         owner_id="general",
         created_by="general",
         reason="initial design",
     )
+
+    with pytest.raises(DynamicWorkflowError, match="run_id must match"):
+        store.get_workflow_run(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            run_id="../run_secret",
+        )
+
+
+def test_get_workflow_run_wraps_json_decoder_errors(tmp_path: Path) -> None:
+    """Corrupt run JSON should return a Dynamic Workflow storage error."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run_path = (
+        tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs/run_corrupt.json"
+    )
+    run_path.parent.mkdir(parents=True, exist_ok=True)
+    run_path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(DynamicWorkflowError, match="Failed to parse JSON mapping"):
+        store.get_workflow_run(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            run_id="run_corrupt",
+        )
+
+
+def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(tmp_path: Path) -> None:
+    """Failed workflow execution should still persist a run record and error report."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    revision_path = (
+        tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/revisions/000001.yaml"
+    )
+    revision = yaml.safe_load(revision_path.read_text(encoding="utf-8"))
+    revision["workflow"] = [
+        {
+            "id": "write",
+            "type": "report_step",
+            "body_template": "{steps.missing}",
+        },
+    ]
+    revision_path.write_text(yaml.safe_dump(revision, sort_keys=False), encoding="utf-8")
 
     run = store.run_workflow(
         workflow_id="competitor-research-report",
@@ -343,6 +473,7 @@ def test_agno_workflow_factory_step_executor_renders_declared_output(tmp_path: P
                     "template": "Research brief for {input.topic}.",
                 },
             ],
+            outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
         ),
         db_file=tmp_path / "dynamic-workflow-agno.db",
     )
@@ -387,3 +518,15 @@ def test_dynamic_workflow_tool_returns_payload_for_invalid_scope(tmp_path: Path)
 
     assert result["status"] == "error"
     assert "Unsupported Dynamic Workflow scope" in result["message"]
+
+
+def test_dynamic_workflow_tool_returns_payload_when_agent_name_is_missing(tmp_path: Path) -> None:
+    """Runtime-aware tool should fail cleanly when required context owner data is missing."""
+    tool = DynamicWorkflowTools()
+    context = replace(_make_context(tmp_path), agent_name="")
+
+    with tool_runtime_context(context):
+        result = _tool_payload(tool.list_workflows())
+
+    assert result["status"] == "error"
+    assert "Agent name is missing" in result["message"]

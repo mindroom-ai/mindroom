@@ -19,7 +19,14 @@ def _workflow_spec() -> dict[str, object]:
         "description": "Create a cited HTML report about competitors.",
         "kind": "workflow",
         "participants": [{"id": "writer", "kind": "ephemeral_agent", "name": "Report Writer"}],
-        "workflow": [{"id": "write", "type": "agent_step", "participant": "writer"}],
+        "workflow": [
+            {
+                "id": "write",
+                "type": "agent_step",
+                "participant": "writer",
+                "response_template": "Report about {input.topic}.",
+            },
+        ],
         "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
     }
 
@@ -48,5 +55,20 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-security-policy"] == (
+        "default-src 'none'; "
+        "img-src 'self' data: https:; "
+        "style-src 'unsafe-inline'; "
+        "font-src 'self' data:; "
+        "base-uri 'none'; "
+        "frame-ancestors 'self'"
+    )
     assert "Competitor Research Report" in response.text
     assert "Agno factories" in response.text
+
+
+def test_private_dynamic_workflow_report_returns_404_for_unknown_run_id(test_client: TestClient) -> None:
+    """Private report URLs should return 404 for unknown Dynamic Workflow runs."""
+    response = test_client.get("/reports/private/run_missing")
+
+    assert response.status_code == 404

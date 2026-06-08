@@ -56,12 +56,16 @@ def build_agno_workflow_factory(
 
 def _build_steps(spec: dict[str, object]) -> list[Step]:
     raw_steps = spec["workflow"]
-    assert isinstance(raw_steps, list)
-    return [
-        _build_step(_object_mapping(cast("Mapping[object, object]", raw_step)))
-        for raw_step in raw_steps
-        if isinstance(raw_step, dict)
-    ]
+    if not isinstance(raw_steps, list):
+        msg = "Workflow spec field 'workflow' must be a list."
+        raise TypeError(msg)
+    steps: list[Step] = []
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, dict):
+            msg = f"Workflow step at index {index} must be a mapping."
+            raise TypeError(msg)
+        steps.append(_build_step(_object_mapping(cast("Mapping[object, object]", raw_step))))
+    return steps
 
 
 def _build_step(step: dict[str, object]) -> Step:

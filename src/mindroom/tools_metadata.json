@@ -3141,18 +3141,6 @@
         },
         {
           "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Save Files",
-          "name": "save_files",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable JSON Generation",
