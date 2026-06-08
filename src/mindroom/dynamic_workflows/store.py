@@ -19,12 +19,14 @@ import yaml
 from mindroom.dynamic_workflows.runner import ParticipantExecutor, execute_workflow_spec
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _STEP_TYPES = frozenset({"agent_step", "report_step", "transform_step"})
 _SCOPES = frozenset({"agent", "room", "tenant"})
+_PARTICIPANT_KINDS = frozenset({"ephemeral_agent", "room_agent"})
+_AGENT_STEP_TEMPLATE_FIELDS = ("prompt", "response_template", "output_template", "template")
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
 
 
@@ -84,9 +86,12 @@ class DynamicWorkflowStore:
         owner_id: str,
         created_by: str,
         reason: str | None = None,
+        spec_validator: Callable[[dict[str, object]], None] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create a workflow with revision 000001."""
         validated_spec = validate_workflow_spec(spec)
+        if spec_validator is not None:
+            spec_validator(validated_spec)
         workflow_id = str(validated_spec["id"])
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
         with _workflow_lock(workflow_dir):
@@ -131,6 +136,7 @@ class DynamicWorkflowStore:
         patch: dict[str, object],
         updated_by: str,
         reason: str,
+        spec_validator: Callable[[dict[str, object]], None] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create and publish a new revision by applying a recursive patch."""
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
@@ -139,6 +145,8 @@ class DynamicWorkflowStore:
             current_spec = self._load_revision(workflow_dir, summary.active_revision)
             patched_spec = _recursive_merge(current_spec, patch)
             validated_patched_spec = validate_workflow_spec(patched_spec)
+            if spec_validator is not None:
+                spec_validator(validated_patched_spec)
             if str(validated_patched_spec["id"]) != workflow_id:
                 msg = "Workflow ID is immutable and cannot be changed by update_workflow."
                 raise DynamicWorkflowError(msg)
@@ -220,6 +228,7 @@ class DynamicWorkflowStore:
             revision=run.revision,
         )
         try:
+            spec = validate_workflow_spec(spec)
             validate_workflow_input(spec, input_data)
         except DynamicWorkflowError as exc:
             return self.fail_workflow_run(run, error=str(exc))
@@ -427,6 +436,7 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
         raise DynamicWorkflowError(msg)
     normalized["kind"] = kind
 
+    _validate_input_schema(normalized)
     participants = _required_mapping_list(normalized, "participants", "Participant")
     participant_ids = _validate_participants(participants)
     workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
@@ -492,6 +502,25 @@ def _input_properties(inputs: dict[str, object]) -> dict[str, object]:
     return _object_mapping(cast("Mapping[object, object]", raw_properties))
 
 
+def _validate_input_schema(spec: dict[str, object]) -> None:
+    inputs = _input_schema(spec)
+    if inputs is None:
+        return
+    required_fields = _input_required_fields(inputs)
+    if len(required_fields) != len(set(required_fields)):
+        msg = "Workflow input schema required entries must be unique."
+        raise DynamicWorkflowError(msg)
+    for field_name, raw_field_schema in _input_properties(inputs).items():
+        if not isinstance(raw_field_schema, dict):
+            msg = f"Workflow input schema property '{field_name}' must be a mapping."
+            raise DynamicWorkflowError(msg)
+        field_schema = _object_mapping(cast("Mapping[object, object]", raw_field_schema))
+        for input_type in _allowed_input_types(field_schema):
+            if input_type not in _INPUT_TYPE_CHECKS:
+                msg = f"Unsupported workflow input schema type '{input_type}'."
+                raise DynamicWorkflowError(msg)
+
+
 def _validate_input_property_types(properties: dict[str, object], input_data: dict[str, object]) -> None:
     for field_name, raw_field_schema in properties.items():
         if field_name not in input_data or not isinstance(raw_field_schema, dict):
@@ -525,9 +554,49 @@ def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
             raise DynamicWorkflowError(msg)
         participant["id"] = participant_id
         participant_ids.add(participant_id)
-        if "kind" in participant:
-            participant["kind"] = _required_text(participant, "kind", context=context)
+        participant_kind = (
+            _required_text(participant, "kind", context=context) if "kind" in participant else "ephemeral_agent"
+        )
+        if participant_kind not in _PARTICIPANT_KINDS:
+            msg = f"{context} has unsupported kind '{participant_kind}'."
+            raise DynamicWorkflowError(msg)
+        participant["kind"] = participant_kind
+        if participant_kind == "room_agent":
+            _validate_room_agent_participant(participant, context)
+        else:
+            _validate_ephemeral_agent_participant(participant, context)
     return participant_ids
+
+
+def _validate_room_agent_participant(participant: dict[str, object], context: str) -> None:
+    agent_name = _required_text(participant, "agent", context=context)
+    participant["agent"] = agent_name
+    if "model" in participant and participant.get("model") not in (None, ""):
+        msg = f"{context} room_agent participants cannot override model."
+        raise DynamicWorkflowError(msg)
+    if participant.get("tools") not in (None, []):
+        msg = f"{context} room_agent participants cannot declare tools; they use configured agent tools."
+        raise DynamicWorkflowError(msg)
+
+
+def _validate_ephemeral_agent_participant(participant: dict[str, object], context: str) -> None:
+    if participant.get("tools") not in (None, []):
+        msg = f"{context} ephemeral_agent participants cannot use tools yet."
+        raise DynamicWorkflowError(msg)
+    if "model" in participant and participant.get("model") is not None:
+        model = _required_text(participant, "model", context=context)
+        participant["model"] = model
+    if "instructions" in participant:
+        _validate_participant_instructions(participant["instructions"], context)
+
+
+def _validate_participant_instructions(value: object, context: str) -> None:
+    if value is None or isinstance(value, str):
+        return
+    if isinstance(value, list) and all(isinstance(instruction, str) for instruction in value):
+        return
+    msg = f"{context} field 'instructions' must be a string or list of strings."
+    raise DynamicWorkflowError(msg)
 
 
 def _validate_workflow_steps(workflow_steps: list[dict[str, object]], participant_ids: set[str]) -> set[str]:
@@ -579,7 +648,7 @@ def _validate_agent_step(
     _validate_template_choice(
         step,
         context,
-        ("response_template", "output_template", "template", "prompt"),
+        _AGENT_STEP_TEMPLATE_FIELDS,
         available_step_ids,
     )
 
@@ -664,9 +733,12 @@ def _validate_template_choice(
     field_names: tuple[str, ...],
     available_step_ids: set[str],
 ) -> None:
-    for field_name in field_names:
-        if field_name not in step:
-            continue
+    present_fields = [field_name for field_name in field_names if field_name in step]
+    if len(present_fields) > 1:
+        fields = ", ".join(present_fields)
+        msg = f"{context} must include only one template field; found: {fields}."
+        raise DynamicWorkflowError(msg)
+    for field_name in present_fields:
         template = _required_text(step, field_name, context=context)
         step[field_name] = template
         _validate_template_references(template, available_step_ids, f"{context} field '{field_name}'")

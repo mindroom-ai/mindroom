@@ -1116,6 +1116,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     active_model_name: str | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
+    persist_runtime_state: bool = True,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     timing_scope: str | None = None,
@@ -1140,6 +1141,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             support Matrix reaction-based question flows.
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
+        persist_runtime_state: Whether this agent instance should write durable
+            Agno history, learning, and culture state.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
@@ -1182,13 +1185,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
 
     storage = (
-        history_storage
-        if history_storage is not None
-        else agent_storage.create_state_storage(
-            agent_name,
-            agent_runtime.state_root,
-            subdir="sessions",
-            session_table=f"{agent_name}_sessions",
+        None
+        if not persist_runtime_state
+        else (
+            history_storage
+            if history_storage is not None
+            else agent_storage.create_state_storage(
+                agent_name,
+                agent_runtime.state_root,
+                subdir="sessions",
+                session_table=f"{agent_name}_sessions",
+            )
         )
     )
     # Dynamic tool state is keyed by agent and session scope, so team members
@@ -1250,7 +1257,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             subdir="learning",
             session_table=f"{agent_name}_learning_sessions",
         )
-        if _is_learning_enabled(agent_config, defaults)
+        if persist_runtime_state and _is_learning_enabled(agent_config, defaults)
         else None
     )
 
@@ -1355,7 +1362,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
     culture_storage_root = resolved_storage_path
     cache_private_culture = False
-    if agent_runtime.is_private:
+    if agent_runtime.is_private and persist_runtime_state:
         worker_key = agent_runtime.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
@@ -1372,12 +1379,16 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             worker_key=worker_key,
         )
         cache_private_culture = True
-    culture_manager, culture_settings = _resolve_agent_culture(
-        agent_name,
-        config,
-        culture_storage_root,
-        model,
-        cache_private=cache_private_culture,
+    culture_manager, culture_settings = (
+        _resolve_agent_culture(
+            agent_name,
+            config,
+            culture_storage_root,
+            model,
+            cache_private=cache_private_culture,
+        )
+        if persist_runtime_state
+        else (None, None)
     )
 
     add_culture_to_context: bool | None = None
@@ -1425,13 +1436,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         skills=skills,
         instructions=instructions,
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage),
+        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
         search_knowledge=knowledge_enabled,
-        add_history_to_context=True,
-        add_session_summary_to_context=True,
+        add_history_to_context=persist_runtime_state,
+        add_session_summary_to_context=persist_runtime_state,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.

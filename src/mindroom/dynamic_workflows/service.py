@@ -9,6 +9,7 @@ from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.store import (
     DynamicWorkflowStore,
     validate_workflow_input,
+    validate_workflow_spec,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ class DynamicWorkflowService:
             revision=run.revision,
         )
         try:
+            spec = validate_workflow_spec(spec)
             validate_workflow_input(spec, input_data)
         except Exception as exc:  # Persist validation failures as run records.
             return self._store.fail_workflow_run(run, error=str(exc))

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -16,8 +17,9 @@ from agno.workflow import Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
 import mindroom.tools  # noqa: F401
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
@@ -26,7 +28,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
@@ -95,7 +97,10 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         env_file_values=runtime_paths.env_file_values,
     )
     config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"])}),
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"])},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
         runtime_paths,
     )
     return ToolRuntimeContext(
@@ -123,6 +128,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
                 "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"]),
                 "specialist": AgentConfig(display_name="Specialist Agent"),
             },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
         ),
         runtime_paths,
     )
@@ -147,6 +153,29 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
         room=room,
         reply_to_event_id="$event:localhost",
         storage_path=None,
+    )
+
+
+def _make_private_context(tmp_path: Path, *, requester_id: str) -> ToolRuntimeContext:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=["dynamic_workflow"],
+                    private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
+        runtime_paths,
+    )
+    return replace(
+        _make_context(tmp_path),
+        requester_id=requester_id,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
     )
 
 
@@ -358,6 +387,25 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
     assert loaded.steps == []
 
 
+def test_validate_workflow_spec_rejects_invalid_input_schema_type(tmp_path: Path) -> None:
+    """Workflow input schemas should be validated before specs are persisted."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="Unsupported workflow input schema type"):
+        store.create_workflow(
+            spec=_workflow_spec(
+                inputs={
+                    "type": "object",
+                    "properties": {"topic": {"type": "secret_string"}},
+                },
+            ),
+            scope="agent",
+            owner_id="general",
+            created_by="general",
+            reason="bad schema",
+        )
+
+
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
     """Running a workflow should execute declared steps and persist their outputs."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -531,6 +579,43 @@ def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
         )
 
 
+def test_validate_workflow_spec_rejects_ambiguous_agent_step_template(tmp_path: Path) -> None:
+    """Validation and execution should not disagree about which agent-step template wins."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="only one template field"):
+        store.validate_workflow(
+            _workflow_spec(
+                workflow=[
+                    {
+                        "id": "write",
+                        "type": "agent_step",
+                        "participant": "writer",
+                        "response_template": "Safe template.",
+                        "prompt": "{steps.future}",
+                    },
+                ],
+            ),
+        )
+
+
+def test_validate_workflow_spec_rejects_unsupported_participant_kind(tmp_path: Path) -> None:
+    """Participant kind errors should fail at create/update time."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="unsupported kind"):
+        store.validate_workflow(
+            _workflow_spec(
+                participants=[
+                    {
+                        "id": "writer",
+                        "kind": "team_agent",
+                    },
+                ],
+            ),
+        )
+
+
 def test_get_workflow_run_rejects_traversal_run_id(tmp_path: Path) -> None:
     """Run lookup should reject path traversal before building the run filename."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -616,9 +701,9 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     )
     report_html = (tmp_path / "mindroom_data" / loaded.artifacts["report_html"]).read_text(encoding="utf-8")
     assert loaded.status == "failed"
-    assert loaded.error == "Unknown template reference 'steps.missing'."
-    assert loaded.steps[0]["status"] == "failed"
-    assert "Unknown template reference" in report_html
+    assert loaded.error == "Workflow step at index 0 field 'body_template' references unknown prior step 'missing'."
+    assert loaded.steps == []
+    assert "unknown prior step" in report_html
 
 
 def test_declarative_spec_compiles_to_agno_workflow_factory(tmp_path: Path) -> None:
@@ -728,6 +813,62 @@ def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     )
 
 
+def test_dynamic_workflow_tool_scopes_private_agent_workflows_by_requester(tmp_path: Path) -> None:
+    """Private agents should not share agent-scoped workflows across requesters."""
+    tool = DynamicWorkflowTools()
+    alice_context = _make_private_context(tmp_path, requester_id="@alice:localhost")
+    bob_context = _make_private_context(tmp_path, requester_id="@bob:localhost")
+
+    with tool_runtime_context(alice_context):
+        created = _tool_payload(tool.create_workflow(_workflow_spec(), reason="initial design"))
+        alice_listed = _tool_payload(tool.list_workflows())
+    with tool_runtime_context(bob_context):
+        bob_listed = _tool_payload(tool.list_workflows())
+
+    assert created["status"] == "ok"
+    assert created["owner_id"].startswith("private_")
+    assert alice_listed["workflows"][0]["workflow_id"] == "competitor-research-report"
+    assert bob_listed["workflows"] == []
+
+
+def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp_path: Path) -> None:
+    """Ephemeral participants should not escalate to arbitrary configured models."""
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
+            models={
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+            },
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config), active_model_name="default")
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            tool.validate_workflow(
+                _workflow_spec(
+                    participants=[
+                        {
+                            "id": "writer",
+                            "kind": "ephemeral_agent",
+                            "name": "Report Writer",
+                            "model": "opus",
+                            "tools": [],
+                        },
+                    ],
+                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                ),
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "not allowed for agent 'general'" in result["message"]
+
+
 def test_dynamic_workflow_tool_returns_payload_for_invalid_scope(tmp_path: Path) -> None:
     """Tool calls should return JSON payload errors instead of raising runtime exceptions."""
     tool = DynamicWorkflowTools()
@@ -789,3 +930,36 @@ def test_room_agent_participant_rejects_model_override(tmp_path: Path) -> None:
             {"id": "specialist", "kind": "room_agent", "agent": "specialist", "model": "default"},
             "Write a report.",
         )
+
+
+def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path: Path) -> None:
+    """Room-agent participants should execute as that agent without durable workflow side effects."""
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+
+    async def fake_arun(prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+        runtime_context = get_tool_runtime_context()
+        assert runtime_context is not None
+        assert runtime_context.agent_name == "specialist"
+        assert runtime_context.session_id == session_id
+        assert runtime_context.active_model_name == "default"
+        assert "competitor-research-report:run_1:specialist" in session_id
+        assert prompt == "Write a report."
+        assert user_id == "@user:localhost"
+        return SimpleNamespace(content="done")
+
+    fake_agent = SimpleNamespace(arun=fake_arun)
+    with patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock:
+        result = dynamic_workflow_module._execute_room_agent_participant(
+            context,
+            {"id": "specialist", "kind": "room_agent", "agent": "specialist"},
+            "Write a report.",
+            run_scope="competitor-research-report:run_1",
+        )
+
+    assert result == "done"
+    create_kwargs = create_agent_mock.call_args.kwargs
+    assert create_kwargs["session_id"].endswith(":dynamic_workflow:competitor-research-report:run_1:specialist")
+    assert create_kwargs["active_model_name"] == "default"
+    assert create_kwargs["persist_runtime_state"] is False
+    assert create_kwargs["execution_identity"].agent_name == "specialist"
+    assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]

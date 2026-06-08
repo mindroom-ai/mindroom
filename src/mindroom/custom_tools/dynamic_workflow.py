@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import nio
 from agno.agent import Agent
@@ -15,6 +18,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -66,6 +70,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = _store_and_owner(context, scope)
+            _validate_workflow_policy_for_context(context, spec)
             summary = store.create_workflow(
                 spec=spec,
                 scope=scope,
@@ -90,6 +95,7 @@ class DynamicWorkflowTools(Toolkit):
         if context is None:
             return self._context_error()
         try:
+            _validate_workflow_policy_for_context(context, spec)
             validated = _store(context).validate_workflow(spec)
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
@@ -115,6 +121,7 @@ class DynamicWorkflowTools(Toolkit):
                 patch=patch,
                 updated_by=context.agent_name,
                 reason=reason,
+                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
@@ -139,7 +146,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = _store_and_owner(context, scope)
-            service = DynamicWorkflowService(store, participant_executor=_participant_executor(context))
+            service = DynamicWorkflowService(store, participant_executor=_participant_executor(context, workflow_id))
             run = service.run_workflow(
                 workflow_id=workflow_id,
                 scope=scope,
@@ -254,7 +261,7 @@ def _store_and_owner(context: ToolRuntimeContext, scope: str) -> tuple[DynamicWo
 
 def _owner_id(context: ToolRuntimeContext, scope: str) -> str:
     if scope == "agent":
-        return context.agent_name
+        return _agent_scope_owner_id(context)
     if scope == "room":
         if not context.room_id:
             msg = "Room ID is missing in the tool runtime context."
@@ -266,7 +273,25 @@ def _owner_id(context: ToolRuntimeContext, scope: str) -> str:
     raise DynamicWorkflowError(msg)
 
 
-def _participant_executor(context: ToolRuntimeContext) -> ParticipantExecutor:
+def _agent_scope_owner_id(context: ToolRuntimeContext) -> str:
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    resolved_execution = resolve_agent_execution(
+        context.agent_name,
+        context.config,
+        execution_identity=execution_identity,
+    )
+    if not resolved_execution.policy.private_workspace_enabled:
+        return context.agent_name
+    if resolved_execution.worker_key is None:
+        msg = f"Private agent '{context.agent_name}' could not resolve a Dynamic Workflow owner scope."
+        raise DynamicWorkflowError(msg)
+    digest = hashlib.sha256(f"{context.agent_name}\0{resolved_execution.worker_key}".encode()).hexdigest()[:24]
+    return f"private_{digest}"
+
+
+def _participant_executor(context: ToolRuntimeContext, workflow_id: str) -> ParticipantExecutor:
+    run_scope = f"{workflow_id}:{uuid4().hex}"
+
     def execute(
         *,
         participant: dict[str, object],
@@ -275,17 +300,23 @@ def _participant_executor(context: ToolRuntimeContext) -> ParticipantExecutor:
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return _execute_participant(context, participant, prompt)
+        return _execute_participant(context, participant, prompt, run_scope=run_scope)
 
     return execute
 
 
-def _execute_participant(context: ToolRuntimeContext, participant: dict[str, object], prompt: str) -> object:
+def _execute_participant(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+    prompt: str,
+    *,
+    run_scope: str,
+) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
-        return _execute_room_agent_participant(context, participant, prompt)
+        return _execute_room_agent_participant(context, participant, prompt, run_scope=run_scope)
     if participant_kind == "ephemeral_agent":
-        return _execute_ephemeral_agent_participant(context, participant, prompt)
+        return _execute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope)
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
 
@@ -294,6 +325,8 @@ def _execute_room_agent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
+    *,
+    run_scope: str = "manual",
 ) -> object:
     raw_agent_name = participant.get("agent") or participant.get("agent_name")
     if not isinstance(raw_agent_name, str) or not raw_agent_name.strip():
@@ -312,8 +345,14 @@ def _execute_room_agent_participant(
 
     agent_config = context.config.get_agent(agent_name)
     active_model_name = agent_config.model
-    execution_identity = build_execution_identity_from_runtime_context(context)
-    session_id = _participant_session_id(context, agent_name)
+    session_id = _participant_session_id(context, agent_name, run_scope=run_scope)
+    participant_context = replace(
+        context,
+        agent_name=agent_name,
+        active_model_name=active_model_name,
+        session_id=session_id,
+    )
+    execution_identity = build_execution_identity_from_runtime_context(participant_context)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import create_agent  # noqa: PLC0415
 
@@ -326,8 +365,9 @@ def _execute_room_agent_participant(
         hook_registry=context.hook_registry,
         active_model_name=active_model_name,
         include_interactive_questions=False,
+        persist_runtime_state=False,
     )
-    return _run_agent(context, agent, prompt, session_id)
+    return _run_agent(participant_context, agent, prompt)
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
@@ -351,6 +391,8 @@ def _execute_ephemeral_agent_participant(
     context: ToolRuntimeContext,
     participant: dict[str, object],
     prompt: str,
+    *,
+    run_scope: str,
 ) -> object:
     tools = participant.get("tools", [])
     if tools not in (None, []):
@@ -374,15 +416,20 @@ def _execute_ephemeral_agent_participant(
         markdown=True,
         telemetry=False,
     )
-    return _run_agent(context, agent, prompt, _participant_session_id(context, participant_id))
+    participant_context = replace(
+        context,
+        active_model_name=model_name,
+        session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
+    )
+    return _run_agent(participant_context, agent, prompt)
 
 
-def _run_agent(context: ToolRuntimeContext, agent: Agent, prompt: str, session_id: str) -> object:
+def _run_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
     async def run() -> object:
         response = await agent.arun(
             prompt,
             user_id=context.requester_id,
-            session_id=session_id,
+            session_id=context.session_id,
         )
         return response.content if response.content is not None else ""
 
@@ -390,9 +437,9 @@ def _run_agent(context: ToolRuntimeContext, agent: Agent, prompt: str, session_i
         return asyncio.run(run())
 
 
-def _participant_session_id(context: ToolRuntimeContext, participant_id: str) -> str:
+def _participant_session_id(context: ToolRuntimeContext, participant_id: str, *, run_scope: str) -> str:
     base_session_id = context.session_id or context.resolved_thread_id or context.thread_id or context.room_id
-    return f"{base_session_id}:dynamic_workflow:{participant_id}"
+    return f"{base_session_id}:dynamic_workflow:{run_scope}:{participant_id}"
 
 
 def _resolve_participant_model_name(
@@ -414,6 +461,54 @@ def _resolve_participant_model_name(
             return model_name
     msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
     raise DynamicWorkflowError(msg)
+
+
+def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dict[str, object]) -> None:
+    caller_models = _caller_allowed_model_refs(context)
+    for participant in _workflow_participants(spec):
+        raw_model = participant.get("model")
+        if raw_model is None:
+            continue
+        model_name = _resolve_participant_model_name(
+            context,
+            raw_model,
+            default_model=context.active_model_name or "default",
+        )
+        model_refs = {model_name}
+        model_config = context.config.models.get(model_name)
+        if model_config is not None:
+            model_refs.add(model_config.id)
+        if model_refs.isdisjoint(caller_models):
+            msg = (
+                f"Dynamic Workflow participant model '{raw_model}' is not allowed for agent '{context.agent_name}'. "
+                "Use the caller's active model or add an approval policy before requesting another model."
+            )
+            raise DynamicWorkflowError(msg)
+
+
+def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
+    model_names = {context.active_model_name or context.config.get_agent(context.agent_name).model or "default"}
+    model_names.add(context.config.get_agent(context.agent_name).model or "default")
+    refs: set[str] = set()
+    for model_name in model_names:
+        refs.add(model_name)
+        model_config = context.config.models.get(model_name)
+        if model_config is not None:
+            refs.add(model_config.id)
+    return refs
+
+
+def _workflow_participants(spec: dict[str, object]) -> list[dict[str, object]]:
+    raw_participants = spec.get("participants", [])
+    if not isinstance(raw_participants, list):
+        return []
+    participants: list[dict[str, object]] = []
+    for raw_participant in raw_participants:
+        if not isinstance(raw_participant, dict):
+            continue
+        participant: dict[str, object] = {key: value for key, value in raw_participant.items() if isinstance(key, str)}
+        participants.append(participant)
+    return participants
 
 
 def _participant_instructions(participant: dict[str, object]) -> list[str]:
