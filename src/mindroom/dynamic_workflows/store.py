@@ -582,6 +582,9 @@ def _allowed_input_types(field_schema: dict[str, object]) -> list[str]:
     if expected_type is None:
         return []
     if isinstance(expected_type, list):
+        if not expected_type:
+            msg = "Workflow input schema type list must be non-empty."
+            raise DynamicWorkflowError(msg)
         allowed_types = []
         for item in expected_type:
             if not isinstance(item, str) or not item.strip():

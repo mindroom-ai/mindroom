@@ -132,7 +132,7 @@ class DynamicWorkflowService:
                 )
         except Exception as exc:  # Persist runtime failures from participant code.
             return self._store.fail_workflow_run(run, error=str(exc))
-        return self._store.complete_workflow_run(run, execution)
+        return self._complete_or_fail(run, execution)
 
     async def _aexecute_and_persist(
         self,
@@ -160,7 +160,13 @@ class DynamicWorkflowService:
             )
         except Exception as exc:
             return self._store.fail_workflow_run(run, error=str(exc))
-        return self._store.complete_workflow_run(run, execution)
+        return self._complete_or_fail(run, execution)
+
+    def _complete_or_fail(self, run: DynamicWorkflowRun, execution: object) -> DynamicWorkflowRun:
+        try:
+            return self._store.complete_workflow_run(run, execution)
+        except Exception as exc:
+            return self._store.fail_workflow_run(run, error=str(exc))
 
 
 @contextmanager

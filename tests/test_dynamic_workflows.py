@@ -362,6 +362,42 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
     assert "Agno factories" in report_html
 
 
+def test_run_workflow_persists_failed_run_when_completion_persistence_fails(tmp_path: Path) -> None:
+    """Completion persistence failures should not leave the run stuck as running."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store, participant_executor=lambda **_: object())
+    store.create_workflow(
+        spec=_workflow_spec(
+            workflow=[
+                {"id": "collect", "type": "agent_step", "participant": "writer", "prompt": "Collect raw data."},
+                {"id": "report", "type": "report_step", "body_template": "Report completed."},
+            ],
+            outputs=[{"id": "report_html", "type": "html_report", "from_step": "report"}],
+        ),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+    )
+    loaded = store.get_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+    )
+
+    assert loaded.status == "failed"
+    assert "not JSON serializable" in str(loaded.error)
+
+
 def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: Path) -> None:
     """Workflow runs should validate declared input schema before executing any step."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -410,6 +446,21 @@ def test_validate_workflow_spec_rejects_invalid_input_schema_type(tmp_path: Path
             owner_id="general",
             created_by="general",
             reason="bad schema",
+        )
+
+
+def test_validate_workflow_spec_rejects_empty_input_schema_type_list(tmp_path: Path) -> None:
+    """Empty input type lists should not silently disable type validation."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="type list must be non-empty"):
+        store.validate_workflow(
+            _workflow_spec(
+                inputs={
+                    "type": "object",
+                    "properties": {"topic": {"type": []}},
+                },
+            ),
         )
 
 
