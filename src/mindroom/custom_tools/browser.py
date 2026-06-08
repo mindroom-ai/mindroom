@@ -409,9 +409,8 @@ class BrowserTools(Toolkit):
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
-        self._output_dir = self._configured_output_dir
-        if self._output_dir is not None:
-            self._output_dir.mkdir(parents=True, exist_ok=True)
+        if self._configured_output_dir is not None:
+            self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
         self._describe_browser_schema()
 
@@ -1294,7 +1293,6 @@ class BrowserTools(Toolkit):
         )
         output_dir = (storage_root / "browser").resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
-        self._output_dir = output_dir
         return output_dir
 
     def _browser_upload_roots(self) -> tuple[Path, ...]:
