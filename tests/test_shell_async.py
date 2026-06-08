@@ -73,11 +73,14 @@ def _fork_child_holding_stdio_script(*, parent_stderr: str = "", parent_exit_cod
 
 
 async def _wait_for_pid_file(pid_file: Path) -> int:
+    last_text: str | None = None
     for _ in range(50):
         if pid_file.exists():
-            return int(pid_file.read_text(encoding="utf-8").strip())
+            last_text = pid_file.read_text(encoding="utf-8").strip()
+            if last_text:
+                return int(last_text)
         await asyncio.sleep(0.05)
-    message = f"PID file was not written: {pid_file}"
+    message = f"PID file was not written: {pid_file}" if last_text is None else f"PID file was empty: {pid_file}"
     raise AssertionError(message)
 
 
