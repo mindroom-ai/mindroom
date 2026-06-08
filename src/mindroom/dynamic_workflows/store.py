@@ -64,6 +64,7 @@ _AGENT_STEP_KEYS = frozenset({"id", "type", "participant", *_AGENT_STEP_TEMPLATE
 _TRANSFORM_STEP_KEYS = frozenset({"id", "type", "template", "text"})
 _REPORT_STEP_KEYS = frozenset({"id", "type", "body_template", "from_step", "title"})
 _OUTPUT_KEYS = frozenset({"id", "type", "from_step"})
+_OUTPUT_TYPES = frozenset({"text", "markdown", "json", "html_report"})
 _INPUT_SCHEMA_KEYS = frozenset({"type", "required", "properties"})
 _INPUT_PROPERTY_SCHEMA_KEYS = frozenset({"type", "description", "enum"})
 
@@ -917,7 +918,11 @@ def _validate_outputs(spec: dict[str, object], step_ids: set[str]) -> None:
         output["id"] = output_id
         output_ids.add(output_id)
         if "type" in output:
-            output["type"] = _required_text(output, "type", context=context)
+            output_type = _required_text(output, "type", context=context)
+            if output_type not in _OUTPUT_TYPES:
+                msg = f"{context} has unsupported type '{output_type}'."
+                raise DynamicWorkflowError(msg)
+            output["type"] = output_type
         from_step = _required_text(output, "from_step", context=context)
         if from_step not in step_ids:
             msg = f"{context} references unknown step '{from_step}'."

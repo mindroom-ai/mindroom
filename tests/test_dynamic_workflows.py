@@ -710,6 +710,24 @@ def test_validate_workflow_spec_rejects_output_without_source_step(tmp_path: Pat
         )
 
 
+def test_validate_workflow_spec_rejects_unsupported_output_type(tmp_path: Path) -> None:
+    """Output type docs and validation should stay aligned."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="unsupported type"):
+        store.validate_workflow(
+            _workflow_spec(
+                outputs=[
+                    {
+                        "id": "report",
+                        "type": "pdf_report",
+                        "from_step": "write",
+                    },
+                ],
+            ),
+        )
+
+
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
     """Running a workflow should execute declared steps and persist their outputs."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")

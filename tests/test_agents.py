@@ -2847,6 +2847,57 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     assert "## Personality Context" not in agent.role
 
 
+@patch("mindroom.agent_storage.SqliteDb")
+def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_workspace(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Restricted in-process agent construction should resolve private paths without creating state."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "PRIVATE.md").write_text("Private template file.", encoding="utf-8")
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=False,
+    )
+    assert runtime.workspace is not None
+    assert not runtime.workspace.root.exists()
+
+    agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        session_id="session-1",
+        persist_runtime_state=False,
+        disable_runtime_capabilities=True,
+    )
+
+    assert agent.tools is None or agent.tools == []
+    assert not runtime.workspace.root.exists()
+
+
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):

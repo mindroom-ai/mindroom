@@ -1164,16 +1164,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     del timing_scope
     resolved_storage_path = runtime_paths.storage_root
+    create_runtime_state = not disable_runtime_capabilities
     agent_runtime = resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        create=True,
+        create=create_runtime_state,
     )
 
     agent_config = config.get_agent(agent_name)
-    ensure_default_agent_workspaces(config, resolved_storage_path)
+    if create_runtime_state:
+        ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
     plugins = _load_agent_plugins(config, runtime_paths)
