@@ -26,6 +26,21 @@
 {{- if and .Values.stateStorage.mountPath (eq .Values.stateStorage.mountPath .Values.storage.mountPath) -}}
 {{- fail "stateStorage.mountPath must differ from storage.mountPath" -}}
 {{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath must differ from storage.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.syncTokens.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.syncTokens.mountPath must differ from storage.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.mountPath .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.encryptionKeys.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from stateStorage.encryptionKeys.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.mountPath .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.mountPath .Values.stateStorage.syncTokens.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from stateStorage.syncTokens.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncTokens.enabled .Values.stateStorage.syncTokens.mountPath (eq .Values.stateStorage.encryptionKeys.mountPath .Values.stateStorage.syncTokens.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncTokens.mountPath" -}}
+{{- end -}}
 {{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.mountPath) -}}
 {{- fail "stateStorage.encryptionKeys.mountPath is required when stateStorage.encryptionKeys.enabled=true" -}}
 {{- end -}}

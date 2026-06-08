@@ -1358,13 +1358,16 @@ def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permis
     assert init_containers["prepare-state-storage"]["volumeMounts"] == [
         {"name": "state-storage", "mountPath": "/state"},
     ]
-    assert init_containers["prepare-state-storage"]["command"] == [
-        "sh",
-        "-lc",
-        "set -eu\nmkdir -p /state /state/encryption_keys /state/sync_tokens\n"
-        "chown -R 1000:1000 /state /state/encryption_keys /state/sync_tokens\n"
-        "chmod 2775 /state /state/encryption_keys /state/sync_tokens\n",
-    ]
+    assert init_containers["prepare-state-storage"]["securityContext"] == {
+        "runAsUser": 0,
+        "runAsNonRoot": False,
+        "allowPrivilegeEscalation": False,
+    }
+    assert init_containers["prepare-state-storage"]["command"][:2] == ["sh", "-c"]
+    state_command = init_containers["prepare-state-storage"]["command"][2]
+    assert 'mkdir -p "/state" "/state/encryption_keys" "/state/sync_tokens"' in state_command
+    assert 'chown -R 1000:1000 "/state" "/state/encryption_keys" "/state/sync_tokens"' in state_command
+    assert 'chmod 2775 "/state" "/state/encryption_keys" "/state/sync_tokens"' in state_command
 
 
 def test_runtime_chart_state_storage_can_create_pvc() -> None:
@@ -1385,6 +1388,49 @@ def test_runtime_chart_state_storage_can_create_pvc() -> None:
         "storageClassName": "fast-rwo",
         "resources": {"requests": {"storage": "20Gi"}},
     }
+
+
+@pytest.mark.parametrize(
+    ("conflict_args", "expected_error"),
+    [
+        (
+            ("stateStorage.mountPath=/app/agent_data/encryption_keys",),
+            "stateStorage.mountPath must differ from stateStorage.encryptionKeys.mountPath",
+        ),
+        (
+            ("stateStorage.mountPath=/app/agent_data/sync_tokens",),
+            "stateStorage.mountPath must differ from stateStorage.syncTokens.mountPath",
+        ),
+        (
+            ("stateStorage.encryptionKeys.mountPath=/app/agent_data",),
+            "stateStorage.encryptionKeys.mountPath must differ from storage.mountPath",
+        ),
+        (
+            ("stateStorage.syncTokens.mountPath=/app/agent_data",),
+            "stateStorage.syncTokens.mountPath must differ from storage.mountPath",
+        ),
+        (
+            ("stateStorage.syncTokens.mountPath=/app/agent_data/encryption_keys",),
+            "stateStorage.encryptionKeys.mountPath must differ from stateStorage.syncTokens.mountPath",
+        ),
+    ],
+)
+def test_runtime_chart_state_storage_rejects_mount_path_conflicts(
+    conflict_args: tuple[str, ...],
+    expected_error: str,
+) -> None:
+    """Generated runtime volumeMount paths must stay unique."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "stateStorage.enabled=true",
+        "stateStorage.existingClaim=mindroom-state",
+        *conflict_args,
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert expected_error in completed.stderr
 
 
 def test_runtime_chart_separate_worker_namespace_can_manage_per_worker_auth_secrets() -> None:

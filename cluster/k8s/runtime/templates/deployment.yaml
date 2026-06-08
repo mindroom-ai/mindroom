@@ -71,14 +71,18 @@ spec:
         - name: prepare-state-storage
           image: {{ .Values.stateStorage.initPermissions.image | quote }}
           imagePullPolicy: {{ .Values.stateStorage.initPermissions.imagePullPolicy }}
+          {{- with .Values.stateStorage.initPermissions.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             - sh
-            - -lc
+            - -c
             - |
               set -eu
-              mkdir -p /state{{ if .Values.stateStorage.encryptionKeys.enabled }} /state/{{ .Values.stateStorage.encryptionKeys.subPath }}{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} /state/{{ .Values.stateStorage.syncTokens.subPath }}{{ end }}
-              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} /state{{ if .Values.stateStorage.encryptionKeys.enabled }} /state/{{ .Values.stateStorage.encryptionKeys.subPath }}{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} /state/{{ .Values.stateStorage.syncTokens.subPath }}{{ end }}
-              chmod {{ .Values.stateStorage.initPermissions.chmod }} /state{{ if .Values.stateStorage.encryptionKeys.enabled }} /state/{{ .Values.stateStorage.encryptionKeys.subPath }}{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} /state/{{ .Values.stateStorage.syncTokens.subPath }}{{ end }}
+              mkdir -p "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
+              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
+              chmod {{ .Values.stateStorage.initPermissions.chmod }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} "/state/{{ .Values.stateStorage.syncTokens.subPath }}"{{ end }}
           volumeMounts:
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
               mountPath: /state

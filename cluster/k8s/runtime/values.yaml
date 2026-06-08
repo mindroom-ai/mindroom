@@ -168,6 +168,11 @@ stateStorage:
     enabled: true
     image: busybox:1.36
     imagePullPolicy: IfNotPresent
+    # The init container uses chown/chmod and therefore runs as root by default.
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+      allowPrivilegeEscalation: false
     runAsUser: 1000
     fsGroup: 1000
     chmod: "2775"

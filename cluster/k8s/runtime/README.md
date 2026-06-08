@@ -83,6 +83,7 @@ Hosted installs can keep those restart-critical directories on a dedicated PVC w
 The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the configured subpaths where MindRoom already reads and writes those directories.
 The optional init container creates the state directories and applies the configured ownership before the runtime starts.
 `initPermissions.runAsUser` and `initPermissions.fsGroup` are the ownership targets used by the init container.
+By default, the init container runs as UID 0 because it performs `chown` and `chmod`, while the main runtime container keeps its own security context.
 
 Use an existing PVC when another platform layer owns durable storage:
 
