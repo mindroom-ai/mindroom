@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -75,8 +76,8 @@ def _workflow_spec(**overrides: object) -> dict[str, object]:
             "models": ["claude-sonnet-4-6"],
             "tools": [],
             "data": {
-                "matrix_history": "current_thread",
-                "attachments": "current_thread",
+                "matrix_history": "none",
+                "attachments": "none",
                 "knowledge_bases": [],
             },
         },
@@ -432,6 +433,25 @@ def test_validate_workflow_spec_rejects_tool_permission_until_grants_exist(tmp_p
         store.validate_workflow(_workflow_spec(permissions={"tools": ["shell"]}))
 
 
+def test_validate_workflow_spec_rejects_unimplemented_thread_data_permissions(tmp_path: Path) -> None:
+    """Workflow specs should not declare data access the runner does not provide."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="matrix_history"):
+        store.validate_workflow(
+            _workflow_spec(
+                permissions={
+                    "tools": [],
+                    "data": {
+                        "matrix_history": "current_thread",
+                        "attachments": "none",
+                        "knowledge_bases": [],
+                    },
+                },
+            ),
+        )
+
+
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
     """Running a workflow should execute declared steps and persist their outputs."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -586,6 +606,71 @@ def test_service_completes_tool_runs_without_raw_background_thread(tmp_path: Pat
     assert run.report_url == (
         f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}"
     )
+
+
+def test_service_sync_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync service runs should honor runtime caps instead of blocking indefinitely."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(
+        store,
+        participant_executor=lambda **_kwargs: time.sleep(0.2) or "late",
+    )
+    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.01)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    assert run.status == "failed"
+    assert "max_runtime_seconds" in str(run.error)
+
+
+@pytest.mark.asyncio
+async def test_service_async_run_persists_cancelled_status(tmp_path: Path) -> None:
+    """Cancelling an async workflow run should not leave the run stuck as running."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    async def cancelled_executor(**_kwargs: object) -> object:
+        raise asyncio.CancelledError
+
+    service = DynamicWorkflowService(store, async_participant_executor=cancelled_executor)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.arun_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            input_data={"topic": "Agno factories"},
+            requested_by="general",
+            base_url="https://acme.mindroom.chat",
+        )
+
+    run_files = list(
+        (tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/runs").glob("*.json"),
+    )
+    assert len(run_files) == 1
+    run_data = json.loads(run_files[0].read_text(encoding="utf-8"))
+    assert run_data["status"] == "failed"
+    assert run_data["error"] == "Workflow run was cancelled."
 
 
 def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
@@ -850,6 +935,32 @@ def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     )
 
 
+def test_dynamic_workflow_tool_denies_run_read_for_different_requester(tmp_path: Path) -> None:
+    """Agent-scoped run details should not leak across Matrix requesters."""
+    tool = DynamicWorkflowTools()
+    alice_context = _make_context(tmp_path)
+    bob_context = replace(alice_context, requester_id="@bob:localhost")
+    transform_spec = _workflow_spec(
+        workflow=[
+            {
+                "id": "research",
+                "type": "transform_step",
+                "template": "Research brief for {input.topic}.",
+            },
+        ],
+        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+    )
+
+    with tool_runtime_context(alice_context):
+        _tool_payload(tool.create_workflow(transform_spec, reason="initial design"))
+        run = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}))
+    with tool_runtime_context(bob_context):
+        read_result = _tool_payload(tool.get_workflow_run("competitor-research-report", run["run_id"]))
+
+    assert read_result["status"] == "error"
+    assert "not available to the current requester" in read_result["message"]
+
+
 def test_dynamic_workflow_tool_json_schemas_allow_arbitrary_json_values() -> None:
     """Tool-call schemas should accept scalar, array, and object values inside JSON payload fields."""
     tool = DynamicWorkflowTools()
@@ -926,6 +1037,75 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
 
     assert result["status"] == "error"
     assert "not allowed for agent 'general'" in result["message"]
+
+
+def test_dynamic_workflow_tool_enforces_permission_models_for_default_participant_model(tmp_path: Path) -> None:
+    """Omitted participant models should still be checked against workflow permissions.models."""
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
+            models={
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+            },
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config), active_model_name="default")
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            tool.validate_workflow(
+                _workflow_spec(
+                    participants=[
+                        {
+                            "id": "writer",
+                            "kind": "ephemeral_agent",
+                            "name": "Report Writer",
+                            "tools": [],
+                        },
+                    ],
+                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                ),
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "permissions.models" in result["message"]
+
+
+def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_path: Path) -> None:
+    """Saved revisions should not bypass the caller's current active model policy."""
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
+            models={
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+            },
+        ),
+        context.runtime_paths,
+    )
+    create_context = replace(
+        context,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        active_model_name="default",
+    )
+    run_context = replace(create_context, active_model_name="opus")
+
+    with tool_runtime_context(create_context):
+        created = _tool_payload(tool.create_workflow(_workflow_spec(), reason="initial design"))
+    with tool_runtime_context(run_context):
+        run = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}))
+
+    assert created["status"] == "ok"
+    assert run["status"] == "failed"
+    assert "not allowed for agent 'general'" in str(run["error"])
 
 
 def test_dynamic_workflow_tool_returns_payload_for_invalid_scope(tmp_path: Path) -> None:

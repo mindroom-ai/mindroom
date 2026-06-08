@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING
 
 from mindroom.dynamic_workflows.runner import async_execute_workflow_spec, execute_workflow_spec
@@ -14,6 +16,8 @@ from mindroom.dynamic_workflows.store import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 
@@ -27,10 +31,12 @@ class DynamicWorkflowService:
         *,
         participant_executor: ParticipantExecutor | None = None,
         async_participant_executor: AsyncParticipantExecutor | None = None,
+        spec_validator: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._store = store
         self._participant_executor = participant_executor
         self._async_participant_executor = async_participant_executor
+        self._spec_validator = spec_validator
 
     def run_workflow(
         self,
@@ -59,6 +65,7 @@ class DynamicWorkflowService:
         )
         try:
             spec = validate_workflow_spec(spec)
+            self._validate_spec_policy(spec)
             validate_workflow_input(spec, input_data)
         except Exception as exc:  # Persist validation failures as run records.
             return self._store.fail_workflow_run(run, error=str(exc))
@@ -92,11 +99,16 @@ class DynamicWorkflowService:
         )
         try:
             spec = validate_workflow_spec(spec)
+            self._validate_spec_policy(spec)
             validate_workflow_input(spec, input_data)
         except Exception as exc:
             return self._store.fail_workflow_run(run, error=str(exc))
 
         return await self._aexecute_and_persist(run, spec, input_data)
+
+    def _validate_spec_policy(self, spec: dict[str, object]) -> None:
+        if self._spec_validator is not None:
+            self._spec_validator(spec)
 
     def _execute_and_persist(
         self,
@@ -104,14 +116,26 @@ class DynamicWorkflowService:
         spec: dict[str, object],
         input_data: dict[str, object],
     ) -> DynamicWorkflowRun:
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            execute_workflow_spec,
+            spec,
+            input_data,
+            participant_executor=self._participant_executor,
+        )
         try:
-            execution = execute_workflow_spec(
-                spec,
-                input_data,
-                participant_executor=self._participant_executor,
+            execution = future.result(timeout=workflow_runtime_seconds(spec))
+        except FutureTimeoutError:
+            future.cancel()
+            timeout_seconds = workflow_runtime_seconds(spec)
+            return self._store.fail_workflow_run(
+                run,
+                error=f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds}).",
             )
         except Exception as exc:  # Persist runtime failures from participant code.
             return self._store.fail_workflow_run(run, error=str(exc))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         return self._store.complete_workflow_run(run, execution)
 
     async def _aexecute_and_persist(
@@ -129,6 +153,9 @@ class DynamicWorkflowService:
                 ),
                 timeout=workflow_runtime_seconds(spec),
             )
+        except asyncio.CancelledError:
+            self._store.fail_workflow_run(run, error="Workflow run was cancelled.")
+            raise
         except Exception as exc:
             return self._store.fail_workflow_run(run, error=str(exc))
         return self._store.complete_workflow_run(run, execution)

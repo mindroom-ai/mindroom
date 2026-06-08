@@ -121,6 +121,31 @@ def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {env["name"]: env for env in container["env"]}
 
 
+def test_runtime_chart_renders_dedicated_state_storage_mounts() -> None:
+    """Dedicated Matrix state storage should survive chart rendering."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "stateStorage.enabled=true",
+        "stateStorage.create=true",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pvc = _resource(docs, "PersistentVolumeClaim", "mindroom-runtime-state")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = _container(deployment, "mindroom")
+    volume_names = {volume["name"] for volume in pod_spec["volumes"]}
+    mounts = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
+
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert "state-storage" in volume_names
+    assert mounts["/app/mindroom_state"]["name"] == "state-storage"
+    assert mounts["/app/agent_data/encryption_keys"]["subPath"] == "encryption_keys"
+    assert mounts["/app/agent_data/sync_tokens"]["subPath"] == "sync_tokens"
+    assert pod_spec["initContainers"][0]["name"] == "prepare-state-storage"
+
+
 def _instance_secret_hash(**overrides: str) -> str:
     secret_data = {
         "openai_key": "",

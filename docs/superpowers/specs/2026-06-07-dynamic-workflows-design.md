@@ -3,13 +3,14 @@
 ## Summary
 
 MindRoom should add Dynamic Workflows.
-A Dynamic Workflow is a versioned, reusable, background workflow that agents can create, update, and run.
+A Dynamic Workflow is a versioned, reusable workflow that agents can create, update, and run.
 The first concrete use case should be deep research with HTML report publishing, but the design should support many workflow types.
 Examples include due diligence, weekly briefings, PR review reports, incident reviews, migration plans, documentation audits, and recurring market reports.
 
 The core primitive is a MindRoom Dynamic Workflow.
 A Dynamic Workflow can use existing room agents and can create isolated ephemeral agents for one run.
-Dynamic Workflows run in the background, produce progress events, and publish artifacts such as Markdown, JSON, files, or hosted HTML reports.
+The first implementation executes a run inside the tool call and persists artifacts such as Markdown, JSON, files, or hosted HTML reports.
+Background jobs, progress events, and cancellation should be added after the runner lifecycle is managed by MindRoom.
 
 Agno factories should be used as the orchestration implementation where they fit.
 Agno `AgentFactory`, `TeamFactory`, and `WorkflowFactory` can build fresh components per request from caller identity and input.
@@ -19,7 +20,7 @@ MindRoom should own auth, tenant isolation, Matrix notifications, report URLs, s
 This design deliberately mirrors the useful parts of Claude Code dynamic workflows.
 The plan lives in a script or declarative spec, not inside the main agent context.
 Intermediate results stay in workflow state, not in the Matrix conversation context.
-The workflow runs in the background while the room remains responsive.
+The first implementation keeps workflow execution on the managed agent tool path.
 The user can inspect, approve, save, rerun, update, and roll back workflow definitions.
 
 ## Goals
@@ -29,7 +30,7 @@ The user can inspect, approve, save, rerun, update, and roll back workflow defin
 - Let workflows create ephemeral agents for temporary roles such as planner, critic, source reader, analyst, or report writer.
 - Keep ephemeral agents isolated from durable agent memory, credentials, Matrix identity, and tools unless policy explicitly grants access.
 - Store Dynamic Workflows and revisions on disk so self-hosted users can inspect, back up, copy, and audit them.
-- Run Dynamic Workflow jobs in the background with progress, cancellation, artifacts, and final Matrix notification.
+- Persist Dynamic Workflow runs with artifacts, report URLs, and final outputs.
 - Make permission expansion explicit and approval-gated.
 - Enable deep research workflows without hard-coding deep research as a one-off feature.
 
@@ -60,10 +61,9 @@ The user can approve once, approve always for that workflow in that scope, deny,
 
 The user can ask: "Run the competitor research workflow for Anthropic, OpenAI, and Google."
 The agent calls `run_workflow`.
-MindRoom returns a job ID and a progress link or Matrix progress card.
-The room stays responsive while the job runs.
+MindRoom executes the active revision, stores a run record, and returns the final run payload with a private report URL when configured.
+The run is pinned to the active revision it started with.
 
-When the job finishes, MindRoom posts a concise completion message.
 If the workflow produced an HTML report, the message includes a URL on the same hosted MindRoom domain.
 If the report is private, the URL requires normal MindRoom authentication.
 If the report is public, the URL uses an unguessable slug and records who published it.
@@ -72,7 +72,8 @@ If the report is public, the URL uses an unguessable slug and records who publis
 
 The user can open a Dynamic Workflow run view in the dashboard.
 The run view shows phases, active agents, elapsed time, token and cost estimates when available, and recent step outputs.
-The user can cancel the whole run.
+The first implementation stores completed or failed run state and artifacts.
+Cancellation and live progress should be added with the background runner.
 Future versions can pause and resume runs if the backing runner supports it.
 
 ### Updating a Dynamic Workflow
@@ -110,7 +111,7 @@ Publishing a revision only changes the active revision pointer.
 ### Workflow Run
 
 A run is one execution of one workflow revision with one input payload.
-It records status, progress, participant outputs, token usage when available, artifacts, and final result.
+It records status, participant outputs, artifacts, and final result.
 It may run in the primary runtime, a sandbox-runner sidecar, or a dedicated worker.
 
 ### Room Agent Participant
@@ -172,9 +173,8 @@ This matches the product concept and hides Agno implementation details.
 create_workflow(spec: dict, scope: str = "agent", reason: str | None = None) -> dict
 update_workflow(workflow_id: str, patch: dict, reason: str) -> dict
 validate_workflow(workflow_id: str | None = None, spec: dict | None = None) -> dict
-run_workflow(workflow_id: str, input: dict, revision: str | None = None, background: bool = True) -> dict
+run_workflow(workflow_id: str, input: dict, scope: str = "agent") -> dict
 get_workflow_run(run_id: str) -> dict
-cancel_workflow_run(run_id: str) -> dict
 list_workflows(scope: str | None = None) -> dict
 list_workflow_revisions(workflow_id: str) -> dict
 publish_workflow_revision(workflow_id: str, revision: str) -> dict
@@ -365,7 +365,7 @@ mindroom_data/
 
 `workflow.yaml` should be a small mutable pointer file.
 Revision files should be immutable.
-Run records should be append-only except for status and progress updates.
+Run records should be append-only except for status updates.
 Artifact files should be immutable after publication unless a new artifact revision is explicitly created.
 
 Example `workflow.yaml`:
@@ -409,16 +409,16 @@ Report pages need a tailored Content Security Policy because HTML reports may us
 3. MindRoom validates input against the workflow input schema.
 4. MindRoom computes effective permissions.
 5. MindRoom creates a run record.
-6. MindRoom starts a background job.
+6. MindRoom executes the run on the managed tool path.
 7. The runner builds Agno components from the workflow revision and request context.
-8. The workflow runs steps and emits progress events.
+8. The workflow runs steps and records step outputs.
 9. The runner writes artifacts.
 10. The report publisher creates private or public URLs.
-11. MindRoom posts a completion message to Matrix.
+11. MindRoom returns the final run payload to the caller.
 12. The dashboard and tool can read the run record.
 
-Running jobs should stay pinned to the revision they started with.
-Updating the active workflow should not change a running job.
+Running workflows should stay pinned to the revision they started with.
+Updating the active workflow should not change an in-flight run.
 
 ## Approval Rules
 
@@ -498,7 +498,7 @@ The same Dynamic Workflow framework can then support other repeatable workflows.
 - Add declarative workflow spec schema.
 - Add `create_workflow`, `validate_workflow`, `run_workflow`, and `get_workflow_run`.
 - Support ephemeral agents with model and tool allowlists.
-- Support current-thread Matrix context and current-thread attachments.
+- Reject Matrix context and attachment grants until they are wired into execution.
 - Store run records and artifacts.
 - Add private report serving.
 - Implement deep research as a bundled declarative Dynamic Workflow.
@@ -533,7 +533,8 @@ The same Dynamic Workflow framework can then support other repeatable workflows.
 ## Testing Strategy
 
 Unit tests should cover spec validation, permission intersection, storage paths, revision immutability, atomic writes, and patch classification.
-API tests should cover create, update, publish, run, cancel, list, and artifact serving.
+API tests should cover create, update, publish, run, list, and artifact serving.
+Future background execution tests should cover cancel.
 Security tests should cover cross-room access denial, unauthorized model denial, unauthorized tool denial, public report revocation, and invalid path traversal.
 Integration tests should run a tiny Dynamic Workflow with two ephemeral agents and one artifact.
 Live tests should run the deep research workflow with a small query and confirm the Matrix completion link works.
@@ -546,11 +547,10 @@ This is needed because the Agno upgrade touches a shared runtime dependency.
 The first version should feel like this:
 
 1. A user asks for a deep research report.
-2. The agent says it will start a background workflow and calls the Dynamic Workflow tool.
-3. MindRoom creates a run and returns a private report URL that starts as pending.
-4. The room stays usable.
-5. The dashboard shows progress.
-6. The final Matrix message links to the report.
+2. The agent creates or reuses a Dynamic Workflow and calls the Dynamic Workflow tool.
+3. MindRoom creates a run, executes the active revision, and returns a private report URL when report artifacts exist.
+4. The final Matrix message links to the report.
+5. Future versions should move long runs to managed background jobs with progress and cancellation.
 7. The user can ask the agent to improve and save the workflow.
 8. The workflow revision history records what changed and why.
 

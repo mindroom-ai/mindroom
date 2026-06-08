@@ -755,8 +755,8 @@ def _validate_permission_data(permissions: dict[str, object]) -> None:
     normalized = _object_mapping(cast("Mapping[object, object]", data))
     for field_name in ("matrix_history", "attachments"):
         value = normalized.get(field_name)
-        if value is not None and value not in {"none", "current_thread"}:
-            msg = f"Workflow permission data.{field_name} must be 'none' or 'current_thread'."
+        if value is not None and value != "none":
+            msg = f"Workflow permission data.{field_name} must be 'none' until workflow data grants are supported."
             raise DynamicWorkflowError(msg)
     knowledge_bases = normalized.get("knowledge_bases", [])
     if not isinstance(knowledge_bases, list) or not all(isinstance(base, str) for base in knowledge_bases):

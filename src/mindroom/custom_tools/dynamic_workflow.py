@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
@@ -19,7 +19,7 @@ from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -261,7 +261,11 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = _store_and_owner(context, scope)
-            service = DynamicWorkflowService(store, participant_executor=_participant_executor(context, workflow_id))
+            service = DynamicWorkflowService(
+                store,
+                participant_executor=_participant_executor(context, workflow_id),
+                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
+            )
             run = service.run_workflow(
                 workflow_id=workflow_id,
                 scope=scope,
@@ -302,6 +306,7 @@ class DynamicWorkflowTools(Toolkit):
                 owner_id=owner_id,
                 run_id=run_id,
             )
+            _authorize_run_for_context(context, run)
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
         return self._payload(
@@ -396,6 +401,7 @@ class DynamicWorkflowTools(Toolkit):
             service = DynamicWorkflowService(
                 store,
                 async_participant_executor=_aparticipant_executor(context, workflow_id),
+                spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
             )
             run = await service.arun_workflow(
                 workflow_id=workflow_id,
@@ -449,6 +455,12 @@ def _store_and_owner(context: ToolRuntimeContext, scope: str) -> tuple[DynamicWo
         msg = f"{scope} scope requires Dynamic Workflow approval policy and is not available to agent tools yet."
         raise DynamicWorkflowError(msg)
     return _store(context), _owner_id(context, scope)
+
+
+def _authorize_run_for_context(context: ToolRuntimeContext, run: DynamicWorkflowRun) -> None:
+    if run.requested_by != context.requester_id:
+        msg = "Dynamic Workflow run is not available to the current requester."
+        raise DynamicWorkflowError(msg)
 
 
 def _owner_id(context: ToolRuntimeContext, scope: str) -> str:
@@ -722,20 +734,31 @@ def _resolve_participant_model_name(
 
 def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dict[str, object]) -> None:
     caller_models = _caller_allowed_model_refs(context)
+    permission_models = _workflow_permission_model_refs(context, spec)
     for participant in _workflow_participants(spec):
+        participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
         raw_model = participant.get("model")
-        if raw_model is None:
-            continue
-        model_name = _resolve_participant_model_name(
-            context,
-            raw_model,
-            default_model=context.active_model_name or "default",
-        )
-        model_refs = {model_name}
-        model_config = context.config.models.get(model_name)
-        if model_config is not None:
-            model_refs.add(model_config.id)
-        if model_refs.isdisjoint(caller_models):
+        if participant_kind == "room_agent":
+            agent_name = _required_participant_text(participant, "agent")
+            model_name = context.config.resolve_runtime_model(
+                entity_name=agent_name,
+                room_id=context.room_id,
+                runtime_paths=context.runtime_paths,
+            ).model_name
+        else:
+            model_name = _resolve_participant_model_name(
+                context,
+                raw_model,
+                default_model=context.active_model_name or "default",
+            )
+        model_refs = _model_refs(context, model_name)
+        if permission_models and model_refs.isdisjoint(permission_models):
+            msg = (
+                f"Dynamic Workflow participant model '{model_name}' is not allowed by permissions.models. "
+                "Add the model to workflow permissions before running this revision."
+            )
+            raise DynamicWorkflowError(msg)
+        if raw_model is not None and model_refs.isdisjoint(caller_models):
             msg = (
                 f"Dynamic Workflow participant model '{raw_model}' is not allowed for agent '{context.agent_name}'. "
                 "Use the caller's active model or add an approval policy before requesting another model."
@@ -744,14 +767,53 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
 
 
 def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
-    model_names = {context.active_model_name or context.config.get_agent(context.agent_name).model or "default"}
-    model_names.add(context.config.get_agent(context.agent_name).model or "default")
+    model_names = {context.active_model_name} if context.active_model_name else set()
+    if not model_names:
+        model_names.add(context.config.get_agent(context.agent_name).model or "default")
     refs: set[str] = set()
     for model_name in model_names:
+        if model_name is None:
+            continue
         refs.add(model_name)
         model_config = context.config.models.get(model_name)
         if model_config is not None:
             refs.add(model_config.id)
+    return refs
+
+
+def _workflow_permission_model_refs(context: ToolRuntimeContext, spec: dict[str, object]) -> set[str]:
+    raw_permissions = spec.get("permissions")
+    if raw_permissions is None:
+        return set()
+    if not isinstance(raw_permissions, dict):
+        return set()
+    permissions = cast("dict[str, object]", raw_permissions)
+    raw_models = permissions.get("models")
+    if raw_models is None:
+        return set()
+    if not isinstance(raw_models, list):
+        return set()
+    refs: set[str] = set()
+    for raw_model in raw_models:
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            continue
+        model_ref = raw_model.strip()
+        refs.add(model_ref)
+        if model_ref in context.config.models:
+            refs.update(_model_refs(context, model_ref))
+        else:
+            for model_name, model_config in context.config.models.items():
+                if model_config.id == model_ref:
+                    refs.update(_model_refs(context, model_name))
+                    break
+    return refs
+
+
+def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:
+    refs = {model_name}
+    model_config = context.config.models.get(model_name)
+    if model_config is not None:
+        refs.add(model_config.id)
     return refs
 
 
