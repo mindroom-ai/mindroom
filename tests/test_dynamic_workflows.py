@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -344,16 +345,42 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
     )
     assert run.status == "completed"
     assert run.revision == "000001"
-    assert (
-        run.report_url
-        == f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}"
+    assert run.report_url is not None
+    assert run.report_url.startswith(
+        f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}",
     )
+    assert "access_token=" in run.report_url
     assert loaded.status == "completed"
     assert loaded.artifacts["report_html"].endswith("/report.html")
     report_path = tmp_path / "mindroom_data" / loaded.artifacts["report_html"]
     report_html = report_path.read_text(encoding="utf-8")
     assert "Competitor Research Report" in report_html
     assert "Agno factories" in report_html
+
+
+def test_store_run_workflow_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Store-level sync runs should share the same runtime cap as service runs."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    monkeypatch.setattr("mindroom.dynamic_workflows.store.workflow_runtime_seconds", lambda _spec: 0.01)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = store.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        participant_executor=lambda **_kwargs: time.sleep(1),
+    )
+
+    assert run.status == "failed"
+    assert "max_runtime_seconds" in str(run.error)
 
 
 def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: Path) -> None:
@@ -602,9 +629,11 @@ def test_service_completes_tool_runs_without_raw_background_thread(tmp_path: Pat
     assert run.status == "completed"
     assert loaded.status == "completed"
     assert loaded.outputs["brief"] == "Research brief for Agno factories."
-    assert run.report_url == (
-        f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}"
+    assert run.report_url is not None
+    assert run.report_url.startswith(
+        f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}",
     )
+    assert "access_token=" in run.report_url
 
 
 def test_service_sync_run_executes_inline_without_detached_timeout_thread(tmp_path: Path) -> None:
@@ -633,6 +662,37 @@ def test_service_sync_run_executes_inline_without_detached_timeout_thread(tmp_pa
 
     assert run.status == "completed"
     assert run.outputs["report_html"] == "inline"
+
+
+def test_service_sync_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync service runs should fail instead of completing work that exceeds the runtime cap."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    def slow_executor(**_kwargs: object) -> object:
+        time.sleep(1)
+        return "late"
+
+    service = DynamicWorkflowService(store, participant_executor=slow_executor)
+    monkeypatch.setattr("mindroom.dynamic_workflows.store.workflow_runtime_seconds", lambda _spec: 0.01)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    assert run.status == "failed"
+    assert "max_runtime_seconds" in str(run.error)
 
 
 @pytest.mark.asyncio
@@ -1112,6 +1172,51 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
     assert "permissions.models" in result["message"]
 
 
+def test_dynamic_workflow_tool_rejects_unknown_room_agent_during_validation(tmp_path: Path) -> None:
+    """Room-agent participants should fail before an invalid workflow is saved."""
+    tool = DynamicWorkflowTools()
+    context = _make_multi_agent_context(tmp_path, room_agents=["general"])
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "room_agent",
+                "agent": "missing",
+            },
+        ],
+    )
+
+    with tool_runtime_context(context):
+        validated = _tool_payload(tool.validate_workflow(spec))
+        created = _tool_payload(tool.create_workflow(spec, reason="initial design"))
+
+    assert validated["status"] == "error"
+    assert "unknown room agent 'missing'" in validated["message"]
+    assert created["status"] == "error"
+    assert "unknown room agent 'missing'" in created["message"]
+
+
+def test_dynamic_workflow_tool_rejects_unavailable_room_agent_during_validation(tmp_path: Path) -> None:
+    """Room-agent participants should match the requester-visible agents in the current room."""
+    tool = DynamicWorkflowTools()
+    context = _make_multi_agent_context(tmp_path, room_agents=["general"])
+    spec = _workflow_spec(
+        participants=[
+            {
+                "id": "writer",
+                "kind": "room_agent",
+                "agent": "specialist",
+            },
+        ],
+    )
+
+    with tool_runtime_context(context):
+        result = _tool_payload(tool.validate_workflow(spec))
+
+    assert result["status"] == "error"
+    assert "not available to this requester in this room" in result["message"]
+
+
 def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_path: Path) -> None:
     """Saved revisions should not bypass the caller's current active model policy."""
     tool = DynamicWorkflowTools()
@@ -1217,6 +1322,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
                 "specialist": AgentConfig(
                     display_name="Specialist Agent",
                     model="default",
+                    tools=["memory"],
                     knowledge_bases=["reference"],
                 ),
             },
@@ -1253,14 +1359,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         return SimpleNamespace(content="done", status=RunStatus.completed)
 
     fake_agent = SimpleNamespace(arun=fake_arun)
-    knowledge = SimpleNamespace()
-    with (
-        patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock,
-        patch(
-            "mindroom.custom_tools.dynamic_workflow.resolve_agent_knowledge_access",
-            return_value=SimpleNamespace(knowledge=knowledge),
-        ),
-    ):
+    with patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock:
         asyncio.set_event_loop(parent_loop)
         try:
             result = parent_loop.run_until_complete(
@@ -1279,9 +1378,9 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     create_kwargs = create_agent_mock.call_args.kwargs
     assert create_kwargs["session_id"].endswith(":dynamic_workflow:competitor-research-report:run_1:writer_a")
     assert create_kwargs["active_model_name"] == "large"
-    assert create_kwargs["knowledge"] is knowledge
+    assert create_kwargs["knowledge"] is None
     assert create_kwargs["persist_runtime_state"] is False
-    assert create_kwargs["disabled_tool_names"] == frozenset({"memory"})
+    assert create_kwargs["disable_runtime_capabilities"] is True
     assert create_kwargs["execution_identity"].agent_name == "specialist"
     assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
 

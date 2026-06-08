@@ -1117,6 +1117,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     persist_runtime_state: bool = True,
+    disable_runtime_capabilities: bool = False,
     disabled_tool_names: frozenset[str] = frozenset(),
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1144,6 +1145,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             history-format guidance in the shared identity prompt.
         persist_runtime_state: Whether this agent instance should write durable
             Agno history, learning, and culture state.
+        disable_runtime_capabilities: Whether to omit tools, skills, and knowledge
+            for a restricted in-process agent run.
         disabled_tool_names: Resolved tool names to omit from this instance.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
@@ -1211,14 +1214,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     resolved_tool_configs = {
         entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
-    if disabled_tool_names:
+    if disable_runtime_capabilities:
+        resolved_tool_configs = {}
+    elif disabled_tool_names:
         resolved_tool_configs = {
             tool_name: overrides
             for tool_name, overrides in resolved_tool_configs.items()
             if tool_name not in disabled_tool_names
         }
-    loaded_tools = tuple(
-        tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
+    loaded_tools = (
+        ()
+        if disable_runtime_capabilities
+        else tuple(
+            tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
+        )
     )
     worker_tools = _resolve_runtime_worker_tools(
         agent_name,
@@ -1325,27 +1334,37 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         model_id=model.id,
     )
 
-    skills = _load_agent_skills(
-        agent_name,
-        config,
-        runtime_paths,
-        workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+    skills = (
+        None
+        if disable_runtime_capabilities
+        else _load_agent_skills(
+            agent_name,
+            config,
+            runtime_paths,
+            workspace_skills_root=workspace.root / "skills" if workspace is not None else None,
+        )
     )
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
 
-    dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
-        config,
-        agent_name,
-        enable_dynamic_tools_manager=session_id is not None,
-    )
+    dynamic_tooling_block = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_block = _build_dynamic_tooling_instruction_block(
+            config,
+            agent_name,
+            enable_dynamic_tools_manager=session_id is not None,
+        )
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if agent_runtime.tool_base_dir is not None:
+    if agent_runtime.tool_base_dir is not None and not disable_runtime_capabilities:
         instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
 
-    file_mode_knowledge_instruction = _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    file_mode_knowledge_instruction = (
+        None
+        if disable_runtime_capabilities
+        else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+    )
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
@@ -1356,18 +1375,24 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
 
-    dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
-        config,
-        agent_name,
-        loaded_tools=loaded_tools,
-        enable_dynamic_tools_manager=session_id is not None,
-    )
+    dynamic_tooling_state_suffix = None
+    if not disable_runtime_capabilities:
+        dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
+            config,
+            agent_name,
+            loaded_tools=loaded_tools,
+            enable_dynamic_tools_manager=session_id is not None,
+        )
     if dynamic_tooling_state_suffix is not None:
         instructions.append(dynamic_tooling_state_suffix)
 
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
-    knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
+    knowledge_enabled = (
+        not disable_runtime_capabilities
+        and bool(config.get_agent_knowledge_base_ids(agent_name))
+        and knowledge is not None
+    )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )

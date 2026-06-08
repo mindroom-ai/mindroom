@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.dynamic_workflows.runner import async_execute_workflow_spec, execute_workflow_spec
 from mindroom.dynamic_workflows.store import (
     DynamicWorkflowStore,
+    sync_workflow_runtime_limit,
     validate_workflow_input,
     validate_workflow_spec,
     workflow_runtime_seconds,
@@ -115,11 +116,12 @@ class DynamicWorkflowService:
         input_data: dict[str, object],
     ) -> DynamicWorkflowRun:
         try:
-            execution = execute_workflow_spec(
-                spec,
-                input_data,
-                participant_executor=self._participant_executor,
-            )
+            with sync_workflow_runtime_limit(spec):
+                execution = execute_workflow_spec(
+                    spec,
+                    input_data,
+                    participant_executor=self._participant_executor,
+                )
         except Exception as exc:  # Persist runtime failures from participant code.
             return self._store.fail_workflow_run(run, error=str(exc))
         return self._store.complete_workflow_run(run, execution)

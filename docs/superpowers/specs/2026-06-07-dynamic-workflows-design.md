@@ -26,7 +26,7 @@ The user can inspect, approve, save, rerun, update, and roll back workflow defin
 ## Goals
 
 - Let agents assemble repeatable workflows instead of manually coordinating every step in one chat turn.
-- Let workflows reuse durable room agents when their existing expertise, memory, tools, or identity matter.
+- Let workflows reuse durable room agents when their existing expertise, public role, model policy, or identity matter.
 - Let workflows create ephemeral agents for temporary roles such as planner, critic, source reader, analyst, or report writer.
 - Keep ephemeral agents isolated from durable agent memory, credentials, Matrix identity, and tools unless policy explicitly grants access.
 - Store Dynamic Workflows and revisions on disk so self-hosted users can inspect, back up, copy, and audit them.
@@ -117,12 +117,13 @@ It may run in the primary runtime, a sandbox-runner sidecar, or a dedicated work
 ### Room Agent Participant
 
 A room agent participant reuses an existing MindRoom agent that is available in the current room.
-It reuses the durable agent's public role, model policy, tools, knowledge, and authorization envelope.
+The current implementation reuses the durable agent's public role, configured model policy, and Matrix-facing identity context.
+It does not inherit durable memory, tools, skills, credentials, or knowledge until an explicit approval policy grants those capabilities.
 It should run as an internal participant in the workflow instead of posting every intermediate step to Matrix.
 It should be constrained to the current room and thread context.
 
-The default memory mode for room agent participants should be `read_only`.
-Dynamic Workflows may request `normal` memory behavior, but that should be treated as permission expansion.
+Future memory or tool grants should be treated as permission expansion.
+Dynamic Workflows may request `read_only` or `normal` memory behavior only after that approval policy exists.
 
 ### Ephemeral Agent Participant
 
@@ -138,7 +139,7 @@ Future tool grants should be treated as permission expansion and require an expl
 The coordinator is the workflow spec or script.
 The coordinator decides which steps run next and how intermediate outputs flow between steps.
 The coordinator should not directly use shell, filesystem, browser, Matrix, or network tools.
-Only agents inside the workflow should call tools.
+Only agents inside the workflow should call tools after the workflow has explicit tool grants.
 
 This mirrors Claude Code dynamic workflows, where the workflow script coordinates agents and agents execute tools.
 
@@ -466,7 +467,7 @@ The script holds loops, branching, and intermediate results.
 The conversation receives the final answer instead of every intermediate result.
 The user can inspect, approve, save, rerun, and manage workflow runs.
 The runtime caps concurrency and total agents.
-The script coordinates agents, while agents use tools.
+The script coordinates agents, while agents may use tools after explicit grants.
 
 MindRoom should adopt those constraints.
 The workflow coordinator should coordinate, not execute arbitrary tools.
@@ -506,6 +507,7 @@ The same Dynamic Workflow framework can then support other repeatable workflows.
 - Add room agent participants.
 - Add `update_workflow`, `publish_workflow_revision`, `rollback_workflow`, and `list_workflow_revisions`.
 - Add approval cards for workflow activation and permission expansion.
+- Add full room-agent memory, tool, skill, and knowledge grants.
 - Add dashboard Dynamic Workflow library and run detail page.
 - Add public report links with revocation.
 - Add run cancellation.

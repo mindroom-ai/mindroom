@@ -111,6 +111,40 @@ def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(tes
     assert response.status_code == 403
 
 
+def test_private_dynamic_workflow_report_accepts_access_token_for_hosted_user(test_client: TestClient) -> None:
+    """Private report bearer URLs should work when dashboard and Matrix identities differ."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = store.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        params={"access_token": run.report_access_token},
+        headers=trusted_upstream_headers(
+            user_id="user-alice",
+            email="alice@example.com",
+            matrix_user_id="",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert "Agno factories" in response.text
+
+
 def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client: TestClient) -> None:
     """Private report auth should deny Supabase users that do not match the run requester."""
     runtime_paths = main._app_runtime_paths(test_client.app)
@@ -135,6 +169,7 @@ def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client
             "type": "http",
             "method": "GET",
             "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+            "query_string": b"",
             "headers": [],
             "auth_user": {"user_id": "user-bob", "email": "bob@example.com"},
         },

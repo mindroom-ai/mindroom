@@ -21,7 +21,6 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -574,21 +573,7 @@ async def _aexecute_room_agent_participant(
     *,
     run_scope: str = "manual",
 ) -> object:
-    raw_agent_name = participant.get("agent") or participant.get("agent_name")
-    if not isinstance(raw_agent_name, str) or not raw_agent_name.strip():
-        msg = "Room agent participants must declare an 'agent' field."
-        raise DynamicWorkflowError(msg)
-    agent_name = raw_agent_name.strip()
-    if agent_name not in context.config.agents:
-        msg = f"Dynamic Workflow participant references unknown room agent '{agent_name}'."
-        raise DynamicWorkflowError(msg)
-    if agent_name not in _available_room_agent_names(context):
-        msg = f"Dynamic Workflow room agent participant '{agent_name}' is not available to this requester in this room."
-        raise DynamicWorkflowError(msg)
-    if participant.get("model") not in (None, ""):
-        msg = "Room agent participants use their configured model; model overrides are only available to ephemeral agents."
-        raise DynamicWorkflowError(msg)
-
+    agent_name = _validate_room_agent_reference_for_context(context, participant)
     participant_id = _required_participant_text(participant, "id")
     runtime_model = context.config.resolve_runtime_model(
         entity_name=agent_name,
@@ -604,12 +589,6 @@ async def _aexecute_room_agent_participant(
         session_id=session_id,
     )
     execution_identity = build_execution_identity_from_runtime_context(participant_context)
-    knowledge_resolution = resolve_agent_knowledge_access(
-        agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=execution_identity,
-    )
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import create_agent  # noqa: PLC0415
 
@@ -620,11 +599,11 @@ async def _aexecute_room_agent_participant(
         execution_identity=execution_identity,
         session_id=session_id,
         hook_registry=context.hook_registry,
-        knowledge=knowledge_resolution.knowledge,
+        knowledge=None,
         active_model_name=active_model_name,
         include_interactive_questions=False,
         persist_runtime_state=False,
-        disabled_tool_names=frozenset({"memory"}),
+        disable_runtime_capabilities=True,
     )
     return await _arun_agent(participant_context, agent, prompt)
 
@@ -644,6 +623,27 @@ def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
         if name in context.config.agents:
             names.add(name)
     return names
+
+
+def _validate_room_agent_reference_for_context(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+) -> str:
+    raw_agent_name = participant.get("agent") or participant.get("agent_name")
+    if not isinstance(raw_agent_name, str) or not raw_agent_name.strip():
+        msg = "Room agent participants must declare an 'agent' field."
+        raise DynamicWorkflowError(msg)
+    agent_name = raw_agent_name.strip()
+    if agent_name not in context.config.agents:
+        msg = f"Dynamic Workflow participant references unknown room agent '{agent_name}'."
+        raise DynamicWorkflowError(msg)
+    if agent_name not in _available_room_agent_names(context):
+        msg = f"Dynamic Workflow room agent participant '{agent_name}' is not available to this requester in this room."
+        raise DynamicWorkflowError(msg)
+    if participant.get("model") not in (None, ""):
+        msg = "Room agent participants use their configured model; model overrides are only available to ephemeral agents."
+        raise DynamicWorkflowError(msg)
+    return agent_name
 
 
 def _execute_ephemeral_agent_participant(
@@ -740,7 +740,7 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
         participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
         raw_model = participant.get("model")
         if participant_kind == "room_agent":
-            agent_name = _required_participant_text(participant, "agent")
+            agent_name = _validate_room_agent_reference_for_context(context, participant)
             model_name = context.config.resolve_runtime_model(
                 entity_name=agent_name,
                 room_id=context.room_id,

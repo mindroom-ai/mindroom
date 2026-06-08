@@ -143,7 +143,6 @@ spec:
           {{ end }}
         {{ end }}
       {{- end }}
-      {{- end }}
       containers:
         - name: mindroom
           image: {{ include "mindroom-runtime.image" . | quote }}

@@ -8,6 +8,10 @@ import hashlib
 import html
 import json
 import re
+import secrets
+import signal
+import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -49,6 +53,10 @@ class DynamicWorkflowError(ValueError):
     """Raised when a Dynamic Workflow operation is invalid."""
 
 
+class _SyncWorkflowTimeoutError(TimeoutError):
+    """Raised when a synchronous Dynamic Workflow run exceeds its runtime cap."""
+
+
 @dataclass(frozen=True)
 class DynamicWorkflowSummary:
     """User-facing summary for one saved Dynamic Workflow."""
@@ -81,6 +89,7 @@ class DynamicWorkflowRun:
     artifacts: dict[str, str]
     report_url: str | None
     requested_by: str
+    report_access_token: str | None
     started_at: str
     completed_at: str | None
     error: str | None = None
@@ -248,7 +257,8 @@ class DynamicWorkflowStore:
         except DynamicWorkflowError as exc:
             return self.fail_workflow_run(run, error=str(exc))
         try:
-            execution = execute_workflow_spec(spec, input_data, participant_executor=participant_executor)
+            with sync_workflow_runtime_limit(spec):
+                execution = execute_workflow_spec(spec, input_data, participant_executor=participant_executor)
         except Exception as exc:
             return self.fail_workflow_run(run, error=str(exc))
         return self.complete_workflow_run(run, execution)
@@ -278,6 +288,7 @@ class DynamicWorkflowStore:
         """Persist a running workflow run record before execution starts."""
         summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
         run_id = f"run_{uuid4().hex}"
+        report_access_token = secrets.token_urlsafe(32)
         run = DynamicWorkflowRun(
             run_id=run_id,
             workflow_id=workflow_id,
@@ -289,8 +300,9 @@ class DynamicWorkflowStore:
             steps=[],
             outputs={},
             artifacts={},
-            report_url=_private_report_url(base_url, scope, owner_id, workflow_id, run_id),
+            report_url=_private_report_url(base_url, scope, owner_id, workflow_id, run_id, report_access_token),
             requested_by=requested_by,
+            report_access_token=report_access_token,
             started_at=_utc_now(),
             completed_at=None,
             error=None,
@@ -321,6 +333,7 @@ class DynamicWorkflowStore:
             artifacts=artifacts,
             report_url=run.report_url,
             requested_by=run.requested_by,
+            report_access_token=run.report_access_token,
             started_at=run.started_at,
             completed_at=_utc_now(),
             error=str(execution.error) if execution.error is not None else None,
@@ -352,6 +365,7 @@ class DynamicWorkflowStore:
             artifacts=artifacts,
             report_url=run.report_url,
             requested_by=run.requested_by,
+            report_access_token=run.report_access_token,
             started_at=run.started_at,
             completed_at=_utc_now(),
             error=error,
@@ -479,6 +493,42 @@ def workflow_runtime_seconds(spec: dict[str, object]) -> int:
     return _positive_int_permission(value, "max_runtime_seconds", maximum=_MAX_WORKFLOW_RUNTIME_SECONDS)
 
 
+@contextmanager
+def sync_workflow_runtime_limit(spec: dict[str, object]) -> Iterator[None]:
+    """Enforce permissions.max_runtime_seconds for synchronous workflow execution."""
+    timeout_seconds = workflow_runtime_seconds(spec)
+    if threading.current_thread() is not threading.main_thread():
+        msg = (
+            "Synchronous Dynamic Workflow runs require the async execution path "
+            "to enforce permissions.max_runtime_seconds outside the main thread."
+        )
+        raise DynamicWorkflowError(msg)
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started_at = time.monotonic()
+
+    def raise_timeout(_signum: int, _frame: object) -> None:
+        raise _SyncWorkflowTimeoutError(_workflow_timeout_message(timeout_seconds))
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, float(timeout_seconds))
+    try:
+        yield
+    except _SyncWorkflowTimeoutError as exc:
+        raise DynamicWorkflowError(str(exc)) from exc
+    finally:
+        elapsed = time.monotonic() - started_at
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, max(previous_timer[0] - elapsed, 1e-6), previous_timer[1])
+
+
+def _workflow_timeout_message(timeout_seconds: float) -> str:
+    return f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds})."
+
+
 def _input_schema(spec: dict[str, object]) -> dict[str, object] | None:
     raw_inputs = spec.get("inputs")
     if raw_inputs is None:
@@ -600,7 +650,7 @@ def _validate_room_agent_participant(participant: dict[str, object], context: st
         msg = f"{context} room_agent participants cannot override model."
         raise DynamicWorkflowError(msg)
     if participant.get("tools") not in (None, []):
-        msg = f"{context} room_agent participants cannot declare tools; they use configured agent tools."
+        msg = f"{context} room_agent participants cannot declare tools; workflow tool grants are not supported yet."
         raise DynamicWorkflowError(msg)
 
 
@@ -1067,6 +1117,7 @@ def _run_to_json(run: DynamicWorkflowRun) -> dict[str, object]:
         "artifacts": run.artifacts,
         "report_url": run.report_url,
         "requested_by": run.requested_by,
+        "report_access_token": run.report_access_token,
         "started_at": run.started_at,
         "completed_at": run.completed_at,
         "error": run.error,
@@ -1093,6 +1144,7 @@ def _run_from_json(data: dict[str, object]) -> DynamicWorkflowRun:
         artifacts={str(key): str(value) for key, value in artifacts.items()} if isinstance(artifacts, dict) else {},
         report_url=str(data["report_url"]) if data.get("report_url") is not None else None,
         requested_by=str(data["requested_by"]),
+        report_access_token=str(data["report_access_token"]) if data.get("report_access_token") is not None else None,
         started_at=str(data["started_at"]),
         completed_at=str(data["completed_at"]) if data.get("completed_at") is not None else None,
         error=str(data["error"]) if data.get("error") is not None else None,
@@ -1145,11 +1197,15 @@ def _private_report_url(
     owner_id: str,
     workflow_id: str,
     run_id: str,
+    report_access_token: str | None,
 ) -> str | None:
     if base_url is None or not base_url.strip():
         return None
     owner_key = _owner_dir_name(scope, owner_id)
-    return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
+    report_url = f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
+    if report_access_token is None:
+        return report_url
+    return f"{report_url}?access_token={report_access_token}"
 
 
 def _object_mapping(data: Mapping[object, object]) -> dict[str, object]:
