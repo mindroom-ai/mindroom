@@ -470,7 +470,7 @@ def validate_workflow_input(spec: dict[str, object], input_data: dict[str, objec
 
 def _validate_schema_version(spec: dict[str, object]) -> None:
     value = spec.get("schema_version")
-    if value != _SUPPORTED_SCHEMA_VERSION:
+    if not isinstance(value, int) or isinstance(value, bool) or value != _SUPPORTED_SCHEMA_VERSION:
         msg = f"Workflow spec field 'schema_version' must be {_SUPPORTED_SCHEMA_VERSION}."
         raise DynamicWorkflowError(msg)
 

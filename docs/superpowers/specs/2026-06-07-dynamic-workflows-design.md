@@ -433,7 +433,7 @@ Approval cards should show:
 ## Agno Integration
 
 MindRoom should upgrade Agno to at least the first version with factories.
-This PR pins Agno 2.6.12.
+MindRoom currently uses Agno 2.6.12.
 The minimum feature version is Agno 2.6.0.
 
 The initial adapter path should keep MindRoom policy and storage outside Agno internals.

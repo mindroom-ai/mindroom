@@ -469,6 +469,10 @@ def test_validate_workflow_spec_requires_supported_schema_version(tmp_path: Path
 
     with pytest.raises(DynamicWorkflowError, match="schema_version"):
         store.validate_workflow(_workflow_spec(schema_version=2))
+    with pytest.raises(DynamicWorkflowError, match="schema_version"):
+        store.validate_workflow(_workflow_spec(schema_version=True))
+    with pytest.raises(DynamicWorkflowError, match="schema_version"):
+        store.validate_workflow(_workflow_spec(schema_version=1.0))
 
     spec_without_version = _workflow_spec()
     del spec_without_version["schema_version"]
