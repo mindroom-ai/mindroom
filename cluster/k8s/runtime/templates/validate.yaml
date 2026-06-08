@@ -54,6 +54,49 @@
 {{- fail "stateStorage.syncTokens.subPath is required when stateStorage.syncTokens.enabled=true" -}}
 {{- end -}}
 {{- end -}}
+{{- $contentBundleNames := dict -}}
+{{- range $index, $bundle := .Values.contentBundles -}}
+{{- if not $bundle.name -}}
+{{- fail (printf "contentBundles[%d].name is required" $index) -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $bundle.name) -}}
+{{- fail (printf "contentBundles[%d].name must contain only lowercase letters, numbers, and hyphens" $index) -}}
+{{- end -}}
+{{- if gt (len $bundle.name) 48 -}}
+{{- fail (printf "contentBundles[%d].name must be 48 characters or fewer" $index) -}}
+{{- end -}}
+{{- if hasKey $contentBundleNames $bundle.name -}}
+{{- fail (printf "contentBundles[%d].name %q is used more than once" $index $bundle.name) -}}
+{{- end -}}
+{{- $_ := set $contentBundleNames $bundle.name true -}}
+{{- if not $bundle.image -}}
+{{- fail (printf "contentBundles[%d].image is required" $index) -}}
+{{- end -}}
+{{- if not (regexMatch "@sha256:[a-f0-9]{64}$" $bundle.image) -}}
+{{- fail (printf "contentBundles[%d].image must be pinned by full sha256 digest" $index) -}}
+{{- end -}}
+{{- $sourcePath := default "/bundle" $bundle.sourcePath -}}
+{{- if not (hasPrefix "/" $sourcePath) -}}
+{{- fail (printf "contentBundles[%d].sourcePath must be absolute" $index) -}}
+{{- end -}}
+{{- if and $bundle.targetPath (not (hasPrefix "/" $bundle.targetPath)) -}}
+{{- fail (printf "contentBundles[%d].targetPath must be absolute" $index) -}}
+{{- end -}}
+{{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
+{{- $storageMountPath := $.Values.storage.mountPath | trimSuffix "/" -}}
+{{- if eq $storageMountPath "" -}}
+{{- $storageMountPath = "/" -}}
+{{- end -}}
+{{- if eq $targetPath $storageMountPath -}}
+{{- fail (printf "contentBundles[%d].targetPath cannot be equal to storage.mountPath %s" $index $.Values.storage.mountPath) -}}
+{{- end -}}
+{{- if and (ne $storageMountPath "/") (not (hasPrefix (printf "%s/" $storageMountPath) $targetPath)) -}}
+{{- fail (printf "contentBundles[%d].targetPath must be under storage.mountPath %s" $index $.Values.storage.mountPath) -}}
+{{- end -}}
+{{- if and $bundle.seed $bundle.seed.enabled (not $bundle.seed.command) -}}
+{{- fail (printf "contentBundles[%d].seed.command is required when seed.enabled=true" $index) -}}
+{{- end -}}
+{{- end -}}
 {{- $egressProxyEnabled := or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}
 {{- $egressPolicyEnabled := and $egressProxyEnabled .Values.egressProxy.networkPolicy.create -}}
 {{- if and $egressProxyEnabled (ne .Values.workers.backend "kubernetes") -}}

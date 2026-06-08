@@ -95,6 +95,26 @@ app.kubernetes.io/component: runtime
 {{- default "state-storage" .Values.stateStorage.volumeName -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.contentBundleSourcePath" -}}
+{{- $bundle := index . 1 -}}
+{{- $sourcePath := default "/bundle" $bundle.sourcePath | clean -}}
+{{- if eq $sourcePath "/" -}}/{{- else -}}{{ $sourcePath | trimSuffix "/" }}{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.contentBundleTargetPath" -}}
+{{- $root := index . 0 -}}
+{{- $bundle := index . 1 -}}
+{{- $targetPath := default (printf "%s/content-bundles/%s" ($root.Values.storage.mountPath | trimSuffix "/") $bundle.name) $bundle.targetPath | clean -}}
+{{- if eq $targetPath "/" -}}/{{- else -}}{{ $targetPath | trimSuffix "/" }}{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.contentBundleSeedCommand" -}}
+{{- $bundle := index . 0 -}}
+{{- range $argIndex, $arg := $bundle.seed.command -}}
+{{- if $argIndex }} {{ end -}}{{ $arg | quote -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "mindroom-runtime.fullname" .) .Values.serviceAccount.name -}}

@@ -108,6 +108,15 @@ def _container(deployment: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(msg)
 
 
+def _init_container(deployment: dict[str, Any], name: str) -> dict[str, Any]:
+    init_containers = deployment["spec"]["template"]["spec"].get("initContainers", [])
+    for container in init_containers:
+        if container["name"] == name:
+            return container
+    msg = f"init container {name} was not rendered"
+    raise AssertionError(msg)
+
+
 def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {env["name"]: env for env in container["env"]}
 
@@ -252,6 +261,100 @@ def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None
 
     assert deployment["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "ghcr-pull"}]
     assert worker_manager_account["imagePullSecrets"] == [{"name": "ghcr-pull"}]
+
+
+def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_containers(tmp_path: Path) -> None:
+    """Content bundles should copy immutable image contents into runtime storage without replacing user hooks."""
+    values_path = tmp_path / "content-bundles.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "initContainers": [
+                    {
+                        "name": "prepare-storage",
+                        "image": "busybox:1.36",
+                        "command": ["sh", "-ec", "mkdir -p /app/agent_data/bootstrap"],
+                    },
+                ],
+                "contentBundles": [
+                    {
+                        "name": "team-config",
+                        "image": "ghcr.io/example/team-config@sha256:"
+                        "1111111111111111111111111111111111111111111111111111111111111111",
+                        "sourcePath": "/bundle",
+                        "targetPath": "/app/agent_data/content-bundles/team-config",
+                        "seed": {
+                            "enabled": True,
+                            "command": [
+                                "/app/agent_data/content-bundles/team-config/scripts/seed-content.sh",
+                            ],
+                        },
+                    },
+                    {
+                        "name": "private-agent-content",
+                        "image": "ghcr.io/example/private-agent-content@sha256:"
+                        "2222222222222222222222222222222222222222222222222222222222222222",
+                        "overwrite": False,
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    team_config = _init_container(deployment, "content-bundle-team-config")
+    agent_content = _init_container(deployment, "content-bundle-private-agent-content")
+
+    assert [container["name"] for container in pod_spec["initContainers"]][:3] == [
+        "prepare-storage",
+        "content-bundle-team-config",
+        "content-bundle-private-agent-content",
+    ]
+    assert team_config["image"] == (
+        "ghcr.io/example/team-config@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    )
+    assert team_config["imagePullPolicy"] == "IfNotPresent"
+    assert team_config["command"] == ["sh", "-ec"]
+    assert team_config["args"] == [
+        "set -eu\n"
+        'rm -rf "/app/agent_data/content-bundles/team-config"\n'
+        'mkdir -p "/app/agent_data/content-bundles/team-config"\n'
+        'cp -a "/bundle/." "/app/agent_data/content-bundles/team-config/"\n'
+        '"/app/agent_data/content-bundles/team-config/scripts/seed-content.sh"',
+    ]
+    assert team_config["volumeMounts"] == [
+        {
+            "name": "storage",
+            "mountPath": "/app/agent_data",
+        },
+    ]
+    assert agent_content["args"] == [
+        "set -eu\n"
+        'mkdir -p "/app/agent_data/content-bundles/private-agent-content"\n'
+        'cp -a "/bundle/." "/app/agent_data/content-bundles/private-agent-content/"',
+    ]
+
+
+def test_runtime_chart_rejects_content_bundle_images_without_digest() -> None:
+    """Hosted bundles should be pinned to immutable image digests."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config:latest",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "contentBundles[0].image must include @sha256:" in completed.stderr
 
 
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:

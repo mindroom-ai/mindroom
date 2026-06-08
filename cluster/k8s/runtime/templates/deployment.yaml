@@ -65,7 +65,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers }}
+      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers .Values.contentBundles }}
       initContainers:
 {{ if and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled }}
         - name: prepare-state-storage
@@ -89,7 +89,54 @@ spec:
 {{- end }}
         {{- with .Values.initContainers }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
+        {{ range $bundle := .Values.contentBundles }}
+        {{- $sourcePath := include "mindroom-runtime.contentBundleSourcePath" (list $ $bundle) -}}
+        {{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
+        {{- $overwrite := true -}}
+        {{- if hasKey $bundle "overwrite" -}}
+        {{- $overwrite = $bundle.overwrite -}}
+        {{- end -}}
+        - name: {{ printf "content-bundle-%s" $bundle.name | trunc 63 | trimSuffix "-" }}
+          image: {{ $bundle.image | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $bundle.imagePullPolicy }}
+          command:
+            - sh
+            - -ec
+          args:
+            - |-
+              set -eu
+              {{- if $overwrite }}
+              rm -rf {{ $targetPath | quote }}
+              {{- end }}
+              mkdir -p {{ $targetPath | quote }}
+              cp -a {{ printf "%s/." $sourcePath | quote }} {{ printf "%s/" $targetPath | quote }}
+              {{- if and $bundle.seed $bundle.seed.enabled }}
+              {{ include "mindroom-runtime.contentBundleSeedCommand" (list $bundle) }}
+              {{- end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.storageVolumeName" $ }}
+              mountPath: {{ $.Values.storage.mountPath }}
+            {{ with $bundle.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{ end }}
+          {{ with $bundle.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+          {{ with $bundle.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+          {{ with $bundle.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+          {{ with $bundle.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{ end }}
+        {{ end }}
       {{- end }}
       containers:
         - name: mindroom

@@ -120,6 +120,56 @@ stateStorage:
   size: 20Gi
 ```
 
+## Content Bundles
+
+Hosted deployments can copy immutable private content into MindRoom storage before the runtime starts.
+Use `contentBundles` for plugins, skills, agent templates, workspace templates, policy files, and small seed scripts that are packaged into an OCI image.
+The chart does not clone repositories or download release assets at pod startup.
+Private registry access should use normal Kubernetes image pull credentials through `imagePullSecrets`.
+
+Each bundle image must be pinned by digest and must contain a POSIX shell, `cp`, and `mkdir`, because the chart runs the bundle image as a copy init container.
+Because `overwrite` defaults to true, bundle images also need `rm` unless every bundle sets `overwrite: false`.
+Package content under `/bundle` by default:
+
+```dockerfile
+FROM busybox:1.36
+COPY . /bundle
+```
+
+Configure one or more bundles:
+
+```yaml
+imagePullSecrets:
+  - name: private-registry-pull
+
+contentBundles:
+  - name: team-config
+    image: ghcr.io/example/acme-mindroom-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    sourcePath: /bundle
+    targetPath: /app/agent_data/content-bundles/team-config
+    seed:
+      enabled: true
+      command:
+        - /app/agent_data/content-bundles/team-config/scripts/seed-content.sh
+
+  - name: private-agent-content
+    image: ghcr.io/example/private-agent-content@sha256:2222222222222222222222222222222222222222222222222222222222222222
+```
+
+If `targetPath` is omitted, the chart copies to `/app/agent_data/content-bundles/<name>`.
+The init container removes the target path before copying unless `overwrite: false` is set.
+`seed.command` runs after the copy and should point at a short script or executable supplied by the bundle instead of embedding deployment-specific shell in Helm values.
+The script runs in the same bundle image, with MindRoom storage mounted at `storage.mountPath`.
+Raw `initContainers`, `extraVolumes`, and `extraVolumeMounts` still work for deployments that need lower-level Kubernetes wiring.
+
+Reference copied plugins from `config.yaml` with absolute paths:
+
+```yaml
+plugins:
+  - /app/agent_data/content-bundles/team-config/plugins/review-tools
+  - /app/agent_data/content-bundles/private-agent-content/plugins/team-tools
+```
+
 ## Worker Egress Proxy
 
 For dedicated Kubernetes workers, the chart can either deploy the approved egress proxy or point workers at an existing HTTP proxy Service.

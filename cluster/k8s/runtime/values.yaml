@@ -177,6 +177,21 @@ stateStorage:
     fsGroup: 1000
     chmod: "2775"
 
+# Immutable content bundles copied into runtime storage before MindRoom starts.
+# Bundle images should be pinned by digest and contain files under sourcePath.
+# The default target path is <storage.mountPath>/content-bundles/<name>.
+contentBundles: []
+# Example:
+# contentBundles:
+#   - name: team-config
+#     image: ghcr.io/example/team-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+#     sourcePath: /bundle
+#     targetPath: /app/agent_data/content-bundles/team-config
+#     seed:
+#       enabled: true
+#       command:
+#         - /app/agent_data/content-bundles/team-config/scripts/seed-content.sh
+
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
   extra: []
