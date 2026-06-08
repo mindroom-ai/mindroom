@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+import nio
 from agno.agent import Agent
 from agno.tools import Toolkit
 
 from mindroom import model_loading
+from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
@@ -300,13 +303,15 @@ def _execute_room_agent_participant(
     if agent_name not in context.config.agents:
         msg = f"Dynamic Workflow participant references unknown room agent '{agent_name}'."
         raise DynamicWorkflowError(msg)
+    if agent_name not in _available_room_agent_names(context):
+        msg = f"Dynamic Workflow room agent participant '{agent_name}' is not available to this requester in this room."
+        raise DynamicWorkflowError(msg)
+    if participant.get("model") not in (None, ""):
+        msg = "Room agent participants use their configured model; model overrides are only available to ephemeral agents."
+        raise DynamicWorkflowError(msg)
 
     agent_config = context.config.get_agent(agent_name)
-    active_model_name = _resolve_participant_model_name(
-        context,
-        participant.get("model"),
-        default_model=agent_config.model,
-    )
+    active_model_name = agent_config.model
     execution_identity = build_execution_identity_from_runtime_context(context)
     session_id = _participant_session_id(context, agent_name)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
@@ -323,6 +328,23 @@ def _execute_room_agent_participant(
         include_interactive_questions=False,
     )
     return _run_agent(context, agent, prompt, session_id)
+
+
+def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
+    room = context.room or nio.MatrixRoom(room_id=context.room_id, own_user_id="")
+    candidates = responder_candidate_entities_from_cached_room(
+        room,
+        context.requester_id,
+        context.config,
+        context.runtime_paths,
+    )
+    registry = entity_identity_registry(context.config, context.runtime_paths)
+    names: set[str] = {context.agent_name}
+    for candidate in candidates:
+        name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
+        if name in context.config.agents:
+            names.add(name)
+    return names
 
 
 def _execute_ephemeral_agent_participant(

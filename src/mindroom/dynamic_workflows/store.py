@@ -229,16 +229,6 @@ class DynamicWorkflowStore:
             return self.fail_workflow_run(run, error=str(exc))
         return self.complete_workflow_run(run, execution)
 
-    def load_active_workflow_spec(self, *, workflow_id: str, scope: str, owner_id: str) -> dict[str, object]:
-        """Load the active immutable workflow revision."""
-        summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
-        return self.load_workflow_revision(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            revision=summary.active_revision,
-        )
-
     def load_workflow_revision(
         self,
         *,

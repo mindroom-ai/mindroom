@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import nio
 import pytest
 import yaml
 from agno.factory import RequestContext
@@ -17,14 +18,17 @@ from agno.workflow.types import StepInput, StepOutput
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
 from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,6 +110,41 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
+        reply_to_event_id="$event:localhost",
+        storage_path=None,
+    )
+
+
+def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> ToolRuntimeContext:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"]),
+                "specialist": AgentConfig(display_name="Specialist Agent"),
+            },
+        ),
+        runtime_paths,
+    )
+    runtime_paths = runtime_paths_for(config)
+    persist_entity_accounts(config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=registry.current_id("general").full_id)
+    for agent_name in room_agents:
+        room.add_member(registry.current_id(agent_name).full_id, config.agents[agent_name].display_name, None)
+    room.members_synced = True
+    return ToolRuntimeContext(
+        agent_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread:localhost",
+        resolved_thread_id="$thread:localhost",
+        requester_id="@user:localhost",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=AsyncMock(),
+        event_cache=make_event_cache_mock(),
+        room=room,
         reply_to_event_id="$event:localhost",
         storage_path=None,
     )
@@ -726,3 +765,27 @@ def test_dynamic_workflow_tool_denies_shared_scopes_without_policy(tmp_path: Pat
     assert "scope requires Dynamic Workflow approval policy" in room_result["message"]
     assert tenant_result["status"] == "error"
     assert "scope requires Dynamic Workflow approval policy" in tenant_result["message"]
+
+
+def test_room_agent_participant_must_be_available_to_requester_in_room(tmp_path: Path) -> None:
+    """Room-agent participants should not bypass normal room responder eligibility."""
+    context = _make_multi_agent_context(tmp_path, room_agents=["general"])
+
+    with pytest.raises(DynamicWorkflowError, match="not available to this requester in this room"):
+        dynamic_workflow_module._execute_room_agent_participant(
+            context,
+            {"id": "specialist", "kind": "room_agent", "agent": "specialist"},
+            "Write a report.",
+        )
+
+
+def test_room_agent_participant_rejects_model_override(tmp_path: Path) -> None:
+    """Room-agent participants should run with their configured model only."""
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
+
+    with pytest.raises(DynamicWorkflowError, match="configured model"):
+        dynamic_workflow_module._execute_room_agent_participant(
+            context,
+            {"id": "specialist", "kind": "room_agent", "agent": "specialist", "model": "default"},
+            "Write a report.",
+        )
