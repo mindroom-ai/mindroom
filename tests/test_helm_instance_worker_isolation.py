@@ -921,6 +921,37 @@ def test_runtime_chart_file_config_source_uses_bundle_path_without_configmap() -
     assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME"]["value"] == "mindroom-runtime-storage"
 
 
+def test_runtime_chart_static_runner_file_config_source_uses_bundle_path_without_configmap() -> None:
+    """Static runner mode should use the resolved file config path in both containers."""
+    config_path = "/app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml"
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=static_runner",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=registry.example.com/team/mindroom-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "config.source=file",
+        f"config.path={config_path}",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+
+    assert not any(
+        doc.get("kind") == "ConfigMap" and doc.get("metadata", {}).get("name") == "mindroom-runtime-config"
+        for doc in docs
+    )
+    assert not any(volume["name"] == "config" for volume in pod_spec["volumes"])
+    assert not any(mount["name"] == "config" for mount in mindroom_container["volumeMounts"])
+    assert not any(mount["name"] == "config" for mount in runner_container["volumeMounts"])
+    assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == config_path
+    assert _env_by_name(runner_container)["MINDROOM_CONFIG_PATH"]["value"] == config_path
+
+
 def test_runtime_chart_file_config_source_rejects_missing_path() -> None:
     """File config mode needs an explicit absolute file path."""
     completed = _run_helm_template(
