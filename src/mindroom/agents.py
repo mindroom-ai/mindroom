@@ -1145,8 +1145,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             history-format guidance in the shared identity prompt.
         persist_runtime_state: Whether this agent instance should write durable
             Agno history, learning, and culture state.
-        disable_runtime_capabilities: Whether to omit tools, skills, and knowledge
-            for a restricted in-process agent run.
+        disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
+            and preloaded context files for a restricted in-process agent run.
         disabled_tool_names: Resolved tool names to omit from this instance.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
@@ -1311,16 +1311,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     # Combine identity and datetime contexts
     full_context = identity_context + datetime_context
 
-    full_context += _build_additional_context(
-        agent_name,
-        agent_config,
-        config.defaults.max_preload_chars,
-        personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
-        truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
-        workspace_context_files=workspace.context_files if workspace is not None else (),
-        storage_path=resolved_storage_path,
-        runtime_paths=runtime_paths,
-    )
+    if not disable_runtime_capabilities:
+        full_context += _build_additional_context(
+            agent_name,
+            agent_config,
+            config.defaults.max_preload_chars,
+            personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
+            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
+            workspace_context_files=workspace.context_files if workspace is not None else (),
+            storage_path=resolved_storage_path,
+            runtime_paths=runtime_paths,
+        )
 
     role = full_context + agent_config.role
     instructions = list(agent_config.instructions)

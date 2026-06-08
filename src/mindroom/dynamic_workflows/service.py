@@ -6,7 +6,7 @@ import asyncio
 import signal
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING
 
 from mindroom.dynamic_workflows.runner import async_execute_workflow_spec, execute_workflow_spec
@@ -141,23 +141,25 @@ class DynamicWorkflowService:
         input_data: dict[str, object],
     ) -> DynamicWorkflowRun:
         timeout_seconds = workflow_runtime_seconds(spec)
+        execution_task = asyncio.create_task(
+            async_execute_workflow_spec(
+                spec,
+                input_data,
+                participant_executor=self._async_participant_executor,
+            ),
+        )
         try:
-            execution = await asyncio.wait_for(
-                async_execute_workflow_spec(
-                    spec,
-                    input_data,
-                    participant_executor=self._async_participant_executor,
-                ),
-                timeout=timeout_seconds,
-            )
+            done, _pending = await asyncio.wait({execution_task}, timeout=timeout_seconds)
+            if not done:
+                execution_task.cancel()
+                execution_task.add_done_callback(_discard_late_task_result)
+                return self._store.fail_workflow_run(run, error=_workflow_timeout_message(timeout_seconds))
+            execution = execution_task.result()
         except asyncio.CancelledError:
+            execution_task.cancel()
+            execution_task.add_done_callback(_discard_late_task_result)
             self._store.fail_workflow_run(run, error="Workflow run was cancelled.")
             raise
-        except TimeoutError:
-            return self._store.fail_workflow_run(
-                run,
-                error=f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds}).",
-            )
         except Exception as exc:
             return self._store.fail_workflow_run(run, error=str(exc))
         return self._complete_or_fail(run, execution)
@@ -203,3 +205,8 @@ def _sync_workflow_runtime_limit(spec: dict[str, object]) -> Iterator[None]:
 
 def _workflow_timeout_message(timeout_seconds: float) -> str:
     return f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds})."
+
+
+def _discard_late_task_result(task: asyncio.Task[object]) -> None:
+    with suppress(asyncio.CancelledError, Exception):
+        task.result()

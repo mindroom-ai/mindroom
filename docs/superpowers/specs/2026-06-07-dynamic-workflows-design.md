@@ -340,11 +340,12 @@ mindroom_data/
           runs/
           artifacts/
     tenant/
-      <workflow_id>/
-        workflow.yaml
-        revisions/
-        runs/
-        artifacts/
+      tenant/
+        <workflow_id>/
+          workflow.yaml
+          revisions/
+          runs/
+          artifacts/
 ```
 
 `workflow.yaml` should be a small mutable pointer file.

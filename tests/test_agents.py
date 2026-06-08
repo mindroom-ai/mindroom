@@ -2816,6 +2816,10 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     """Restricted in-process agent construction should reuse persona/model without capabilities."""
     config = _test_config()
     config.agents["general"].tools = ["memory", "calculator"]
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "SOUL.md").write_text("Private workspace directive.", encoding="utf-8")
+    config.agents["general"].context_files = ["SOUL.md"]
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(config, runtime_paths)
     built_tools: list[str] = []
@@ -2839,6 +2843,8 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     load_agent_skills.assert_not_called()
     assert agent.tools is None or agent.tools == []
     assert agent.skills is None
+    assert "Private workspace directive." not in agent.role
+    assert "## Personality Context" not in agent.role
 
 
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:

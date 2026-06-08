@@ -963,7 +963,56 @@ async def test_service_async_run_enforces_runtime_cap(tmp_path: Path, monkeypatc
 
     assert run.status == "failed"
     assert "max_runtime_seconds" in str(run.error)
-    assert participant_cancelled.is_set()
+    await asyncio.wait_for(participant_cancelled.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_service_async_run_fails_at_deadline_when_cancellation_is_suppressed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async runtime caps should fail the run even if participant code swallows cancellation."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    late_participant_finished = asyncio.Event()
+
+    async def stubborn_executor(**_kwargs: object) -> object:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.02)
+            late_participant_finished.set()
+            return "late"
+        return "late"
+
+    service = DynamicWorkflowService(store, async_participant_executor=stubborn_executor)
+    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.01)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = await service.arun_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+    )
+    await asyncio.wait_for(late_participant_finished.wait(), timeout=1)
+    loaded = store.get_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+    )
+
+    assert run.status == "failed"
+    assert loaded.status == "failed"
+    assert "max_runtime_seconds" in str(loaded.error)
 
 
 @pytest.mark.asyncio
