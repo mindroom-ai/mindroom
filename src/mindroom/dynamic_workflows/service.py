@@ -64,13 +64,13 @@ class DynamicWorkflowService:
             requested_by=requested_by,
             base_url=base_url,
         )
-        spec = self._store.load_workflow_revision(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            revision=run.revision,
-        )
         try:
+            spec = self._store.load_workflow_revision(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                revision=run.revision,
+            )
             spec = validate_workflow_spec(spec)
             self._validate_spec_policy(spec)
             validate_workflow_input(spec, input_data)
@@ -98,13 +98,13 @@ class DynamicWorkflowService:
             requested_by=requested_by,
             base_url=base_url,
         )
-        spec = self._store.load_workflow_revision(
-            workflow_id=workflow_id,
-            scope=scope,
-            owner_id=owner_id,
-            revision=run.revision,
-        )
         try:
+            spec = self._store.load_workflow_revision(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                revision=run.revision,
+            )
             spec = validate_workflow_spec(spec)
             self._validate_spec_policy(spec)
             validate_workflow_input(spec, input_data)

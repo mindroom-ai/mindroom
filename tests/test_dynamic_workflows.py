@@ -352,7 +352,8 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
     assert run.report_url.startswith(
         f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}",
     )
-    assert "access_token=" in run.report_url
+    assert "access_token=" not in run.report_url
+    assert run.report_access_token is None
     assert loaded.status == "completed"
     assert loaded.artifacts["report_html"].endswith("/report.html")
     report_path = tmp_path / "mindroom_data" / loaded.artifacts["report_html"]
@@ -410,6 +411,76 @@ def test_validate_workflow_spec_rejects_invalid_input_schema_type(tmp_path: Path
             created_by="general",
             reason="bad schema",
         )
+
+
+def test_validate_workflow_spec_requires_supported_schema_version(tmp_path: Path) -> None:
+    """Workflow specs should not silently run missing or future schema versions."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="schema_version"):
+        store.validate_workflow(_workflow_spec(schema_version=2))
+
+    spec_without_version = _workflow_spec()
+    del spec_without_version["schema_version"]
+    with pytest.raises(DynamicWorkflowError, match="schema_version"):
+        store.validate_workflow(spec_without_version)
+
+
+def test_validate_workflow_spec_rejects_unsupported_input_schema_keywords(tmp_path: Path) -> None:
+    """Workflow input schemas should not accept constraints the validator ignores."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="default"):
+        store.validate_workflow(
+            _workflow_spec(
+                inputs={
+                    "type": "object",
+                    "properties": {"topic": {"type": "string", "default": "Agno"}},
+                },
+            ),
+        )
+
+
+def test_run_workflow_enforces_input_schema_enum(tmp_path: Path) -> None:
+    """Declared enum constraints should be enforced before workflow execution."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(
+            inputs={
+                "type": "object",
+                "required": ["topic", "visibility"],
+                "properties": {
+                    "topic": {"type": "string"},
+                    "visibility": {"type": "string", "enum": ["private"]},
+                },
+            },
+            workflow=[
+                {
+                    "id": "research",
+                    "type": "transform_step",
+                    "template": "Research brief for {input.topic}.",
+                },
+            ],
+            outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+        ),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories", "visibility": "public"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    assert run.status == "failed"
+    assert "declared enum values" in str(run.error)
 
 
 def test_validate_workflow_spec_rejects_excessive_agent_steps(tmp_path: Path) -> None:
@@ -744,7 +815,7 @@ def test_service_completes_tool_runs_without_raw_background_thread(tmp_path: Pat
     assert run.report_url.startswith(
         f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}",
     )
-    assert "access_token=" in run.report_url
+    assert "access_token=" not in run.report_url
 
 
 def test_service_sync_run_executes_inline_without_detached_timeout_thread(tmp_path: Path) -> None:
@@ -954,6 +1025,26 @@ def test_get_workflow_run_rejects_traversal_run_id(tmp_path: Path) -> None:
         )
 
 
+def test_load_workflow_revision_rejects_traversal_revision(tmp_path: Path) -> None:
+    """Revision lookup should reject path traversal before building the revision filename."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    with pytest.raises(DynamicWorkflowError, match="revision must match"):
+        store.load_workflow_revision(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            revision="../workflow",
+        )
+
+
 def test_get_workflow_run_wraps_json_decoder_errors(tmp_path: Path) -> None:
     """Corrupt run JSON should return a Dynamic Workflow storage error."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -1024,6 +1115,42 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     assert loaded.error == "Workflow step at index 0 field 'body_template' references unknown prior step 'missing'."
     assert loaded.steps == []
     assert "unknown prior step" in report_html
+
+
+def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_path: Path) -> None:
+    """Revision load failures after run creation should not leave run records stuck as running."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    revision_path = (
+        tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/revisions/000001.yaml"
+    )
+    revision_path.unlink()
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    loaded = store.get_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+    )
+    assert loaded.status == "failed"
+    assert loaded.error == "YAML mapping was not found."
+    assert loaded.artifacts["report_html"].endswith("/report.html")
 
 
 def test_declarative_spec_compiles_to_agno_workflow_factory(tmp_path: Path) -> None:

@@ -118,8 +118,8 @@ def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(tes
     assert response.status_code == 403
 
 
-def test_private_dynamic_workflow_report_accepts_access_token_for_hosted_user(test_client: TestClient) -> None:
-    """Private report bearer URLs should work when dashboard and Matrix identities differ."""
+def test_private_dynamic_workflow_report_rejects_access_token_for_other_hosted_user(test_client: TestClient) -> None:
+    """Private report URLs should not become bearer links across hosted users."""
     runtime_paths = use_trusted_upstream_runtime(test_client.app)
     store = DynamicWorkflowStore(runtime_paths.storage_root)
     service = DynamicWorkflowService(store)
@@ -141,11 +141,44 @@ def test_private_dynamic_workflow_report_accepts_access_token_for_hosted_user(te
 
     response = test_client.get(
         f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
-        params={"access_token": run.report_access_token},
+        params={"access_token": "leaked-token"},
+        headers=trusted_upstream_headers(
+            user_id="user-bob",
+            email="bob@example.com",
+            matrix_user_id="",
+        ),
+    )
+
+    assert response.status_code == 403
+
+
+def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(test_client: TestClient) -> None:
+    """Private report auth should allow the Matrix requester that started the run."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
         headers=trusted_upstream_headers(
             user_id="user-alice",
             email="alice@example.com",
-            matrix_user_id="",
+            matrix_user_id="@alice:example.org",
         ),
     )
 

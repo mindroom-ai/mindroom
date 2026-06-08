@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
-
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
@@ -61,13 +59,6 @@ async def private_dynamic_workflow_report(
 
 
 def _authorize_private_report_request(request: Request, run: DynamicWorkflowRun) -> None:
-    access_token = request.query_params.get("access_token")
-    if (
-        access_token is not None
-        and run.report_access_token is not None
-        and secrets.compare_digest(access_token, run.report_access_token)
-    ):
-        return
     auth_user = request.scope.get("auth_user")
     if not isinstance(auth_user, dict):
         raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")

@@ -189,7 +189,8 @@ Future admin policy can add per-action allowlists, for example allowing normal a
 
 The first release should use declarative YAML or JSON specs.
 Declarative specs are inspectable, diffable, policy-checkable, and safe for agents to write.
-The spec can compile to an Agno `WorkflowFactory`, `TeamFactory`, or `AgentFactory`.
+The spec can compile to an Agno `WorkflowFactory` for factory-compatible surfaces.
+MindRoom's current tool path still executes through its own service runner so async Matrix-agent execution, report persistence, and policy checks stay in one place.
 
 Example:
 
@@ -211,7 +212,6 @@ inputs:
       enum:
         - private
         - public
-      default: private
 participants:
   - id: existing_researcher
     kind: room_agent
@@ -462,7 +462,7 @@ Costs and limits should be visible before and during a run.
 
 ## Deep Research as First Dynamic Workflow
 
-Deep research should be the first bundled Dynamic Workflow.
+Deep research should be the first substantial bundled Dynamic Workflow after the basic runner is stable.
 It should produce Markdown and HTML report artifacts.
 It should default to private reports.
 It should use web search and website reading tools when allowed.
@@ -486,10 +486,10 @@ The same Dynamic Workflow framework can then support other repeatable workflows.
 - Reject Matrix context, attachment, knowledge, and tool grants until they are wired into execution.
 - Store run records and artifacts.
 - Add private report serving.
-- Implement deep research as a bundled declarative Dynamic Workflow.
 
 ### Phase 2: Grants, Publishing, and Dashboard
 
+- Implement deep research as a bundled declarative Dynamic Workflow once web/data/tool grants exist.
 - Add publish, rollback, and archive actions.
 - Add approval cards for workflow activation and permission expansion.
 - Add full room-agent memory, tool, skill, and knowledge grants.
@@ -527,9 +527,9 @@ Live tests should run the deep research workflow with a small query and confirm 
 Agno upgrade tests should cover existing MindRoom agent runs, teams, tools, skills, memory, and OpenAI-compatible API behavior.
 This is needed because the Agno upgrade touches a shared runtime dependency.
 
-## Expected First User Experience
+## Expected User Experience
 
-The first version should feel like this:
+After the deep research workflow is bundled, the user experience should feel like this:
 
 1. A user asks for a deep research report.
 2. The agent creates or reuses a Dynamic Workflow and calls the Dynamic Workflow tool.

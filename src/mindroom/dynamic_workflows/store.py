@@ -8,7 +8,6 @@ import hashlib
 import html
 import json
 import re
-import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +21,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
+_REVISION_RE = re.compile(r"^[0-9]{6}$")
+_SUPPORTED_SCHEMA_VERSION = 1
 _STEP_TYPES = frozenset({"agent_step", "report_step", "transform_step"})
 _SCOPES = frozenset({"agent", "room", "tenant"})
 _PARTICIPANT_KINDS = frozenset({"ephemeral_agent", "room_agent"})
@@ -63,6 +64,8 @@ _AGENT_STEP_KEYS = frozenset({"id", "type", "participant", *_AGENT_STEP_TEMPLATE
 _TRANSFORM_STEP_KEYS = frozenset({"id", "type", "template", "text"})
 _REPORT_STEP_KEYS = frozenset({"id", "type", "body_template", "from_step", "title"})
 _OUTPUT_KEYS = frozenset({"id", "type", "from_step"})
+_INPUT_SCHEMA_KEYS = frozenset({"type", "required", "properties"})
+_INPUT_PROPERTY_SCHEMA_KEYS = frozenset({"type", "description", "enum"})
 
 
 class DynamicWorkflowError(ValueError):
@@ -246,6 +249,7 @@ class DynamicWorkflowStore:
         revision: str,
     ) -> dict[str, object]:
         """Load one immutable workflow revision."""
+        _validate_revision(revision)
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
         return _workflow_spec_payload(self._load_revision(workflow_dir, revision))
 
@@ -261,8 +265,8 @@ class DynamicWorkflowStore:
     ) -> DynamicWorkflowRun:
         """Persist a running workflow run record before execution starts."""
         summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
+        _validate_revision(summary.active_revision)
         run_id = f"run_{uuid4().hex}"
-        report_access_token = secrets.token_urlsafe(32)
         run = DynamicWorkflowRun(
             run_id=run_id,
             workflow_id=workflow_id,
@@ -274,9 +278,9 @@ class DynamicWorkflowStore:
             steps=[],
             outputs={},
             artifacts={},
-            report_url=_private_report_url(base_url, scope, owner_id, workflow_id, run_id, report_access_token),
+            report_url=_private_report_url(base_url, scope, owner_id, workflow_id, run_id),
             requested_by=requested_by,
-            report_access_token=report_access_token,
+            report_access_token=None,
             started_at=_utc_now(),
             completed_at=None,
             error=None,
@@ -287,10 +291,10 @@ class DynamicWorkflowStore:
     def complete_workflow_run(self, run: DynamicWorkflowRun, execution: Any) -> DynamicWorkflowRun:  # noqa: ANN401
         """Persist completed or execution-failed workflow outputs and artifacts."""
         workflow_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id)
-        spec = self._load_revision(workflow_dir, run.revision)
+        title = self._run_report_title(workflow_dir, run)
         artifacts = self._write_run_artifacts(
             run,
-            title=str(spec["name"]),
+            title=title,
             report_markdown=str(execution.report_markdown),
             step_outputs=execution.step_outputs_json(),
         )
@@ -318,11 +322,11 @@ class DynamicWorkflowStore:
     def fail_workflow_run(self, run: DynamicWorkflowRun, *, error: str) -> DynamicWorkflowRun:
         """Persist a failed workflow run without executing steps."""
         workflow_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id)
-        spec = self._load_revision(workflow_dir, run.revision)
-        report_markdown = _failed_input_report_markdown(str(spec["name"]), run.input_data, error)
+        title = self._run_report_title(workflow_dir, run)
+        report_markdown = _failed_input_report_markdown(title, run.input_data, error)
         artifacts = self._write_run_artifacts(
             run,
-            title=str(spec["name"]),
+            title=title,
             report_markdown=report_markdown,
             step_outputs={},
         )
@@ -380,7 +384,14 @@ class DynamicWorkflowStore:
         return report_path
 
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
+        _validate_revision(revision)
         return _load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml")
+
+    def _run_report_title(self, workflow_dir: Path, run: DynamicWorkflowRun) -> str:
+        try:
+            return str(self._load_revision(workflow_dir, run.revision)["name"])
+        except DynamicWorkflowError:
+            return run.workflow_id
 
     def _next_revision(self, workflow_dir: Path) -> str:
         revision_numbers = [
@@ -430,6 +441,7 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
         raise DynamicWorkflowError(msg)
     normalized = copy.deepcopy(spec)
     _reject_unsupported_fields(normalized, _SPEC_KEYS, "Workflow spec")
+    _validate_schema_version(normalized)
     workflow_id = _required_text(normalized, "id")
     _validate_id(workflow_id, "id")
     normalized["id"] = workflow_id
@@ -459,6 +471,13 @@ def validate_workflow_input(spec: dict[str, object], input_data: dict[str, objec
     _validate_input_property_types(_input_properties(inputs), input_data)
 
 
+def _validate_schema_version(spec: dict[str, object]) -> None:
+    value = spec.get("schema_version")
+    if value != _SUPPORTED_SCHEMA_VERSION:
+        msg = f"Workflow spec field 'schema_version' must be {_SUPPORTED_SCHEMA_VERSION}."
+        raise DynamicWorkflowError(msg)
+
+
 def workflow_runtime_seconds(spec: dict[str, object]) -> int:
     """Return the validated runtime cap for one workflow spec."""
     permissions = _permissions_mapping(spec)
@@ -476,6 +495,7 @@ def _input_schema(spec: dict[str, object]) -> dict[str, object] | None:
         msg = "Workflow spec field 'inputs' must be a mapping."
         raise DynamicWorkflowError(msg)
     inputs = _object_mapping(cast("Mapping[object, object]", raw_inputs))
+    _reject_unsupported_fields(inputs, _INPUT_SCHEMA_KEYS, "Workflow input schema")
     input_type = inputs.get("type", "object")
     if input_type != "object":
         msg = "Workflow input schema type must be 'object'."
@@ -529,7 +549,14 @@ def _validate_input_schema(spec: dict[str, object]) -> None:
             msg = f"Workflow input schema property '{field_name}' must be a mapping."
             raise DynamicWorkflowError(msg)
         field_schema = _object_mapping(cast("Mapping[object, object]", raw_field_schema))
-        for input_type in _allowed_input_types(field_schema):
+        _reject_unsupported_fields(
+            field_schema,
+            _INPUT_PROPERTY_SCHEMA_KEYS,
+            f"Workflow input schema property '{field_name}'",
+        )
+        allowed_types = _allowed_input_types(field_schema)
+        _validate_input_enum(field_name, field_schema, allowed_types)
+        for input_type in allowed_types:
             if input_type not in _INPUT_TYPE_CHECKS:
                 msg = f"Unsupported workflow input schema type '{input_type}'."
                 raise DynamicWorkflowError(msg)
@@ -542,10 +569,12 @@ def _validate_input_property_types(properties: dict[str, object], input_data: di
         field_schema = _object_mapping(cast("Mapping[object, object]", raw_field_schema))
         allowed_types = _allowed_input_types(field_schema)
         if not allowed_types:
+            _validate_input_enum_value(field_name, field_schema, input_data[field_name])
             continue
         if not any(_input_value_matches_type(input_data[field_name], allowed_type) for allowed_type in allowed_types):
             msg = f"Input field '{field_name}' must be {_input_type_label(allowed_types)}."
             raise DynamicWorkflowError(msg)
+        _validate_input_enum_value(field_name, field_schema, input_data[field_name])
 
 
 def _allowed_input_types(field_schema: dict[str, object]) -> list[str]:
@@ -553,8 +582,50 @@ def _allowed_input_types(field_schema: dict[str, object]) -> list[str]:
     if expected_type is None:
         return []
     if isinstance(expected_type, list):
-        return [str(item) for item in expected_type]
+        allowed_types = []
+        for item in expected_type:
+            if not isinstance(item, str) or not item.strip():
+                msg = "Workflow input schema type list entries must be non-empty strings."
+                raise DynamicWorkflowError(msg)
+            allowed_types.append(item.strip())
+        return allowed_types
+    if not isinstance(expected_type, str) or not expected_type.strip():
+        msg = "Workflow input schema type must be a non-empty string or list of strings."
+        raise DynamicWorkflowError(msg)
     return [str(expected_type)]
+
+
+def _validate_input_enum(field_name: str, field_schema: dict[str, object], allowed_types: list[str]) -> None:
+    enum_values = field_schema.get("enum")
+    if enum_values is None:
+        return
+    if not isinstance(enum_values, list) or not enum_values:
+        msg = f"Workflow input schema property '{field_name}' enum must be a non-empty list."
+        raise DynamicWorkflowError(msg)
+    if not allowed_types:
+        return
+    for enum_value in enum_values:
+        if not any(_input_value_matches_type(enum_value, allowed_type) for allowed_type in allowed_types):
+            msg = f"Workflow input schema property '{field_name}' enum values must match its declared type."
+            raise DynamicWorkflowError(msg)
+
+
+def _validate_input_enum_value(field_name: str, field_schema: dict[str, object], value: object) -> None:
+    enum_values = field_schema.get("enum")
+    if enum_values is None:
+        return
+    if not isinstance(enum_values, list):
+        msg = f"Workflow input schema property '{field_name}' enum must be a list."
+        raise DynamicWorkflowError(msg)
+    if not any(_enum_value_matches(value, enum_value) for enum_value in enum_values):
+        msg = f"Input field '{field_name}' must be one of the declared enum values."
+        raise DynamicWorkflowError(msg)
+
+
+def _enum_value_matches(value: object, enum_value: object) -> bool:
+    if type(value) is not type(enum_value):
+        return False
+    return value == enum_value
 
 
 def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
@@ -1144,6 +1215,12 @@ def _validate_id(value: str, field_name: str) -> None:
         raise DynamicWorkflowError(msg)
 
 
+def _validate_revision(value: str) -> None:
+    if not _REVISION_RE.fullmatch(value):
+        msg = f"revision must match {_REVISION_RE.pattern}."
+        raise DynamicWorkflowError(msg)
+
+
 def _owner_dir_name(scope: str, owner_id: str) -> str:
     if scope == "tenant":
         return "tenant"
@@ -1163,15 +1240,11 @@ def _private_report_url(
     owner_id: str,
     workflow_id: str,
     run_id: str,
-    report_access_token: str | None,
 ) -> str | None:
     if base_url is None or not base_url.strip():
         return None
     owner_key = _owner_dir_name(scope, owner_id)
-    report_url = f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
-    if report_access_token is None:
-        return report_url
-    return f"{report_url}?access_token={report_access_token}"
+    return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
 
 
 def _object_mapping(data: Mapping[object, object]) -> dict[str, object]:
