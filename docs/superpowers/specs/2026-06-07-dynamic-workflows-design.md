@@ -129,7 +129,8 @@ An ephemeral agent participant exists only for one workflow run.
 It has no Matrix account.
 It has no persistent memory by default.
 It does not inherit creator credentials, creator tools, or durable agent tools.
-It can use only models, tools, knowledge inputs, and data sources granted by the Dynamic Workflow permission envelope.
+It can use only allowlisted models in the current implementation.
+Future tool grants should be treated as permission expansion and require an explicit Dynamic Workflow approval policy.
 
 ### Workflow Coordinator
 
@@ -218,12 +219,9 @@ participants:
     agent: researcher
     memory_mode: read_only
   - id: source_reader
-    kind: ephemeral_agent
-    name: Source Reader
-    model: claude-haiku-4-5
-    tools:
-      - website
-      - duckduckgo
+    kind: room_agent
+    agent: research
+    memory_mode: read_only
   - id: critic
     kind: ephemeral_agent
     name: Source Critic
@@ -238,7 +236,7 @@ workflow:
   - id: plan
     type: agent_step
     participant: existing_researcher
-    prompt: Create a research plan for {{ input.topic }}.
+    prompt: Create a research plan for {input.topic}.
   - id: gather
     type: parallel_map
     participant: source_reader
@@ -394,7 +392,7 @@ It should serve private and public artifacts from the tenant's existing MindRoom
 Example URLs:
 
 ```text
-https://acme.mindroom.chat/reports/private/<run_id>
+https://acme.mindroom.chat/reports/private/<scope>/<owner_key>/<workflow_id>/<run_id>
 https://acme.mindroom.chat/reports/public/<unguessable_slug>
 ```
 

@@ -19,6 +19,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
+from mindroom.dynamic_workflows.runner import execute_workflow_spec
+from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -261,6 +263,7 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
         input_data={"topic": "Agno factories"},
         requested_by="general",
         base_url="https://acme.mindroom.chat",
+        participant_executor=lambda **_: "Report about Agno factories.",
     )
 
     loaded = store.get_workflow_run(
@@ -271,13 +274,49 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
     )
     assert run.status == "completed"
     assert run.revision == "000001"
-    assert run.report_url == f"https://acme.mindroom.chat/reports/private/{run.run_id}"
+    assert (
+        run.report_url
+        == f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}"
+    )
     assert loaded.status == "completed"
     assert loaded.artifacts["report_html"].endswith("/report.html")
     report_path = tmp_path / "mindroom_data" / loaded.artifacts["report_html"]
     report_html = report_path.read_text(encoding="utf-8")
     assert "Competitor Research Report" in report_html
     assert "Agno factories" in report_html
+
+
+def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: Path) -> None:
+    """Workflow runs should validate declared input schema before executing any step."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+        background=False,
+    )
+
+    loaded = store.get_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+    )
+    assert loaded.status == "failed"
+    assert loaded.error == "Input field 'topic' is required."
+    assert loaded.steps == []
 
 
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
@@ -334,6 +373,106 @@ def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> Non
     assert step_outputs["research"]["content"] == "Research brief for Agno factories: sources checked."
     assert "Report for Agno factories" in report_html
     assert "Research brief for Agno factories: sources checked." in report_html
+
+
+def test_agent_step_uses_participant_executor_instead_of_prompt_template() -> None:
+    """Agent steps should invoke the resolved participant instead of echoing the prompt."""
+
+    def participant_executor(
+        *,
+        participant: dict[str, object],
+        prompt: str,
+        input_data: dict[str, object],
+        step_outputs: dict[str, object],
+    ) -> str:
+        assert participant["id"] == "writer"
+        assert prompt == "Write about Agno factories."
+        assert input_data == {"topic": "Agno factories"}
+        assert step_outputs == {}
+        return "Executed by Report Writer."
+
+    execution = execute_workflow_spec(
+        _workflow_spec(
+            workflow=[
+                {
+                    "id": "write",
+                    "type": "agent_step",
+                    "participant": "writer",
+                    "prompt": "Write about {input.topic}.",
+                },
+            ],
+            outputs=[{"id": "report", "type": "text", "from_step": "write"}],
+        ),
+        {"topic": "Agno factories"},
+        participant_executor=participant_executor,
+    )
+
+    assert execution.status == "completed"
+    assert execution.outputs["report"] == "Executed by Report Writer."
+
+
+def test_agent_step_fails_without_participant_executor() -> None:
+    """Agent steps should not silently degrade into template-only execution."""
+    execution = execute_workflow_spec(
+        _workflow_spec(
+            workflow=[
+                {
+                    "id": "write",
+                    "type": "agent_step",
+                    "participant": "writer",
+                    "prompt": "Write about {input.topic}.",
+                },
+            ],
+        ),
+        {"topic": "Agno factories"},
+    )
+
+    assert execution.status == "failed"
+    assert execution.error == "Agent step 'write' requires a participant executor."
+
+
+def test_service_returns_running_run_for_background_execution(tmp_path: Path) -> None:
+    """Background runs should persist a running record and return before step execution completes."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(
+            workflow=[
+                {
+                    "id": "research",
+                    "type": "transform_step",
+                    "template": "Research brief for {input.topic}.",
+                },
+            ],
+            outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+        ),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+        background=True,
+    )
+    loaded = store.get_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+    )
+
+    assert run.status == "running"
+    assert loaded.status in {"running", "completed"}
+    assert run.report_url == (
+        f"https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/{run.run_id}"
+    )
 
 
 def test_validate_workflow_spec_rejects_missing_step_id(tmp_path: Path) -> None:
@@ -486,6 +625,46 @@ def test_agno_workflow_factory_step_executor_renders_declared_output(tmp_path: P
     assert output.content == "Research brief for Agno factories."
 
 
+def test_agno_workflow_factory_step_executor_runs_participant(tmp_path: Path) -> None:
+    """Agno factory agent steps should use the supplied participant executor."""
+
+    def participant_executor(
+        *,
+        participant: dict[str, object],
+        prompt: str,
+        input_data: dict[str, object],
+        step_outputs: dict[str, object],
+    ) -> str:
+        assert participant["id"] == "writer"
+        assert prompt == "Write about Agno factories."
+        assert input_data == {"topic": "Agno factories"}
+        assert step_outputs == {}
+        return "Executed by Agno factory participant."
+
+    factory = build_agno_workflow_factory(
+        _workflow_spec(
+            workflow=[
+                {
+                    "id": "write",
+                    "type": "agent_step",
+                    "participant": "writer",
+                    "prompt": "Write about {input.topic}.",
+                },
+            ],
+            outputs=[{"id": "report", "type": "text", "from_step": "write"}],
+        ),
+        db_file=tmp_path / "dynamic-workflow-agno.db",
+        participant_executor=participant_executor,
+    )
+    workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
+
+    output = workflow.steps[0].execute(StepInput(input={"topic": "Agno factories"}))
+
+    assert isinstance(output, StepOutput)
+    assert output.success is True
+    assert output.content == "Executed by Agno factory participant."
+
+
 def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     """Runtime-aware tool should scope workflows to current agent and storage root."""
     tool = DynamicWorkflowTools()
@@ -504,8 +683,10 @@ def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     assert created["status"] == "ok"
     assert created["workflow_id"] == "competitor-research-report"
     assert listed["workflows"][0]["workflow_id"] == "competitor-research-report"
-    assert run["status"] == "completed"
-    assert run["report_url"].startswith("https://acme.mindroom.chat/reports/private/run_")
+    assert run["status"] == "running"
+    assert run["report_url"].startswith(
+        "https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/run_",
+    )
 
 
 def test_dynamic_workflow_tool_returns_payload_for_invalid_scope(tmp_path: Path) -> None:
@@ -530,3 +711,18 @@ def test_dynamic_workflow_tool_returns_payload_when_agent_name_is_missing(tmp_pa
 
     assert result["status"] == "error"
     assert "Agent name is missing" in result["message"]
+
+
+def test_dynamic_workflow_tool_denies_shared_scopes_without_policy(tmp_path: Path) -> None:
+    """Agent tools should not mutate room or tenant workflow scopes without an approval policy."""
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+
+    with tool_runtime_context(context):
+        room_result = _tool_payload(tool.create_workflow(_workflow_spec(), scope="room"))
+        tenant_result = _tool_payload(tool.create_workflow(_workflow_spec(), scope="tenant"))
+
+    assert room_result["status"] == "error"
+    assert "scope requires Dynamic Workflow approval policy" in room_result["message"]
+    assert tenant_result["status"] == "error"
+    assert "scope requires Dynamic Workflow approval policy" in tenant_result["message"]

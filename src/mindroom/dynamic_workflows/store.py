@@ -11,12 +11,12 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import yaml
 
-from mindroom.dynamic_workflows.runner import execute_workflow_spec
+from mindroom.dynamic_workflows.runner import ParticipantExecutor, execute_workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -202,48 +202,148 @@ class DynamicWorkflowStore:
         input_data: dict[str, object],
         requested_by: str,
         base_url: str | None = None,
+        participant_executor: ParticipantExecutor | None = None,
     ) -> DynamicWorkflowRun:
         """Execute the active revision and persist run artifacts."""
+        run = self.start_workflow_run(
+            workflow_id=workflow_id,
+            scope=scope,
+            owner_id=owner_id,
+            input_data=input_data,
+            requested_by=requested_by,
+            base_url=base_url,
+        )
+        spec = self.load_workflow_revision(
+            workflow_id=workflow_id,
+            scope=scope,
+            owner_id=owner_id,
+            revision=run.revision,
+        )
+        try:
+            validate_workflow_input(spec, input_data)
+        except DynamicWorkflowError as exc:
+            return self.fail_workflow_run(run, error=str(exc))
+        try:
+            execution = execute_workflow_spec(spec, input_data, participant_executor=participant_executor)
+        except Exception as exc:
+            return self.fail_workflow_run(run, error=str(exc))
+        return self.complete_workflow_run(run, execution)
+
+    def load_active_workflow_spec(self, *, workflow_id: str, scope: str, owner_id: str) -> dict[str, object]:
+        """Load the active immutable workflow revision."""
         summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
+        return self.load_workflow_revision(
+            workflow_id=workflow_id,
+            scope=scope,
+            owner_id=owner_id,
+            revision=summary.active_revision,
+        )
+
+    def load_workflow_revision(
+        self,
+        *,
+        workflow_id: str,
+        scope: str,
+        owner_id: str,
+        revision: str,
+    ) -> dict[str, object]:
+        """Load one immutable workflow revision."""
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        spec = self._load_revision(workflow_dir, summary.active_revision)
+        return self._load_revision(workflow_dir, revision)
+
+    def start_workflow_run(
+        self,
+        *,
+        workflow_id: str,
+        scope: str,
+        owner_id: str,
+        input_data: dict[str, object],
+        requested_by: str,
+        base_url: str | None = None,
+    ) -> DynamicWorkflowRun:
+        """Persist a running workflow run record before execution starts."""
+        summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
         run_id = f"run_{uuid4().hex}"
-        started_at = _utc_now()
-        artifact_dir = workflow_dir / "artifacts" / run_id
-        execution = execute_workflow_spec(spec, input_data)
-        report_markdown = execution.report_markdown
-        report_html = _render_report_html(title=summary.name, markdown=report_markdown)
-        report_path = artifact_dir / "report.html"
-        report_markdown_path = artifact_dir / "report.md"
-        step_outputs_path = artifact_dir / "step_outputs.json"
-        _atomic_write_text(report_path, report_html)
-        artifacts = {
-            "report_markdown": _relative_artifact_path(report_markdown_path, self._storage_root),
-            "report_html": _relative_artifact_path(report_path, self._storage_root),
-            "step_outputs": _relative_artifact_path(step_outputs_path, self._storage_root),
-        }
-        _atomic_write_text(report_markdown_path, report_markdown)
-        _atomic_write_json(step_outputs_path, execution.step_outputs_json())
-        report_url = _private_report_url(base_url, run_id)
         run = DynamicWorkflowRun(
             run_id=run_id,
             workflow_id=workflow_id,
             scope=scope,
             owner_id=owner_id,
             revision=summary.active_revision,
-            status=execution.status,
+            status="running",
             input_data=dict(input_data),
-            steps=[step.to_json() for step in execution.steps],
-            outputs=execution.outputs,
-            artifacts=artifacts,
-            report_url=report_url,
+            steps=[],
+            outputs={},
+            artifacts={},
+            report_url=_private_report_url(base_url, scope, owner_id, workflow_id, run_id),
             requested_by=requested_by,
-            started_at=started_at,
-            completed_at=_utc_now(),
-            error=execution.error,
+            started_at=_utc_now(),
+            completed_at=None,
+            error=None,
         )
-        _atomic_write_json(workflow_dir / "runs" / f"{run_id}.json", _run_to_json(run))
+        self._write_run(run)
         return run
+
+    def complete_workflow_run(self, run: DynamicWorkflowRun, execution: Any) -> DynamicWorkflowRun:  # noqa: ANN401
+        """Persist completed or execution-failed workflow outputs and artifacts."""
+        workflow_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id)
+        spec = self._load_revision(workflow_dir, run.revision)
+        artifacts = self._write_run_artifacts(
+            run,
+            title=str(spec["name"]),
+            report_markdown=str(execution.report_markdown),
+            step_outputs=execution.step_outputs_json(),
+        )
+        completed = DynamicWorkflowRun(
+            run_id=run.run_id,
+            workflow_id=run.workflow_id,
+            scope=run.scope,
+            owner_id=run.owner_id,
+            revision=run.revision,
+            status=str(execution.status),
+            input_data=dict(run.input_data),
+            steps=[step.to_json() for step in execution.steps],
+            outputs=dict(execution.outputs),
+            artifacts=artifacts,
+            report_url=run.report_url,
+            requested_by=run.requested_by,
+            started_at=run.started_at,
+            completed_at=_utc_now(),
+            error=str(execution.error) if execution.error is not None else None,
+        )
+        self._write_run(completed)
+        return completed
+
+    def fail_workflow_run(self, run: DynamicWorkflowRun, *, error: str) -> DynamicWorkflowRun:
+        """Persist a failed workflow run without executing steps."""
+        workflow_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id)
+        spec = self._load_revision(workflow_dir, run.revision)
+        report_markdown = _failed_input_report_markdown(str(spec["name"]), run.input_data, error)
+        artifacts = self._write_run_artifacts(
+            run,
+            title=str(spec["name"]),
+            report_markdown=report_markdown,
+            step_outputs={},
+        )
+        failed = DynamicWorkflowRun(
+            run_id=run.run_id,
+            workflow_id=run.workflow_id,
+            scope=run.scope,
+            owner_id=run.owner_id,
+            revision=run.revision,
+            status="failed",
+            input_data=dict(run.input_data),
+            steps=[],
+            outputs={},
+            artifacts=artifacts,
+            report_url=run.report_url,
+            requested_by=run.requested_by,
+            started_at=run.started_at,
+            completed_at=_utc_now(),
+            error=error,
+        )
+        self._write_run(failed)
+        return failed
 
     def get_workflow_run(
         self,
@@ -258,17 +358,24 @@ class DynamicWorkflowStore:
         run_path = self._workflow_dir(scope, owner_id, workflow_id) / "runs" / f"{run_id}.json"
         return _run_from_json(_load_json_mapping(run_path))
 
-    def find_private_report_html(self, run_id: str) -> Path:
-        """Find the private HTML report for one run ID."""
+    def private_report_html_path(
+        self,
+        *,
+        scope: str,
+        owner_key: str,
+        workflow_id: str,
+        run_id: str,
+    ) -> Path:
+        """Return the private HTML report path for one scoped run."""
+        _validate_scope(scope)
+        _validate_id(owner_key, "owner_key")
+        _validate_id(workflow_id, "workflow_id")
         _validate_id(run_id, "run_id")
-        matches = list(self._root.glob(f"*/*/*/artifacts/{run_id}/report.html"))
-        if not matches:
+        report_path = self._root / scope / owner_key / workflow_id / "artifacts" / run_id / "report.html"
+        if not report_path.is_file():
             msg = f"Private report for run '{run_id}' was not found."
             raise DynamicWorkflowError(msg)
-        if len(matches) > 1:
-            msg = f"Multiple private reports found for run '{run_id}'."
-            raise DynamicWorkflowError(msg)
-        return matches[0]
+        return report_path
 
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
         return _load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml")
@@ -287,6 +394,31 @@ class DynamicWorkflowStore:
     def _workflow_dir(self, scope: str, owner_id: str, workflow_id: str) -> Path:
         _validate_id(workflow_id, "workflow_id")
         return self._scope_dir(scope, owner_id) / workflow_id
+
+    def _write_run(self, run: DynamicWorkflowRun) -> None:
+        run_path = self._workflow_dir(run.scope, run.owner_id, run.workflow_id) / "runs" / f"{run.run_id}.json"
+        _atomic_write_json(run_path, _run_to_json(run))
+
+    def _write_run_artifacts(
+        self,
+        run: DynamicWorkflowRun,
+        *,
+        title: str,
+        report_markdown: str,
+        step_outputs: dict[str, object],
+    ) -> dict[str, str]:
+        artifact_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id) / "artifacts" / run.run_id
+        report_path = artifact_dir / "report.html"
+        report_markdown_path = artifact_dir / "report.md"
+        step_outputs_path = artifact_dir / "step_outputs.json"
+        _atomic_write_text(report_path, _render_report_html(title=title, markdown=report_markdown))
+        _atomic_write_text(report_markdown_path, report_markdown)
+        _atomic_write_json(step_outputs_path, step_outputs)
+        return {
+            "report_markdown": _relative_artifact_path(report_markdown_path, self._storage_root),
+            "report_html": _relative_artifact_path(report_path, self._storage_root),
+            "step_outputs": _relative_artifact_path(step_outputs_path, self._storage_root),
+        }
 
 
 def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
@@ -311,6 +443,85 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
     _validate_outputs(normalized, step_ids)
     return normalized
+
+
+def validate_workflow_input(spec: dict[str, object], input_data: dict[str, object]) -> None:
+    """Validate run input against the workflow's declared input schema."""
+    inputs = _input_schema(spec)
+    if inputs is None:
+        return
+    _validate_required_inputs(_input_required_fields(inputs), input_data)
+    _validate_input_property_types(_input_properties(inputs), input_data)
+
+
+def _input_schema(spec: dict[str, object]) -> dict[str, object] | None:
+    raw_inputs = spec.get("inputs")
+    if raw_inputs is None:
+        return None
+    if not isinstance(raw_inputs, dict):
+        msg = "Workflow spec field 'inputs' must be a mapping."
+        raise DynamicWorkflowError(msg)
+    inputs = _object_mapping(cast("Mapping[object, object]", raw_inputs))
+    input_type = inputs.get("type", "object")
+    if input_type != "object":
+        msg = "Workflow input schema type must be 'object'."
+        raise DynamicWorkflowError(msg)
+    return inputs
+
+
+def _input_required_fields(inputs: dict[str, object]) -> list[str]:
+    raw_required = inputs.get("required", [])
+    if raw_required is None:
+        return []
+    if not isinstance(raw_required, list):
+        msg = "Workflow input schema field 'required' must be a list."
+        raise DynamicWorkflowError(msg)
+    required: list[str] = []
+    for field_name in raw_required:
+        if not isinstance(field_name, str) or not field_name.strip():
+            msg = "Workflow input schema required entries must be strings."
+            raise DynamicWorkflowError(msg)
+        required.append(field_name)
+    return required
+
+
+def _validate_required_inputs(required_fields: list[str], input_data: dict[str, object]) -> None:
+    for field_name in required_fields:
+        if field_name not in input_data:
+            msg = f"Input field '{field_name}' is required."
+            raise DynamicWorkflowError(msg)
+
+
+def _input_properties(inputs: dict[str, object]) -> dict[str, object]:
+    raw_properties = inputs.get("properties", {})
+    if raw_properties is None:
+        return {}
+    if not isinstance(raw_properties, dict):
+        msg = "Workflow input schema field 'properties' must be a mapping."
+        raise DynamicWorkflowError(msg)
+    return _object_mapping(cast("Mapping[object, object]", raw_properties))
+
+
+def _validate_input_property_types(properties: dict[str, object], input_data: dict[str, object]) -> None:
+    for field_name, raw_field_schema in properties.items():
+        if field_name not in input_data or not isinstance(raw_field_schema, dict):
+            continue
+        field_schema = _object_mapping(cast("Mapping[object, object]", raw_field_schema))
+        allowed_types = _allowed_input_types(field_schema)
+        if not allowed_types:
+            continue
+        if not any(_input_value_matches_type(input_data[field_name], allowed_type) for allowed_type in allowed_types):
+            msg = f"Input field '{field_name}' must be {_input_type_label(allowed_types)}."
+            raise DynamicWorkflowError(msg)
+
+
+def _allowed_input_types(field_schema: dict[str, object]) -> list[str]:
+    expected_type = field_schema.get("type")
+    if expected_type is None:
+        return []
+    if isinstance(expected_type, list):
+        return [str(item) for item in expected_type]
+    return [str(expected_type)]
 
 
 def _validate_participants(participants: list[dict[str, object]]) -> set[str]:
@@ -527,6 +738,56 @@ def _render_report_html(*, title: str, markdown: str) -> str:
     )
 
 
+def _failed_input_report_markdown(title: str, input_data: dict[str, object], error: str) -> str:
+    input_json = json.dumps(input_data, indent=2, sort_keys=True)
+    return (
+        f"# {title}\n\n"
+        "Dynamic Workflow run failed before step execution.\n\n"
+        f"## Error\n\n{error}\n\n"
+        f"## Input\n\n```json\n{input_json}\n```\n"
+    )
+
+
+def _is_integer_input(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number_input(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+_INPUT_TYPE_CHECKS = {
+    "string": lambda value: isinstance(value, str),
+    "integer": _is_integer_input,
+    "number": _is_number_input,
+    "boolean": lambda value: isinstance(value, bool),
+    "object": lambda value: isinstance(value, dict),
+    "array": lambda value: isinstance(value, list),
+    "null": lambda value: value is None,
+}
+
+
+def _input_value_matches_type(value: object, expected_type: str) -> bool:
+    checker = _INPUT_TYPE_CHECKS.get(expected_type)
+    if checker is not None:
+        return checker(value)
+    msg = f"Unsupported workflow input schema type '{expected_type}'."
+    raise DynamicWorkflowError(msg)
+
+
+def _input_type_label(allowed_types: list[str]) -> str:
+    labels = {
+        "string": "a string",
+        "integer": "an integer",
+        "number": "a number",
+        "boolean": "a boolean",
+        "object": "an object",
+        "array": "an array",
+        "null": "null",
+    }
+    return " or ".join(labels.get(input_type, input_type) for input_type in allowed_types)
+
+
 def _revision_spec(
     spec: dict[str, object],
     *,
@@ -673,10 +934,17 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _private_report_url(base_url: str | None, run_id: str) -> str | None:
+def _private_report_url(
+    base_url: str | None,
+    scope: str,
+    owner_id: str,
+    workflow_id: str,
+    run_id: str,
+) -> str | None:
     if base_url is None or not base_url.strip():
         return None
-    return f"{base_url.rstrip('/')}/reports/private/{run_id}"
+    owner_key = _owner_dir_name(scope, owner_id)
+    return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
 
 
 def _object_mapping(data: Mapping[object, object]) -> dict[str, object]:

@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import TYPE_CHECKING, Any
 
+from agno.agent import Agent
 from agno.tools import Toolkit
 
+from mindroom import model_loading
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
+
+if TYPE_CHECKING:
+    from mindroom.dynamic_workflows.runner import ParticipantExecutor
 
 
 class DynamicWorkflowTools(Toolkit):
@@ -124,13 +136,15 @@ class DynamicWorkflowTools(Toolkit):
             return self._context_error()
         try:
             store, owner_id = _store_and_owner(context, scope)
-            run = store.run_workflow(
+            service = DynamicWorkflowService(store, participant_executor=_participant_executor(context))
+            run = service.run_workflow(
                 workflow_id=workflow_id,
                 scope=scope,
                 owner_id=owner_id,
                 input_data=input,
                 requested_by=context.agent_name,
                 base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+                background=True,
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
@@ -229,6 +243,9 @@ def _store_and_owner(context: ToolRuntimeContext, scope: str) -> tuple[DynamicWo
     if not context.agent_name:
         msg = "Agent name is missing in the tool runtime context."
         raise DynamicWorkflowError(msg)
+    if scope in {"room", "tenant"}:
+        msg = f"{scope} scope requires Dynamic Workflow approval policy and is not available to agent tools yet."
+        raise DynamicWorkflowError(msg)
     return _store(context), _owner_id(context, scope)
 
 
@@ -244,3 +261,154 @@ def _owner_id(context: ToolRuntimeContext, scope: str) -> str:
         return "tenant"
     msg = f"Unsupported Dynamic Workflow scope '{scope}'."
     raise DynamicWorkflowError(msg)
+
+
+def _participant_executor(context: ToolRuntimeContext) -> ParticipantExecutor:
+    def execute(
+        *,
+        participant: dict[str, object],
+        prompt: str,
+        input_data: dict[str, object],
+        step_outputs: dict[str, object],
+    ) -> object:
+        del input_data, step_outputs
+        return _execute_participant(context, participant, prompt)
+
+    return execute
+
+
+def _execute_participant(context: ToolRuntimeContext, participant: dict[str, object], prompt: str) -> object:
+    participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
+    if participant_kind == "room_agent":
+        return _execute_room_agent_participant(context, participant, prompt)
+    if participant_kind == "ephemeral_agent":
+        return _execute_ephemeral_agent_participant(context, participant, prompt)
+    msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
+    raise DynamicWorkflowError(msg)
+
+
+def _execute_room_agent_participant(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+    prompt: str,
+) -> object:
+    raw_agent_name = participant.get("agent") or participant.get("agent_name")
+    if not isinstance(raw_agent_name, str) or not raw_agent_name.strip():
+        msg = "Room agent participants must declare an 'agent' field."
+        raise DynamicWorkflowError(msg)
+    agent_name = raw_agent_name.strip()
+    if agent_name not in context.config.agents:
+        msg = f"Dynamic Workflow participant references unknown room agent '{agent_name}'."
+        raise DynamicWorkflowError(msg)
+
+    agent_config = context.config.get_agent(agent_name)
+    active_model_name = _resolve_participant_model_name(
+        context,
+        participant.get("model"),
+        default_model=agent_config.model,
+    )
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    session_id = _participant_session_id(context, agent_name)
+    # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
+    from mindroom.agents import create_agent  # noqa: PLC0415
+
+    agent = create_agent(
+        agent_name,
+        context.config,
+        context.runtime_paths,
+        execution_identity=execution_identity,
+        session_id=session_id,
+        hook_registry=context.hook_registry,
+        active_model_name=active_model_name,
+        include_interactive_questions=False,
+    )
+    return _run_agent(context, agent, prompt, session_id)
+
+
+def _execute_ephemeral_agent_participant(
+    context: ToolRuntimeContext,
+    participant: dict[str, object],
+    prompt: str,
+) -> object:
+    tools = participant.get("tools", [])
+    if tools not in (None, []):
+        msg = "Ephemeral Dynamic Workflow agents cannot use tools; use room_agent participants for configured tools."
+        raise DynamicWorkflowError(msg)
+    participant_id = _required_participant_text(participant, "id")
+    model_name = _resolve_participant_model_name(
+        context,
+        participant.get("model"),
+        default_model=context.active_model_name or "default",
+    )
+    execution_identity = build_execution_identity_from_runtime_context(context)
+    model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
+    agent = Agent(
+        id=f"dynamic_workflow_{participant_id}",
+        name=str(participant.get("name") or participant_id),
+        role=str(participant.get("role") or participant.get("description") or "Dynamic Workflow participant."),
+        model=model,
+        tools=[],
+        instructions=_participant_instructions(participant),
+        markdown=True,
+        telemetry=False,
+    )
+    return _run_agent(context, agent, prompt, _participant_session_id(context, participant_id))
+
+
+def _run_agent(context: ToolRuntimeContext, agent: Agent, prompt: str, session_id: str) -> object:
+    async def run() -> object:
+        response = await agent.arun(
+            prompt,
+            user_id=context.requester_id,
+            session_id=session_id,
+        )
+        return response.content if response.content is not None else ""
+
+    with tool_runtime_context(context):
+        return asyncio.run(run())
+
+
+def _participant_session_id(context: ToolRuntimeContext, participant_id: str) -> str:
+    base_session_id = context.session_id or context.resolved_thread_id or context.thread_id or context.room_id
+    return f"{base_session_id}:dynamic_workflow:{participant_id}"
+
+
+def _resolve_participant_model_name(
+    context: ToolRuntimeContext,
+    raw_model: object,
+    *,
+    default_model: str,
+) -> str:
+    if raw_model is None:
+        return default_model
+    if not isinstance(raw_model, str) or not raw_model.strip():
+        msg = "Dynamic Workflow participant model must be a non-empty string."
+        raise DynamicWorkflowError(msg)
+    model_ref = raw_model.strip()
+    if model_ref in context.config.models:
+        return model_ref
+    for model_name, model_config in context.config.models.items():
+        if model_config.id == model_ref:
+            return model_name
+    msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
+    raise DynamicWorkflowError(msg)
+
+
+def _participant_instructions(participant: dict[str, object]) -> list[str]:
+    raw_instructions = participant.get("instructions", [])
+    if raw_instructions is None:
+        return []
+    if isinstance(raw_instructions, str):
+        return [raw_instructions]
+    if isinstance(raw_instructions, list):
+        return [str(instruction) for instruction in raw_instructions]
+    msg = "Dynamic Workflow participant instructions must be a string or list."
+    raise DynamicWorkflowError(msg)
+
+
+def _required_participant_text(participant: dict[str, object], field_name: str) -> str:
+    value = participant.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        msg = f"Dynamic Workflow participant field '{field_name}' must be a non-empty string."
+        raise DynamicWorkflowError(msg)
+    return value.strip()

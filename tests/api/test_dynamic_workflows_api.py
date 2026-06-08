@@ -22,9 +22,8 @@ def _workflow_spec() -> dict[str, object]:
         "workflow": [
             {
                 "id": "write",
-                "type": "agent_step",
-                "participant": "writer",
-                "response_template": "Report about {input.topic}.",
+                "type": "transform_step",
+                "template": "Report about {input.topic}.",
             },
         ],
         "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
@@ -51,7 +50,7 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
         base_url="https://acme.mindroom.chat",
     )
 
-    response = test_client.get(f"/reports/private/{run.run_id}")
+    response = test_client.get(f"/reports/private/agent/general/competitor-research-report/{run.run_id}")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
@@ -69,6 +68,13 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
 
 def test_private_dynamic_workflow_report_returns_404_for_unknown_run_id(test_client: TestClient) -> None:
     """Private report URLs should return 404 for unknown Dynamic Workflow runs."""
+    response = test_client.get("/reports/private/agent/general/competitor-research-report/run_missing")
+
+    assert response.status_code == 404
+
+
+def test_private_dynamic_workflow_report_rejects_unscoped_run_id(test_client: TestClient) -> None:
+    """Private reports should not be served through global run-id lookup."""
     response = test_client.get("/reports/private/run_missing")
 
     assert response.status_code == 404
