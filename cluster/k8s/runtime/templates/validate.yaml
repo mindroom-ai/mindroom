@@ -13,6 +13,32 @@
 {{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.databaseUrl.existingSecret) (eq .Values.eventCache.postgres.auth.passwordKey (include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" .)) -}}
 {{- fail "eventCache.postgres.auth.passwordKey must differ from the event-cache database URL secret key" -}}
 {{- end -}}
+{{- if .Values.stateStorage.enabled -}}
+{{- if and (not .Values.stateStorage.create) (not .Values.stateStorage.existingClaim) -}}
+{{- fail "stateStorage.existingClaim or stateStorage.create=true is required when stateStorage.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.create (not .Values.stateStorage.existingClaim) (not .Values.stateStorage.size) -}}
+{{- fail "stateStorage.size is required when chart-managed state storage is enabled" -}}
+{{- end -}}
+{{- if eq (include "mindroom-runtime.storageVolumeName" .) (include "mindroom-runtime.stateStorageVolumeName" .) -}}
+{{- fail "stateStorage.volumeName must differ from storage.volumeName" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.mountPath (eq .Values.stateStorage.mountPath .Values.storage.mountPath) -}}
+{{- fail "stateStorage.mountPath must differ from storage.mountPath" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.mountPath) -}}
+{{- fail "stateStorage.encryptionKeys.mountPath is required when stateStorage.encryptionKeys.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.encryptionKeys.enabled (not .Values.stateStorage.encryptionKeys.subPath) -}}
+{{- fail "stateStorage.encryptionKeys.subPath is required when stateStorage.encryptionKeys.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.syncTokens.enabled (not .Values.stateStorage.syncTokens.mountPath) -}}
+{{- fail "stateStorage.syncTokens.mountPath is required when stateStorage.syncTokens.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.stateStorage.syncTokens.enabled (not .Values.stateStorage.syncTokens.subPath) -}}
+{{- fail "stateStorage.syncTokens.subPath is required when stateStorage.syncTokens.enabled=true" -}}
+{{- end -}}
+{{- end -}}
 {{- $egressProxyEnabled := or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}
 {{- $egressPolicyEnabled := and $egressProxyEnabled .Values.egressProxy.networkPolicy.create -}}
 {{- if and $egressProxyEnabled (ne .Values.workers.backend "kubernetes") -}}

@@ -145,6 +145,33 @@ storage:
   size: 10Gi
   mountPath: /app/agent_data
 
+stateStorage:
+  # Optional dedicated PVC for restart-critical Matrix client state.
+  enabled: false
+  create: false
+  existingClaim: ""
+  volumeName: state-storage
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: 10Gi
+  mountPath: /app/mindroom_state
+  encryptionKeys:
+    enabled: true
+    mountPath: /app/agent_data/encryption_keys
+    subPath: encryption_keys
+  syncTokens:
+    enabled: true
+    mountPath: /app/agent_data/sync_tokens
+    subPath: sync_tokens
+  initPermissions:
+    enabled: true
+    image: busybox:1.36
+    imagePullPolicy: IfNotPresent
+    runAsUser: 1000
+    fsGroup: 1000
+    chmod: "2775"
+
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
   extra: []

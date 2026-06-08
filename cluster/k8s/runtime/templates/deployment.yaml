@@ -65,9 +65,27 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.initContainers }}
+      {{- if or (and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled) .Values.initContainers }}
       initContainers:
+{{ if and .Values.stateStorage.enabled .Values.stateStorage.initPermissions.enabled }}
+        - name: prepare-state-storage
+          image: {{ .Values.stateStorage.initPermissions.image | quote }}
+          imagePullPolicy: {{ .Values.stateStorage.initPermissions.imagePullPolicy }}
+          command:
+            - sh
+            - -lc
+            - |
+              set -eu
+              mkdir -p /state{{ if .Values.stateStorage.encryptionKeys.enabled }} /state/{{ .Values.stateStorage.encryptionKeys.subPath }}{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} /state/{{ .Values.stateStorage.syncTokens.subPath }}{{ end }}
+              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} /state{{ if .Values.stateStorage.encryptionKeys.enabled }} /state/{{ .Values.stateStorage.encryptionKeys.subPath }}{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} /state/{{ .Values.stateStorage.syncTokens.subPath }}{{ end }}
+              chmod {{ .Values.stateStorage.initPermissions.chmod }} /state{{ if .Values.stateStorage.encryptionKeys.enabled }} /state/{{ .Values.stateStorage.encryptionKeys.subPath }}{{ end }}{{ if .Values.stateStorage.syncTokens.enabled }} /state/{{ .Values.stateStorage.syncTokens.subPath }}{{ end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: /state
+{{- end }}
+        {{- with .Values.initContainers }}
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       containers:
         - name: mindroom
@@ -298,6 +316,22 @@ spec:
               readOnly: true
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
+            {{- if .Values.stateStorage.enabled }}
+            {{- if .Values.stateStorage.mountPath }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: {{ .Values.stateStorage.mountPath }}
+            {{- end }}
+            {{- if .Values.stateStorage.encryptionKeys.enabled }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: {{ .Values.stateStorage.encryptionKeys.mountPath }}
+              subPath: {{ .Values.stateStorage.encryptionKeys.subPath }}
+            {{- end }}
+            {{- if .Values.stateStorage.syncTokens.enabled }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+              mountPath: {{ .Values.stateStorage.syncTokens.mountPath }}
+              subPath: {{ .Values.stateStorage.syncTokens.subPath }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.approvedEgress.enabled }}
             - name: approved-egress-allowlist
               mountPath: {{ .Values.approvedEgress.allowlist.mountPath | quote }}
@@ -370,6 +404,11 @@ spec:
         - name: {{ include "mindroom-runtime.storageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.storageClaimName" . }}
+        {{- if .Values.stateStorage.enabled }}
+        - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.stateStorageClaimName" . }}
+        {{- end }}
         {{- if .Values.approvedEgress.enabled }}
         - name: approved-egress-allowlist
           configMap:

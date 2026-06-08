@@ -83,6 +83,18 @@ app.kubernetes.io/component: runtime
 {{- default "storage" .Values.storage.volumeName -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.stateStorageClaimName" -}}
+{{- if .Values.stateStorage.existingClaim -}}
+{{- .Values.stateStorage.existingClaim -}}
+{{- else -}}
+{{- printf "%s-state" (include "mindroom-runtime.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.stateStorageVolumeName" -}}
+{{- default "state-storage" .Values.stateStorage.volumeName -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "mindroom-runtime.fullname" .) .Values.serviceAccount.name -}}

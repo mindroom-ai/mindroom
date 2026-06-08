@@ -76,6 +76,49 @@ eventCache:
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
 When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
 
+## Runtime State Storage
+
+MindRoom stores Matrix encryption keys and sync-token checkpoints under `MINDROOM_STORAGE_PATH`.
+Hosted installs can keep those restart-critical directories on a dedicated PVC while normal workspace data stays on `storage`.
+The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the configured subpaths where MindRoom already reads and writes those directories.
+The optional init container creates the state directories and applies the configured ownership before the runtime starts.
+`initPermissions.runAsUser` and `initPermissions.fsGroup` are the ownership targets used by the init container.
+
+Use an existing PVC when another platform layer owns durable storage:
+
+```yaml
+storage:
+  create: false
+  existingClaim: mindroom-workspace
+  mountPath: /app/agent_data
+
+stateStorage:
+  enabled: true
+  existingClaim: mindroom-state
+  mountPath: /app/mindroom_state
+  encryptionKeys:
+    enabled: true
+    mountPath: /app/agent_data/encryption_keys
+    subPath: encryption_keys
+  syncTokens:
+    enabled: true
+    mountPath: /app/agent_data/sync_tokens
+    subPath: sync_tokens
+  initPermissions:
+    enabled: true
+    runAsUser: 1000
+    fsGroup: 1000
+```
+
+Let the chart create the state PVC for simpler hosted installs:
+
+```yaml
+stateStorage:
+  enabled: true
+  create: true
+  size: 20Gi
+```
+
 ## Worker Egress Proxy
 
 For dedicated Kubernetes workers, the chart can either deploy the approved egress proxy or point workers at an existing HTTP proxy Service.
@@ -162,6 +205,10 @@ storage:
   create: false
   existingClaim: mindroom-data
   mountPath: /app/agent_data
+
+stateStorage:
+  enabled: true
+  existingClaim: mindroom-state
 
 matrix:
   homeserverUrl: http://matrix.example.svc.cluster.local:8008
