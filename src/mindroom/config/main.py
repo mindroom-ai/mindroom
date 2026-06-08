@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from copy import deepcopy
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -53,6 +51,11 @@ from mindroom.config.models import (
     ToolConfigEntry,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
+from mindroom.config.runtime_overlays import (
+    apply_runtime_approved_egress_overlay,
+    strip_runtime_approved_egress_overlay_from_dump,
+)
+from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
@@ -99,13 +102,6 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "subagents",
     "matrix_message",
 )
-_APPROVED_EGRESS_ENABLED_ENV = "MINDROOM_APPROVED_EGRESS_ENABLED"
-_APPROVED_EGRESS_TOOL_NAME = "approved_egress"
-_APPROVED_EGRESS_TOOL_FUNCTION_NAME = "request_network_access"
-_APPROVED_EGRESS_APPROVAL_RULE: dict[str, str] = {
-    "match": _APPROVED_EGRESS_TOOL_FUNCTION_NAME,
-    "action": "require_approval",
-}
 
 
 logger = get_logger(__name__)
@@ -345,172 +341,6 @@ def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
     return bool(entry.model_fields_set & {"defer", "initial"})
 
 
-def _raw_tool_entry_name_and_lazy_flag_fields(entry: object) -> tuple[str | None, bool, bool]:
-    """Return the authored tool name and lazy flag field presence from one raw config entry."""
-    name: str | None = None
-    defer = False
-    initial = False
-
-    if isinstance(entry, ToolConfigEntry):
-        name = entry.name
-        defer = "defer" in entry.model_fields_set
-        initial = "initial" in entry.model_fields_set
-    elif isinstance(entry, str):
-        name = entry
-    elif isinstance(entry, dict):
-        raw_entry = cast("dict[object, object]", entry)
-        if "name" in raw_entry or "overrides" in raw_entry:
-            raw_name = raw_entry.get("name")
-            name = raw_name if isinstance(raw_name, str) else None
-            defer = "defer" in raw_entry
-            initial = "initial" in raw_entry
-        elif len(raw_entry) == 1:
-            raw_name, overrides = next(iter(raw_entry.items()))
-            name = raw_name if isinstance(raw_name, str) else None
-            if isinstance(overrides, dict):
-                override_map = cast("dict[object, object]", overrides)
-                defer = "defer" in override_map
-                initial = "initial" in override_map
-
-    return name, defer, initial
-
-
-def _raw_tools_entries(data: dict[object, object], section: str) -> list[object]:
-    raw_section = data.get(section)
-    if not isinstance(raw_section, dict):
-        return []
-    section_data = cast("dict[object, object]", raw_section)
-    tools = section_data.get("tools")
-    return list(tools) if isinstance(tools, list) else []
-
-
-def _raw_tool_entry_name(entry: object) -> str | None:
-    return _raw_tool_entry_name_and_lazy_flag_fields(entry)[0]
-
-
-@dataclass(frozen=True)
-class _RuntimeApprovedEgressOverlayResult:
-    data: object
-    injected_default_tool: bool = False
-    injected_approval_rule: bool = False
-
-
-def _runtime_approved_egress_rule_present(rules: list[object]) -> bool:
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        raw_rule = cast("dict[object, object]", rule)
-        match = raw_rule.get("match")
-        if not isinstance(match, str) or not fnmatchcase(_APPROVED_EGRESS_TOOL_FUNCTION_NAME, match):
-            continue
-        return raw_rule.get("action") == "require_approval"
-    return False
-
-
-def _apply_runtime_approved_egress_overlay(
-    data: object,
-    runtime_paths: RuntimePaths,
-) -> _RuntimeApprovedEgressOverlayResult:
-    """Add chart-managed approved egress config without requiring authored YAML edits."""
-    if not runtime_paths.env_flag(_APPROVED_EGRESS_ENABLED_ENV) or not isinstance(data, dict):
-        return _RuntimeApprovedEgressOverlayResult(data)
-
-    config_data = cast("dict[object, object]", data.copy())
-    raw_defaults = config_data.get("defaults")
-    if "defaults" in config_data and not isinstance(raw_defaults, dict):
-        return _RuntimeApprovedEgressOverlayResult(config_data)
-    defaults = cast("dict[object, object]", raw_defaults).copy() if isinstance(raw_defaults, dict) else {}
-    raw_tools = defaults.get("tools")
-    if raw_tools is None:
-        tools: list[object] = []
-    elif isinstance(raw_tools, list):
-        tools = list(raw_tools)
-    else:
-        config_data["defaults"] = defaults
-        return _RuntimeApprovedEgressOverlayResult(config_data)
-    injected_default_tool = False
-    if all(_raw_tool_entry_name(entry) != _APPROVED_EGRESS_TOOL_NAME for entry in tools):
-        tools.append(_APPROVED_EGRESS_TOOL_NAME)
-        injected_default_tool = True
-    defaults["tools"] = tools
-    config_data["defaults"] = defaults
-
-    raw_tool_approval = config_data.get("tool_approval")
-    if "tool_approval" in config_data and not isinstance(raw_tool_approval, dict):
-        return _RuntimeApprovedEgressOverlayResult(
-            config_data,
-            injected_default_tool=injected_default_tool,
-        )
-    tool_approval = (
-        cast("dict[object, object]", raw_tool_approval).copy() if isinstance(raw_tool_approval, dict) else {}
-    )
-    raw_rules = tool_approval.get("rules")
-    if raw_rules is None:
-        rules = []
-    elif isinstance(raw_rules, list):
-        rules = list(raw_rules)
-    else:
-        config_data["tool_approval"] = tool_approval
-        return _RuntimeApprovedEgressOverlayResult(
-            config_data,
-            injected_default_tool=injected_default_tool,
-        )
-    injected_approval_rule = False
-    if not _runtime_approved_egress_rule_present(rules):
-        rules.insert(0, dict(_APPROVED_EGRESS_APPROVAL_RULE))
-        injected_approval_rule = True
-    tool_approval["rules"] = rules
-    config_data["tool_approval"] = tool_approval
-    return _RuntimeApprovedEgressOverlayResult(
-        config_data,
-        injected_default_tool=injected_default_tool,
-        injected_approval_rule=injected_approval_rule,
-    )
-
-
-def _strip_runtime_approved_egress_default_tool(authored_payload: dict[str, Any]) -> None:
-    defaults = authored_payload.get("defaults")
-    if not isinstance(defaults, dict):
-        return
-    tools = defaults.get("tools")
-    if not isinstance(tools, list):
-        return
-    defaults["tools"] = [entry for entry in tools if _raw_tool_entry_name(entry) != _APPROVED_EGRESS_TOOL_NAME]
-    if not defaults["tools"]:
-        defaults.pop("tools", None)
-    if not defaults:
-        authored_payload.pop("defaults", None)
-
-
-def _strip_runtime_approved_egress_approval_rule(authored_payload: dict[str, Any]) -> None:
-    tool_approval = authored_payload.get("tool_approval")
-    if not isinstance(tool_approval, dict):
-        return
-    rules = tool_approval.get("rules")
-    if not isinstance(rules, list):
-        return
-    for index, rule in enumerate(rules):
-        if rule == _APPROVED_EGRESS_APPROVAL_RULE:
-            rules.pop(index)
-            break
-    if not rules:
-        tool_approval.pop("rules", None)
-
-
-def _strip_runtime_approved_egress_overlay_from_dump(
-    payload: dict[str, Any],
-    *,
-    injected_default_tool: bool,
-    injected_approval_rule: bool,
-) -> dict[str, Any]:
-    authored_payload = deepcopy(payload)
-    if injected_default_tool:
-        _strip_runtime_approved_egress_default_tool(authored_payload)
-    if injected_approval_rule:
-        _strip_runtime_approved_egress_approval_rule(authored_payload)
-    return authored_payload
-
-
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -605,7 +435,7 @@ class Config(BaseModel):
 
     @classmethod
     def _validate_raw_tool_lazy_flag_boundary(cls, entry: object, *, config_path: str) -> None:
-        name, defer, initial = _raw_tool_entry_name_and_lazy_flag_fields(entry)
+        name, defer, initial = raw_tool_entry_name_and_lazy_flag_fields(entry)
         if name is None or not (defer or initial):
             return
         if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
@@ -620,7 +450,7 @@ class Config(BaseModel):
             return normalized
 
         raw_data = cast("dict[object, object]", normalized)
-        for entry in _raw_tools_entries(raw_data, "defaults"):
+        for entry in raw_tools_entries(raw_data, "defaults"):
             cls._validate_raw_tool_lazy_flag_boundary(entry, config_path="defaults.tools")
 
         raw_agents = raw_data.get("agents")
@@ -1165,7 +995,7 @@ class Config(BaseModel):
     ) -> Config:
         """Validate config data against one explicit runtime context."""
         normalized_data = normalized_config_data(data)
-        approved_egress_overlay = _apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
+        approved_egress_overlay = apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
         config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
@@ -1187,7 +1017,7 @@ class Config(BaseModel):
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
         payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
-        payload = _strip_runtime_approved_egress_overlay_from_dump(
+        payload = strip_runtime_approved_egress_overlay_from_dump(
             payload,
             injected_default_tool=self._runtime_approved_egress_injected_default_tool,
             injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
