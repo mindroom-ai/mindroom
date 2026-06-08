@@ -1231,16 +1231,38 @@ def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_
     assert committed_runtime.config_path == config_path.resolve()
 
 
-def test_kubernetes_backend_mounts_shared_storage_root_without_configmap(tmp_path: Path) -> None:
-    """File-backed configs need the worker pod to see the shared storage root that contains bundle files."""
-    config_path = tmp_path / "storage" / "content-bundles" / "team-config" / "agent-config.yaml"
+@pytest.mark.parametrize(
+    ("config_relative_path", "worker_config_path", "expected_mount_path", "expected_subpath"),
+    [
+        (
+            "content-bundles/team-config/agent-config.yaml",
+            "/app/agent_data/content-bundles/team-config/agent-config.yaml",
+            "/app/agent_data/content-bundles",
+            "content-bundles",
+        ),
+        (
+            "team-config/content/environments/prod/agent-config.yaml",
+            "/app/agent_data/team-config/content/environments/prod/agent-config.yaml",
+            "/app/agent_data/team-config",
+            "team-config",
+        ),
+    ],
+)
+def test_kubernetes_backend_mounts_config_storage_subtree_without_configmap(
+    tmp_path: Path,
+    config_relative_path: str,
+    worker_config_path: str,
+    expected_mount_path: str,
+    expected_subpath: str,
+) -> None:
+    """File-backed configs need bundle visibility without broadening worker state mounts."""
+    config_path = tmp_path / "storage" / config_relative_path
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    worker_config_path = "/app/agent_data/content-bundles/team-config/agent-config.yaml"
     backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         storage_mount_path="/app/agent_data",
@@ -1253,8 +1275,18 @@ def test_kubernetes_backend_mounts_shared_storage_root_without_configmap(tmp_pat
     deployment = apps_api.created_bodies[0]
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_by_name = {env["name"]: env for env in container["env"]}
+    mount_paths = {mount["mountPath"]: mount for mount in container["volumeMounts"]}
+    expected_worker_root = f"/app/agent_data/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
 
-    assert {"name": "worker-storage", "mountPath": "/app/agent_data"} in container["volumeMounts"]
+    assert mount_paths[expected_mount_path] == {
+        "name": "worker-storage",
+        "mountPath": expected_mount_path,
+        "subPath": expected_subpath,
+        "readOnly": True,
+    }
+    assert "/app/agent_data" not in mount_paths
+    assert mount_paths["/app/agent_data/agents/code"]["subPath"] == "agents/code"
+    assert mount_paths[expected_worker_root]["subPath"] == f"workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
     assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
     assert deployment["spec"]["template"]["spec"]["volumes"] == [
         {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},

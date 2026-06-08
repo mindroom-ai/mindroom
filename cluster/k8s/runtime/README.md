@@ -84,7 +84,7 @@ Set `config.source: file` when another init container or content bundle places `
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
-Dedicated Kubernetes workers also mount the shared runtime storage PVC at `storage.mountPath` so content-bundle files under that path are visible.
+Dedicated Kubernetes workers also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
 
 Use a content bundle as the source of truth for the runtime config:
 

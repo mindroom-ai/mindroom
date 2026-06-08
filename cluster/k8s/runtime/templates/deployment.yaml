@@ -460,7 +460,7 @@ spec:
         {{- end }}
         {{- with .Values.extraContainers }}
         {{- toYaml . | nindent 8 }}
-          {{- end }}
+        {{- end }}
       volumes:
         {{- if $usesConfigMapConfig }}
         - name: config
