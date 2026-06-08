@@ -270,12 +270,10 @@ permissions:
   models:
     - claude-haiku-4-5
     - claude-sonnet-4-6
-  tools:
-    - website
-    - duckduckgo
+  tools: []
   data:
-    matrix_history: current_thread
-    attachments: current_thread
+    matrix_history: none
+    attachments: none
     knowledge_bases: []
 ```
 
@@ -472,7 +470,7 @@ The script coordinates agents, while agents use tools.
 
 MindRoom should adopt those constraints.
 The workflow coordinator should coordinate, not execute arbitrary tools.
-Runs should be inspectable and backgrounded.
+Future managed runs should be inspectable and backgrounded.
 Saved workflows should become reusable commands or tool targets.
 Costs and limits should be visible before and during a run.
 
@@ -551,8 +549,8 @@ The first version should feel like this:
 3. MindRoom creates a run, executes the active revision, and returns a private report URL when report artifacts exist.
 4. The final Matrix message links to the report.
 5. Future versions should move long runs to managed background jobs with progress and cancellation.
-7. The user can ask the agent to improve and save the workflow.
-8. The workflow revision history records what changed and why.
+6. The user can ask the agent to improve and save the workflow.
+7. The workflow revision history records what changed and why.
 
 This should make MindRoom feel like it can build and reuse its own workflow systems without turning every workflow into a permanent Matrix bot.
 

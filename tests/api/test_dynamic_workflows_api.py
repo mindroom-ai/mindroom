@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
 from mindroom.api import main
+from mindroom.api.dynamic_workflows import _authorize_private_report_request
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
@@ -104,6 +109,41 @@ def test_private_dynamic_workflow_report_rejects_other_trusted_upstream_user(tes
     )
 
     assert response.status_code == 403
+
+
+def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client: TestClient) -> None:
+    """Private report auth should deny Supabase users that do not match the run requester."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = store.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="user-alice",
+        base_url="https://acme.mindroom.chat",
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+            "headers": [],
+            "auth_user": {"user_id": "user-bob", "email": "bob@example.com"},
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _authorize_private_report_request(request, run)
+
+    assert exc_info.value.status_code == 403
 
 
 def test_private_dynamic_workflow_report_rejects_unscoped_run_id(test_client: TestClient) -> None:

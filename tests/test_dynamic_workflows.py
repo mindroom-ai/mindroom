@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -608,14 +607,13 @@ def test_service_completes_tool_runs_without_raw_background_thread(tmp_path: Pat
     )
 
 
-def test_service_sync_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sync service runs should honor runtime caps instead of blocking indefinitely."""
+def test_service_sync_run_executes_inline_without_detached_timeout_thread(tmp_path: Path) -> None:
+    """Sync service runs should not leave detached participant work behind."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     service = DynamicWorkflowService(
         store,
-        participant_executor=lambda **_kwargs: time.sleep(0.2) or "late",
+        participant_executor=lambda **_kwargs: "inline",
     )
-    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.01)
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -633,8 +631,46 @@ def test_service_sync_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pyte
         base_url="https://acme.mindroom.chat",
     )
 
+    assert run.status == "completed"
+    assert run.outputs["report_html"] == "inline"
+
+
+@pytest.mark.asyncio
+async def test_service_async_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async service runs should cancel participant work when the runtime cap is exceeded."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    participant_cancelled = asyncio.Event()
+
+    async def slow_executor(**_kwargs: object) -> object:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            participant_cancelled.set()
+            raise
+        return "late"
+
+    service = DynamicWorkflowService(store, async_participant_executor=slow_executor)
+    monkeypatch.setattr("mindroom.dynamic_workflows.service.workflow_runtime_seconds", lambda _spec: 0.01)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = await service.arun_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="general",
+        base_url="https://acme.mindroom.chat",
+    )
+
     assert run.status == "failed"
     assert "max_runtime_seconds" in str(run.error)
+    assert participant_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -1245,6 +1281,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     assert create_kwargs["active_model_name"] == "large"
     assert create_kwargs["knowledge"] is knowledge
     assert create_kwargs["persist_runtime_state"] is False
+    assert create_kwargs["disabled_tool_names"] == frozenset({"memory"})
     assert create_kwargs["execution_identity"].agent_name == "specialist"
     assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
 

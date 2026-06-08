@@ -90,6 +90,16 @@ def _render_runtime_chart_with_separate_worker_namespace() -> list[dict[str, Any
     )
 
 
+def _run_runtime_chart_template(*set_args: str) -> subprocess.CompletedProcess[str]:
+    return _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        *set_args,
+        release_name="mindroom-runtime",
+    )
+
+
 def _resource(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any]:
     for doc in docs:
         metadata = doc.get("metadata")
@@ -144,6 +154,29 @@ def test_runtime_chart_renders_dedicated_state_storage_mounts() -> None:
     assert mounts["/app/agent_data/encryption_keys"]["subPath"] == "encryption_keys"
     assert mounts["/app/agent_data/sync_tokens"]["subPath"] == "sync_tokens"
     assert pod_spec["initContainers"][0]["name"] == "prepare-state-storage"
+
+
+def test_runtime_chart_requires_state_storage_claim_source() -> None:
+    """State storage must either create or reference a PVC."""
+    completed = _run_runtime_chart_template(
+        "stateStorage.enabled=true",
+        "stateStorage.create=false",
+    )
+
+    assert completed.returncode != 0
+    assert "stateStorage.existingClaim or stateStorage.create=true" in completed.stderr
+
+
+def test_runtime_chart_rejects_state_storage_mount_path_conflicts() -> None:
+    """State storage overlays must not duplicate the main storage mount path."""
+    completed = _run_runtime_chart_template(
+        "stateStorage.enabled=true",
+        "stateStorage.create=true",
+        "stateStorage.encryptionKeys.mountPath=/app/agent_data",
+    )
+
+    assert completed.returncode != 0
+    assert "stateStorage.encryptionKeys.mountPath must differ from storage.mountPath" in completed.stderr
 
 
 def _instance_secret_hash(**overrides: str) -> str:

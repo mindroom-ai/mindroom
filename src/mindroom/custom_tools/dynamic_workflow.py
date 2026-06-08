@@ -624,6 +624,7 @@ async def _aexecute_room_agent_participant(
         active_model_name=active_model_name,
         include_interactive_questions=False,
         persist_runtime_state=False,
+        disabled_tool_names=frozenset({"memory"}),
     )
     return await _arun_agent(participant_context, agent, prompt)
 

@@ -66,6 +66,4 @@ def _authorize_private_report_request(request: Request, run: DynamicWorkflowRun)
         return
     if auth_user.get("matrix_user_id") == run.requested_by or auth_user.get("user_id") == run.requested_by:
         return
-    if auth_user.get("auth_source") != "trusted_upstream":
-        return
     raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")

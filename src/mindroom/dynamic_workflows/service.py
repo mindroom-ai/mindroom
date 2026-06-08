@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING
 
 from mindroom.dynamic_workflows.runner import async_execute_workflow_spec, execute_workflow_spec
@@ -116,26 +114,14 @@ class DynamicWorkflowService:
         spec: dict[str, object],
         input_data: dict[str, object],
     ) -> DynamicWorkflowRun:
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(
-            execute_workflow_spec,
-            spec,
-            input_data,
-            participant_executor=self._participant_executor,
-        )
         try:
-            execution = future.result(timeout=workflow_runtime_seconds(spec))
-        except FutureTimeoutError:
-            future.cancel()
-            timeout_seconds = workflow_runtime_seconds(spec)
-            return self._store.fail_workflow_run(
-                run,
-                error=f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds}).",
+            execution = execute_workflow_spec(
+                spec,
+                input_data,
+                participant_executor=self._participant_executor,
             )
         except Exception as exc:  # Persist runtime failures from participant code.
             return self._store.fail_workflow_run(run, error=str(exc))
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
         return self._store.complete_workflow_run(run, execution)
 
     async def _aexecute_and_persist(
@@ -144,6 +130,7 @@ class DynamicWorkflowService:
         spec: dict[str, object],
         input_data: dict[str, object],
     ) -> DynamicWorkflowRun:
+        timeout_seconds = workflow_runtime_seconds(spec)
         try:
             execution = await asyncio.wait_for(
                 async_execute_workflow_spec(
@@ -151,11 +138,16 @@ class DynamicWorkflowService:
                     input_data,
                     participant_executor=self._async_participant_executor,
                 ),
-                timeout=workflow_runtime_seconds(spec),
+                timeout=timeout_seconds,
             )
         except asyncio.CancelledError:
             self._store.fail_workflow_run(run, error="Workflow run was cancelled.")
             raise
+        except TimeoutError:
+            return self._store.fail_workflow_run(
+                run,
+                error=f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds}).",
+            )
         except Exception as exc:
             return self._store.fail_workflow_run(run, error=str(exc))
         return self._store.complete_workflow_run(run, execution)

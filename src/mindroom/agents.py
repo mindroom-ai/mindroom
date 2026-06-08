@@ -1117,6 +1117,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
     persist_runtime_state: bool = True,
+    disabled_tool_names: frozenset[str] = frozenset(),
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     timing_scope: str | None = None,
@@ -1143,6 +1144,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             history-format guidance in the shared identity prompt.
         persist_runtime_state: Whether this agent instance should write durable
             Agno history, learning, and culture state.
+        disabled_tool_names: Resolved tool names to omit from this instance.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
         refresh_scheduler: Optional runtime-owned shared knowledge refresh scheduler
@@ -1209,6 +1211,15 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     resolved_tool_configs = {
         entry.name: entry.tool_config_overrides for entry in dynamic_tool_selection.runtime_tool_configs
     }
+    if disabled_tool_names:
+        resolved_tool_configs = {
+            tool_name: overrides
+            for tool_name, overrides in resolved_tool_configs.items()
+            if tool_name not in disabled_tool_names
+        }
+    loaded_tools = tuple(
+        tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
+    )
     worker_tools = _resolve_runtime_worker_tools(
         agent_name,
         config,
@@ -1348,7 +1359,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(
         config,
         agent_name,
-        loaded_tools=dynamic_tool_selection.loaded_tools,
+        loaded_tools=loaded_tools,
         enable_dynamic_tools_manager=session_id is not None,
     )
     if dynamic_tooling_state_suffix is not None:
