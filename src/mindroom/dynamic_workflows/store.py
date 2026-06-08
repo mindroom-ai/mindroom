@@ -799,6 +799,9 @@ def _validate_agent_step(
 
 
 def _validate_report_step(step: dict[str, object], context: str, available_step_ids: set[str]) -> None:
+    if "body_template" in step and "from_step" in step:
+        msg = f"{context} must include only one report source field; found: body_template, from_step."
+        raise DynamicWorkflowError(msg)
     if "body_template" in step:
         body_template = _required_text(step, "body_template", context=context)
         step["body_template"] = body_template
@@ -841,12 +844,11 @@ def _validate_outputs(spec: dict[str, object], step_ids: set[str]) -> None:
         output_ids.add(output_id)
         if "type" in output:
             output["type"] = _required_text(output, "type", context=context)
-        if "from_step" in output:
-            from_step = _required_text(output, "from_step", context=context)
-            if from_step not in step_ids:
-                msg = f"{context} references unknown step '{from_step}'."
-                raise DynamicWorkflowError(msg)
-            output["from_step"] = from_step
+        from_step = _required_text(output, "from_step", context=context)
+        if from_step not in step_ids:
+            msg = f"{context} references unknown step '{from_step}'."
+            raise DynamicWorkflowError(msg)
+        output["from_step"] = from_step
         _reject_unsupported_fields(output, _OUTPUT_KEYS, context)
         outputs.append(output)
     spec["outputs"] = outputs

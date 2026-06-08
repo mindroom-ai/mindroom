@@ -671,7 +671,7 @@ async def _aexecute_ephemeral_agent_participant(
     model_name = _resolve_participant_model_name(
         context,
         participant.get("model"),
-        default_model=context.active_model_name or "default",
+        default_model=_caller_runtime_model_name(context),
     )
     execution_identity = build_execution_identity_from_runtime_context(context)
     model = model_loading.get_model_instance(context.config, context.runtime_paths, model_name, execution_identity)
@@ -750,7 +750,7 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
             model_name = _resolve_participant_model_name(
                 context,
                 raw_model,
-                default_model=context.active_model_name or "default",
+                default_model=_caller_runtime_model_name(context),
             )
         model_refs = _model_refs(context, model_name)
         if permission_models and model_refs.isdisjoint(permission_models):
@@ -759,18 +759,17 @@ def _validate_workflow_policy_for_context(context: ToolRuntimeContext, spec: dic
                 "Add the model to workflow permissions before running this revision."
             )
             raise DynamicWorkflowError(msg)
-        if raw_model is not None and model_refs.isdisjoint(caller_models):
+        if participant_kind != "room_agent" and model_refs.isdisjoint(caller_models):
+            requested_model = raw_model if raw_model is not None else model_name
             msg = (
-                f"Dynamic Workflow participant model '{raw_model}' is not allowed for agent '{context.agent_name}'. "
+                f"Dynamic Workflow participant model '{requested_model}' is not allowed for agent '{context.agent_name}'. "
                 "Use the caller's active model or add an approval policy before requesting another model."
             )
             raise DynamicWorkflowError(msg)
 
 
 def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
-    model_names = {context.active_model_name} if context.active_model_name else set()
-    if not model_names:
-        model_names.add(context.config.get_agent(context.agent_name).model or "default")
+    model_names = {_caller_runtime_model_name(context)}
     refs: set[str] = set()
     for model_name in model_names:
         if model_name is None:
@@ -780,6 +779,16 @@ def _caller_allowed_model_refs(context: ToolRuntimeContext) -> set[str]:
         if model_config is not None:
             refs.add(model_config.id)
     return refs
+
+
+def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
+    if context.active_model_name:
+        return context.active_model_name
+    return context.config.resolve_runtime_model(
+        entity_name=context.agent_name,
+        room_id=context.room_id,
+        runtime_paths=context.runtime_paths,
+    ).model_name
 
 
 def _workflow_permission_model_refs(context: ToolRuntimeContext, spec: dict[str, object]) -> set[str]:

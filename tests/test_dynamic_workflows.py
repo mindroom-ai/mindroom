@@ -547,6 +547,47 @@ def test_validate_workflow_spec_rejects_unsupported_agent_step_fields(tmp_path: 
         )
 
 
+def test_validate_workflow_spec_rejects_ambiguous_report_step_source(tmp_path: Path) -> None:
+    """Report steps should not accept a source field the runner would ignore."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="report source"):
+        store.validate_workflow(
+            _workflow_spec(
+                workflow=[
+                    {
+                        "id": "research",
+                        "type": "transform_step",
+                        "template": "Research brief for {input.topic}.",
+                    },
+                    {
+                        "id": "write",
+                        "type": "report_step",
+                        "from_step": "research",
+                        "body_template": "{steps.research}",
+                    },
+                ],
+            ),
+        )
+
+
+def test_validate_workflow_spec_rejects_output_without_source_step(tmp_path: Path) -> None:
+    """Declared outputs should not disappear at runtime because from_step is missing."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="from_step"):
+        store.validate_workflow(
+            _workflow_spec(
+                outputs=[
+                    {
+                        "id": "report",
+                        "type": "text",
+                    },
+                ],
+            ),
+        )
+
+
 def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) -> None:
     """Running a workflow should execute declared steps and persist their outputs."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -1236,6 +1277,43 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
                         },
                     ],
                     permissions={"models": ["claude-opus-4-8"], "tools": []},
+                ),
+            ),
+        )
+
+    assert result["status"] == "error"
+    assert "permissions.models" in result["message"]
+
+
+def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(tmp_path: Path) -> None:
+    """Omitted participant models should not fall back to the global default model."""
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="opus")},
+            models={
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+            },
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config), active_model_name=None)
+
+    with tool_runtime_context(context):
+        result = _tool_payload(
+            tool.validate_workflow(
+                _workflow_spec(
+                    participants=[
+                        {
+                            "id": "writer",
+                            "kind": "ephemeral_agent",
+                            "name": "Report Writer",
+                            "tools": [],
+                        },
+                    ],
+                    permissions={"models": ["claude-sonnet-4-6"], "tools": []},
                 ),
             ),
         )

@@ -180,9 +180,10 @@ list_workflows(scope: str = "agent") -> dict
 list_workflow_revisions(workflow_id: str, scope: str = "agent") -> dict
 ```
 
-The tool should be configurable per agent.
-Admins should be able to restrict which actions an agent can call.
-For example, a normal assistant might be allowed to run workflows but not create or publish them.
+The first implementation configures the capability per agent by including the `dynamic_workflow` tool.
+When enabled, an agent can use the agent-scoped workflow actions listed above.
+Room-scoped and tenant-scoped mutations stay denied until an approval policy exists.
+Future admin policy can add per-action allowlists, for example allowing normal assistants to run workflows but not create or update them.
 
 ## Declarative Workflow Spec
 
@@ -431,7 +432,7 @@ Approval cards should show:
 ## Agno Integration
 
 MindRoom should upgrade Agno to at least the first version with factories.
-The current candidate from PyPI is Agno 2.6.9.
+This PR pins Agno 2.6.12.
 The minimum feature version is Agno 2.6.0.
 
 The initial adapter path should keep MindRoom policy and storage outside Agno internals.
