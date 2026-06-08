@@ -368,6 +368,7 @@ def _backend(
     storage_subpath_prefix: str = "workers",
     storage_mount_path: str = "/app/worker",
     config_map_name: str | None = "mindroom-config",
+    worker_config_path: str = "/app/config.yaml",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
@@ -393,7 +394,7 @@ def _backend(
         storage_subpath_prefix=storage_subpath_prefix,
         config_map_name=config_map_name,
         config_key="config.yaml",
-        config_path="/app/config.yaml",
+        config_path=worker_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
         name_prefix=name_prefix,
@@ -1228,6 +1229,37 @@ def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_
     )
 
     assert committed_runtime.config_path == config_path.resolve()
+
+
+def test_kubernetes_backend_mounts_shared_storage_root_without_configmap(tmp_path: Path) -> None:
+    """File-backed configs need the worker pod to see the shared storage root that contains bundle files."""
+    config_path = tmp_path / "storage" / "content-bundles" / "team-config" / "agent-config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    worker_config_path = "/app/agent_data/content-bundles/team-config/agent-config.yaml"
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/app/agent_data",
+        config_map_name=None,
+        worker_config_path=worker_config_path,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_by_name = {env["name"]: env for env in container["env"]}
+
+    assert {"name": "worker-storage", "mountPath": "/app/agent_data"} in container["volumeMounts"]
+    assert not any(mount["name"] == "worker-config" for mount in container["volumeMounts"])
+    assert deployment["spec"]["template"]["spec"]["volumes"] == [
+        {"name": "worker-storage", "persistentVolumeClaim": {"claimName": "mindroom-storage"}},
+    ]
+    assert env_by_name["MINDROOM_CONFIG_PATH"]["value"] == worker_config_path
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:

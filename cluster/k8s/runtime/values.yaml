@@ -61,6 +61,10 @@ runtime:
   timing: false
 
 config:
+  # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
+  # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
+  source: configMap
+  path: ""
   create: true
   existingConfigMap: ""
   key: config.yaml
@@ -184,13 +188,17 @@ contentBundles: []
 # Example:
 # contentBundles:
 #   - name: team-config
-#     image: ghcr.io/example/team-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+#     image: registry.example.com/team/mindroom-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
 #     sourcePath: /bundle
 #     targetPath: /app/agent_data/content-bundles/team-config
 #     seed:
 #       enabled: true
 #       command:
 #         - /app/agent_data/content-bundles/team-config/scripts/seed-content.sh
+# Then point MindRoom at a config file copied by the bundle:
+# config:
+#   source: file
+#   path: /app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml
 
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.

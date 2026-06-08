@@ -1057,6 +1057,14 @@ class KubernetesResourceManager:
             state_subpath,
             private_agent_names=private_agent_names,
         )
+        if self.config.config_map_name is None:
+            mounts.insert(
+                0,
+                {
+                    "name": "worker-storage",
+                    "mountPath": self.config.storage_mount_path,
+                },
+            )
         if self.config.config_map_name is not None:
             mounts.append(
                 {

@@ -8,6 +8,11 @@
 {{- $workerExtraEnvJson := include "mindroom-runtime.workerExtraEnvJson" . -}}
 {{- $approvedEgressTokenSecretName := include "mindroom-runtime.approvedEgressTokenSecretName" . -}}
 {{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
+{{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
+{{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $workerConfigMapName := include "mindroom-runtime.workerConfigMapName" . -}}
+{{- $workerConfigKey := include "mindroom-runtime.workerConfigKey" . -}}
+{{- $workerConfigPath := include "mindroom-runtime.workerConfigPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -159,7 +164,7 @@ spec:
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
             - name: MINDROOM_CONFIG_PATH
-              value: {{ .Values.config.mountPath | quote }}
+              value: {{ $configPath | quote }}
             - name: HOME
               value: {{ .Values.storage.mountPath | quote }}
             {{- if .Values.runtime.logLevel }}
@@ -246,12 +251,16 @@ spec:
               value: {{ .Values.storage.mountPath | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
               value: {{ .Values.workers.kubernetes.storageSubpathPrefix | quote }}
+            {{- if $workerConfigMapName }}
             - name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
-              value: {{ include "mindroom-runtime.workerConfigMapName" . | quote }}
+              value: {{ $workerConfigMapName | quote }}
+            {{- end }}
+            {{- if $workerConfigKey }}
             - name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
-              value: {{ include "mindroom-runtime.workerConfigKey" . | quote }}
+              value: {{ $workerConfigKey | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
-              value: {{ include "mindroom-runtime.workerConfigPath" . | quote }}
+              value: {{ $workerConfigPath | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS
               value: {{ .Values.workers.kubernetes.idleTimeoutSeconds | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
@@ -361,10 +370,12 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if $usesConfigMapConfig }}
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               subPath: {{ .Values.config.key }}
               readOnly: true
+            {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
             {{- if .Values.stateStorage.enabled }}
@@ -410,7 +421,7 @@ spec:
             - name: MINDROOM_SANDBOX_RUNNER_PORT
               value: {{ .Values.workers.staticRunner.port | quote }}
             - name: MINDROOM_CONFIG_PATH
-              value: {{ .Values.config.mountPath | quote }}
+              value: {{ $configPath | quote }}
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
             - name: HOME
@@ -436,10 +447,12 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if $usesConfigMapConfig }}
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               subPath: {{ .Values.config.key }}
               readOnly: true
+            {{- end }}
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
             - name: sandbox-workspace
@@ -447,11 +460,13 @@ spec:
         {{- end }}
         {{- with .Values.extraContainers }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
+          {{- end }}
       volumes:
+        {{- if $usesConfigMapConfig }}
         - name: config
           configMap:
             name: {{ include "mindroom-runtime.configMapName" . }}
+        {{- end }}
         - name: {{ include "mindroom-runtime.storageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.storageClaimName" . }}

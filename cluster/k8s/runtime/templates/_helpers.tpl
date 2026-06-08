@@ -71,6 +71,22 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.configSource" -}}
+{{- default "configMap" .Values.config.source -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.usesConfigMapConfig" -}}
+{{- if eq (include "mindroom-runtime.configSource" .) "configMap" -}}true{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.configPath" -}}
+{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
+{{- .Values.config.path -}}
+{{- else -}}
+{{- .Values.config.mountPath -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.storageClaimName" -}}
 {{- if .Values.storage.existingClaim -}}
 {{- .Values.storage.existingClaim -}}
@@ -140,15 +156,25 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 
 {{- define "mindroom-runtime.workerConfigMapName" -}}
+{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
+{{- else -}}
 {{- default (include "mindroom-runtime.configMapName" .) .Values.workers.kubernetes.configMapName -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerConfigKey" -}}
+{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
+{{- else -}}
 {{- default .Values.config.key .Values.workers.kubernetes.configKey -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerConfigPath" -}}
+{{- if eq (include "mindroom-runtime.configSource" .) "file" -}}
+{{- include "mindroom-runtime.configPath" . -}}
+{{- else -}}
 {{- default .Values.config.mountPath .Values.workers.kubernetes.configPath -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerNamespace" -}}

@@ -1,6 +1,18 @@
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
+{{- $configSource := include "mindroom-runtime.configSource" . -}}
+{{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
+{{- fail "config.source must be either configMap or file" -}}
+{{- end -}}
+{{- if eq $configSource "file" -}}
+{{- if not .Values.config.path -}}
+{{- fail "config.path is required when config.source=file" -}}
+{{- end -}}
+{{- if not (hasPrefix "/" .Values.config.path) -}}
+{{- fail "config.path must be absolute when config.source=file" -}}
+{{- end -}}
+{{- end -}}
 {{- if and (eq .Values.eventCache.backend "postgres") (not .Values.eventCache.databaseUrlEnv) -}}
 {{- fail "eventCache.databaseUrlEnv is required when eventCache.backend=postgres" -}}
 {{- end -}}
