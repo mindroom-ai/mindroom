@@ -343,18 +343,25 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
     ]
 
 
-def test_runtime_chart_rejects_content_bundle_images_without_digest() -> None:
+@pytest.mark.parametrize(
+    "image",
+    [
+        "ghcr.io/example/team-config:latest",
+        "ghcr.io/example/team-config@sha256:short",
+    ],
+)
+def test_runtime_chart_rejects_content_bundle_images_without_digest(image: str) -> None:
     """Hosted bundles should be pinned to immutable image digests."""
     completed = _run_helm_template(
         Path("cluster/k8s/runtime"),
         "eventCache.postgres.auth.password=test-password",
         "contentBundles[0].name=team-config",
-        "contentBundles[0].image=ghcr.io/example/team-config:latest",
+        f"contentBundles[0].image={image}",
         release_name="mindroom-runtime",
     )
 
     assert completed.returncode != 0
-    assert "contentBundles[0].image must include @sha256:" in completed.stderr
+    assert "contentBundles[0].image must be pinned by full sha256 digest" in completed.stderr
 
 
 def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
@@ -395,6 +402,7 @@ def test_runtime_chart_rejects_content_bundle_names_that_would_be_truncated() ->
     [
         ("/app/agent_data", "contentBundles[0].targetPath cannot be equal to storage.mountPath /app/agent_data"),
         ("/app/content/team-config", "contentBundles[0].targetPath must be under storage.mountPath /app/agent_data"),
+        ("/app/agent_data/../outside", "contentBundles[0].targetPath must be under storage.mountPath /app/agent_data"),
     ],
 )
 def test_runtime_chart_rejects_content_bundle_target_paths_outside_storage(target_path: str, message: str) -> None:
@@ -411,6 +419,23 @@ def test_runtime_chart_rejects_content_bundle_target_paths_outside_storage(targe
 
     assert completed.returncode != 0
     assert message in completed.stderr
+
+
+def test_runtime_chart_rejects_content_bundle_target_path_equal_root_storage() -> None:
+    """The root path should not be accepted when storage itself is mounted at root."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "storage.mountPath=/",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=ghcr.io/example/team-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "contentBundles[0].targetPath=/",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "contentBundles[0].targetPath cannot be equal to storage.mountPath /" in completed.stderr
 
 
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
