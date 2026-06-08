@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
+from mindroom import constants
 from mindroom.api import main
 from mindroom.api.dynamic_workflows import _authorize_private_report_request
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
@@ -54,7 +55,7 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
         scope="agent",
         owner_id="general",
         input_data={"topic": "Agno factories"},
-        requested_by="general",
+        requested_by="standalone",
         base_url="https://acme.mindroom.chat",
     )
 
@@ -72,6 +73,79 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
     )
     assert "Competitor Research Report" in response.text
     assert "Agno factories" in response.text
+
+
+def test_private_dynamic_workflow_report_rejects_standalone_user_for_matrix_requested_run(
+    test_client: TestClient,
+) -> None:
+    """Standalone dashboard auth should not be a wildcard for Matrix-requested reports."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    response = test_client.get(f"/reports/private/agent/general/competitor-research-report/{run.run_id}")
+
+    assert response.status_code == 403
+
+
+def test_private_dynamic_workflow_report_accepts_standalone_owner_matrix_user(test_client: TestClient) -> None:
+    """Standalone dashboard auth should use the configured Matrix owner as its report principal."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    owner_runtime_paths = runtime_paths.__class__(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        process_env={
+            **dict(runtime_paths.process_env),
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+        env_file_values=runtime_paths.env_file_values,
+    )
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+            "query_string": b"",
+            "headers": [],
+            "auth_user": {"user_id": "standalone", "email": None},
+        },
+    )
+
+    _authorize_private_report_request(request, run, owner_runtime_paths)
 
 
 def test_private_dynamic_workflow_report_returns_404_for_unknown_run_id(test_client: TestClient) -> None:
@@ -186,6 +260,50 @@ def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(
     assert "Agno factories" in response.text
 
 
+def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix_user(test_client: TestClient) -> None:
+    """Trusted upstream auth can use an email-derived Matrix identity to read a Matrix-requested report."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    trusted_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
+        },
+    )
+    main.initialize_api_app(test_client.app, trusted_runtime_paths)
+    store = DynamicWorkflowStore(trusted_runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers={
+            "X-Trusted-User": "user-alice",
+            "X-Trusted-Email": "alice@example.com",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Agno factories" in response.text
+
+
 def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client: TestClient) -> None:
     """Private report auth should deny Supabase users that do not match the run requester."""
     runtime_paths = main._app_runtime_paths(test_client.app)
@@ -218,9 +336,43 @@ def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        _authorize_private_report_request(request, run)
+        _authorize_private_report_request(request, run, runtime_paths)
 
     assert exc_info.value.status_code == 403
+
+
+def test_private_dynamic_workflow_report_accepts_matching_platform_user(test_client: TestClient) -> None:
+    """Private report auth should allow platform users that match the run requester."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="user-alice",
+        base_url="https://acme.mindroom.chat",
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+            "query_string": b"",
+            "headers": [],
+            "auth_user": {"user_id": "user-alice", "email": "alice@example.com"},
+        },
+    )
+
+    _authorize_private_report_request(request, run, runtime_paths)
 
 
 def test_private_dynamic_workflow_report_rejects_unscoped_run_id(test_client: TestClient) -> None:
