@@ -92,6 +92,23 @@ _TEST_KUBERNETES_VALIDATION_SNAPSHOT = {
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
+def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path: Path) -> None:
+    """Policy API grants must be requested from the primary runtime, not a worker."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+
+    assert not sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+        "approved_egress",
+        runtime_paths=runtime_paths,
+    )
+
+
 def test_attachment_save_protocol_payload_fields_round_trip() -> None:
     """Attachment save payload helpers should preserve the current wire fields."""
     payload_bytes = b"attachment-bytes"

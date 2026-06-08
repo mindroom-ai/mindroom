@@ -221,9 +221,12 @@ approvedEgress:
 This renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, and proxy ingress NetworkPolicy.
 By default, chart-managed proxy resources use the release-derived `<fullname>-egress-proxy` name; set `approvedEgress.service.name` only when an explicit shared name is required.
 The control-plane pod receives `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS`.
-The control-plane pod also mounts the same allowlist file so the approved egress plugin can avoid asking for domains that are already static-allowed.
+The control-plane pod also mounts the same allowlist file so the built-in `approved_egress` tool can avoid asking for domains that are already static-allowed.
+The control-plane pod also receives `MINDROOM_APPROVED_EGRESS_ENABLED=true`, so MindRoom adds `approved_egress` and the required Matrix approval rule at runtime even when you use `config.data` or `config.existingConfigMap`.
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
+Do not install a separate approved egress plugin for new deployments.
+Existing manual plugin entries are tolerated during migration, but the built-in tool is the source of truth.
 
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 

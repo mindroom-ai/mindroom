@@ -62,6 +62,7 @@
 - [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/)
 - [Docker](https://docs.mindroom.chat/deployment/docker/)
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/)
+- [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/)
 - [CLI Reference](https://docs.mindroom.chat/cli/)
 

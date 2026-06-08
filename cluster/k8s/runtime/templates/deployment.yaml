@@ -209,6 +209,8 @@ spec:
                   key: {{ .Values.workers.sandbox.proxyToken.key }}
             {{- end }}
             {{- if .Values.approvedEgress.enabled }}
+            - name: MINDROOM_APPROVED_EGRESS_ENABLED
+              value: "true"
             - name: MINDROOM_APPROVED_EGRESS_API_URL
               value: {{ include "mindroom-runtime.approvedEgressApiUrl" . | quote }}
             - name: MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH

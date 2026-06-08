@@ -33,6 +33,7 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
 )
 _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
+        "approved_egress",
         "attachments",
         "gmail",
         "google_calendar",

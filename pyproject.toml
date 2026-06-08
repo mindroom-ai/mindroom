@@ -68,6 +68,7 @@ airflow = []
 apify = [
   "apify-client>=1.12.2; platform_machine!='aarch64'",
 ]
+approved_egress = []
 arxiv = [
   "arxiv",
   "pypdf",

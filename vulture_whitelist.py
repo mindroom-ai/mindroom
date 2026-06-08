@@ -62,6 +62,7 @@ collection_formats  # unused variable (src/mindroom/workers/backends/kubernetes_
 _.invite_user  # unused method (src/mindroom/hooks/types.py)
 _.make_request  # unused method (src/mindroom/tools/custom_api.py)
 _._async_crawl  # unused method (src/mindroom/tools/crawl4ai.py)
+_.redirect_request  # unused method (src/mindroom/tools/approved_egress.py)
 _.handle_data  # unused method (src/mindroom/matrix/message_builder.py)
 _.handle_entityref  # unused method (src/mindroom/matrix/message_builder.py)
 _.handle_charref  # unused method (src/mindroom/matrix/message_builder.py)

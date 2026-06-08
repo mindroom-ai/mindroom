@@ -82,6 +82,7 @@ nav = [
     { "Trusted Upstream Browser Auth" = "deployment/trusted-upstream-auth.md" },
     { "Docker" = "deployment/docker.md" },
     { "Sandbox Proxy" = "deployment/sandbox-proxy.md" },
+    { "Approved Egress" = "deployment/approved-egress.md" },
     { "Kubernetes" = "deployment/kubernetes.md" },
   ] },
   { "CLI Reference" = "cli.md" },

@@ -6705,6 +6705,27 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Request human-approved temporary worker access to blocked external hostnames",
+      "display_name": "Approved Worker Egress",
+      "docs_url": null,
+      "function_names": [
+        "request_network_access"
+      ],
+      "helper_text": null,
+      "icon": "FiShield",
+      "icon_color": "text-emerald-600",
+      "name": "approved_egress",
+      "setup_type": "special",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
       "config_fields": [
         {
           "authored_override": true,

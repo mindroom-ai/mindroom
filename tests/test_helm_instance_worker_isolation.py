@@ -1114,6 +1114,7 @@ def test_runtime_chart_can_deploy_chart_managed_approved_egress_proxy(tmp_path: 
     proxy_env = _env_by_name(proxy_container)
     worker_env = json.loads(runtime_env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
 
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_ENABLED"]["value"] == "true"
     assert proxy_config["data"]["allowed-domains.txt"] == "example.com\n.docs.example.com\n"
     assert proxy_pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
     assert proxy_service_account["automountServiceAccountToken"] is True
@@ -1215,6 +1216,45 @@ def test_runtime_chart_can_deploy_chart_managed_approved_egress_proxy(tmp_path: 
             "ports": [{"port": 8080, "protocol": "TCP"}],
         },
     ]
+
+
+def test_runtime_chart_approved_egress_sets_runtime_flag_for_custom_config(tmp_path: Path) -> None:
+    """Custom configs should still enable the built-in approved egress runtime overlay."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
+                "config": {
+                    "data": yaml.safe_dump(
+                        {
+                            "agents": {},
+                            "defaults": {"tools": ["scheduler"]},
+                            "models": {},
+                        },
+                    ),
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    runtime_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-runtime-config")["data"]["config.yaml"])
+    runtime_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+
+    assert runtime_config["defaults"]["tools"] == ["scheduler"]
+    assert runtime_env["MINDROOM_APPROVED_EGRESS_ENABLED"]["value"] == "true"
+    assert "MINDROOM_APPROVED_EGRESS_API_URL" in runtime_env
 
 
 def test_runtime_chart_approved_egress_uses_worker_namespace_for_pod_lookup_and_rbac() -> None:

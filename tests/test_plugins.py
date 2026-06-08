@@ -1478,6 +1478,51 @@ def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> N
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
 
+def test_legacy_approved_egress_plugin_does_not_override_builtin_tool(tmp_path: Path) -> None:
+    """Legacy approved egress plugin entries should not break the built-in tool."""
+    plugin_root = tmp_path / "plugins" / "approved-egress"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "approved-egress", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "\n"
+        "class LegacyApprovedEgressTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='legacy_approved_egress', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='approved_egress',\n"
+        "    display_name='Legacy Approved Egress',\n"
+        "    description='Legacy plugin copy',\n"
+        "    category=ToolCategory.INTEGRATIONS,\n"
+        ")\n"
+        "def legacy_approved_egress_tools():\n"
+        "    return LegacyApprovedEgressTool\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config = Config(plugins=["./plugins/approved-egress"])
+
+    with _preserved_plugin_loader_state():
+        runtime_metadata = metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, config)
+
+    assert runtime_metadata["approved_egress"].display_name == "Approved Worker Egress"
+
+
 def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> None:
     """Active plugins must not register the same tool name."""
     first_root = tmp_path / "plugins" / "first"

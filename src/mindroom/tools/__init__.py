@@ -28,6 +28,7 @@ from mindroom.tools import (
 from mindroom.tools.agentql import agentql_tools
 from mindroom.tools.airflow import airflow_tools
 from mindroom.tools.apify import apify_tools
+from mindroom.tools.approved_egress import approved_egress_tools
 from mindroom.tools.arxiv import arxiv_tools
 from mindroom.tools.attachments import attachments_tools
 from mindroom.tools.aws_lambda import aws_lambda_tools
@@ -149,6 +150,7 @@ __all__ = [
     "agentql_tools",
     "airflow_tools",
     "apify_tools",
+    "approved_egress_tools",
     "arxiv_tools",
     "attachments_tools",
     "aws_lambda_tools",
