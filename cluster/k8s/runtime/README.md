@@ -76,6 +76,29 @@ eventCache:
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
 When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
 
+## Config Sources
+
+By default the chart keeps the existing ConfigMap behavior.
+Omit `config.source` or set `config.source: configMap` to mount a chart-created or existing ConfigMap at `config.mountPath`.
+Set `config.source: file` when another init container or content bundle places `agent-config.yaml` on the runtime filesystem before MindRoom starts.
+In file mode, `config.path` must be an absolute container path.
+In file mode, the chart does not render or mount the runtime config ConfigMap.
+Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
+Dedicated Kubernetes workers also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
+
+Use a content bundle as the source of truth for the runtime config:
+
+```yaml
+contentBundles:
+  - name: team-config
+    image: registry.example.com/team/mindroom-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    targetPath: /app/agent_data/content-bundles/team-config
+
+config:
+  source: file
+  path: /app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml
+```
+
 ## Runtime State Storage
 
 MindRoom stores Matrix encryption keys and sync-token checkpoints under `MINDROOM_STORAGE_PATH`.
@@ -144,7 +167,7 @@ imagePullSecrets:
 
 contentBundles:
   - name: team-config
-    image: ghcr.io/example/acme-mindroom-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    image: registry.example.com/team/mindroom-config@sha256:1111111111111111111111111111111111111111111111111111111111111111
     sourcePath: /bundle
     targetPath: /app/agent_data/content-bundles/team-config
     seed:
@@ -152,8 +175,8 @@ contentBundles:
       command:
         - /app/agent_data/content-bundles/team-config/scripts/seed-content.sh
 
-  - name: private-agent-content
-    image: ghcr.io/example/private-agent-content@sha256:2222222222222222222222222222222222222222222222222222222222222222
+  - name: policy-pack
+    image: registry.example.com/team/policy-pack@sha256:2222222222222222222222222222222222222222222222222222222222222222
 ```
 
 If `targetPath` is omitted, the chart copies to `/app/agent_data/content-bundles/<name>`.
@@ -167,7 +190,7 @@ Reference copied plugins from `config.yaml` with absolute paths:
 ```yaml
 plugins:
   - /app/agent_data/content-bundles/team-config/plugins/review-tools
-  - /app/agent_data/content-bundles/private-agent-content/plugins/team-tools
+  - /app/agent_data/content-bundles/policy-pack/plugins/policy-tools
 ```
 
 ## Worker Egress Proxy

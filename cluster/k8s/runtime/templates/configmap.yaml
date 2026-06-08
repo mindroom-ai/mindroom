@@ -1,4 +1,4 @@
-{{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
+{{- if and (include "mindroom-runtime.usesConfigMapConfig" .) .Values.config.create (not .Values.config.existingConfigMap) }}
 {{- $configData := default (include "mindroom-runtime.defaultConfig" .) .Values.config.data -}}
 apiVersion: v1
 kind: ConfigMap

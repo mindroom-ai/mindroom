@@ -292,8 +292,8 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
                         },
                     },
                     {
-                        "name": "private-agent-content",
-                        "image": "ghcr.io/example/private-agent-content@sha256:"
+                        "name": "policy-pack",
+                        "image": "registry.example.com/team/policy-pack@sha256:"
                         "2222222222222222222222222222222222222222222222222222222222222222",
                         "overwrite": False,
                     },
@@ -311,12 +311,12 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
     deployment = _resource(docs, "Deployment", "mindroom-runtime")
     pod_spec = deployment["spec"]["template"]["spec"]
     team_config = _init_container(deployment, "content-bundle-team-config")
-    agent_content = _init_container(deployment, "content-bundle-private-agent-content")
+    policy_pack = _init_container(deployment, "content-bundle-policy-pack")
 
     assert [container["name"] for container in pod_spec["initContainers"]][:3] == [
         "prepare-storage",
         "content-bundle-team-config",
-        "content-bundle-private-agent-content",
+        "content-bundle-policy-pack",
     ]
     assert team_config["image"] == (
         "ghcr.io/example/team-config@sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -336,10 +336,10 @@ def test_runtime_chart_renders_content_bundle_init_containers_after_user_init_co
             "mountPath": "/app/agent_data",
         },
     ]
-    assert agent_content["args"] == [
+    assert policy_pack["args"] == [
         "set -eu\n"
-        'mkdir -p "/app/agent_data/content-bundles/private-agent-content"\n'
-        'cp -a "/bundle/." "/app/agent_data/content-bundles/private-agent-content/"',
+        'mkdir -p "/app/agent_data/content-bundles/policy-pack"\n'
+        'cp -a "/bundle/." "/app/agent_data/content-bundles/policy-pack/"',
     ]
 
 
@@ -862,6 +862,103 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
         "app.kubernetes.io/managed-by": "mindroom",
         "app.kubernetes.io/name": "mindroom-worker",
     }
+
+
+def test_runtime_chart_default_configmap_source_wires_runtime_and_worker_configmap() -> None:
+    """Default config mode should preserve the chart-managed ConfigMap mount and worker projection."""
+    docs = _render_runtime_chart()
+    config_map = _resource(docs, "ConfigMap", "mindroom-runtime-config")
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    mindroom_env = _env_by_name(mindroom_container)
+
+    assert "config.yaml" in config_map["data"]
+    assert {"name": "config", "configMap": {"name": "mindroom-runtime-config"}} in pod_spec["volumes"]
+    assert {
+        "name": "config",
+        "mountPath": "/app/config.yaml",
+        "subPath": "config.yaml",
+        "readOnly": True,
+    } in mindroom_container["volumeMounts"]
+    assert mindroom_env["MINDROOM_CONFIG_PATH"]["value"] == "/app/config.yaml"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME"]["value"] == "mindroom-runtime-config"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_KEY"]["value"] == "config.yaml"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == "/app/config.yaml"
+
+
+def test_runtime_chart_file_config_source_uses_bundle_path_without_configmap() -> None:
+    """File config mode should point runtime and workers at the bundle file without rendering a ConfigMap."""
+    config_path = "/app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml"
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "contentBundles[0].name=team-config",
+        "contentBundles[0].image=registry.example.com/team/mindroom-config@sha256:"
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "config.source=file",
+        f"config.path={config_path}",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    mindroom_container = _container(deployment, "mindroom")
+    mindroom_env = _env_by_name(mindroom_container)
+
+    assert not any(
+        doc.get("kind") == "ConfigMap" and doc.get("metadata", {}).get("name") == "mindroom-runtime-config"
+        for doc in docs
+    )
+    assert not any(volume["name"] == "config" for volume in pod_spec["volumes"])
+    assert not any(mount["name"] == "config" for mount in mindroom_container["volumeMounts"])
+    assert mindroom_env["MINDROOM_CONFIG_PATH"]["value"] == config_path
+    assert "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME" not in mindroom_env
+    assert "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY" not in mindroom_env
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"]["value"] == config_path
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH"]["value"] == "/app/agent_data"
+    assert mindroom_env["MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME"]["value"] == "mindroom-runtime-storage"
+
+
+def test_runtime_chart_file_config_source_rejects_missing_path() -> None:
+    """File config mode needs an explicit absolute file path."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "config.path is required when config.source=file" in completed.stderr
+
+
+def test_runtime_chart_file_config_source_rejects_relative_path() -> None:
+    """File config mode should fail early for paths that are not container-absolute."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        "config.path=content/environments/prod/agent-config.yaml",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "config.path must be absolute when config.source=file" in completed.stderr
+
+
+def test_runtime_chart_rejects_unknown_config_source() -> None:
+    """Config source should be constrained to known chart modes."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=secret",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "config.source must be either configMap or file" in completed.stderr
 
 
 def test_runtime_chart_can_route_kubernetes_workers_through_existing_egress_proxy(tmp_path: Path) -> None:

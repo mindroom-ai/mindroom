@@ -8,9 +8,10 @@ import hmac
 import importlib
 import json
 import os
+import posixpath
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -1057,6 +1058,8 @@ class KubernetesResourceManager:
             state_subpath,
             private_agent_names=private_agent_names,
         )
+        if self.config.config_map_name is None:
+            mounts.extend(self._file_config_storage_mounts())
         if self.config.config_map_name is not None:
             mounts.append(
                 {
@@ -1067,6 +1070,26 @@ class KubernetesResourceManager:
                 },
             )
         return mounts
+
+    def _file_config_storage_mounts(self) -> list[dict[str, object]]:
+        storage_root = PurePosixPath(posixpath.normpath(self.config.storage_mount_path))
+        config_path = PurePosixPath(posixpath.normpath(self.config.config_path))
+        try:
+            relative_config_path = config_path.relative_to(storage_root)
+        except ValueError:
+            return []
+        if not relative_config_path.parts:
+            return []
+
+        visible_subpath = PurePosixPath(relative_config_path.parts[0])
+        return [
+            {
+                "name": "worker-storage",
+                "mountPath": str(storage_root / visible_subpath),
+                "subPath": str(visible_subpath),
+                "readOnly": True,
+            },
+        ]
 
     def _volumes(self) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
