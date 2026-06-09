@@ -497,8 +497,9 @@ These items close the gap between "the grant plumbing works" and "the feature is
 - Done: blocking-approval behavior is bounded by the runtime cap.
   A participant tool call waiting on approval blocks the caller's turn, but `permissions.max_runtime_seconds` (hard-capped at 3600 seconds) fails the run at the deadline, and the cancelled approval wait edits the pending card to expired.
   The approval card posted in the originating room is the "waiting for approval" signal; no additional cap was added.
-- Live-test the full approval loop.
-  Drive the real path on a local Matrix stack: a participant calls a non-pre-approved tool, the card posts in the originating room, the requester reacts to approve, the tool runs, and the workflow completes; deny declines.
+- Done: live-test the full approval loop.
+  Verified on a local Synapse stack with a Gemini-driven agent: the participant's `run_shell_command` posted a provenance-labeled card in the originating thread, a human ✅ reaction approved it, the command ran (token file on disk), and the workflow completed with the token in its outputs.
+  The deny path was verified by replying to the card: the card flipped to denied with the reply as `resolution_reason`, the command never ran, and a participant retry posted a fresh card that required its own decision.
 
 ### Phase 1: Storage, Validation, and Basic Runs
 
