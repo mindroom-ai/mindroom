@@ -1976,6 +1976,10 @@ def test_resolve_participant_toolkits_rejects_unavailable_tools(tmp_path: Path) 
     with pytest.raises(DynamicWorkflowError, match="list of non-empty strings"):
         dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": "duckduckgo"})
 
+    # Falsy non-list values (e.g. "") are malformed, not "no tools" — they must raise, not degrade silently.
+    with pytest.raises(DynamicWorkflowError, match="list of non-empty strings"):
+        dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": ""})
+
 
 def test_resolve_participant_toolkits_returns_empty_for_missing_grants(tmp_path: Path) -> None:
     """Participants without grants (missing, null, or empty tools) resolve to no toolkits."""

@@ -693,7 +693,9 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
 
 
 def _participant_tool_names(participant: dict[str, object]) -> list[str]:
-    raw_tools = participant.get("tools") or []
+    raw_tools = participant.get("tools")
+    if raw_tools is None:
+        return []
     if not isinstance(raw_tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in raw_tools):
         msg = "Dynamic Workflow participant tools must be a list of non-empty strings."
         raise DynamicWorkflowError(msg)
