@@ -382,7 +382,15 @@ class DynamicWorkflowStore:
 
     def run_report_html_artifact_path(self, run: DynamicWorkflowRun) -> Path:
         """Return the HTML report artifact path for one persisted run."""
-        return self._run_report_html_artifact_path(run)
+        report_artifact = run.artifacts.get("report_html")
+        if report_artifact is None:
+            msg = f"Run '{run.run_id}' does not have an HTML report artifact."
+            raise DynamicWorkflowError(msg)
+        report_path = self._artifact_path_from_relative(report_artifact)
+        if not report_path.is_file():
+            msg = f"HTML report artifact for run '{run.run_id}' was not found."
+            raise DynamicWorkflowError(msg)
+        return report_path
 
     def run_report_title(self, run: DynamicWorkflowRun) -> str:
         """Return the report title for one persisted run."""
@@ -412,17 +420,6 @@ class DynamicWorkflowStore:
     def _workflow_dir(self, scope: str, owner_id: str, workflow_id: str) -> Path:
         _validate_id(workflow_id, "workflow_id")
         return self._scope_dir(scope, owner_id) / workflow_id
-
-    def _run_report_html_artifact_path(self, run: DynamicWorkflowRun) -> Path:
-        report_artifact = run.artifacts.get("report_html")
-        if report_artifact is None:
-            msg = f"Run '{run.run_id}' does not have an HTML report artifact."
-            raise DynamicWorkflowError(msg)
-        report_path = self._artifact_path_from_relative(report_artifact)
-        if not report_path.is_file():
-            msg = f"HTML report artifact for run '{run.run_id}' was not found."
-            raise DynamicWorkflowError(msg)
-        return report_path
 
     def _artifact_path_from_relative(self, artifact_path: str) -> Path:
         relative_path = Path(artifact_path)

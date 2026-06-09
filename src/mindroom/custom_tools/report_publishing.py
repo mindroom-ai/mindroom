@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
-from agno.tools.function import Function
 
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.store import DynamicWorkflowError
 from mindroom.report_publishing.store import (
     PublishableReport,
@@ -22,35 +22,7 @@ from mindroom.report_publishing.store import (
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-_JSON_VALUE_SCHEMA: dict[str, object] = {
-    "anyOf": [
-        {"type": "object", "additionalProperties": True},
-        {"type": "array", "items": {}},
-        {"type": "string"},
-        {"type": "number"},
-        {"type": "integer"},
-        {"type": "boolean"},
-        {"type": "null"},
-    ],
-}
-_JSON_OBJECT_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "additionalProperties": _JSON_VALUE_SCHEMA,
-}
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
-
-
-def _tool_function(function_name: str, entrypoint: Callable[..., object]) -> Function:
-    return Function(
-        name=function_name,
-        description=_TOOL_DESCRIPTIONS[function_name],
-        parameters=_TOOL_PARAMETERS[function_name],
-        entrypoint=entrypoint,
-        skip_entrypoint_processing=True,
-    )
 
 
 _TOOL_DESCRIPTIONS = {
@@ -64,7 +36,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
         "type": "object",
         "properties": {
             "source_type": {"type": "string"},
-            "source": _JSON_OBJECT_SCHEMA,
+            "source": JSON_OBJECT_SCHEMA,
             "confirm_public": {"type": "boolean"},
         },
         "required": ["source_type", "source", "confirm_public"],
@@ -85,18 +57,19 @@ class ReportPublishingTools(Toolkit):
         self._register_functions()
 
     def _register_functions(self) -> None:
-        sync_functions = {
-            "publish_report": self.publish_report,
-            "revoke_public_report": self.revoke_public_report,
-        }
-        async_functions = {
-            "publish_report": self.apublish_report,
-            "revoke_public_report": self.arevoke_public_report,
-        }
-        for function_name, entrypoint in sync_functions.items():
-            self.functions[function_name] = _tool_function(function_name, entrypoint)
-        for function_name, entrypoint in async_functions.items():
-            self.async_functions[function_name] = _tool_function(function_name, entrypoint)
+        register_toolkit_functions(
+            self,
+            sync_entrypoints={
+                "publish_report": self.publish_report,
+                "revoke_public_report": self.revoke_public_report,
+            },
+            async_entrypoints={
+                "publish_report": self.apublish_report,
+                "revoke_public_report": self.arevoke_public_report,
+            },
+            descriptions=_TOOL_DESCRIPTIONS,
+            parameters=_TOOL_PARAMETERS,
+        )
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:

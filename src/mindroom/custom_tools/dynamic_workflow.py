@@ -12,7 +12,6 @@ import nio
 from agno.agent import Agent
 from agno.run.agent import RunStatus
 from agno.tools import Toolkit
-from agno.tools.function import Function
 
 from mindroom import model_loading
 from mindroom.authorization import responder_candidate_entities_from_cached_room
@@ -22,6 +21,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
     dynamic_workflow_store_and_owner,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError
@@ -34,36 +34,7 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.dynamic_workflows.runner import AsyncParticipantExecutor, ParticipantExecutor
-
-_JSON_VALUE_SCHEMA: dict[str, object] = {
-    "anyOf": [
-        {"type": "object", "additionalProperties": True},
-        {"type": "array", "items": {}},
-        {"type": "string"},
-        {"type": "number"},
-        {"type": "integer"},
-        {"type": "boolean"},
-        {"type": "null"},
-    ],
-}
-_JSON_OBJECT_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "additionalProperties": _JSON_VALUE_SCHEMA,
-}
-
-
-def _tool_function(function_name: str, entrypoint: Callable[..., object]) -> Function:
-    return Function(
-        name=function_name,
-        description=_TOOL_DESCRIPTIONS[function_name],
-        parameters=_TOOL_PARAMETERS[function_name],
-        entrypoint=entrypoint,
-        skip_entrypoint_processing=True,
-    )
-
 
 _TOOL_DESCRIPTIONS = {
     "create_workflow": "Create a Dynamic Workflow from a declarative workflow spec.",
@@ -80,7 +51,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
     "create_workflow": {
         "type": "object",
         "properties": {
-            "spec": _JSON_OBJECT_SCHEMA,
+            "spec": JSON_OBJECT_SCHEMA,
             "scope": {"type": "string"},
             "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         },
@@ -88,14 +59,14 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
     },
     "validate_workflow": {
         "type": "object",
-        "properties": {"spec": _JSON_OBJECT_SCHEMA},
+        "properties": {"spec": JSON_OBJECT_SCHEMA},
         "required": ["spec"],
     },
     "update_workflow": {
         "type": "object",
         "properties": {
             "workflow_id": {"type": "string"},
-            "patch": _JSON_OBJECT_SCHEMA,
+            "patch": JSON_OBJECT_SCHEMA,
             "reason": {"type": "string"},
             "scope": {"type": "string"},
         },
@@ -105,7 +76,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
         "type": "object",
         "properties": {
             "workflow_id": {"type": "string"},
-            "input": _JSON_OBJECT_SCHEMA,
+            "input": JSON_OBJECT_SCHEMA,
             "scope": {"type": "string"},
         },
         "required": ["workflow_id", "input"],
@@ -142,28 +113,29 @@ class DynamicWorkflowTools(Toolkit):
         self._register_functions()
 
     def _register_functions(self) -> None:
-        sync_functions = {
-            "create_workflow": self.create_workflow,
-            "validate_workflow": self.validate_workflow,
-            "update_workflow": self.update_workflow,
-            "run_workflow": self.run_workflow,
-            "get_workflow_run": self.get_workflow_run,
-            "list_workflows": self.list_workflows,
-            "list_workflow_revisions": self.list_workflow_revisions,
-        }
-        async_functions = {
-            "create_workflow": self.acreate_workflow,
-            "validate_workflow": self.avalidate_workflow,
-            "update_workflow": self.aupdate_workflow,
-            "run_workflow": self.arun_workflow,
-            "get_workflow_run": self.aget_workflow_run,
-            "list_workflows": self.alist_workflows,
-            "list_workflow_revisions": self.alist_workflow_revisions,
-        }
-        for function_name, entrypoint in sync_functions.items():
-            self.functions[function_name] = _tool_function(function_name, entrypoint)
-        for function_name, entrypoint in async_functions.items():
-            self.async_functions[function_name] = _tool_function(function_name, entrypoint)
+        register_toolkit_functions(
+            self,
+            sync_entrypoints={
+                "create_workflow": self.create_workflow,
+                "validate_workflow": self.validate_workflow,
+                "update_workflow": self.update_workflow,
+                "run_workflow": self.run_workflow,
+                "get_workflow_run": self.get_workflow_run,
+                "list_workflows": self.list_workflows,
+                "list_workflow_revisions": self.list_workflow_revisions,
+            },
+            async_entrypoints={
+                "create_workflow": self.acreate_workflow,
+                "validate_workflow": self.avalidate_workflow,
+                "update_workflow": self.aupdate_workflow,
+                "run_workflow": self.arun_workflow,
+                "get_workflow_run": self.aget_workflow_run,
+                "list_workflows": self.alist_workflows,
+                "list_workflow_revisions": self.alist_workflow_revisions,
+            },
+            descriptions=_TOOL_DESCRIPTIONS,
+            parameters=_TOOL_PARAMETERS,
+        )
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:

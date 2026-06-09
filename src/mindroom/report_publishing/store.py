@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -94,7 +94,6 @@ class ReportPublishingStore:
 
     def get_public_report(self, slug: str, *, include_revoked: bool = False) -> PublishedReport:
         """Load one public report record."""
-        _validate_public_report_slug(slug)
         report = _published_report_from_json(_load_json_mapping(self._public_report_path(slug)))
         if report.revoked_at is not None and not include_revoked:
             msg = f"Public report '{slug}' was revoked."
@@ -115,19 +114,7 @@ class ReportPublishingStore:
         report = self.get_public_report(slug, include_revoked=True)
         if report.revoked_at is not None:
             return report
-        revoked = PublishedReport(
-            slug=report.slug,
-            source_type=report.source_type,
-            source=dict(report.source),
-            artifact_path=report.artifact_path,
-            title=report.title,
-            requested_by=report.requested_by,
-            published_by=report.published_by,
-            published_at=report.published_at,
-            public_url=report.public_url,
-            revoked_at=_utc_now(),
-            revoked_by=revoked_by,
-        )
+        revoked = replace(report, revoked_at=_utc_now(), revoked_by=revoked_by)
         _atomic_write_json(self._public_report_path(slug), _published_report_to_json(revoked))
         return revoked
 
