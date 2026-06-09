@@ -36,6 +36,75 @@ def _approved_egress_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.mark.parametrize(
+    ("hostname", "expected"),
+    [
+        ("Docs.Example.COM.", "docs.example.com"),
+        ("münchen.example", "xn--mnchen-3ya.example"),
+    ],
+)
+def test_canonical_hostname_normalizes_case_trailing_dot_and_idna(hostname: str, expected: str) -> None:
+    """Hostnames should canonicalize to lowercase ASCII DNS names."""
+    assert approved_egress_module._canonical_hostname(hostname) == expected
+
+
+@pytest.mark.parametrize(
+    ("hostname", "match"),
+    [
+        ("", "must not be empty"),
+        ("https://docs.example.com", "scheme, path, query, or credentials"),
+        ("docs.example.com/path", "scheme, path, query, or credentials"),
+        ("user@docs.example.com", "scheme, path, query, or credentials"),
+        ("docs.example.com:443", "must not include a port"),
+        ("*.example.com", "wildcards are not supported"),
+        ("203.0.113.7", "IP literals are not valid"),
+        ("example", "fully-qualified external DNS name"),
+        ("localhost", "fully-qualified external DNS name"),
+        ("metadata.google.internal", "points at an internal name"),
+        ("foo.svc.cluster.local", "points at an internal name"),
+        ("api.svc", "points at an internal name"),
+        ("foo.localhost", "points at an internal name"),
+        ("bad..example.com", "not valid IDNA"),
+        (f"{'a' * 64}.example.com", "not valid IDNA"),
+        ("-bad.example.com", "not a valid DNS name"),
+        ("foo_bar.example.com", "contains unsupported characters"),
+    ],
+)
+def test_canonical_hostname_rejects_invalid_and_internal_names(hostname: str, match: str) -> None:
+    """The hostname gate should reject malformed, internal, and non-DNS inputs."""
+    with pytest.raises(ValueError, match=match):
+        approved_egress_module._canonical_hostname(hostname)
+
+
+def test_request_network_access_rejects_internal_hostname_before_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Internal hostnames must never reach the policy API."""
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "rejected hostname should not create a grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+
+    with pytest.raises(ValueError, match="points at an internal name"):
+        asyncio.run(
+            _approved_egress_tool().request_network_access(
+                "metadata.google.internal",
+                5,
+                "Need metadata",
+            ),
+        )
+
+
+def test_effective_ttl_rejects_non_integer_max_ttl_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed max-TTL override must fail loudly instead of restoring the default cap."""
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS", "60s")
+
+    with pytest.raises(RuntimeError, match="MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS must be an integer"):
+        approved_egress_module._effective_ttl_seconds(300)
+
+
 def test_request_network_access_skips_grant_when_static_allowed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

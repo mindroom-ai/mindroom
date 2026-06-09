@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from http.client import HTTPMessage
     from typing import IO
 
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
 _DEFAULT_MAX_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_POLICY_API_URL = "http://mindroom-egress-proxy:8080"
 _DEFAULT_ALLOWLIST_PATH = "/etc/mindroom-egress/allowed-domains.txt"
@@ -43,7 +45,6 @@ _FORBIDDEN_HOST_SUFFIXES = (
     ".svc.cluster.local",
     ".cluster.local",
 )
-_SHARED_EXECUTION_SCOPES = {"shared", "unscoped", "agent", "global"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +59,9 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return int(raw)
-    except ValueError:
-        return default
+    except ValueError as exc:
+        msg = f"{name} must be an integer"
+        raise RuntimeError(msg) from exc
 
 
 def _static_allowlist_entries() -> list[str]:
@@ -177,8 +179,8 @@ def _canonical_hostname(value: str) -> str:
     return normalized
 
 
-def _static_allowlist_allows(hostname: str) -> bool:
-    host = _canonical_hostname(hostname)
+def _static_allowlist_allows(host: str) -> bool:
+    """Return whether one canonical hostname matches the static allowlist."""
     for entry in _static_allowlist_entries():
         try:
             if entry.startswith("."):
@@ -240,20 +242,16 @@ def _normalize_reason(value: str) -> str:
     return normalized[:_MAX_REASON_CHARS]
 
 
-def _effective_ttl_seconds(ttl_minutes: int) -> int:
-    requested = int(ttl_minutes) * 60
-    if requested <= 0:
+def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
+    if requested_ttl_seconds <= 0:
         msg = "ttl_minutes must be positive"
         raise ValueError(msg)
     max_ttl = _env_int("MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS", _DEFAULT_MAX_TTL_SECONDS)
-    return max(1, min(requested, max_ttl))
+    return max(1, min(requested_ttl_seconds, max_ttl))
 
 
-def _grant_subject(agent_name: str) -> _GrantSubject:
-    context = get_tool_runtime_context()
-    if context is None:
-        msg = "request_network_access requires a live MindRoom Matrix tool context"
-        raise RuntimeError(msg)
+def _grant_subject(context: ToolRuntimeContext) -> _GrantSubject:
+    agent_name = context.agent_name
     scope = context.config.get_agent_execution_scope(agent_name)
     if scope == "user_agent":
         identity = build_execution_identity_from_runtime_context(context)
@@ -265,10 +263,7 @@ def _grant_subject(agent_name: str) -> _GrantSubject:
     if scope == "user":
         msg = "approved egress is not supported for worker_scope=user"
         raise RuntimeError(msg)
-    if scope in _SHARED_EXECUTION_SCOPES or not scope:
-        return _GrantSubject(subject_type="agent", subject=agent_name)
-    msg = f"approved egress is not supported for worker scope {scope!r}"
-    raise RuntimeError(msg)
+    return _GrantSubject(subject_type="agent", subject=agent_name)
 
 
 class _NoRedirectHandler(request.HTTPRedirectHandler):
@@ -373,14 +368,14 @@ class _ApprovedEgressTools(Toolkit):
         if _static_allowlist_allows(host):
             return f"{host} is already allowed by the static egress allowlist. No temporary grant was created."
         normalized_reason = _normalize_reason(reason)
-        requested_ttl_seconds = int(ttl_minutes) * 60
-        effective_ttl_seconds = _effective_ttl_seconds(ttl_minutes)
+        requested_ttl_seconds = ttl_minutes * 60
+        effective_ttl_seconds = _effective_ttl_seconds(requested_ttl_seconds)
 
         context = get_tool_runtime_context()
         if context is None:
             msg = "request_network_access requires a live MindRoom Matrix tool context"
             raise RuntimeError(msg)
-        subject = _grant_subject(context.agent_name)
+        subject = _grant_subject(context)
         payload: dict[str, object] = {
             "hostname": host,
             "subject_type": subject.subject_type,
