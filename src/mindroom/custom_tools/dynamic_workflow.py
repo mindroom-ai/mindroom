@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import nio
 from agno.agent import Agent
-from agno.run.agent import RunStatus
+from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
 from mindroom import model_loading
@@ -771,15 +771,29 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
 
 
 async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
+    # Stream the run: the participant inherits the caller's model and the workflow's runtime
+    # budget, and the Anthropic/Vertex SDK refuses a non-streaming request whose budget could
+    # exceed 10 minutes. Consuming the event stream drives tool calls and their approval gating;
+    # yield_run_output makes the final RunOutput the last streamed item, which works without a db.
+    final_output: RunOutput | None = None
     with tool_runtime_context(context):
-        response = await agent.arun(
+        event_stream = agent.arun(
             prompt,
             user_id=context.requester_id,
             session_id=context.session_id,
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
         )
-    content = response.content if response.content is not None else ""
-    if response.status != RunStatus.completed:
-        message = str(content) if content else f"Agent run ended with status {response.status.value}."
+        async for event in event_stream:
+            if isinstance(event, RunOutput):
+                final_output = event
+    if final_output is None:
+        msg = "Dynamic Workflow participant run produced no output."
+        raise DynamicWorkflowExecutionError(msg)
+    content = final_output.content if final_output.content is not None else ""
+    if final_output.status != RunStatus.completed:
+        message = str(content) if content else f"Agent run ended with status {final_output.status.value}."
         raise DynamicWorkflowExecutionError(message)
     return content
 

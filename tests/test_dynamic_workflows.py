@@ -15,7 +15,7 @@ import nio
 import pytest
 import yaml
 from agno.factory import RequestContext
-from agno.run.agent import RunStatus
+from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 from agno.workflow import Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
@@ -38,7 +38,32 @@ from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_pa
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
+
+
+def _fake_stream_agent(
+    *,
+    content: str,
+    status: RunStatus = RunStatus.completed,
+    on_run: Callable[..., None] | None = None,
+) -> SimpleNamespace:
+    """Build a fake Agent matching the streaming participant run contract.
+
+    ``_arun_agent`` calls ``agent.arun(..., stream=True, yield_run_output=True)`` (not awaited)
+    and consumes the event iterator, treating the final ``RunOutput`` as the result.
+    """
+
+    def arun(prompt: str, *, user_id: str, session_id: str, **_kwargs: object) -> AsyncIterator[RunOutput]:
+        if on_run is not None:
+            on_run(prompt, user_id=user_id, session_id=session_id)
+
+        async def _events() -> AsyncIterator[RunOutput]:
+            yield RunOutput(content=content, status=status)
+
+        return _events()
+
+    return SimpleNamespace(arun=arun)
 
 
 def _workflow_spec(**overrides: object) -> dict[str, object]:
@@ -1924,7 +1949,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()
 
-    async def fake_arun(prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+    def assert_run(prompt: str, *, user_id: str, session_id: str) -> None:
         runtime_context = get_tool_runtime_context()
         assert runtime_context is not None
         assert asyncio.get_running_loop() is parent_loop
@@ -1934,9 +1959,8 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         assert "competitor-research-report:run_1:writer_a" in session_id
         assert prompt == "Write a report."
         assert user_id == "@user:localhost"
-        return SimpleNamespace(content="done", status=RunStatus.completed)
 
-    fake_agent = SimpleNamespace(arun=fake_arun)
+    fake_agent = _fake_stream_agent(content="done", on_run=assert_run)
     with patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock:
         asyncio.set_event_loop(parent_loop)
         try:
@@ -2159,16 +2183,15 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
     )
     sentinel_toolkits = {name: Toolkit(name=f"fake_{name}") for name in ("website", "shell")}
 
-    async def fake_arun(prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+    def assert_run(prompt: str, *, user_id: str, session_id: str) -> None:
         assert "Write a cited report" in prompt
         assert user_id == "@user:localhost"
         assert session_id
         runtime_context = get_tool_runtime_context()
         assert runtime_context is not None
         assert runtime_context.config.tool_approval.default == "require_approval"
-        return SimpleNamespace(content="researched", status=RunStatus.completed)
 
-    agent_mock = Mock(return_value=SimpleNamespace(arun=fake_arun))
+    agent_mock = Mock(return_value=_fake_stream_agent(content="researched", on_run=assert_run))
     with (
         tool_runtime_context(context),
         patch(
@@ -2212,12 +2235,11 @@ def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Pa
         outputs=[{"id": "report_html", "type": "html_report", "from_step": "edit"}],
     )
 
-    async def fake_arun(_prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+    def assert_run(_prompt: str, *, user_id: str, session_id: str) -> None:
         assert user_id == "@user:localhost"
         assert session_id
-        return SimpleNamespace(content="done", status=RunStatus.completed)
 
-    agent_mock = Mock(return_value=SimpleNamespace(arun=fake_arun))
+    agent_mock = Mock(return_value=_fake_stream_agent(content="done", on_run=assert_run))
     with (
         tool_runtime_context(context),
         patch("mindroom.agents.build_agent_toolkit") as build_toolkit_mock,
@@ -2238,10 +2260,11 @@ def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
     """Participant failures from Agno should become failed workflow steps, not normal content."""
     context = _make_context(tmp_path)
 
-    async def fake_arun(_prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+    def assert_run(_prompt: str, *, user_id: str, session_id: str) -> None:
         assert user_id == "@user:localhost"
         assert session_id == context.session_id
-        return SimpleNamespace(content="provider auth failed", status=RunStatus.error)
+
+    fake_agent = _fake_stream_agent(content="provider auth failed", status=RunStatus.error, on_run=assert_run)
 
     with pytest.raises(dynamic_workflow_module.DynamicWorkflowExecutionError, match="provider auth failed"):
-        asyncio.run(dynamic_workflow_module._arun_agent(context, SimpleNamespace(arun=fake_arun), "Write."))
+        asyncio.run(dynamic_workflow_module._arun_agent(context, fake_agent, "Write."))
