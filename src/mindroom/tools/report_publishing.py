@@ -16,6 +16,7 @@ register_builtin_tool_metadata(
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
+        consumes_workspace_paths=True,
         icon="Share2",
         icon_color="text-emerald-500",
         config_fields=[],

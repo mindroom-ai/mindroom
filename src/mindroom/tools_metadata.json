@@ -8048,7 +8048,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
-      "consumes_workspace_paths": false,
+      "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Publish authorized report artifacts through revocable public links",

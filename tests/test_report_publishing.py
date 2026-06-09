@@ -127,6 +127,7 @@ def test_report_publishing_tool_registered() -> None:
     metadata = TOOL_METADATA["report_publishing"]
 
     assert metadata.display_name == "Report Publishing"
+    assert metadata.consumes_workspace_paths is True
     assert metadata.function_names == (
         "publish_report",
         "revoke_public_report",
