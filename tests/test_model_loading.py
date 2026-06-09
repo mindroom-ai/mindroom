@@ -37,6 +37,30 @@ def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_stre
     assert model.timeout == 3600.0
 
 
+def test_bedrock_claude_gets_explicit_timeout(tmp_path: Path) -> None:
+    """Bedrock Claude uses the same anthropic SDK guard and needs the same explicit timeout."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "bedrock": ModelConfig(
+                    provider="bedrock_claude",
+                    id="anthropic.claude-opus-4-8",
+                    extra_kwargs={
+                        "aws_region": "us-east-1",
+                        "aws_access_key": "dummy-access",
+                        "aws_secret_key": "dummy-secret",
+                    },
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    model = get_model_instance(config, runtime_paths_for(config), "bedrock")
+
+    assert model.timeout == 3600.0
+
+
 def test_anthropic_timeout_override_is_preserved(tmp_path: Path) -> None:
     """Explicit Claude timeout config wins over the default."""
     config = bind_runtime_paths(

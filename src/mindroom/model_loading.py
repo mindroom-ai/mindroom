@@ -196,8 +196,6 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
     if canonical_provider in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)
         extra_kwargs.setdefault("extended_cache_time", True)
-
-    if canonical_provider in {"anthropic", "vertexai_claude"}:
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
 
     if canonical_provider == "ollama":
