@@ -544,7 +544,7 @@ def _load_agent_model_instance(
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911
+def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     tool_name: str,
     *,
     agent_name: str,
@@ -662,6 +662,16 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
 
         return _wrap_direct_agent_toolkit_for_output_files(
             DynamicWorkflowTools(),
+            agent_runtime=agent_runtime,
+            runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+
+    if tool_name == "report_publishing":
+        from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
+
+        return _wrap_direct_agent_toolkit_for_output_files(
+            ReportPublishingTools(),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,

@@ -4137,7 +4137,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", marker = "extra == 'google-drive'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'" },
-    { name = "google-genai", specifier = ">=2.0.0" },
+    { name = "google-genai", specifier = ">=2" },
     { name = "google-genai", marker = "extra == 'gemini'" },
     { name = "google-maps-places", marker = "extra == 'google-maps'" },
     { name = "google-search-results", marker = "extra == 'serpapi'", specifier = ">=2.4.2" },
@@ -4195,7 +4195,7 @@ requires-dist = [
     { name = "pygments", specifier = ">=2.20" },
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
-    { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2.0" },
+    { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
     { name = "python-dotenv", specifier = ">=1" },
     { name = "pytz", marker = "extra == 'cal-com'" },
     { name = "pyyaml", specifier = ">=6" },
@@ -4220,7 +4220,7 @@ requires-dist = [
     { name = "requests", marker = "extra == 'zoom'" },
     { name = "resend", marker = "extra == 'resend'" },
     { name = "rich" },
-    { name = "scrapegraph-py", marker = "extra == 'scrapegraph'", specifier = ">=2.1.0" },
+    { name = "scrapegraph-py", marker = "extra == 'scrapegraph'", specifier = ">=2.1" },
     { name = "sentence-transformers", marker = "extra == 'sentence-transformers'" },
     { name = "slack-sdk", marker = "extra == 'slack'" },
     { name = "spider-client", marker = "extra == 'spider'" },
@@ -4243,7 +4243,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-drive", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-e2ee", "matrix-message", "matrix-room", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-summary", "thread-tags", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-drive", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-e2ee", "matrix-message", "matrix-room", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-summary", "thread-tags", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 dev = [

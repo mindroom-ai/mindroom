@@ -43,6 +43,10 @@ depends_on = []
 path = "mindroom.dynamic_workflows"
 depends_on = []
 
+[[modules]]
+path = "mindroom.report_publishing"
+depends_on = []
+
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
 [[modules]]
@@ -365,8 +369,21 @@ depends_on = [
 path = "mindroom.api.dynamic_workflows"
 depends_on = [
     "mindroom.api.config_lifecycle",
+    "mindroom.api.report_headers",
     "mindroom.constants",
     "mindroom.dynamic_workflows",
+]
+
+[[modules]]
+path = "mindroom.api.report_headers"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.report_publishing"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.report_headers",
+    "mindroom.report_publishing",
 ]
 
 [[modules]]
@@ -456,6 +473,7 @@ depends_on = [
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
     "mindroom.api.oauth",
+    "mindroom.api.report_publishing",
     "mindroom.api.schedules",
     "mindroom.api.skills",
     "mindroom.api.tools",

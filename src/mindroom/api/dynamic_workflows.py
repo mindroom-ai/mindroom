@@ -8,19 +8,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from mindroom.api.config_lifecycle import api_runtime_paths
+from mindroom.api.report_headers import set_report_headers
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
 
 router = APIRouter(tags=["dynamic-workflows"])
-
-_REPORT_CSP = (
-    "default-src 'none'; "
-    "img-src 'self' data: https:; "
-    "style-src 'unsafe-inline'; "
-    "font-src 'self' data:; "
-    "base-uri 'none'; "
-    "frame-ancestors 'self'"
-)
 
 
 class _RuntimePathsProtocol(Protocol):
@@ -62,10 +54,7 @@ async def private_dynamic_workflow_report(
         raise HTTPException(status_code=404, detail="Private Dynamic Workflow report was not found.") from exc
 
     response = FileResponse(report_path, media_type="text/html")
-    response.headers["Content-Security-Policy"] = _REPORT_CSP
-    response.headers["Cache-Control"] = "private, no-store, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
+    set_report_headers(response, cache_control="private, no-store, max-age=0")
     return response
 
 

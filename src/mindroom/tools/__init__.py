@@ -22,6 +22,7 @@ from mindroom.tools import (
     dynamic_tools,  # noqa: F401
     dynamic_workflow,  # noqa: F401
     memory,  # noqa: F401
+    report_publishing,  # noqa: F401
     self_config,  # noqa: F401
 )
 from mindroom.tools.agentql import agentql_tools

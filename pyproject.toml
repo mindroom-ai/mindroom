@@ -158,6 +158,7 @@ duckduckgo = [
 ]
 dynamic_tools = []
 dynamic_workflow = []
+report_publishing = []
 e2b = [
   "e2b-code-interpreter",
 ]
