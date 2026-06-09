@@ -93,6 +93,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+_TERMINATION_DIAGNOSTIC_ENV = "MINDROOM_DEBUG_AGENT_TERMINATION"
+_TERMINATION_DIAGNOSTIC_PREVIEW_CHARS = 240
 
 __all__ = [
     "AIStreamChunk",
@@ -212,6 +214,8 @@ class _StreamingAttemptState:
     latest_request_input_tokens: int | None = None
     latest_request_cache_read_tokens: int | None = None
     latest_request_cache_write_tokens: int | None = None
+    model_request_count: int = 0
+    model_request_summaries: list[dict[str, object]] = field(default_factory=list)
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
@@ -523,29 +527,30 @@ def _track_model_request_metrics(
     event: ModelRequestCompletedEvent,
 ) -> None:
     """Track per-request model/token usage for streamed runs."""
+    state.model_request_count += 1
+    request_summary: dict[str, object] = {"index": state.model_request_count}
     if event.model:
         state.latest_model_id = event.model
+        request_summary["model"] = event.model
     if event.model_provider:
         state.latest_model_provider = event.model_provider
+        request_summary["model_provider"] = event.model_provider
+    metric_values = [
+        ("input_tokens", event.input_tokens),
+        ("output_tokens", event.output_tokens),
+        ("total_tokens", event.total_tokens),
+        ("reasoning_tokens", event.reasoning_tokens),
+        ("cache_read_tokens", event.cache_read_tokens),
+        ("cache_write_tokens", event.cache_write_tokens),
+    ]
+    for metric_name, metric_value in metric_values:
+        if not isinstance(metric_value, int):
+            continue
+        state.observed_request_metric_fields.add(metric_name)
+        state.request_metric_totals[metric_name] += metric_value
+        request_summary[metric_name] = metric_value
     if isinstance(event.input_tokens, int):
-        state.observed_request_metric_fields.add("input_tokens")
         state.latest_request_input_tokens = event.input_tokens
-        state.request_metric_totals["input_tokens"] += event.input_tokens
-    if isinstance(event.output_tokens, int):
-        state.observed_request_metric_fields.add("output_tokens")
-        state.request_metric_totals["output_tokens"] += event.output_tokens
-    if isinstance(event.total_tokens, int):
-        state.observed_request_metric_fields.add("total_tokens")
-        state.request_metric_totals["total_tokens"] += event.total_tokens
-    if isinstance(event.reasoning_tokens, int):
-        state.observed_request_metric_fields.add("reasoning_tokens")
-        state.request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
-    if isinstance(event.cache_read_tokens, int):
-        state.observed_request_metric_fields.add("cache_read_tokens")
-        state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
-    if isinstance(event.cache_write_tokens, int):
-        state.observed_request_metric_fields.add("cache_write_tokens")
-        state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
     state.latest_request_cache_read_tokens = (
         event.cache_read_tokens if isinstance(event.cache_read_tokens, int) else None
     )
@@ -554,11 +559,29 @@ def _track_model_request_metrics(
     )
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
+    if isinstance(event.time_to_first_token, (int, float)):
+        request_summary["time_to_first_token"] = float(event.time_to_first_token)
+    state.model_request_summaries.append(request_summary)
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:
     visible_text = state.full_response.strip() or (state.canonical_final_body_candidate or "").strip()
     return state.completed_run_event is not None and not visible_text and state.observed_tool_calls == 0
+
+
+def _diagnostic_preview(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= _TERMINATION_DIAGNOSTIC_PREVIEW_CHARS:
+        return text
+    return f"{text[:_TERMINATION_DIAGNOSTIC_PREVIEW_CHARS]}..."
+
+
+def _log_termination_diagnostic(runtime_paths: RuntimePaths, message: str, **fields: object) -> None:
+    if not runtime_paths.env_flag(_TERMINATION_DIAGNOSTIC_ENV):
+        return
+    logger.warning(message, **fields)
 
 
 def _metrics_comparison_payload(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1148,6 +1171,20 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 if run_metadata:
                     run_metadata_collector.update(run_metadata)
 
+            _log_termination_diagnostic(
+                runtime_paths,
+                "AI response termination diagnostic",
+                agent=agent_name,
+                status=response.status.value,
+                run_id=response.run_id,
+                session_id=response.session_id,
+                model=response.model,
+                content_empty=not bool(str(response.content or "").strip()),
+                content_preview=_diagnostic_preview(response.content),
+                tool_count=len(response.tools or []),
+                tool_names=[tool.tool_name or "tool" for tool in response.tools or []],
+            )
+
             if response.status == RunStatus.cancelled:
                 partial_text = _extract_interrupted_partial_text(
                     response.content,
@@ -1727,14 +1764,14 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
 
                     break
 
+                final_status = (
+                    RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
+                )
                 if run_metadata_collector is not None:
                     fallback_metrics = build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
                         state.observed_request_metric_fields,
-                    )
-                    final_status = (
-                        RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
                     )
                     usage_metrics, usage_metrics_fallback = _select_streaming_usage_metrics(
                         state.completed_run_event.metrics if state.completed_run_event is not None else None,
@@ -1770,6 +1807,28 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     )
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
+                completed_event = state.completed_run_event
+                _log_termination_diagnostic(
+                    runtime_paths,
+                    "AI stream termination diagnostic",
+                    agent=agent_name,
+                    status=final_status.value,
+                    run_id=completed_event.run_id if completed_event is not None else None,
+                    session_id=completed_event.session_id if completed_event is not None else None,
+                    model=state.latest_model_id,
+                    completed_event=completed_event is not None,
+                    content_empty=not bool(state.assistant_text.strip()),
+                    content_preview=_diagnostic_preview(state.assistant_text),
+                    final_event_content_preview=(
+                        _diagnostic_preview(completed_event.content) if completed_event is not None else None
+                    ),
+                    observed_tool_calls=state.observed_tool_calls,
+                    completed_tool_count=len(state.completed_tools),
+                    pending_tool_count=len(state.pending_tools),
+                    model_request_count=state.model_request_count,
+                    model_request_summaries=state.model_request_summaries,
+                    request_metric_totals=state.request_metric_totals,
+                )
                 if turn_recorder is not None:
                     final_visible_body = state.assistant_text or state.canonical_final_body_candidate or ""
                     turn_recorder.record_completed(
