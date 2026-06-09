@@ -913,12 +913,11 @@ def _validate_outputs(spec: dict[str, object], step_ids: set[str]) -> None:
             raise DynamicWorkflowError(msg)
         output["id"] = output_id
         output_ids.add(output_id)
-        if "type" in output:
-            output_type = _required_text(output, "type", context=context)
-            if output_type not in _OUTPUT_TYPES:
-                msg = f"{context} has unsupported type '{output_type}'."
-                raise DynamicWorkflowError(msg)
-            output["type"] = output_type
+        output_type = _required_text(output, "type", context=context)
+        if output_type not in _OUTPUT_TYPES:
+            msg = f"{context} has unsupported type '{output_type}'."
+            raise DynamicWorkflowError(msg)
+        output["type"] = output_type
         from_step = _required_text(output, "from_step", context=context)
         if from_step not in step_ids:
             msg = f"{context} references unknown step '{from_step}'."

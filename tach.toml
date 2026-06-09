@@ -365,6 +365,7 @@ depends_on = [
 path = "mindroom.api.dynamic_workflows"
 depends_on = [
     "mindroom.api.config_lifecycle",
+    "mindroom.constants",
     "mindroom.dynamic_workflows",
 ]
 

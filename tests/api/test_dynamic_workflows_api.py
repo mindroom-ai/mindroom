@@ -71,6 +71,9 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
         "base-uri 'none'; "
         "frame-ancestors 'self'"
     )
+    assert response.headers["cache-control"] == "private, no-store, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["expires"] == "0"
     assert "Competitor Research Report" in response.text
     assert "Agno factories" in response.text
 

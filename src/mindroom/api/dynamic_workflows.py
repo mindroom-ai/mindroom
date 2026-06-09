@@ -8,10 +8,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from mindroom.api.config_lifecycle import api_runtime_paths
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
 
 router = APIRouter(tags=["dynamic-workflows"])
-_OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 _REPORT_CSP = (
     "default-src 'none'; "
@@ -63,6 +63,9 @@ async def private_dynamic_workflow_report(
 
     response = FileResponse(report_path, media_type="text/html")
     response.headers["Content-Security-Policy"] = _REPORT_CSP
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return response
 
 
@@ -98,7 +101,7 @@ def _private_report_auth_principals(
         return principals
 
     principals.add(user_id)
-    owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
+    owner_user_id = runtime_paths.env_value(OWNER_MATRIX_USER_ID_ENV)
     if owner_user_id:
         principals.add(owner_user_id)
     return principals

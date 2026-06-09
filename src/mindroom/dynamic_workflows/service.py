@@ -55,7 +55,11 @@ class DynamicWorkflowService:
         requested_by: str,
         base_url: str | None = None,
     ) -> DynamicWorkflowRun:
-        """Start and complete one workflow run on the current managed call path."""
+        """Start and complete one workflow run on the synchronous main-thread call path.
+
+        Synchronous execution uses SIGALRM to enforce permissions.max_runtime_seconds, so callers running in worker
+        threads should use arun_workflow instead.
+        """
         run = self._store.start_workflow_run(
             workflow_id=workflow_id,
             scope=scope,
@@ -173,7 +177,7 @@ class DynamicWorkflowService:
 
 @contextmanager
 def _sync_workflow_runtime_limit(spec: dict[str, object]) -> Iterator[None]:
-    """Enforce permissions.max_runtime_seconds for synchronous workflow execution."""
+    """Enforce permissions.max_runtime_seconds for synchronous main-thread workflow execution."""
     timeout_seconds = workflow_runtime_seconds(spec)
     if threading.current_thread() is not threading.main_thread():
         msg = (

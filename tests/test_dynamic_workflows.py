@@ -713,6 +713,23 @@ def test_validate_workflow_spec_rejects_output_without_source_step(tmp_path: Pat
         )
 
 
+def test_validate_workflow_spec_rejects_output_without_type(tmp_path: Path) -> None:
+    """Declared outputs should include the documented output type."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    with pytest.raises(DynamicWorkflowError, match="field 'type' is missing"):
+        store.validate_workflow(
+            _workflow_spec(
+                outputs=[
+                    {
+                        "id": "report",
+                        "from_step": "write",
+                    },
+                ],
+            ),
+        )
+
+
 def test_validate_workflow_spec_rejects_unsupported_output_type(tmp_path: Path) -> None:
     """Output type docs and validation should stay aligned."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
@@ -1473,15 +1490,9 @@ def test_dynamic_workflow_tool_json_schemas_allow_arbitrary_json_values() -> Non
 
     for schema in (spec_schema, patch_schema, input_schema):
         value_schema = schema["additionalProperties"]
-        assert {entry["type"] for entry in value_schema["anyOf"]} >= {
-            "object",
-            "array",
-            "string",
-            "number",
-            "integer",
-            "boolean",
-            "null",
-        }
+        allowed_types = {entry["type"] for entry in value_schema["anyOf"]}
+        assert {"object", "array", "string", "boolean", "null"} <= allowed_types
+        assert allowed_types & {"number", "integer"}
 
 
 def test_dynamic_workflow_tool_scopes_private_agent_workflows_by_requester(tmp_path: Path) -> None:
