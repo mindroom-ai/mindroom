@@ -199,7 +199,51 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
     assert model.api_key == "sk-no-key-required"
     assert model.base_url == "http://llama.local/v1"
     assert model.max_tokens == 32000
+    assert model.request_params == {"parallel_tool_calls": False}
+    assert model.extra_body == {
+        "parse_tool_calls": True,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
     assert model.default_role_map["system"] == "system"
+
+
+def test_llama_cpp_provider_preserves_explicit_tool_request_overrides() -> None:
+    """Users should be able to opt out of MindRoom's llama.cpp request defaults."""
+    config_data = {
+        "models": {
+            "local_model": {
+                "provider": "llama_cpp",
+                "id": "gemma-4:31b-q4-uncensored",
+                "extra_kwargs": {
+                    "base_url": "http://llama.local/v1",
+                    "request_params": {
+                        "parallel_tool_calls": True,
+                    },
+                    "extra_body": {
+                        "parse_tool_calls": False,
+                        "chat_template_kwargs": {
+                            "enable_thinking": True,
+                        },
+                    },
+                },
+            },
+        },
+        "router": {
+            "model": "local_model",
+        },
+        "agents": {},
+    }
+
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+
+    model = get_model_instance(config, runtime_paths, "local_model")
+
+    assert isinstance(model, LlamaCpp)
+    assert model.request_params == {"parallel_tool_calls": True}
+    assert model.extra_body == {
+        "parse_tool_calls": False,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
 
 
 def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

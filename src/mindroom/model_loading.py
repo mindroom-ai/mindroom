@@ -52,6 +52,20 @@ def _canonical_provider(provider: str) -> str:
     return provider.strip().lower().replace("-", "_")
 
 
+def _populate_llama_cpp_tool_defaults(extra_kwargs: dict[str, Any]) -> None:
+    """Set conservative llama.cpp defaults for OpenAI-compatible tool calls."""
+    request_params = dict(cast("dict[str, Any]", extra_kwargs.get("request_params") or {}))
+    request_params.setdefault("parallel_tool_calls", False)
+    extra_kwargs["request_params"] = request_params
+
+    extra_body = dict(cast("dict[str, Any]", extra_kwargs.get("extra_body") or {}))
+    extra_body.setdefault("parse_tool_calls", True)
+    chat_template_kwargs = dict(cast("dict[str, Any]", extra_body.get("chat_template_kwargs") or {}))
+    chat_template_kwargs.setdefault("enable_thinking", False)
+    extra_body["chat_template_kwargs"] = chat_template_kwargs
+    extra_kwargs["extra_body"] = extra_body
+
+
 def _populate_azure_openai_runtime_kwargs(
     extra_kwargs: dict[str, Any],
     runtime_paths: RuntimePaths,
@@ -188,6 +202,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
 
     if canonical_provider == "azure":
         _populate_azure_openai_runtime_kwargs(extra_kwargs, runtime_paths)
+
+    if canonical_provider == "llama_cpp":
+        _populate_llama_cpp_tool_defaults(extra_kwargs)
 
     if canonical_provider in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)

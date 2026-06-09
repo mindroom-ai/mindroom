@@ -202,4 +202,7 @@ OPENAI_EMBEDDING_DIMENSIONS: Mapping[str, int] = MappingProxyType(
 
 def llama_cpp_server_command(model_id: str) -> str:
     """Return the llama.cpp OpenAI-compatible server command for a Hugging Face GGUF ref."""
-    return f"llama-server -hf {model_id} --host 127.0.0.1 --port 8080"
+    return (
+        f"llama-server -hf {model_id} --host 127.0.0.1 --port 8080 "
+        "--jinja --reasoning off --chat-template-kwargs '{\"enable_thinking\":false}'"
+    )
