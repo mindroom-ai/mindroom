@@ -61,7 +61,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
+    from mindroom.config.worker_egress import ResolvedWorkerEgressBroker
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -450,7 +451,7 @@ def _build_registered_agent_tool(
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
-    worker_egress_env: Mapping[str, str] | None,
+    worker_egress_broker: ResolvedWorkerEgressBroker | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_worker_target_from_runtime_env(
@@ -463,6 +464,11 @@ def _build_registered_agent_tool(
             if worker_scope == "user_agent" and routing_agent_is_private
             else (frozenset() if worker_scope == "user_agent" else None)
         ),
+    )
+    worker_egress_env = (
+        worker_egress_broker.execution_env_for_worker_target(worker_target)
+        if worker_egress_broker is not None
+        else None
     )
 
     return get_tool_by_name(
@@ -719,7 +725,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         agent_runtime.is_private,
         execution_identity,
         runtime_overrides,
-        worker_egress_broker.execution_env if worker_egress_broker is not None else None,
+        worker_egress_broker,
     )
 
 

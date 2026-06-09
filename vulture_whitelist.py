@@ -211,6 +211,7 @@ _.validate_worker_egress_broker_references  # unused method (src/mindroom/config
 get_credential_status  # unused function (src/mindroom/api/credentials.py)
 connect_spotify  # unused function (src/mindroom/api/integrations.py)
 _.validate_worker_grantable_credentials  # unused method (src/mindroom/config/models.py)
+_.validate_kind_fields  # unused method (src/mindroom/config/worker_egress.py)
 _.validate_non_empty_string  # unused method (src/mindroom/config/worker_egress.py)
 _.validate_proxy_url_scheme  # unused method (src/mindroom/config/worker_egress.py)
 set_api_key  # unused function (src/mindroom/api/credentials.py)

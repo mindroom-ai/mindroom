@@ -1273,7 +1273,8 @@ class Config(BaseModel):
             available = ", ".join(sorted(self.worker_egress_brokers)) or "(none)"
             msg = f"Unknown worker_egress_broker '{broker_reference}'. Available worker_egress_brokers: {available}"
             raise ConfigRuntimeValidationError(msg)
-        return ResolvedWorkerEgressBroker(name=broker_reference, execution_env=broker.execution_env())
+        execution_env = broker.execution_env() if broker.kind == "static" else {}
+        return ResolvedWorkerEgressBroker(name=broker_reference, execution_env=execution_env, config=broker)
 
     def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.
