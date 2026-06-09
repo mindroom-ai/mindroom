@@ -7386,7 +7386,20 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
-      "config_fields": [],
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool.",
+          "label": "Pre-approved participant tools",
+          "name": "allowed_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        }
+      ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
