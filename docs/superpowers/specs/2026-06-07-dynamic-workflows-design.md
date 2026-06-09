@@ -485,19 +485,18 @@ The remaining work to finish the feature is tracked in the "Finish Phase 1" sect
 
 These items close the gap between "the grant plumbing works" and "the feature is trustworthy and usable end to end".
 
-- Stream ephemeral participant runs.
-  `_arun_agent` calls `agent.arun()` without `stream=True`, so Claude/Vertex participants fail their first model call with "Streaming is required for operations that may take longer than 10 minutes" before any tool runs.
-  The fix mirrors the main agent path, which streams and consumes events.
-  This blocks all Claude participant execution, with or without tool grants; Gemini participants are unaffected because that SDK has no equivalent guard.
-- Carry workflow provenance into the approval card.
-  `ToolApprovalCall` carries only `tool_name`, `arguments`, `agent_name`, and the Matrix scope, so a participant's approval card is indistinguishable from a normal agent tool call.
-  The card should name the workflow and participant so the approver gives informed consent.
-- Decide policy for high-power tools under tool grants.
-  `config_manager`, `subagents`, `scheduler`, and `claude_agent` are registered and grantable but absent from `_WORKFLOW_RESTRICTED_TOOLS`, so `allowed_tools: ["*"]` can pre-approve config rewrites, agent spawning, and cron creation with no per-call approval.
-  Either add them to the restricted set, forbid wildcard pre-approval for them, or consciously accept the risk.
-- Define blocking-approval behavior.
-  In the synchronous `run_workflow` path a participant tool call blocks on approval up to the workflow's `max_runtime_seconds`, which hangs the calling agent's turn.
-  Verify this behavior and decide on an acceptable cap or a clearer "waiting for approval" signal.
+- Done: stream ephemeral participant runs.
+  `_arun_agent` now streams with `stream=True` and `yield_run_output=True` and consumes the event stream, so Claude/Vertex participants no longer trip the SDK's "Streaming is required for operations that may take longer than 10 minutes" guard.
+  Verified live with a Vertex Claude participant that wrote and read a unique token through a granted shell tool.
+- Done: carry workflow provenance into the approval card.
+  `ToolApprovalCall` now carries a `ToolCallWorkflowOrigin` (workflow id plus participant id) injected through the participant's tool hook bridge.
+  Approval cards expose `workflow_id` and `participant_id` content fields, and the card body names the workflow and participant in both pending and resolved states.
+- Done: high-power tools are never pre-approved.
+  `claude_agent`, `config_manager`, `scheduler`, and `subagents` stay grantable, but `_WORKFLOW_NO_PREAPPROVAL_TOOLS` excludes them from `allowed_tools` pre-approval, wildcard or explicit, so every call posts an approval card.
+  This also closes the escalation where an agent with `self_config` edits its own `allowed_tools` config to silence approval for system-mutating tools.
+- Done: blocking-approval behavior is bounded by the runtime cap.
+  A participant tool call waiting on approval blocks the caller's turn, but `permissions.max_runtime_seconds` (hard-capped at 3600 seconds) fails the run at the deadline, and the cancelled approval wait edits the pending card to expired.
+  The approval card posted in the originating room is the "waiting for approval" signal; no additional cap was added.
 - Live-test the full approval loop.
   Drive the real path on a local Matrix stack: a participant calls a non-pre-approved tool, the card posts in the originating room, the requester reacts to approve, the tool runs, and the workflow completes; deny declines.
 

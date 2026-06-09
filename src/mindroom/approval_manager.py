@@ -264,6 +264,8 @@ class _ApprovalManager:
         timeout_seconds: float,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        workflow_id: str | None = None,
+        participant_id: str | None = None,
     ) -> ApprovalDecision:
         """Send one Matrix approval card and wait for the Matrix-backed resolution."""
         # Keep the send/bind/wait flow linear so cancellation cleanup remains visible.
@@ -287,6 +289,8 @@ class _ApprovalManager:
             arguments=event_arguments,
             arguments_truncated=arguments_truncated,
             agent_name=agent_name,
+            workflow_id=workflow_id,
+            participant_id=participant_id,
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
@@ -1076,10 +1080,17 @@ class _ApprovalManager:
         requested_at: datetime,
         expires_at: datetime,
         status: PendingApprovalStatus,
+        workflow_id: str | None = None,
+        participant_id: str | None = None,
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(tool_name, status),
+            "body": _ApprovalManager._event_body(
+                tool_name,
+                status,
+                workflow_id=workflow_id,
+                participant_id=participant_id,
+            ),
             "tool_name": tool_name,
             "tool_call_id": approval_id,
             "arguments": arguments,
@@ -1092,6 +1103,10 @@ class _ApprovalManager:
         }
         if agent_name is not None:
             content["agent_name"] = agent_name
+        if workflow_id is not None:
+            content["workflow_id"] = workflow_id
+        if participant_id is not None:
+            content["participant_id"] = participant_id
         if arguments_truncated:
             content["arguments_truncated"] = True
         if requester_id is not None:
@@ -1116,7 +1131,12 @@ class _ApprovalManager:
         )
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(pending.tool_name, status),
+            "body": _ApprovalManager._event_body(
+                pending.tool_name,
+                status,
+                workflow_id=pending.workflow_id,
+                participant_id=pending.participant_id,
+            ),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.approval_id,
             "arguments": pending.arguments_preview,
@@ -1131,6 +1151,10 @@ class _ApprovalManager:
         }
         if pending.agent_name is not None:
             content["agent_name"] = pending.agent_name
+        if pending.workflow_id is not None:
+            content["workflow_id"] = pending.workflow_id
+        if pending.participant_id is not None:
+            content["participant_id"] = pending.participant_id
         if pending.arguments_preview_truncated:
             content["arguments_truncated"] = True
         if pending.requester_id:
@@ -1140,14 +1164,23 @@ class _ApprovalManager:
         return content
 
     @staticmethod
-    def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
+    def _event_body(
+        tool_name: str,
+        status: PendingApprovalStatus,
+        *,
+        workflow_id: str | None = None,
+        participant_id: str | None = None,
+    ) -> str:
+        subject = tool_name
+        if workflow_id is not None and participant_id is not None:
+            subject = f"{tool_name} — Dynamic Workflow '{workflow_id}' participant '{participant_id}'"
         if status == "approved":
-            return f"Approved: {tool_name}"
+            return f"Approved: {subject}"
         if status == "denied":
-            return f"Denied: {tool_name}"
+            return f"Denied: {subject}"
         if status == "expired":
-            return f"Expired: {tool_name}"
-        return f"🔒 Approval required: {tool_name}"
+            return f"Expired: {subject}"
+        return f"🔒 Approval required: {subject}"
 
     @classmethod
     def _normalized_resolution_request(

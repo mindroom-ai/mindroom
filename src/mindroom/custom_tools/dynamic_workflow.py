@@ -28,6 +28,7 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.tool_approval import ToolCallWorkflowOrigin
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -46,6 +47,11 @@ if TYPE_CHECKING:
 _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
 )
+
+# Tools that mutate the MindRoom system itself (rewrite config.yaml, spawn agents, create
+# cron jobs, run an autonomous coding agent). Participants may be granted these, but every
+# call needs a human decision: allowed_tools (including "*") never pre-approves them.
+_WORKFLOW_NO_PREAPPROVAL_TOOLS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
 
 _TOOL_DESCRIPTIONS = {
     "create_workflow": (
@@ -445,7 +451,7 @@ def _participant_executor(context: ToolRuntimeContext, workflow_id: str) -> Part
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return _execute_participant(context, participant, prompt, run_scope=run_scope)
+        return _execute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
 
     return execute
 
@@ -461,7 +467,7 @@ def _aparticipant_executor(context: ToolRuntimeContext, workflow_id: str) -> Asy
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope)
+        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
 
     return execute
 
@@ -472,12 +478,19 @@ def _execute_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
         return _execute_room_agent_participant(context, participant, prompt, run_scope=run_scope)
     if participant_kind == "ephemeral_agent":
-        return _execute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope)
+        return _execute_ephemeral_agent_participant(
+            context,
+            participant,
+            prompt,
+            run_scope=run_scope,
+            workflow_id=workflow_id,
+        )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
 
@@ -488,12 +501,19 @@ async def _aexecute_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
         return await _aexecute_room_agent_participant(context, participant, prompt, run_scope=run_scope)
     if participant_kind == "ephemeral_agent":
-        return await _aexecute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope)
+        return await _aexecute_ephemeral_agent_participant(
+            context,
+            participant,
+            prompt,
+            run_scope=run_scope,
+            workflow_id=workflow_id,
+        )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
 
@@ -605,8 +625,17 @@ def _execute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
-    return asyncio.run(_aexecute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope))
+    return asyncio.run(
+        _aexecute_ephemeral_agent_participant(
+            context,
+            participant,
+            prompt,
+            run_scope=run_scope,
+            workflow_id=workflow_id,
+        ),
+    )
 
 
 async def _aexecute_ephemeral_agent_participant(
@@ -615,6 +644,7 @@ async def _aexecute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
     toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
@@ -631,6 +661,7 @@ async def _aexecute_ephemeral_agent_participant(
         agent_name=context.agent_name,
         config=run_config,
         runtime_paths=context.runtime_paths,
+        workflow_origin=ToolCallWorkflowOrigin(workflow_id=workflow_id, participant_id=participant_id),
     )
     agent = Agent(
         id=f"dynamic_workflow_{participant_id}",
@@ -731,7 +762,11 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
     for tool_name, toolkit in toolkits_by_name.items():
         for function_name in (*toolkit.functions, *toolkit.async_functions):
             owning_tools.setdefault(function_name, set()).add(tool_name)
-    pre_approved_tools = {tool_name for tool_name in toolkits_by_name if allow_all or tool_name in allowed_tools}
+    pre_approved_tools = {
+        tool_name
+        for tool_name in toolkits_by_name
+        if tool_name not in _WORKFLOW_NO_PREAPPROVAL_TOOLS and (allow_all or tool_name in allowed_tools)
+    }
     pre_approved_functions = sorted(
         function_name for function_name, tools in owning_tools.items() if tools <= pre_approved_tools
     )
