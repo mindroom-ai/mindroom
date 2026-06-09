@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -276,6 +276,35 @@ def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) ->
     index_path = store.report_asset_path(store.get_public_report(report.slug))
     assert index_path.name == "index.html"
     assert index_path.read_text(encoding="utf-8") == "<!doctype html><h1>Single Page</h1>"
+
+
+def test_report_publishing_store_removes_single_page_snapshot_on_copy_failure(tmp_path: Path) -> None:
+    """Failed single-page snapshots should not leave an orphaned artifact directory."""
+    storage_root = tmp_path / "mindroom_data"
+    page_path = tmp_path / "workspace" / "report.html"
+    page_path.parent.mkdir(parents=True)
+    page_path.write_text("<!doctype html><h1>Single Page</h1>", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+
+    with (
+        patch("mindroom.report_publishing.static_site.shutil.copy2", side_effect=OSError("disk full")),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        store.publish_report(
+            source=PublishableReport(
+                source_type="static_site",
+                source={"path": "report.html"},
+                artifact_path=page_path,
+                title="Single Page",
+                requested_by="@alice:localhost",
+                artifact_kind="static_site",
+            ),
+            published_by="@alice:localhost",
+            base_url="https://mindroom.lab.mindroom.chat",
+        )
+
+    artifacts_root = storage_root / "report_publishing" / "artifacts"
+    assert not artifacts_root.exists() or list(artifacts_root.iterdir()) == []
 
 
 def test_report_publishing_store_rejects_single_page_without_html_suffix(tmp_path: Path) -> None:

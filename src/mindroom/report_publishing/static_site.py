@@ -63,7 +63,11 @@ def _snapshot_single_html_page(source_file: Path, destination_dir: Path) -> None
         msg = f"Static site is too large: {total_bytes} > {_STATIC_SITE_MAX_BYTES} bytes."
         raise StaticSiteSnapshotError(msg)
     destination_dir.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(source_file, destination_dir / "index.html")
+    try:
+        shutil.copy2(source_file, destination_dir / "index.html")
+    except OSError:
+        shutil.rmtree(destination_dir, ignore_errors=True)
+        raise
 
 
 def resolve_static_site_asset(site_root: Path, asset_path: str | None) -> Path:
