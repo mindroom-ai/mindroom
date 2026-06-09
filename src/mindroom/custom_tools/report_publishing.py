@@ -187,7 +187,7 @@ def _resolve_static_site_source(
         context.agent_name,
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        execution_identity=build_execution_identity_from_runtime_context(context),
     ).workspace
     if workspace is None:
         msg = "static_site publishing requires an agent workspace in this runtime path."
