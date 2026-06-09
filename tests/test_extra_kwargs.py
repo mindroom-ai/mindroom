@@ -178,6 +178,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
                 "provider": "llama_cpp",
                 "id": "gemma-4:31b-q4-uncensored",
                 "extra_kwargs": {
+                    "api_key": "sk-no-key-required",
                     "base_url": "http://llama.local/v1",
                     "max_tokens": 32000,
                 },
@@ -195,9 +196,44 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
 
     assert isinstance(model, LlamaCpp)
     assert model.id == "gemma-4:31b-q4-uncensored"
+    assert model.api_key == "sk-no-key-required"
     assert model.base_url == "http://llama.local/v1"
     assert model.max_tokens == 32000
     assert model.default_role_map["system"] == "system"
+
+
+def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom llama.cpp configs without api_key should not consult shared credentials."""
+    config_data = {
+        "models": {
+            "local_model": {
+                "provider": "llama_cpp",
+                "id": "gemma-4:31b-q4-uncensored",
+                "extra_kwargs": {
+                    "base_url": "http://llama.local/v1",
+                },
+            },
+        },
+        "router": {
+            "model": "local_model",
+        },
+        "agents": {},
+    }
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    provider_lookups: list[str] = []
+
+    def get_api_key(provider: str, *, runtime_paths: RuntimePaths) -> str:
+        _ = runtime_paths
+        provider_lookups.append(provider)
+        return "unexpected-credential"
+
+    monkeypatch.setattr("mindroom.model_loading.get_api_key_for_provider", get_api_key)
+
+    model = get_model_instance(config, runtime_paths, "local_model")
+
+    assert isinstance(model, LlamaCpp)
+    assert provider_lookups == []
+    assert model.api_key == "not-provided"
 
 
 def test_different_providers_with_extra_kwargs() -> None:

@@ -157,7 +157,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
     canonical_provider = _canonical_provider(provider)
 
     if (
-        canonical_provider not in {"ollama", "vertexai_claude", "codex", "openai_codex", _BEDROCK_CLAUDE_PROVIDER}
+        canonical_provider
+        not in {"ollama", "llama_cpp", "vertexai_claude", "codex", "openai_codex", _BEDROCK_CLAUDE_PROVIDER}
         and "api_key" not in extra_kwargs
     ):
         api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
