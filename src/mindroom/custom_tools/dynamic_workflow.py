@@ -58,7 +58,9 @@ _TOOL_DESCRIPTIONS = {
         "Create a Dynamic Workflow from a declarative workflow spec. "
         "Ephemeral participants may declare any registered tool when it is also granted in "
         "permissions.tools; participant tool calls require per-call user approval unless the "
-        "tool is pre-approved by the dynamic_workflow allowed_tools config."
+        "tool is pre-approved by the dynamic_workflow allowed_tools config. System-mutating "
+        "tools (claude_agent, config_manager, scheduler, subagents) always require per-call "
+        "approval and can never be pre-approved."
     ),
     "validate_workflow": "Validate a declarative Dynamic Workflow spec without saving it.",
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
