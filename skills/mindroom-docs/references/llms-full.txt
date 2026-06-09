@@ -15599,6 +15599,15 @@ uv run python tests/manual/agent_vault_bridge_live_smoke.py
 The smoke configures Agent Vault with a fake bearer credential, starts the MindRoom adapter, then runs a separate Docker worker that has only proxy env.
 It passes only when Agent Vault injects the fake credential and the worker receives no Agent Vault token or upstream secret env.
 
+To validate the multi-identity isolation model behind per-worker bridges, run:
+
+```bash
+uv run python tests/manual/agent_vault_isolation_live_smoke.py
+```
+
+The isolation smoke provisions one vault plus one proxy-role Agent Vault agent per worker identity, then proves each agent token injects only its own vault's credential, gets no injection for another vault's service, cannot list or decrypt another vault's credentials via the API, and cannot decrypt even its own vault's credentials.
+It also proves garbage and missing proxy session tokens are refused.
+
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
 These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
