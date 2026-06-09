@@ -459,6 +459,9 @@ egressProxy:
 # settings at it. Worker direct egress still depends on the worker NetworkPolicy.
 approvedEgress:
   enabled: false
+  # Set false when the authored config already wires approved_egress (for example
+  # per-agent tool entries) and MindRoom should not add it to defaults at runtime.
+  manageRuntimeConfig: true
   image:
     repository: ghcr.io/mindroom-ai/mindroom-egress-proxy
     # Pin a tag or digest before enabling this feature.

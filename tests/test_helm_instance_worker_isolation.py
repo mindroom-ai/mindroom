@@ -1257,6 +1257,39 @@ def test_runtime_chart_approved_egress_sets_runtime_flag_for_custom_config(tmp_p
     assert "MINDROOM_APPROVED_EGRESS_API_URL" in runtime_env
 
 
+def test_runtime_chart_approved_egress_can_opt_out_of_runtime_config_overlay(tmp_path: Path) -> None:
+    """Disabling manageRuntimeConfig keeps proxy wiring without the runtime overlay flag."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "approvedEgress": {
+                    "enabled": True,
+                    "image": {"tag": "v0.1.0"},
+                    "manageRuntimeConfig": False,
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=(values_path,),
+        release_name="mindroom-runtime",
+    )
+    runtime_container = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    runtime_env = _env_by_name(runtime_container)
+
+    assert "MINDROOM_APPROVED_EGRESS_ENABLED" not in runtime_env
+    assert "MINDROOM_APPROVED_EGRESS_API_URL" in runtime_env
+    assert "MINDROOM_APPROVED_EGRESS_TOKEN" in runtime_env
+
+
 def test_runtime_chart_approved_egress_uses_worker_namespace_for_pod_lookup_and_rbac() -> None:
     """The proxy runs in the release namespace but reads worker pods from the worker namespace."""
     docs = _render_chart(
