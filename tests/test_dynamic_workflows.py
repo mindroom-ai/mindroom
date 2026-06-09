@@ -31,6 +31,7 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, exe
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowStore
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.tool_approval import _matching_tool_approval_rule
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -595,8 +596,8 @@ def test_validate_workflow_spec_rejects_participant_tool_not_granted_by_permissi
         )
 
 
-def test_validate_workflow_tool_policy_rejects_unknown_and_restricted_tools(tmp_path: Path) -> None:
-    """The context-aware policy layer rejects unregistered and agent-infrastructure tool grants."""
+def test_validate_workflow_tool_policy_rejects_unknown_tool(tmp_path: Path) -> None:
+    """The context-aware policy layer rejects tool grants that name no registered tool."""
     context = _make_context(tmp_path)
     tool = DynamicWorkflowTools()
 
@@ -609,19 +610,45 @@ def test_validate_workflow_tool_policy_rejects_unknown_and_restricted_tools(tmp_
                 ),
             ),
         )
-        restricted_payload = _tool_payload(
+
+    assert unknown_payload["status"] == "error"
+    assert "not a registered tool" in unknown_payload["message"]
+
+
+@pytest.mark.parametrize(
+    "restricted_tool",
+    ["compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"],
+)
+def test_validate_workflow_tool_policy_rejects_each_restricted_tool(tmp_path: Path, restricted_tool: str) -> None:
+    """Every agent-infrastructure tool must be rejected as a participant grant."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        # Place the grant only in permissions.tools, with no participant using it: the
+        # policy layer is the sole gate for this case (store validation is shape-only and
+        # the subset rule passes trivially when no participant references the tool).
+        permissions_only_payload = _tool_payload(
             tool.validate_workflow(
                 _workflow_spec(
-                    participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["delegate"]}],
-                    permissions={"tools": ["delegate"]},
+                    participants=[{"id": "writer", "kind": "ephemeral_agent"}],
+                    permissions={"tools": [restricted_tool]},
+                ),
+            ),
+        )
+        participant_payload = _tool_payload(
+            tool.validate_workflow(
+                _workflow_spec(
+                    participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": [restricted_tool]}],
+                    permissions={"tools": [restricted_tool]},
                 ),
             ),
         )
 
-    assert unknown_payload["status"] == "error"
-    assert "not a registered tool" in unknown_payload["message"]
-    assert restricted_payload["status"] == "error"
-    assert "agent-infrastructure" in restricted_payload["message"]
+    assert permissions_only_payload["status"] == "error"
+    assert "agent-infrastructure" in permissions_only_payload["message"]
+    assert participant_payload["status"] == "error"
+    assert "agent-infrastructure" in participant_payload["message"]
 
 
 def test_validate_workflow_spec_rejects_room_agent_participant_tools(tmp_path: Path) -> None:
@@ -2035,9 +2062,84 @@ def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path
     ]
 
 
-def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> None:
-    """run_workflow should hand granted toolkit instances to the ephemeral participant agent."""
+def test_participant_run_config_does_not_pre_approve_colliding_function_names(tmp_path: Path) -> None:
+    """A function name shared with a non-pre-approved toolkit must not be auto-approved."""
     context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["python"]}}],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    python = Toolkit(name="fake_python")
+    python.functions["read_file"] = SimpleNamespace(name="read_file")
+    python.functions["run_python_code"] = SimpleNamespace(name="run_python_code")
+    file = Toolkit(name="fake_file")
+    file.functions["read_file"] = SimpleNamespace(name="read_file")
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"python": python, "file": file})
+
+    rules = {rule.match: rule.action for rule in run_config.tool_approval.rules}
+    # run_python_code is unique to the pre-approved python toolkit -> auto-approved.
+    assert rules == {"run_python_code": "auto_approve"}
+    # read_file collides with the non-pre-approved file toolkit, so it must still require approval.
+    assert "read_file" not in rules
+
+
+def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Path) -> None:
+    """An operator require_approval rule must win over workflow pre-approval (first-match)."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            tool_approval={"rules": [{"match": "run_shell_command", "action": "require_approval"}]},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    shell = Toolkit(name="fake_shell")
+    shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": shell})
+
+    ordered = [(rule.match, rule.action) for rule in run_config.tool_approval.rules]
+    assert ordered[0] == ("run_shell_command", "require_approval")
+    assert ordered[1] == ("run_shell_command", "auto_approve")
+    matched = _matching_tool_approval_rule(run_config, "run_shell_command")
+    assert matched is not None
+    assert matched.action == "require_approval"
+
+
+def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> None:
+    """run_workflow should hand granted toolkit instances to the participant with caller routing parity."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=["dynamic_workflow", {"website": {"knowledge": "kb"}}, "shell"],
+                    worker_tools=["shell"],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
     tool = DynamicWorkflowTools()
     spec = _workflow_spec(
         participants=[
@@ -2046,12 +2148,12 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
                 "model": "claude-sonnet-4-6",
-                "tools": ["duckduckgo", "website"],
+                "tools": ["website", "shell"],
             },
         ],
-        permissions={"models": ["claude-sonnet-4-6"], "tools": ["duckduckgo", "website"]},
+        permissions={"models": ["claude-sonnet-4-6"], "tools": ["website", "shell"]},
     )
-    sentinel_toolkits = {name: Toolkit(name=f"fake_{name}") for name in ("duckduckgo", "website")}
+    sentinel_toolkits = {name: Toolkit(name=f"fake_{name}") for name in ("website", "shell")}
 
     async def fake_arun(prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
         assert "Write a cited report" in prompt
@@ -2078,12 +2180,16 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
     assert create_payload["status"] == "ok"
     assert run_payload["status"] == "completed"
     tools_kwarg = agent_mock.call_args.kwargs["tools"]
-    assert tools_kwarg == [sentinel_toolkits["duckduckgo"], sentinel_toolkits["website"]]
-    assert [call.args[0] for call in build_toolkit_mock.call_args_list] == ["duckduckgo", "website"]
-    build_kwargs = build_toolkit_mock.call_args.kwargs
-    assert build_kwargs["agent_name"] == "general"
-    assert build_kwargs["execution_identity"] is not None
-    assert isinstance(build_kwargs["worker_tools"], list)
+    assert tools_kwarg == [sentinel_toolkits["website"], sentinel_toolkits["shell"]]
+    build_calls = {call.args[0]: call.kwargs for call in build_toolkit_mock.call_args_list}
+    assert list(build_calls) == ["website", "shell"]
+    # Caller parity: authored per-tool config, worker routing, and session reach the builder.
+    assert build_calls["website"]["agent_name"] == "general"
+    assert build_calls["website"]["execution_identity"] is not None
+    assert build_calls["website"]["tool_config_overrides"] == {"knowledge": "kb"}
+    assert build_calls["website"]["worker_tools"] == ["shell"]
+    assert build_calls["website"]["session_id"] == context.session_id
+    assert build_calls["shell"]["worker_tools"] == ["shell"]
 
 
 def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Path) -> None:

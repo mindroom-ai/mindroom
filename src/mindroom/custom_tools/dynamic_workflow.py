@@ -796,23 +796,29 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
         return context.config
     allowed_tools = _workflow_allowed_tools(context)
     allow_all = "*" in allowed_tools
+    # The approval engine matches by bare function name, but function names collide across
+    # toolkits (read_file on python and file, run_shell_command on daytona and shell). A function
+    # is only safe to pre-approve when every granted toolkit exposing it is itself pre-approved;
+    # otherwise a non-pre-approved toolkit's call would inherit the auto-approve rule.
+    owning_tools: dict[str, set[str]] = {}
+    for tool_name, toolkit in toolkits_by_name.items():
+        for function_name in (*toolkit.functions, *toolkit.async_functions):
+            owning_tools.setdefault(function_name, set()).add(tool_name)
+    pre_approved_tools = {tool_name for tool_name in toolkits_by_name if allow_all or tool_name in allowed_tools}
     pre_approved_functions = sorted(
-        {
-            function_name
-            for tool_name, toolkit in toolkits_by_name.items()
-            if allow_all or tool_name in allowed_tools
-            for function_name in (*toolkit.functions, *toolkit.async_functions)
-        },
+        function_name for function_name, tools in owning_tools.items() if tools <= pre_approved_tools
     )
     tool_approval = context.config.tool_approval.model_copy(
         update={
             "default": "require_approval",
+            # Operator-authored rules keep precedence (first match wins); workflow pre-approval
+            # only applies to functions the operator has not already ruled on.
             "rules": [
+                *context.config.tool_approval.rules,
                 *(
                     ApprovalRuleConfig(match=function_name, action="auto_approve")
                     for function_name in pre_approved_functions
                 ),
-                *context.config.tool_approval.rules,
             ],
         },
     )
