@@ -20,7 +20,12 @@ from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import (
+    DynamicWorkflowError,
+    DynamicWorkflowPublicReport,
+    DynamicWorkflowRun,
+    DynamicWorkflowStore,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.runtime_context import (
@@ -68,6 +73,8 @@ _TOOL_DESCRIPTIONS = {
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
     "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
     "get_workflow_run": "Read one Dynamic Workflow run record.",
+    "publish_workflow_report": "Publish a completed Dynamic Workflow run report through a revocable public link.",
+    "revoke_public_report": "Revoke a previously published Dynamic Workflow report link.",
     "list_workflows": "List Dynamic Workflows available in one scope.",
     "list_workflow_revisions": "List immutable revisions for one Dynamic Workflow.",
 }
@@ -116,6 +123,21 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
         },
         "required": ["workflow_id", "run_id"],
     },
+    "publish_workflow_report": {
+        "type": "object",
+        "properties": {
+            "workflow_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "scope": {"type": "string"},
+            "confirm_public": {"type": "boolean"},
+        },
+        "required": ["workflow_id", "run_id", "confirm_public"],
+    },
+    "revoke_public_report": {
+        "type": "object",
+        "properties": {"slug": {"type": "string"}},
+        "required": ["slug"],
+    },
     "list_workflows": {
         "type": "object",
         "properties": {"scope": {"type": "string"}},
@@ -145,6 +167,8 @@ class DynamicWorkflowTools(Toolkit):
             "update_workflow": self.update_workflow,
             "run_workflow": self.run_workflow,
             "get_workflow_run": self.get_workflow_run,
+            "publish_workflow_report": self.publish_workflow_report,
+            "revoke_public_report": self.revoke_public_report,
             "list_workflows": self.list_workflows,
             "list_workflow_revisions": self.list_workflow_revisions,
         }
@@ -154,6 +178,8 @@ class DynamicWorkflowTools(Toolkit):
             "update_workflow": self.aupdate_workflow,
             "run_workflow": self.arun_workflow,
             "get_workflow_run": self.aget_workflow_run,
+            "publish_workflow_report": self.apublish_workflow_report,
+            "revoke_public_report": self.arevoke_public_report,
             "list_workflows": self.alist_workflows,
             "list_workflow_revisions": self.alist_workflow_revisions,
         }
@@ -321,6 +347,73 @@ class DynamicWorkflowTools(Toolkit):
             steps=run.steps,
         )
 
+    def publish_workflow_report(
+        self,
+        workflow_id: str,
+        run_id: str,
+        confirm_public: bool,
+        scope: str = "agent",
+    ) -> str:
+        """Publish a completed Dynamic Workflow run report through a revocable public link."""
+        context = get_tool_runtime_context()
+        if context is None:
+            return self._context_error()
+        if not confirm_public:
+            return self._payload(
+                "error",
+                workflow_id=workflow_id,
+                run_id=run_id,
+                message="Set confirm_public to true to publish this report as a public link.",
+            )
+        try:
+            store, owner_id = _store_and_owner(context, scope)
+            run = store.get_workflow_run(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                run_id=run_id,
+            )
+            _authorize_run_for_context(context, run)
+            report = store.publish_workflow_run_report(
+                workflow_id=workflow_id,
+                scope=scope,
+                owner_id=owner_id,
+                run_id=run_id,
+                published_by=context.requester_id,
+                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+            )
+        except DynamicWorkflowError as exc:
+            return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
+        return self._payload(
+            "ok",
+            workflow_id=report.workflow_id,
+            run_id=report.run_id,
+            slug=report.slug,
+            public_url=report.public_url,
+            public_path=f"/reports/public/{report.slug}",
+            published_at=report.published_at,
+        )
+
+    def revoke_public_report(self, slug: str) -> str:
+        """Revoke a previously published Dynamic Workflow report link."""
+        context = get_tool_runtime_context()
+        if context is None:
+            return self._context_error()
+        try:
+            store = _store(context)
+            report = store.get_public_report(slug, include_revoked=True)
+            _authorize_public_report_for_context(context, report)
+            revoked = store.revoke_public_report(slug, revoked_by=context.requester_id)
+        except DynamicWorkflowError as exc:
+            return self._payload("error", slug=slug, message=str(exc))
+        return self._payload(
+            "ok",
+            slug=revoked.slug,
+            workflow_id=revoked.workflow_id,
+            run_id=revoked.run_id,
+            revoked_at=revoked.revoked_at,
+        )
+
     def list_workflows(self, scope: str = "agent") -> str:
         """List Dynamic Workflows available in one scope."""
         context = get_tool_runtime_context()
@@ -434,6 +527,20 @@ class DynamicWorkflowTools(Toolkit):
         """Read one Dynamic Workflow run record."""
         return self.get_workflow_run(workflow_id, run_id, scope=scope)
 
+    async def apublish_workflow_report(
+        self,
+        workflow_id: str,
+        run_id: str,
+        confirm_public: bool,
+        scope: str = "agent",
+    ) -> str:
+        """Publish a completed Dynamic Workflow run report through a revocable public link."""
+        return self.publish_workflow_report(workflow_id, run_id, confirm_public, scope=scope)
+
+    async def arevoke_public_report(self, slug: str) -> str:
+        """Revoke a previously published Dynamic Workflow report link."""
+        return self.revoke_public_report(slug)
+
     async def alist_workflows(self, scope: str = "agent") -> str:
         """List Dynamic Workflows available in one scope."""
         return self.list_workflows(scope=scope)
@@ -461,6 +568,13 @@ def _authorize_run_for_context(context: ToolRuntimeContext, run: DynamicWorkflow
     if run.requested_by != context.requester_id:
         msg = "Dynamic Workflow run is not available to the current requester."
         raise DynamicWorkflowError(msg)
+
+
+def _authorize_public_report_for_context(context: ToolRuntimeContext, report: DynamicWorkflowPublicReport) -> None:
+    if context.requester_id in {report.requested_by, report.published_by}:
+        return
+    msg = "Public Dynamic Workflow report is not available to the current requester."
+    raise DynamicWorkflowError(msg)
 
 
 def _owner_id(context: ToolRuntimeContext, scope: str) -> str:

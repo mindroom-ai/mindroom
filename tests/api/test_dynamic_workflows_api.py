@@ -78,6 +78,91 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
     assert "Agno factories" in response.text
 
 
+def test_public_dynamic_workflow_report_served_without_dashboard_auth(test_client: TestClient) -> None:
+    """Public report URLs should serve published reports without dashboard credentials."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+    public_report = store.publish_workflow_run_report(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+        published_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    response = test_client.get(f"/reports/public/{public_report.slug}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-security-policy"] == (
+        "default-src 'none'; "
+        "img-src 'self' data: https:; "
+        "style-src 'unsafe-inline'; "
+        "font-src 'self' data:; "
+        "base-uri 'none'; "
+        "frame-ancestors 'self'"
+    )
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["expires"] == "0"
+    assert "Competitor Research Report" in response.text
+    assert "Agno factories" in response.text
+
+
+def test_public_dynamic_workflow_report_returns_404_after_revocation(test_client: TestClient) -> None:
+    """Revoked public report URLs should stop serving the underlying artifact."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+    public_report = store.publish_workflow_run_report(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+        published_by="@alice:example.org",
+        base_url="https://acme.mindroom.chat",
+    )
+    store.revoke_public_report(public_report.slug, revoked_by="@alice:example.org")
+
+    response = test_client.get(f"/reports/public/{public_report.slug}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Public Dynamic Workflow report was not found."
+    assert str(runtime_paths.storage_root) not in response.text
+
+
 def test_private_dynamic_workflow_report_rejects_standalone_user_for_matrix_requested_run(
     test_client: TestClient,
 ) -> None:

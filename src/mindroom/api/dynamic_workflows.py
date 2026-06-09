@@ -12,6 +12,7 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
 
 router = APIRouter(tags=["dynamic-workflows"])
+public_router = APIRouter(tags=["dynamic-workflows"])
 
 _REPORT_CSP = (
     "default-src 'none'; "
@@ -25,6 +26,21 @@ _REPORT_CSP = (
 
 class _RuntimePathsProtocol(Protocol):
     def env_value(self, name: str, *, default: str | None = None) -> str | None: ...
+
+
+@public_router.get("/reports/public/{slug}", include_in_schema=False)
+async def public_dynamic_workflow_report(request: Request, slug: str) -> FileResponse:
+    """Serve one active public Dynamic Workflow HTML report from runtime storage."""
+    runtime_paths = api_runtime_paths(request)
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    try:
+        report_path = store.public_report_html_path(slug)
+    except DynamicWorkflowError as exc:
+        raise HTTPException(status_code=404, detail="Public Dynamic Workflow report was not found.") from exc
+
+    response = FileResponse(report_path, media_type="text/html")
+    _set_report_headers(response, cache_control="no-store, max-age=0")
+    return response
 
 
 @router.get("/reports/private/{run_id}", include_in_schema=False)
@@ -62,11 +78,15 @@ async def private_dynamic_workflow_report(
         raise HTTPException(status_code=404, detail="Private Dynamic Workflow report was not found.") from exc
 
     response = FileResponse(report_path, media_type="text/html")
+    _set_report_headers(response, cache_control="private, no-store, max-age=0")
+    return response
+
+
+def _set_report_headers(response: FileResponse, *, cache_control: str) -> None:
     response.headers["Content-Security-Policy"] = _REPORT_CSP
-    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["Cache-Control"] = cache_control
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
-    return response
 
 
 def _authorize_private_report_request(

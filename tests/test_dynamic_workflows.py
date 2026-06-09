@@ -197,6 +197,8 @@ def test_dynamic_workflow_tool_registered() -> None:
         "update_workflow",
         "run_workflow",
         "get_workflow_run",
+        "publish_workflow_report",
+        "revoke_public_report",
         "list_workflows",
         "list_workflow_revisions",
     )
@@ -359,6 +361,79 @@ def test_run_workflow_writes_run_record_and_private_html_report(tmp_path: Path) 
     report_html = report_path.read_text(encoding="utf-8")
     assert "Competitor Research Report" in report_html
     assert "Agno factories" in report_html
+
+
+def test_publish_workflow_run_report_creates_revocable_public_link(tmp_path: Path) -> None:
+    """Completed runs should be publishable through a separate revocable public report record."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store, participant_executor=lambda **_: "Report about Agno factories.")
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:localhost",
+        base_url="https://acme.mindroom.chat",
+    )
+
+    report = store.publish_workflow_run_report(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+        published_by="@alice:localhost",
+        base_url="https://acme.mindroom.chat",
+    )
+    loaded = store.get_public_report(report.slug)
+    report_html_path = store.public_report_html_path(report.slug)
+    revoked = store.revoke_public_report(report.slug, revoked_by="@alice:localhost")
+
+    assert report.slug.startswith("pub_")
+    assert report.public_url == f"https://acme.mindroom.chat/reports/public/{report.slug}"
+    assert loaded.requested_by == "@alice:localhost"
+    assert loaded.published_by == "@alice:localhost"
+    assert report_html_path.is_file()
+    assert revoked.revoked_at is not None
+    assert revoked.revoked_by == "@alice:localhost"
+    with pytest.raises(DynamicWorkflowError, match="revoked"):
+        store.public_report_html_path(report.slug)
+
+
+def test_publish_workflow_run_report_rejects_failed_runs(tmp_path: Path) -> None:
+    """Only completed runs should be exposed as public report links."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    run = service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by="@alice:localhost",
+    )
+
+    with pytest.raises(DynamicWorkflowError, match="Only completed"):
+        store.publish_workflow_run_report(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            run_id=run.run_id,
+            published_by="@alice:localhost",
+            base_url="https://acme.mindroom.chat",
+        )
 
 
 def test_run_workflow_persists_failed_run_when_completion_persistence_fails(tmp_path: Path) -> None:
@@ -1451,6 +1526,72 @@ def test_dynamic_workflow_tool_uses_runtime_context(tmp_path: Path) -> None:
     assert run["report_url"].startswith(
         "https://acme.mindroom.chat/reports/private/agent/general/competitor-research-report/run_",
     )
+
+
+def test_dynamic_workflow_tool_publishes_and_revokes_report_links(tmp_path: Path) -> None:
+    """Tool callers should be able to intentionally publish and revoke completed run reports."""
+    tool = DynamicWorkflowTools()
+    context = _make_context(tmp_path)
+    transform_spec = _workflow_spec(
+        workflow=[
+            {
+                "id": "research",
+                "type": "transform_step",
+                "template": "Research brief for {input.topic}.",
+            },
+        ],
+        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+    )
+
+    with tool_runtime_context(context):
+        _tool_payload(tool.create_workflow(transform_spec, reason="initial design"))
+        run = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}))
+        missing_confirmation = _tool_payload(
+            tool.publish_workflow_report("competitor-research-report", run["run_id"], confirm_public=False),
+        )
+        published = _tool_payload(
+            tool.publish_workflow_report("competitor-research-report", run["run_id"], confirm_public=True),
+        )
+        revoked = _tool_payload(tool.revoke_public_report(published["slug"]))
+
+    store = DynamicWorkflowStore(context.runtime_paths.storage_root)
+    assert missing_confirmation["status"] == "error"
+    assert "confirm_public" in missing_confirmation["message"]
+    assert published["status"] == "ok"
+    assert published["public_url"] == f"https://acme.mindroom.chat/reports/public/{published['slug']}"
+    assert revoked["status"] == "ok"
+    assert revoked["revoked_at"] is not None
+    with pytest.raises(DynamicWorkflowError, match="revoked"):
+        store.public_report_html_path(published["slug"])
+
+
+def test_dynamic_workflow_tool_denies_public_report_revoke_for_different_requester(tmp_path: Path) -> None:
+    """Public report revocation should stay limited to the run requester or publisher."""
+    tool = DynamicWorkflowTools()
+    alice_context = _make_context(tmp_path)
+    bob_context = replace(alice_context, requester_id="@bob:localhost")
+    transform_spec = _workflow_spec(
+        workflow=[
+            {
+                "id": "research",
+                "type": "transform_step",
+                "template": "Research brief for {input.topic}.",
+            },
+        ],
+        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+    )
+
+    with tool_runtime_context(alice_context):
+        _tool_payload(tool.create_workflow(transform_spec, reason="initial design"))
+        run = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno factories"}))
+        published = _tool_payload(
+            tool.publish_workflow_report("competitor-research-report", run["run_id"], confirm_public=True),
+        )
+    with tool_runtime_context(bob_context):
+        revoked = _tool_payload(tool.revoke_public_report(published["slug"]))
+
+    assert revoked["status"] == "error"
+    assert "not available to the current requester" in revoked["message"]
 
 
 def test_dynamic_workflow_tool_denies_run_read_for_different_requester(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -18,10 +19,10 @@ import yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-    from pathlib import Path
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
+_PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
 _SUPPORTED_SCHEMA_VERSION = 1
 _STEP_TYPES = frozenset({"agent_step", "report_step", "transform_step"})
 _SCOPES = frozenset({"agent", "room", "tenant"})
@@ -108,6 +109,25 @@ class DynamicWorkflowRun:
     started_at: str
     completed_at: str | None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class DynamicWorkflowPublicReport:
+    """Persistent public link record for one Dynamic Workflow run report."""
+
+    slug: str
+    scope: str
+    owner_id: str
+    workflow_id: str
+    run_id: str
+    artifact_path: str
+    title: str
+    requested_by: str
+    published_by: str
+    published_at: str
+    public_url: str | None
+    revoked_at: str | None = None
+    revoked_by: str | None = None
 
 
 class DynamicWorkflowStore:
@@ -380,6 +400,91 @@ class DynamicWorkflowStore:
             raise DynamicWorkflowError(msg)
         return report_path
 
+    def publish_workflow_run_report(
+        self,
+        *,
+        workflow_id: str,
+        scope: str,
+        owner_id: str,
+        run_id: str,
+        published_by: str,
+        base_url: str | None = None,
+    ) -> DynamicWorkflowPublicReport:
+        """Create a public link record for one completed workflow run report."""
+        run = self.get_workflow_run(
+            workflow_id=workflow_id,
+            scope=scope,
+            owner_id=owner_id,
+            run_id=run_id,
+        )
+        if run.status != "completed":
+            msg = "Only completed Dynamic Workflow runs can be published."
+            raise DynamicWorkflowError(msg)
+
+        artifact_path = self._run_report_html_artifact_path(run)
+        slug = f"pub_{uuid4().hex}"
+        report = DynamicWorkflowPublicReport(
+            slug=slug,
+            scope=run.scope,
+            owner_id=run.owner_id,
+            workflow_id=run.workflow_id,
+            run_id=run.run_id,
+            artifact_path=_relative_artifact_path(artifact_path, self._storage_root),
+            title=self._run_report_title(self._workflow_dir(run.scope, run.owner_id, run.workflow_id), run),
+            requested_by=run.requested_by,
+            published_by=published_by,
+            published_at=_utc_now(),
+            public_url=_public_report_url(base_url, slug),
+        )
+        _atomic_write_json(self._public_report_path(slug), _public_report_to_json(report))
+        return report
+
+    def get_public_report(
+        self,
+        slug: str,
+        *,
+        include_revoked: bool = False,
+    ) -> DynamicWorkflowPublicReport:
+        """Load one public report record."""
+        _validate_public_report_slug(slug)
+        report = _public_report_from_json(_load_json_mapping(self._public_report_path(slug)))
+        if report.revoked_at is not None and not include_revoked:
+            msg = f"Public report '{slug}' was revoked."
+            raise DynamicWorkflowError(msg)
+        return report
+
+    def public_report_html_path(self, slug: str) -> Path:
+        """Return the public HTML report path for one active public link."""
+        report = self.get_public_report(slug)
+        report_path = self._artifact_path_from_relative(report.artifact_path)
+        if not report_path.is_file():
+            msg = f"Public report '{slug}' artifact was not found."
+            raise DynamicWorkflowError(msg)
+        return report_path
+
+    def revoke_public_report(self, slug: str, *, revoked_by: str) -> DynamicWorkflowPublicReport:
+        """Revoke one public report link without deleting its underlying run artifacts."""
+        report = self.get_public_report(slug, include_revoked=True)
+        if report.revoked_at is not None:
+            return report
+        revoked = DynamicWorkflowPublicReport(
+            slug=report.slug,
+            scope=report.scope,
+            owner_id=report.owner_id,
+            workflow_id=report.workflow_id,
+            run_id=report.run_id,
+            artifact_path=report.artifact_path,
+            title=report.title,
+            requested_by=report.requested_by,
+            published_by=report.published_by,
+            published_at=report.published_at,
+            public_url=report.public_url,
+            revoked_at=_utc_now(),
+            revoked_by=revoked_by,
+        )
+        _atomic_write_json(self._public_report_path(slug), _public_report_to_json(revoked))
+        return revoked
+
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
         _validate_revision(revision)
         return _load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml")
@@ -404,6 +509,28 @@ class DynamicWorkflowStore:
     def _workflow_dir(self, scope: str, owner_id: str, workflow_id: str) -> Path:
         _validate_id(workflow_id, "workflow_id")
         return self._scope_dir(scope, owner_id) / workflow_id
+
+    def _public_report_path(self, slug: str) -> Path:
+        _validate_public_report_slug(slug)
+        return self._root / "public_reports" / f"{slug}.json"
+
+    def _run_report_html_artifact_path(self, run: DynamicWorkflowRun) -> Path:
+        report_artifact = run.artifacts.get("report_html")
+        if report_artifact is None:
+            msg = f"Run '{run.run_id}' does not have an HTML report artifact."
+            raise DynamicWorkflowError(msg)
+        report_path = self._artifact_path_from_relative(report_artifact)
+        if not report_path.is_file():
+            msg = f"HTML report artifact for run '{run.run_id}' was not found."
+            raise DynamicWorkflowError(msg)
+        return report_path
+
+    def _artifact_path_from_relative(self, artifact_path: str) -> Path:
+        relative_path = Path(artifact_path)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            msg = "Dynamic Workflow artifact path is invalid."
+            raise DynamicWorkflowError(msg)
+        return self._storage_root / relative_path
 
     def _write_run(self, run: DynamicWorkflowRun) -> None:
         run_path = self._workflow_dir(run.scope, run.owner_id, run.workflow_id) / "runs" / f"{run.run_id}.json"
@@ -1189,6 +1316,42 @@ def _run_from_json(data: dict[str, object]) -> DynamicWorkflowRun:
     )
 
 
+def _public_report_to_json(report: DynamicWorkflowPublicReport) -> dict[str, object]:
+    return {
+        "slug": report.slug,
+        "scope": report.scope,
+        "owner_id": report.owner_id,
+        "workflow_id": report.workflow_id,
+        "run_id": report.run_id,
+        "artifact_path": report.artifact_path,
+        "title": report.title,
+        "requested_by": report.requested_by,
+        "published_by": report.published_by,
+        "published_at": report.published_at,
+        "public_url": report.public_url,
+        "revoked_at": report.revoked_at,
+        "revoked_by": report.revoked_by,
+    }
+
+
+def _public_report_from_json(data: dict[str, object]) -> DynamicWorkflowPublicReport:
+    return DynamicWorkflowPublicReport(
+        slug=str(data["slug"]),
+        scope=str(data["scope"]),
+        owner_id=str(data["owner_id"]),
+        workflow_id=str(data["workflow_id"]),
+        run_id=str(data["run_id"]),
+        artifact_path=str(data["artifact_path"]),
+        title=str(data["title"]),
+        requested_by=str(data["requested_by"]),
+        published_by=str(data["published_by"]),
+        published_at=str(data["published_at"]),
+        public_url=str(data["public_url"]) if data.get("public_url") is not None else None,
+        revoked_at=str(data["revoked_at"]) if data.get("revoked_at") is not None else None,
+        revoked_by=str(data["revoked_by"]) if data.get("revoked_by") is not None else None,
+    )
+
+
 def _required_text(data: dict[str, object], key: str, *, context: str = "Workflow spec") -> str:
     if key not in data:
         msg = f"{context} field '{key}' is missing."
@@ -1222,6 +1385,12 @@ def _validate_revision(value: str) -> None:
         raise DynamicWorkflowError(msg)
 
 
+def _validate_public_report_slug(value: str) -> None:
+    if not _PUBLIC_REPORT_SLUG_RE.fullmatch(value):
+        msg = f"public report slug must match {_PUBLIC_REPORT_SLUG_RE.pattern}."
+        raise DynamicWorkflowError(msg)
+
+
 def _owner_dir_name(scope: str, owner_id: str) -> str:
     if scope == "tenant":
         return "tenant"
@@ -1246,6 +1415,12 @@ def _private_report_url(
         return None
     owner_key = _owner_dir_name(scope, owner_id)
     return f"{base_url.rstrip('/')}/reports/private/{scope}/{owner_key}/{workflow_id}/{run_id}"
+
+
+def _public_report_url(base_url: str | None, slug: str) -> str | None:
+    if base_url is None or not base_url.strip():
+        return None
+    return f"{base_url.rstrip('/')}/reports/public/{slug}"
 
 
 def _object_mapping(data: Mapping[object, object]) -> dict[str, object]:

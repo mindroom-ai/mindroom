@@ -26,6 +26,8 @@ register_builtin_tool_metadata(
             "update_workflow",
             "run_workflow",
             "get_workflow_run",
+            "publish_workflow_report",
+            "revoke_public_report",
             "list_workflows",
             "list_workflow_revisions",
         ),

@@ -164,13 +164,15 @@ delegate_task(
 
 ### What It Does
 
-`dynamic_workflow` exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`.
+`dynamic_workflow` exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `publish_workflow_report()`, `revoke_public_report()`, `list_workflows()`, and `list_workflow_revisions()`.
 All calls return JSON strings with a `status` field and operation-specific payload data.
 Saved specs live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
 Each update creates a new immutable `revisions/<revision>.yaml` file and updates the small `workflow.yaml` pointer file.
 Each run pins the active revision at start time, writes a `runs/<run_id>.json` record, and writes `report.md`, `report.html`, and `step_outputs.json` under that run's artifact directory.
 If `MINDROOM_PUBLIC_URL` is set, successful and failed run payloads include a private report URL under `/reports/private/...`.
 Private report routes authorize the dashboard requester against the run's `requested_by` identity.
+Completed runs can be published with `publish_workflow_report(..., confirm_public=True)` to create a revocable public URL under `/reports/public/<slug>`.
+Public report links serve the same HTML artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
 If `MINDROOM_PUBLIC_URL` is unset, the report artifacts are still persisted on disk and listed in the run payload.
 
 ### Configuration
@@ -254,6 +256,8 @@ create_workflow(
     reason="initial report workflow",
 )
 run_workflow("brief-report", {"topic": "Agno factories"})
+publish_workflow_report("brief-report", "run_...", confirm_public=True)
+revoke_public_report("pub_...")
 list_workflows()
 get_workflow_run("brief-report", "run_...")
 ```
@@ -261,7 +265,7 @@ get_workflow_run("brief-report", "run_...")
 ### Notes
 
 - Dynamic Workflow runs execute synchronously on the current tool call path today.
-- Long-running background workflow management, approval cards, public report publishing, broad tool grants, Matrix history grants, attachment grants, and knowledge-base grants are future work.
+- Long-running background workflow management, approval cards, broad tool grants, Matrix history grants, attachment grants, and knowledge-base grants are future work.
 - Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
 - Room-agent participants can reuse only agents that normal room routing would expose to the requester.
 - Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
