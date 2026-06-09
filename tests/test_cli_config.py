@@ -608,14 +608,14 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
-        assert config["models"]["default"]["provider"] == "openai"
+        assert config["models"]["default"]["provider"] == "llama_cpp"
         assert config["models"]["default"]["id"] == LLAMA_CPP_GEMMA
         assert config["models"]["default"]["context_window"] == 128_000
         assert config["models"]["default"]["extra_kwargs"] == {
             "api_key": "sk-no-key-required",
             "base_url": "http://localhost:8080/v1",
         }
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "openai"
+        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "llama_cpp"
         assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == LLAMA_CPP_QWEN
         assert config["models"][LOCAL_QWEN_PRESET_NAME]["context_window"] == LOCAL_QWEN_CONTEXT_WINDOW
         assert config["models"][LOCAL_QWEN_PRESET_NAME]["extra_kwargs"] == {

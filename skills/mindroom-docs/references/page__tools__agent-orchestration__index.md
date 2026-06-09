@@ -12,6 +12,7 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
+- [`report_publishing`] - Publish authorized report artifacts through revocable public links.
 - [`config_manager`] - Inspect MindRoom config and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
@@ -19,7 +20,7 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 
 ## Common Setup Notes
 
-All seven entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
@@ -27,6 +28,7 @@ Only [`claude_agent`] has tool-specific credential fields.
 [`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
 [`subagents`] requires a live Matrix tool runtime context with `room_id`, `requester_id`, Matrix client access, and a writable storage path.
 [`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
+[`report_publishing`] requires a live tool runtime context, a writable storage path, and an authorized report source.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
@@ -171,6 +173,7 @@ Each update creates a new immutable `revisions/<revision>.yaml` file and updates
 Each run pins the active revision at start time, writes a `runs/<run_id>.json` record, and writes `report.md`, `report.html`, and `step_outputs.json` under that run's artifact directory.
 If `MINDROOM_PUBLIC_URL` is set, successful and failed run payloads include a private report URL under `/reports/private/...`.
 Private report routes authorize the dashboard requester against the run's `requested_by` identity.
+Use [`report_publishing`] to publish a completed Dynamic Workflow run report through a revocable public URL under `/reports/public/<slug>`.
 If `MINDROOM_PUBLIC_URL` is unset, the report artifacts are still persisted on disk and listed in the run payload.
 
 ### Configuration
@@ -280,11 +283,60 @@ Tools outside `allowed_tools` still run, but each call posts an approval card in
 ### Notes
 
 - Dynamic Workflow runs execute synchronously on the current tool call path today.
-- Long-running background workflow management, workflow-activation approval cards, public report publishing, Matrix history grants, attachment grants, and knowledge-base grants are future work.
+- Long-running background workflow management, workflow-activation approval cards, Matrix history grants, attachment grants, and knowledge-base grants are future work.
 - Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
 - Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating plus the per-call approval flow.
 - Room-agent participants can reuse only agents that normal room routing would expose to the requester.
 - Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
+
+## [`report_publishing`]
+
+`report_publishing` lets an agent intentionally publish authorized report artifacts through revocable public links.
+
+### What It Does
+
+`report_publishing` exposes `publish_report()` and `revoke_public_report(slug)`.
+All calls return JSON strings with a `status` field and operation-specific payload data.
+The tool does not accept arbitrary filesystem paths.
+It publishes only registered source references that the current Matrix requester is authorized to read.
+The current source type is `dynamic_workflow_run`.
+Published link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
+Public report links serve the registered HTML artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
+The `slug` is the public-report identifier returned by `publish_report()`.
+If `MINDROOM_PUBLIC_URL` is set, successful publish payloads include the absolute public URL.
+
+### Configuration
+
+Enable the tool by adding `report_publishing` to any agent that should be allowed to publish report artifacts.
+
+```yaml
+agents:
+  coordinator:
+    display_name: Coordinator
+    role: Build workflows and publish report links
+    model: sonnet
+    tools:
+      - dynamic_workflow
+      - report_publishing
+```
+
+### Example
+
+```python
+publish_report(
+    source_type="dynamic_workflow_run",
+    source={"workflow_id": "brief-report", "run_id": "run_..."},
+    confirm_public=True,
+)
+revoke_public_report("pub_...")
+```
+
+### Notes
+
+- `confirm_public=True` is required so accidental publish calls fail closed.
+- Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
+- Only the run requester or the user who published the link may revoke it.
+- Additional registered report sources can be added without changing Dynamic Workflow storage.
 
 ## [`config_manager`]
 

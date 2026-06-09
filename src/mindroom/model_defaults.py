@@ -133,7 +133,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "bedrock_claude": ModelPreset("bedrock_claude", AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
         "codex": ModelPreset("codex", CODEX_GPT, 258_000),
-        "llama_cpp": ModelPreset("openai", LLAMA_CPP_GEMMA, 128_000),
+        "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
         "openai": ModelPreset("openai", _OPENAI_GPT, 258_000),
         "openrouter": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),

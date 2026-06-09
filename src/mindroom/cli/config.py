@@ -795,7 +795,7 @@ def _additional_models_template_block(provider_preset: _ProviderPreset) -> str:
     if provider_preset == "llama_cpp":
         return (
             f"\n  {LOCAL_QWEN_PRESET_NAME}:\n"
-            "    provider: openai\n"
+            "    provider: llama_cpp\n"
             f"    id: {LLAMA_CPP_QWEN}\n"
             f"    context_window: {LOCAL_QWEN_CONTEXT_WINDOW}\n"
             "    extra_kwargs:\n"

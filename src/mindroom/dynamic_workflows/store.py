@@ -11,6 +11,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -18,7 +19,6 @@ import yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-    from pathlib import Path
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
@@ -380,6 +380,22 @@ class DynamicWorkflowStore:
             raise DynamicWorkflowError(msg)
         return report_path
 
+    def run_report_html_artifact_path(self, run: DynamicWorkflowRun) -> Path:
+        """Return the HTML report artifact path for one persisted run."""
+        report_artifact = run.artifacts.get("report_html")
+        if report_artifact is None:
+            msg = f"Run '{run.run_id}' does not have an HTML report artifact."
+            raise DynamicWorkflowError(msg)
+        report_path = self._artifact_path_from_relative(report_artifact)
+        if not report_path.is_file():
+            msg = f"HTML report artifact for run '{run.run_id}' was not found."
+            raise DynamicWorkflowError(msg)
+        return report_path
+
+    def run_report_title(self, run: DynamicWorkflowRun) -> str:
+        """Return the report title for one persisted run."""
+        return self._run_report_title(self._workflow_dir(run.scope, run.owner_id, run.workflow_id), run)
+
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
         _validate_revision(revision)
         return _load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml")
@@ -404,6 +420,13 @@ class DynamicWorkflowStore:
     def _workflow_dir(self, scope: str, owner_id: str, workflow_id: str) -> Path:
         _validate_id(workflow_id, "workflow_id")
         return self._scope_dir(scope, owner_id) / workflow_id
+
+    def _artifact_path_from_relative(self, artifact_path: str) -> Path:
+        relative_path = Path(artifact_path)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            msg = "Dynamic Workflow artifact path is invalid."
+            raise DynamicWorkflowError(msg)
+        return self._storage_root / relative_path
 
     def _write_run(self, run: DynamicWorkflowRun) -> None:
         run_path = self._workflow_dir(run.scope, run.owner_id, run.workflow_id) / "runs" / f"{run.run_id}.json"
