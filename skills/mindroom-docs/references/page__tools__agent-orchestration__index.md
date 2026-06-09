@@ -299,9 +299,14 @@ Tools outside `allowed_tools` still run, but each call posts an approval card in
 All calls return JSON strings with a `status` field and operation-specific payload data.
 The tool does not accept arbitrary filesystem paths.
 It publishes only registered source references that the current Matrix requester is authorized to read.
-The current source type is `dynamic_workflow_run`.
+The current source types are `dynamic_workflow_run` and `static_site`.
+Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
+Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
+The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
+JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
+That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
 Published link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
-Public report links serve the registered HTML artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
+Public report links serve the registered artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
 The `slug` is the public-report identifier returned by `publish_report()`.
 If `MINDROOM_PUBLIC_URL` is set, successful publish payloads include the absolute public URL.
 
@@ -328,6 +333,11 @@ publish_report(
     source={"workflow_id": "brief-report", "run_id": "run_..."},
     confirm_public=True,
 )
+publish_report(
+    source_type="static_site",
+    source={"path": "public-demo", "title": "Public Demo"},
+    confirm_public=True,
+)
 revoke_public_report("pub_...")
 ```
 
@@ -335,8 +345,12 @@ revoke_public_report("pub_...")
 
 - `confirm_public=True` is required so accidental publish calls fail closed.
 - Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
+- Static site publishing requires an agent workspace and publishes an immutable copy, so later workspace edits need a new `publish_report()` call.
 - Only the run requester or the user who published the link may revoke it.
 - Additional registered report sources can be added without changing Dynamic Workflow storage.
+- No extra proxy route is needed when `/reports/public/*` already reaches the MindRoom backend.
+- If the dashboard frontend and Python backend are split across upstreams, route `/reports/public/*` to the Python backend and do not put dashboard-login middleware on that path.
+- Set `MINDROOM_PUBLIC_URL` to the externally reachable dashboard origin, such as `https://mindroom.lab.mindroom.chat`, so publish payloads include clickable absolute URLs.
 
 ## [`config_manager`]
 
