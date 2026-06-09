@@ -20,7 +20,12 @@ from mindroom.report_publishing.store import (
     ReportPublishingError,
     ReportPublishingStore,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    get_tool_runtime_context,
+)
 from mindroom.workspaces import resolve_workspace_relative_path
 
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
@@ -175,14 +180,20 @@ def _resolve_static_site_source(
     source: dict[str, Any],
 ) -> PublishableReport:
     _reject_unsupported_source_fields(source, _STATIC_SITE_SOURCE_KEYS, "static_site source")
-    if context.storage_path is None:
-        msg = "static_site publishing requires an agent workspace in this runtime path."
-        raise ReportPublishingError(msg)
     source_path = _required_source_text(source, "path", context="static_site source")
     title = _required_source_text(source, "title", context="static_site source")
+    workspace = resolve_agent_runtime(
+        context.agent_name,
+        context.config,
+        context.runtime_paths,
+        build_execution_identity_from_runtime_context(context),
+    ).workspace
+    if workspace is None:
+        msg = "static_site publishing requires an agent workspace in this runtime path."
+        raise ReportPublishingError(msg)
     try:
         site_dir = resolve_workspace_relative_path(
-            context.storage_path,
+            workspace.root,
             source_path,
             field_name="static_site source.path",
         )

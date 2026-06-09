@@ -347,6 +347,7 @@ revoke_public_report("pub_...")
 - `confirm_public=True` is required so accidental publish calls fail closed.
 - Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
 - Static site publishing requires an agent workspace and publishes an immutable copy, so later workspace edits need a new `publish_report()` call.
+- An agent has a workspace when it uses `memory_backend: file` or a `private:` workspace configuration, and the source path resolves against that canonical workspace root.
 - Only the run requester or the user who published the link may revoke it.
 - Additional registered report sources can be added without changing Dynamic Workflow storage.
 - No extra proxy route is needed when `/reports/public/*` already reaches the MindRoom backend.

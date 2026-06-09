@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -74,6 +74,7 @@ def _make_context(
     tmp_path: Path,
     *,
     public_url: str = "https://acme.mindroom.chat",
+    agent_memory_backend: Literal["file"] | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
     runtime_paths = runtime_paths.__class__(
@@ -93,6 +94,7 @@ def _make_context(
                 "general": AgentConfig(
                     display_name="General Agent",
                     tools=["dynamic_workflow", "report_publishing"],
+                    memory_backend=agent_memory_backend,
                 ),
             },
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
@@ -416,15 +418,16 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
 def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: Path) -> None:
     """Report Publishing should let agents publish copied static-site directories."""
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path, public_url="https://mindroom.lab.mindroom.chat")
-    assert context.storage_path is None
+    context = _make_context(
+        tmp_path,
+        public_url="https://mindroom.lab.mindroom.chat",
+        agent_memory_backend="file",
+    )
     workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
-    workspace_root.mkdir(parents=True)
     site_dir = workspace_root / "public-demo"
-    site_dir.mkdir()
+    site_dir.mkdir(parents=True)
     (site_dir / "index.html").write_text("<!doctype html><script src='app.js'></script>", encoding="utf-8")
     (site_dir / "app.js").write_text("document.body.dataset.ready = 'true';", encoding="utf-8")
-    context = replace(context, storage_path=workspace_root)
 
     with tool_runtime_context(context):
         published = _tool_payload(
@@ -445,11 +448,14 @@ def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: Path) 
 def test_report_publishing_tool_publishes_workspace_single_html_page(tmp_path: Path) -> None:
     """Report Publishing should let agents publish one workspace HTML page directly."""
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path, public_url="https://mindroom.lab.mindroom.chat")
+    context = _make_context(
+        tmp_path,
+        public_url="https://mindroom.lab.mindroom.chat",
+        agent_memory_backend="file",
+    )
     workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
     workspace_root.mkdir(parents=True)
     (workspace_root / "report.html").write_text("<!doctype html><h1>Single Page</h1>", encoding="utf-8")
-    context = replace(context, storage_path=workspace_root)
 
     with tool_runtime_context(context):
         published = _tool_payload(
@@ -486,10 +492,9 @@ def test_report_publishing_tool_requires_workspace_for_static_site(tmp_path: Pat
 def test_report_publishing_tool_rejects_static_site_path_escape(tmp_path: Path) -> None:
     """Static site path input should stay workspace-relative."""
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path)
+    context = _make_context(tmp_path, agent_memory_backend="file")
     workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
     workspace_root.mkdir(parents=True)
-    context = replace(context, storage_path=workspace_root)
 
     with tool_runtime_context(context):
         escaped = _tool_payload(
