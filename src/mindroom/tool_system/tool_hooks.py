@@ -29,7 +29,12 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import elapsed_ms_since, emit_timing_event
-from mindroom.tool_approval import ToolApprovalCall, ToolApprovalScriptError, request_tool_approval_for_call
+from mindroom.tool_approval import (
+    ToolApprovalCall,
+    ToolApprovalScriptError,
+    ToolCallWorkflowOrigin,
+    request_tool_approval_for_call,
+)
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -474,6 +479,7 @@ async def _maybe_block_for_tool_approval(
     tool_name: str,
     has_after_hooks: bool,
     started_at: float,
+    workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> str | None:
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
@@ -489,6 +495,7 @@ async def _maybe_block_for_tool_approval(
                 room_id=resolved_context.room_id,
                 thread_id=resolved_context.thread_id,
                 requester_id=resolved_context.requester_id,
+                workflow_origin=workflow_origin,
             ),
         )
     except ToolApprovalScriptError:
@@ -580,6 +587,7 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
+    workflow_origin: ToolCallWorkflowOrigin | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
@@ -622,6 +630,7 @@ async def _execute_bridge(
         tool_name=tool_name,
         has_after_hooks=has_after_hooks,
         started_at=started_at,
+        workflow_origin=workflow_origin,
     )
     if blocked_result is not None:
         return blocked_result
@@ -741,6 +750,7 @@ def build_tool_hook_bridge(
     dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
+    workflow_origin: ToolCallWorkflowOrigin | None = None,
 ) -> Callable[..., Any]:
     """Return one Agno-compatible tool hook bridge."""
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
@@ -758,6 +768,7 @@ def build_tool_hook_bridge(
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
+            workflow_origin=workflow_origin,
         )
 
     def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
@@ -774,6 +785,7 @@ def build_tool_hook_bridge(
                     runtime_paths=runtime_paths,
                     has_before_hooks=has_before_hooks,
                     has_after_hooks=has_after_hooks,
+                    workflow_origin=workflow_origin,
                 ),
             )
         return _run_coroutine_from_sync(
@@ -788,6 +800,7 @@ def build_tool_hook_bridge(
                 runtime_paths=runtime_paths,
                 has_before_hooks=has_before_hooks,
                 has_after_hooks=has_after_hooks,
+                workflow_origin=workflow_origin,
             ),
         )
 

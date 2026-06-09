@@ -47,6 +47,7 @@ __all__ = [
     "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "ToolCallWorkflowOrigin",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
@@ -69,6 +70,14 @@ class ToolApprovalScriptError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCallWorkflowOrigin:
+    """Dynamic Workflow provenance for one participant tool call."""
+
+    workflow_id: str
+    participant_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolApprovalCall:
     """One tool call that may require a Matrix approval card."""
 
@@ -80,6 +89,7 @@ class ToolApprovalCall:
     room_id: str | None
     thread_id: str | None
     requester_id: str | None
+    workflow_origin: ToolCallWorkflowOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +264,7 @@ async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDeci
             "Tool approval is required but the approval store is not initialized.",
         )
 
+    origin = call.workflow_origin
     return await manager.request_approval(
         tool_name=call.tool_name,
         arguments=deepcopy(call.arguments),
@@ -261,6 +272,8 @@ async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDeci
         room_id=call.room_id,
         thread_id=call.thread_id,
         requester_id=call.requester_id,
+        workflow_id=origin.workflow_id if origin is not None else None,
+        participant_id=origin.participant_id if origin is not None else None,
         approver_user_id=resolve_tool_approval_approver(
             call.config,
             call.runtime_paths,

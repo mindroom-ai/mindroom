@@ -50,7 +50,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import _shutdown_approval_store
+from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -2389,6 +2389,53 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
 
     assert result == "ok"
     assert seen == ["before", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_bridge_workflow_origin_reaches_approval_card(tmp_path: Path) -> None:
+    """A bridge built with workflow provenance must surface it on the approval card."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding.", rooms=[])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender, _ = _initialize_test_approval_store(runtime_paths)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+        workflow_origin=ToolCallWorkflowOrigin(workflow_id="research-report", participant_id="writer"),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> str:
+        del kwargs
+        return "ok"
+
+    with tool_execution_identity(_execution_identity()):
+        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
+        await asyncio.sleep(0)
+        store = get_approval_store()
+        assert store is not None
+        pending = await _wait_for_sent_pending(store, sender)
+
+        card_content = sender.await_args.args[2]
+        assert card_content["workflow_id"] == "research-report"
+        assert card_content["participant_id"] == "writer"
+        assert card_content["body"] == (
+            "🔒 Approval required: read_file — Dynamic Workflow 'research-report' participant 'writer'"
+        )
+
+        await _resolve_pending_approval(store, pending, status="approved")
+        result = await task
+
+    assert result == "ok"
 
 
 @pytest.mark.asyncio

@@ -302,6 +302,63 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_request_approval_carries_workflow_provenance_through_resolution(tmp_path: Path) -> None:
+    """Dynamic Workflow participant cards must name the workflow and participant, pending and resolved."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="run_shell_command",
+            arguments={"command": "ls"},
+            agent_name="general",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+            workflow_id="competitor-research-report",
+            participant_id="writer",
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    card_content = sender.await_args.args[2]
+    assert card_content["workflow_id"] == "competitor-research-report"
+    assert card_content["participant_id"] == "writer"
+    assert card_content["body"] == (
+        "🔒 Approval required: run_shell_command — Dynamic Workflow 'competitor-research-report' participant 'writer'"
+    )
+    assert pending.workflow_id == "competitor-research-report"
+    assert pending.participant_id == "writer"
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+    edited_content = editor.await_args.args[2]
+    assert edited_content["workflow_id"] == "competitor-research-report"
+    assert edited_content["participant_id"] == "writer"
+    assert edited_content["body"] == (
+        "Approved: run_shell_command — Dynamic Workflow 'competitor-research-report' participant 'writer'"
+    )
+
+
+@pytest.mark.asyncio
 async def test_live_card_response_ignores_cached_terminal_edit_from_different_sender(tmp_path: Path) -> None:
     cache = FakeEventCache()
     runtime_paths = test_runtime_paths(tmp_path)

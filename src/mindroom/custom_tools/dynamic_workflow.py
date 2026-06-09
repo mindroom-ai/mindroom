@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import nio
 from agno.agent import Agent
-from agno.run.agent import RunStatus
+from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
 from mindroom import model_loading
@@ -28,6 +28,7 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.tool_approval import ToolCallWorkflowOrigin
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -47,12 +48,19 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
     {"compact_context", "delegate", "dynamic_tools", "dynamic_workflow", "memory", "self_config"},
 )
 
+# Tools that mutate the MindRoom system itself (rewrite config.yaml, spawn agents, create
+# cron jobs, run an autonomous coding agent). Participants may be granted these, but every
+# call needs a human decision: allowed_tools (including "*") never pre-approves them.
+_WORKFLOW_NO_PREAPPROVAL_TOOLS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
+
 _TOOL_DESCRIPTIONS = {
     "create_workflow": (
         "Create a Dynamic Workflow from a declarative workflow spec. "
         "Ephemeral participants may declare any registered tool when it is also granted in "
         "permissions.tools; participant tool calls require per-call user approval unless the "
-        "tool is pre-approved by the dynamic_workflow allowed_tools config."
+        "tool is pre-approved by the dynamic_workflow allowed_tools config. System-mutating "
+        "tools (claude_agent, config_manager, scheduler, subagents) always require per-call "
+        "approval and can never be pre-approved."
     ),
     "validate_workflow": "Validate a declarative Dynamic Workflow spec without saving it.",
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
@@ -445,7 +453,7 @@ def _participant_executor(context: ToolRuntimeContext, workflow_id: str) -> Part
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return _execute_participant(context, participant, prompt, run_scope=run_scope)
+        return _execute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
 
     return execute
 
@@ -461,7 +469,7 @@ def _aparticipant_executor(context: ToolRuntimeContext, workflow_id: str) -> Asy
         step_outputs: dict[str, object],
     ) -> object:
         del input_data, step_outputs
-        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope)
+        return await _aexecute_participant(context, participant, prompt, run_scope=run_scope, workflow_id=workflow_id)
 
     return execute
 
@@ -472,12 +480,19 @@ def _execute_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
         return _execute_room_agent_participant(context, participant, prompt, run_scope=run_scope)
     if participant_kind == "ephemeral_agent":
-        return _execute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope)
+        return _execute_ephemeral_agent_participant(
+            context,
+            participant,
+            prompt,
+            run_scope=run_scope,
+            workflow_id=workflow_id,
+        )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
 
@@ -488,12 +503,19 @@ async def _aexecute_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
     participant_kind = str(participant.get("kind", "ephemeral_agent")).strip() or "ephemeral_agent"
     if participant_kind == "room_agent":
         return await _aexecute_room_agent_participant(context, participant, prompt, run_scope=run_scope)
     if participant_kind == "ephemeral_agent":
-        return await _aexecute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope)
+        return await _aexecute_ephemeral_agent_participant(
+            context,
+            participant,
+            prompt,
+            run_scope=run_scope,
+            workflow_id=workflow_id,
+        )
     msg = f"Unsupported Dynamic Workflow participant kind '{participant_kind}'."
     raise DynamicWorkflowError(msg)
 
@@ -605,8 +627,17 @@ def _execute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
-    return asyncio.run(_aexecute_ephemeral_agent_participant(context, participant, prompt, run_scope=run_scope))
+    return asyncio.run(
+        _aexecute_ephemeral_agent_participant(
+            context,
+            participant,
+            prompt,
+            run_scope=run_scope,
+            workflow_id=workflow_id,
+        ),
+    )
 
 
 async def _aexecute_ephemeral_agent_participant(
@@ -615,6 +646,7 @@ async def _aexecute_ephemeral_agent_participant(
     prompt: str,
     *,
     run_scope: str,
+    workflow_id: str,
 ) -> object:
     toolkits_by_name = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
@@ -631,6 +663,7 @@ async def _aexecute_ephemeral_agent_participant(
         agent_name=context.agent_name,
         config=run_config,
         runtime_paths=context.runtime_paths,
+        workflow_origin=ToolCallWorkflowOrigin(workflow_id=workflow_id, participant_id=participant_id),
     )
     agent = Agent(
         id=f"dynamic_workflow_{participant_id}",
@@ -731,7 +764,11 @@ def _participant_run_config(context: ToolRuntimeContext, toolkits_by_name: dict[
     for tool_name, toolkit in toolkits_by_name.items():
         for function_name in (*toolkit.functions, *toolkit.async_functions):
             owning_tools.setdefault(function_name, set()).add(tool_name)
-    pre_approved_tools = {tool_name for tool_name in toolkits_by_name if allow_all or tool_name in allowed_tools}
+    pre_approved_tools = {
+        tool_name
+        for tool_name in toolkits_by_name
+        if tool_name not in _WORKFLOW_NO_PREAPPROVAL_TOOLS and (allow_all or tool_name in allowed_tools)
+    }
     pre_approved_functions = sorted(
         function_name for function_name, tools in owning_tools.items() if tools <= pre_approved_tools
     )
@@ -771,15 +808,29 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
 
 
 async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
+    # Stream the run: the participant inherits the caller's model and the workflow's runtime
+    # budget, and the Anthropic/Vertex SDK refuses a non-streaming request whose budget could
+    # exceed 10 minutes. Consuming the event stream drives tool calls and their approval gating;
+    # yield_run_output makes the final RunOutput the last streamed item, which works without a db.
+    final_output: RunOutput | None = None
     with tool_runtime_context(context):
-        response = await agent.arun(
+        event_stream = agent.arun(
             prompt,
             user_id=context.requester_id,
             session_id=context.session_id,
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
         )
-    content = response.content if response.content is not None else ""
-    if response.status != RunStatus.completed:
-        message = str(content) if content else f"Agent run ended with status {response.status.value}."
+        async for event in event_stream:
+            if isinstance(event, RunOutput):
+                final_output = event
+    if final_output is None:
+        msg = "Dynamic Workflow participant run produced no output."
+        raise DynamicWorkflowExecutionError(msg)
+    content = final_output.content if final_output.content is not None else ""
+    if final_output.status != RunStatus.completed:
+        message = str(content) if content else f"Agent run ended with status {final_output.status.value}."
         raise DynamicWorkflowExecutionError(message)
     return content
 

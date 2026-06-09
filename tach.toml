@@ -3203,6 +3203,7 @@ expose = [
     "ToolApprovalCall",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "ToolCallWorkflowOrigin",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
