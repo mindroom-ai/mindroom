@@ -13,11 +13,17 @@ class StaticSiteSnapshotError(ValueError):
     """Raised when a static-site snapshot is invalid."""
 
 
-def snapshot_static_site(source_dir: Path, destination_dir: Path) -> None:
-    """Copy one static-site directory without symlinks or path escapes."""
-    resolved_source = source_dir.resolve()
+def snapshot_static_site(source_path: Path, destination_dir: Path) -> None:
+    """Copy one static-site directory or single HTML page without symlinks or path escapes."""
+    if source_path.is_symlink():
+        msg = "Static site source must not be a symlink."
+        raise StaticSiteSnapshotError(msg)
+    resolved_source = source_path.resolve()
+    if resolved_source.is_file():
+        _snapshot_single_html_page(resolved_source, destination_dir)
+        return
     if not resolved_source.is_dir():
-        msg = "Static site source path must be a directory."
+        msg = "Static site source path must be a directory or an HTML file."
         raise StaticSiteSnapshotError(msg)
     if not (resolved_source / "index.html").is_file():
         msg = "Static site source must contain index.html."
@@ -34,13 +40,25 @@ def snapshot_static_site(source_dir: Path, destination_dir: Path) -> None:
         raise StaticSiteSnapshotError(msg)
 
     destination_dir.mkdir(parents=True, exist_ok=False)
-    for source_path, relative_path in entries:
+    for entry_path, relative_path in entries:
         target_path = destination_dir / relative_path
-        if source_path.is_dir():
+        if entry_path.is_dir():
             target_path.mkdir(parents=True, exist_ok=True)
             continue
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, target_path)
+        shutil.copy2(entry_path, target_path)
+
+
+def _snapshot_single_html_page(source_file: Path, destination_dir: Path) -> None:
+    if source_file.suffix.lower() not in {".html", ".htm"}:
+        msg = "Static site source file must be an HTML page."
+        raise StaticSiteSnapshotError(msg)
+    total_bytes = source_file.stat().st_size
+    if total_bytes > _STATIC_SITE_MAX_BYTES:
+        msg = f"Static site is too large: {total_bytes} > {_STATIC_SITE_MAX_BYTES} bytes."
+        raise StaticSiteSnapshotError(msg)
+    destination_dir.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(source_file, destination_dir / "index.html")
 
 
 def resolve_static_site_asset(site_root: Path, asset_path: str | None) -> Path:

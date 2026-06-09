@@ -249,6 +249,55 @@ def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) ->
     assert index_path.parent.is_relative_to(storage_root / "report_publishing" / "artifacts")
 
 
+def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) -> None:
+    """A single workspace HTML page should publish as a static site index."""
+    storage_root = tmp_path / "mindroom_data"
+    page_path = tmp_path / "workspace" / "report.html"
+    page_path.parent.mkdir(parents=True)
+    page_path.write_text("<!doctype html><h1>Single Page</h1>", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="static_site",
+            source={"path": "report.html"},
+            artifact_path=page_path,
+            title="Single Page",
+            requested_by="@alice:localhost",
+            artifact_kind="static_site",
+        ),
+        published_by="@alice:localhost",
+        base_url="https://mindroom.lab.mindroom.chat",
+    )
+
+    index_path = store.public_report_asset_path(report.slug)
+    assert index_path.name == "index.html"
+    assert index_path.read_text(encoding="utf-8") == "<!doctype html><h1>Single Page</h1>"
+
+
+def test_report_publishing_store_rejects_single_page_without_html_suffix(tmp_path: Path) -> None:
+    """Single-file static site sources should stay limited to HTML pages."""
+    storage_root = tmp_path / "mindroom_data"
+    page_path = tmp_path / "workspace" / "report.pdf"
+    page_path.parent.mkdir(parents=True)
+    page_path.write_bytes(b"%PDF-1.7")
+    store = ReportPublishingStore(storage_root)
+
+    with pytest.raises(ReportPublishingError, match="HTML page"):
+        store.publish_report(
+            source=PublishableReport(
+                source_type="static_site",
+                source={"path": "report.pdf"},
+                artifact_path=page_path,
+                title="Not A Page",
+                requested_by="@alice:localhost",
+                artifact_kind="static_site",
+            ),
+            published_by="@alice:localhost",
+            base_url="https://mindroom.lab.mindroom.chat",
+        )
+
+
 def test_report_publishing_store_rejects_static_site_without_index(tmp_path: Path) -> None:
     """Static site publishing should require index.html."""
     storage_root = tmp_path / "mindroom_data"
@@ -391,6 +440,29 @@ def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: Path) 
     assert published["source"] == {"path": "public-demo"}
     assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
     assert published["public_path"] == f"/reports/public/{published['slug']}/"
+
+
+def test_report_publishing_tool_publishes_workspace_single_html_page(tmp_path: Path) -> None:
+    """Report Publishing should let agents publish one workspace HTML page directly."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path, public_url="https://mindroom.lab.mindroom.chat")
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "report.html").write_text("<!doctype html><h1>Single Page</h1>", encoding="utf-8")
+    context = replace(context, storage_path=workspace_root)
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "report.html", "title": "Single Page"},
+                confirm_public=True,
+            ),
+        )
+
+    assert published["status"] == "ok"
+    assert published["source"] == {"path": "report.html"}
+    assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
 
 
 def test_report_publishing_tool_requires_workspace_for_static_site(tmp_path: Path) -> None:

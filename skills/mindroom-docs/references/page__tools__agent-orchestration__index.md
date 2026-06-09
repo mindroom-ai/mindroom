@@ -302,6 +302,7 @@ It publishes only registered source references that the current Matrix requester
 The current source types are `dynamic_workflow_run` and `static_site`.
 Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
 Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
+A `static_site` source path may also point at one workspace HTML file, which is copied and served as `index.html`.
 The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
 JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
 That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
