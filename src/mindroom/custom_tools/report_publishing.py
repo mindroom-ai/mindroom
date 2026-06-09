@@ -21,12 +21,17 @@ from mindroom.report_publishing.store import (
     ReportPublishingStore,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.workspaces import resolve_workspace_relative_path
 
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
+_STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
 
 
 _TOOL_DESCRIPTIONS = {
-    "publish_report": "Publish an authorized report artifact through a revocable public link.",
+    "publish_report": (
+        "Publish an authorized report source through a revocable public link. "
+        "Supports source_type dynamic_workflow_run and static_site."
+    ),
     "revoke_public_report": "Revoke a previously published public report link.",
 }
 
@@ -159,8 +164,38 @@ def _resolve_publishable_source(
     normalized_source_type = source_type.strip()
     if normalized_source_type == "dynamic_workflow_run":
         return _resolve_dynamic_workflow_run_source(context, source)
+    if normalized_source_type == "static_site":
+        return _resolve_static_site_source(context, source)
     msg = f"Unsupported report source_type '{source_type}'."
     raise ReportPublishingError(msg)
+
+
+def _resolve_static_site_source(
+    context: ToolRuntimeContext,
+    source: dict[str, Any],
+) -> PublishableReport:
+    _reject_unsupported_source_fields(source, _STATIC_SITE_SOURCE_KEYS, "static_site source")
+    if context.storage_path is None:
+        msg = "static_site publishing requires an agent workspace in this runtime path."
+        raise ReportPublishingError(msg)
+    source_path = _required_source_text(source, "path", context="static_site source")
+    title = _required_source_text(source, "title", context="static_site source")
+    try:
+        site_dir = resolve_workspace_relative_path(
+            context.storage_path,
+            source_path,
+            field_name="static_site source.path",
+        )
+    except ValueError as exc:
+        raise ReportPublishingError(str(exc)) from exc
+    return PublishableReport(
+        source_type="static_site",
+        source={"path": source_path},
+        artifact_path=site_dir,
+        title=title,
+        requested_by=context.requester_id,
+        artifact_kind="static_site",
+    )
 
 
 def _resolve_dynamic_workflow_run_source(
@@ -203,12 +238,12 @@ def _authorize_public_report_for_context(context: ToolRuntimeContext, report: Pu
 
 
 def _public_path_for_report(report: PublishedReport) -> str:
-    if report.public_url is None:
-        return f"/reports/public/{report.slug}"
-    public_path = urlsplit(report.public_url).path.rstrip("/")
-    if public_path:
-        return public_path
-    return f"/reports/public/{report.slug}"
+    if report.public_url is not None:
+        public_path = urlsplit(report.public_url).path
+        if public_path:
+            return public_path
+    suffix = "/" if report.artifact_kind == "static_site" else ""
+    return f"/reports/public/{report.slug}{suffix}"
 
 
 def _reject_unsupported_source_fields(

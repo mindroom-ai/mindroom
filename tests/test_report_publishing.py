@@ -364,6 +364,74 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
     assert revoked["revoked_at"] is not None
 
 
+def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: Path) -> None:
+    """Report Publishing should let agents publish copied static-site directories."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path, public_url="https://mindroom.lab.mindroom.chat")
+    assert context.storage_path is None
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    site_dir = workspace_root / "public-demo"
+    site_dir.mkdir()
+    (site_dir / "index.html").write_text("<!doctype html><script src='app.js'></script>", encoding="utf-8")
+    (site_dir / "app.js").write_text("document.body.dataset.ready = 'true';", encoding="utf-8")
+    context = replace(context, storage_path=workspace_root)
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "public-demo", "title": "Public Demo"},
+                confirm_public=True,
+            ),
+        )
+
+    assert published["status"] == "ok"
+    assert published["source_type"] == "static_site"
+    assert published["source"] == {"path": "public-demo"}
+    assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
+    assert published["public_path"] == f"/reports/public/{published['slug']}/"
+
+
+def test_report_publishing_tool_requires_workspace_for_static_site(tmp_path: Path) -> None:
+    """Static site publishing should require an agent workspace."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path)
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "public-demo", "title": "Public Demo"},
+                confirm_public=True,
+            ),
+        )
+
+    assert published["status"] == "error"
+    assert "agent workspace" in published["message"]
+
+
+def test_report_publishing_tool_rejects_static_site_path_escape(tmp_path: Path) -> None:
+    """Static site path input should stay workspace-relative."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path)
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    context = replace(context, storage_path=workspace_root)
+
+    with tool_runtime_context(context):
+        escaped = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "../outside", "title": "Escape"},
+                confirm_public=True,
+            ),
+        )
+
+    assert escaped["status"] == "error"
+    assert "workspace root" in escaped["message"]
+
+
 def test_report_publishing_tool_rejects_arbitrary_sources(tmp_path: Path) -> None:
     """Report Publishing should publish only registered authorized source types."""
     report_tool = ReportPublishingTools()
