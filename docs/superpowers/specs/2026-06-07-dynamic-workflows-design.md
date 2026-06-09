@@ -484,7 +484,8 @@ The same Dynamic Workflow framework can then support other repeatable workflows.
 - Add `create_workflow`, `validate_workflow`, `update_workflow`, `run_workflow`, `get_workflow_run`, `list_workflows`, and `list_workflow_revisions`.
 - Support ephemeral agents with a model allowlist.
 - Support room agent participants without durable memory, tools, skills, credentials, or knowledge.
-- Reject Matrix context, attachment, knowledge, and tool grants until they are wired into execution.
+- Support ephemeral tool grants from a fixed credential-free read-only research allowlist (`duckduckgo`, `hackernews`, `website`, `wikipedia`) declared in `permissions.tools` and per-participant `tools`.
+- Reject Matrix context, attachment, knowledge, and broader tool grants until they are wired into execution.
 - Store run records and artifacts.
 - Add private report serving.
 

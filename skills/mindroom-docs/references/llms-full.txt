@@ -8306,7 +8306,8 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 `inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
 Participants can be `ephemeral_agent` or `room_agent`.
 An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
-Ephemeral participant `tools` must be empty until explicit workflow tool grants exist.
+Ephemeral participant `tools` may grant credential-free read-only research tools from the fixed allowlist: `duckduckgo`, `hackernews`, `website`, and `wikipedia`.
+Every participant tool must also be listed in `permissions.tools`.
 A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
 Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
 Step types are `transform_step`, `agent_step`, and `report_step`.
@@ -8315,8 +8316,8 @@ Step types are `transform_step`, `agent_step`, and `report_step`.
 `report_step` renders Markdown report content from input and prior step outputs.
 Outputs declare `id`, `type`, and `from_step`.
 Output `type` may be `text`, `markdown`, `json`, or `html_report`.
-Permissions currently support runtime and model caps.
-`permissions.tools` must be empty, and `permissions.data` must keep `matrix_history`, `attachments`, and `knowledge_bases` disabled until approval-backed data grants exist.
+Permissions support runtime caps, model caps, and the read-only research tool allowlist.
+`permissions.tools` may list only allowlisted tools, and `permissions.data` must keep `matrix_history`, `attachments`, and `knowledge_bases` disabled until approval-backed data grants exist.
 
 ### Example
 
@@ -8339,7 +8340,7 @@ create_workflow(
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
                 "model": "claude-sonnet-4-6",
-                "tools": [],
+                "tools": ["duckduckgo", "website"],
             },
         ],
         "workflow": [
@@ -8347,7 +8348,7 @@ create_workflow(
                 "id": "write",
                 "type": "agent_step",
                 "participant": "writer",
-                "prompt": "Write a concise cited report about {input.topic}.",
+                "prompt": "Research the web and write a concise cited report about {input.topic}.",
             },
         ],
         "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
@@ -8356,7 +8357,7 @@ create_workflow(
             "max_concurrent_agents": 4,
             "max_total_agents": 8,
             "models": ["claude-sonnet-4-6"],
-            "tools": [],
+            "tools": ["duckduckgo", "website"],
             "data": {"matrix_history": "none", "attachments": "none", "knowledge_bases": []},
         },
     },
@@ -8370,8 +8371,9 @@ get_workflow_run("brief-report", "run_...")
 ### Notes
 
 - Dynamic Workflow runs execute synchronously on the current tool call path today.
-- Long-running background workflow management, approval cards, public report publishing, broad tool grants, Matrix history grants, attachment grants, and knowledge-base grants are future work.
+- Long-running background workflow management, approval cards, public report publishing, tool grants beyond the read-only research allowlist, Matrix history grants, attachment grants, and knowledge-base grants are future work.
 - Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
+- Granted tools run through the caller's tool-hook bridge, so plugin gating and tool approval policies still apply.
 - Room-agent participants can reuse only agents that normal room routing would expose to the requester.
 - Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
 

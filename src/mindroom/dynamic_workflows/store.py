@@ -33,6 +33,9 @@ _MAX_WORKFLOW_STEPS = 64
 _MAX_WORKFLOW_AGENT_STEPS = 16
 _MAX_WORKFLOW_RUNTIME_SECONDS = 3600
 _MAX_WORKFLOW_CONCURRENT_AGENTS = 8
+# Credential-free, read-only research tools that workflow specs may grant to
+# ephemeral participants. Anything outside this set is rejected at validation.
+ALLOWED_WORKFLOW_PARTICIPANT_TOOLS = frozenset({"duckduckgo", "hackernews", "website", "wikipedia"})
 _PERMISSION_KEYS = frozenset(
     {
         "max_runtime_seconds",
@@ -455,6 +458,7 @@ def validate_workflow_spec(spec: dict[str, object]) -> dict[str, object]:
     workflow_steps = _required_mapping_list(normalized, "workflow", "Workflow step")
     step_ids = _validate_workflow_steps(workflow_steps, participant_ids)
     _validate_workflow_limits(normalized, participants, workflow_steps)
+    _validate_participant_tool_grants(normalized, participants)
     _validate_outputs(normalized, step_ids)
     return normalized
 
@@ -661,15 +665,16 @@ def _validate_room_agent_participant(participant: dict[str, object], context: st
         msg = f"{context} room_agent participants cannot override model."
         raise DynamicWorkflowError(msg)
     if participant.get("tools") not in (None, []):
-        msg = f"{context} room_agent participants cannot declare tools; workflow tool grants are not supported yet."
+        msg = f"{context} room_agent participants cannot declare tools; tool grants are only available to ephemeral participants."
         raise DynamicWorkflowError(msg)
 
 
 def _validate_ephemeral_agent_participant(participant: dict[str, object], context: str) -> None:
     _reject_unsupported_fields(participant, _EPHEMERAL_PARTICIPANT_KEYS, context)
-    if participant.get("tools") not in (None, []):
-        msg = f"{context} ephemeral_agent participants cannot use tools yet."
-        raise DynamicWorkflowError(msg)
+    participant["tools"] = _normalized_tool_names(
+        participant.get("tools"),
+        f"{context} field 'tools'",
+    )
     if "model" in participant and participant.get("model") is not None:
         model = _required_text(participant, "model", context=context)
         participant["model"] = model
@@ -799,14 +804,36 @@ def _validate_permission_models(permissions: dict[str, object]) -> None:
 
 
 def _validate_permission_tools(permissions: dict[str, object]) -> None:
-    tools = permissions.get("tools", [])
-    if not isinstance(tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in tools):
-        msg = "Workflow permission 'tools' must be a list of non-empty strings."
+    permissions["tools"] = _normalized_tool_names(permissions.get("tools", []), "Workflow permission 'tools'")
+
+
+def _normalized_tool_names(raw_tools: object, context: str) -> list[str]:
+    if raw_tools is None:
+        return []
+    if not isinstance(raw_tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in raw_tools):
+        msg = f"{context} must be a list of non-empty strings."
         raise DynamicWorkflowError(msg)
-    if tools:
-        msg = "Workflow permission 'tools' must be empty until Dynamic Workflow tool grants are supported."
-        raise DynamicWorkflowError(msg)
-    permissions["tools"] = []
+    tool_names: list[str] = []
+    for raw_tool in raw_tools:
+        tool_name = cast("str", raw_tool).strip()
+        if tool_name not in ALLOWED_WORKFLOW_PARTICIPANT_TOOLS:
+            allowed = ", ".join(sorted(ALLOWED_WORKFLOW_PARTICIPANT_TOOLS))
+            msg = f"{context} contains tool '{tool_name}' outside the Dynamic Workflow tool allowlist ({allowed})."
+            raise DynamicWorkflowError(msg)
+        if tool_name not in tool_names:
+            tool_names.append(tool_name)
+    return tool_names
+
+
+def _validate_participant_tool_grants(spec: dict[str, object], participants: list[dict[str, object]]) -> None:
+    granted_tools = _permissions_mapping(spec).get("tools", [])
+    granted = set(cast("list[str]", granted_tools))
+    for participant in participants:
+        for tool_name in cast("list[str]", participant.get("tools") or []):
+            if tool_name not in granted:
+                participant_id = participant["id"]
+                msg = f"Participant '{participant_id}' tool '{tool_name}' is not granted by permissions.tools."
+                raise DynamicWorkflowError(msg)
 
 
 def _validate_permission_data(permissions: dict[str, object]) -> None:

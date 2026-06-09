@@ -20,15 +20,22 @@ from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.store import DynamicWorkflowError, DynamicWorkflowRun, DynamicWorkflowStore
+from mindroom.dynamic_workflows.store import (
+    ALLOWED_WORKFLOW_PARTICIPANT_TOOLS,
+    DynamicWorkflowError,
+    DynamicWorkflowRun,
+    DynamicWorkflowStore,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,8 +69,14 @@ def _tool_function(function_name: str, entrypoint: Callable[..., object]) -> Fun
     )
 
 
+_ALLOWED_PARTICIPANT_TOOLS_TEXT = ", ".join(sorted(ALLOWED_WORKFLOW_PARTICIPANT_TOOLS))
+
 _TOOL_DESCRIPTIONS = {
-    "create_workflow": "Create a Dynamic Workflow from a declarative workflow spec.",
+    "create_workflow": (
+        "Create a Dynamic Workflow from a declarative workflow spec. "
+        "Ephemeral participants may declare read-only research tools "
+        f"({_ALLOWED_PARTICIPANT_TOOLS_TEXT}) when each tool is also granted in permissions.tools."
+    ),
     "validate_workflow": "Validate a declarative Dynamic Workflow spec without saving it.",
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
     "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
@@ -675,10 +688,7 @@ async def _aexecute_ephemeral_agent_participant(
     *,
     run_scope: str,
 ) -> object:
-    tools = participant.get("tools", [])
-    if tools not in (None, []):
-        msg = "Dynamic Workflow participants cannot use tools until workflow tool grants are supported."
-        raise DynamicWorkflowError(msg)
+    toolkits = _resolve_participant_toolkits(context, participant)
     participant_id = _required_participant_text(participant, "id")
     model_name = _resolve_participant_model_name(
         context,
@@ -692,7 +702,7 @@ async def _aexecute_ephemeral_agent_participant(
         name=str(participant.get("name") or participant_id),
         role=str(participant.get("role") or participant.get("description") or "Dynamic Workflow participant."),
         model=model,
-        tools=[],
+        tools=toolkits,
         instructions=_participant_instructions(participant),
         markdown=True,
         telemetry=False,
@@ -703,6 +713,39 @@ async def _aexecute_ephemeral_agent_participant(
         session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
     )
     return await _arun_agent(participant_context, agent, prompt)
+
+
+def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict[str, object]) -> list[Toolkit]:
+    """Resolve allowlisted participant tool grants to hook-bridged toolkit instances."""
+    raw_tools = participant.get("tools") or []
+    if not isinstance(raw_tools, list) or not all(isinstance(tool, str) and tool.strip() for tool in raw_tools):
+        msg = "Dynamic Workflow participant tools must be a list of non-empty strings."
+        raise DynamicWorkflowError(msg)
+    tool_names: list[str] = []
+    for raw_tool in raw_tools:
+        tool_name = cast("str", raw_tool).strip()
+        if tool_name not in ALLOWED_WORKFLOW_PARTICIPANT_TOOLS:
+            allowed = ", ".join(sorted(ALLOWED_WORKFLOW_PARTICIPANT_TOOLS))
+            msg = f"Dynamic Workflow participant tool '{tool_name}' is outside the tool allowlist ({allowed})."
+            raise DynamicWorkflowError(msg)
+        if tool_name not in tool_names:
+            tool_names.append(tool_name)
+    if not tool_names:
+        return []
+    ensure_tool_registry_loaded(context.runtime_paths, context.config, load_plugin_tools=False)
+    bridge = build_tool_hook_bridge(
+        context.hook_registry,
+        agent_name=context.agent_name,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+    )
+    return [
+        prepend_tool_hook_bridge(
+            get_tool_by_name(tool_name, context.runtime_paths, worker_tools_override=[], worker_target=None),
+            bridge,
+        )
+        for tool_name in tool_names
+    ]
 
 
 async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
