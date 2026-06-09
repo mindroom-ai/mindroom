@@ -2,30 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.tool_system.worker_routing import worker_id_for_key
+
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
-
-
-@dataclass(frozen=True)
-class ResolvedWorkerEgressBroker:
-    """Resolved worker egress broker env for one agent."""
-
-    name: str
-    execution_env: dict[str, str]
-    config: WorkerEgressBrokerConfig
-
-    def execution_env_for_worker_target(
-        self,
-        worker_target: ResolvedWorkerTarget | None,
-    ) -> dict[str, str]:
-        """Return broker env for one resolved worker target."""
-        return self.config.execution_env_for_worker_target(worker_target)
 
 
 class WorkerEgressBrokerConfig(BaseModel):
@@ -85,43 +70,35 @@ class WorkerEgressBrokerConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_kind_fields(self) -> WorkerEgressBrokerConfig:
-        """Ensure required fields exist for the selected broker kind."""
-        if self.kind == "static" and self.proxy_url is None:
-            msg = "proxy_url is required for static worker egress brokers"
+        """Ensure authored fields match the selected broker kind."""
+        if self.kind == "static":
+            if self.proxy_url is None:
+                msg = "proxy_url is required for static worker egress brokers"
+                raise ValueError(msg)
+            mismatched = {"service_name_prefix", "port"} & self.model_fields_set
+            if mismatched:
+                msg = f"{', '.join(sorted(mismatched))} only applies to worker_scoped_proxy brokers"
+                raise ValueError(msg)
+        elif self.proxy_url is not None:
+            msg = "proxy_url does not apply to worker_scoped_proxy brokers; the URL is derived from the worker key"
             raise ValueError(msg)
         return self
-
-    def execution_env(self) -> dict[str, str]:
-        """Return process env overlay for worker execution tools."""
-        if self.kind == "worker_scoped_proxy":
-            msg = "Worker-scoped proxy broker requires a resolved worker key"
-            raise ValueError(msg)
-        return self._proxy_execution_env(self._required_proxy_url())
 
     def execution_env_for_worker_target(
         self,
         worker_target: ResolvedWorkerTarget | None,
     ) -> dict[str, str]:
         """Return process env overlay for one worker target."""
-        if self.kind == "static":
-            return self.execution_env()
+        # validate_kind_fields guarantees proxy_url is set exactly for static brokers.
+        if self.proxy_url is not None:
+            return self._proxy_execution_env(self.proxy_url)
 
         worker_key = worker_target.worker_key if worker_target is not None else None
         if not worker_key:
             msg = "Worker-scoped proxy broker requires a resolved worker key"
             raise ValueError(msg)
-
-        from mindroom.workers.backends.kubernetes_resources import worker_id_for_key  # noqa: PLC0415
-
         service_name = worker_id_for_key(worker_key, prefix=self.service_name_prefix)
-        proxy_url = f"http://{service_name}:{self.port}"
-        return self._proxy_execution_env(proxy_url)
-
-    def _required_proxy_url(self) -> str:
-        if self.proxy_url is None:
-            msg = "proxy_url is required for static worker egress brokers"
-            raise ValueError(msg)
-        return self.proxy_url
+        return self._proxy_execution_env(f"http://{service_name}:{self.port}")
 
     def _proxy_execution_env(self, proxy_url: str) -> dict[str, str]:
         env = {

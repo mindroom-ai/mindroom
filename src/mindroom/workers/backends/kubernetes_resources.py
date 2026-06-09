@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 
     from .kubernetes_config import KubernetesWorkerBackendConfig
 
-_DEFAULT_NAME_PREFIX = "mindroom-worker"
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
@@ -189,17 +188,6 @@ class _CoreApiProtocol(Protocol):
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
-
-
-def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
-    """Return a DNS-safe Kubernetes resource name for one worker key."""
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
-    normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_NAME_PREFIX
-    max_prefix_length = 63 - len(digest) - 1
-    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
-    if not safe_prefix:
-        safe_prefix = _DEFAULT_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
-    return f"{safe_prefix}-{digest}"
 
 
 def service_host(service_name: str, namespace: str, port: int) -> str:

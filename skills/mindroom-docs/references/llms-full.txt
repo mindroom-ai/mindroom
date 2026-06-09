@@ -15553,6 +15553,7 @@ The proxy should be an adapter or broker that owns the real credential or broker
 Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
 
 For Kubernetes deployments that run one proxy service per MindRoom worker identity, use a worker-scoped broker. MindRoom derives the service name from the resolved `worker_key`, using `service_name_prefix`, and injects `HTTP_PROXY`/`HTTPS_PROXY` for that worker only:
+Worker-scoped brokers only apply to agents with a worker execution scope; config validation fails if one is bound to an agent without `worker_scope`.
 
 ```yaml
 worker_egress_brokers:

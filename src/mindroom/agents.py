@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
-    from mindroom.config.worker_egress import ResolvedWorkerEgressBroker
+    from mindroom.config.worker_egress import WorkerEgressBrokerConfig
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -451,7 +451,7 @@ def _build_registered_agent_tool(
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
-    worker_egress_broker: ResolvedWorkerEgressBroker | None,
+    worker_egress_broker: WorkerEgressBrokerConfig | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_worker_target_from_runtime_env(

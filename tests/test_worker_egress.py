@@ -11,8 +11,7 @@ import mindroom.agents as agents_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from mindroom.workers.backends.kubernetes_resources import worker_id_for_key
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, worker_id_for_key
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,11 +121,9 @@ def test_worker_egress_broker_resolves_proxy_env_from_default_and_agent_override
     override_broker = config.get_agent_worker_egress_broker("local_code")
 
     assert default_broker is not None
-    assert default_broker.name == "agent_vault"
-    assert default_broker.execution_env == _agent_vault_env()
+    assert default_broker.execution_env_for_worker_target(None) == _agent_vault_env()
     assert override_broker is not None
-    assert override_broker.name == "local"
-    assert override_broker.execution_env["HTTP_PROXY"] == "http://127.0.0.1:19090"
+    assert override_broker.execution_env_for_worker_target(None)["HTTP_PROXY"] == "http://127.0.0.1:19090"
 
 
 def test_worker_egress_broker_requires_explicit_kind() -> None:
@@ -167,6 +164,48 @@ def test_worker_scoped_proxy_broker_requires_worker_key() -> None:
     assert broker is not None
     with pytest.raises(ValueError, match="Worker-scoped proxy broker requires a resolved worker key"):
         broker.execution_env_for_worker_target(None)
+
+
+def test_worker_scoped_proxy_broker_requires_worker_scoped_agent() -> None:
+    """Worker-scoped proxy broker bound to an agent without worker scope should fail at config load."""
+    payload = _worker_scoped_proxy_payload()
+    agents = payload["agents"]
+    assert isinstance(agents, dict)
+    code_agent = agents["code"]
+    assert isinstance(code_agent, dict)
+    del code_agent["worker_scope"]
+
+    with pytest.raises(
+        ValueError,
+        match=r"Agent 'code' uses worker-scoped egress broker 'agent_vault' but has no worker execution scope",
+    ):
+        Config.model_validate(payload)
+
+
+def test_static_broker_rejects_worker_scoped_fields() -> None:
+    """Static brokers should reject worker-scoped-only fields instead of ignoring them."""
+    payload = _broker_config_payload()
+    brokers = payload["worker_egress_brokers"]
+    assert isinstance(brokers, dict)
+    local_broker = brokers["local"]
+    assert isinstance(local_broker, dict)
+    local_broker["port"] = 18080
+
+    with pytest.raises(ValueError, match="port only applies to worker_scoped_proxy brokers"):
+        Config.model_validate(payload)
+
+
+def test_worker_scoped_proxy_broker_rejects_proxy_url() -> None:
+    """Worker-scoped proxy brokers should reject a static proxy_url instead of ignoring it."""
+    payload = _worker_scoped_proxy_payload()
+    brokers = payload["worker_egress_brokers"]
+    assert isinstance(brokers, dict)
+    broker = brokers["agent_vault"]
+    assert isinstance(broker, dict)
+    broker["proxy_url"] = "http://agent-vault-adapter:18080"
+
+    with pytest.raises(ValueError, match="proxy_url does not apply to worker_scoped_proxy brokers"):
+        Config.model_validate(payload)
 
 
 def test_agent_can_disable_default_worker_egress_broker() -> None:
@@ -240,7 +279,7 @@ def test_sandbox_execution_env_payload_includes_worker_egress_env(tmp_path: Path
     execution_env = sandbox_proxy_module._execution_env_payload(
         "shell",
         runtime_paths=runtime_paths,
-        worker_egress_env=broker.execution_env,
+        worker_egress_env=broker.execution_env_for_worker_target(None),
     )
 
     assert execution_env is not None

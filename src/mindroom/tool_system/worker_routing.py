@@ -22,6 +22,7 @@ ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
+_DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
@@ -222,6 +223,17 @@ def normalize_worker_key_part(value: str) -> str:
     """Return one normalized worker-key component."""
     normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
     return normalized or "default"
+
+
+def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    """Return a DNS-safe resource name for one worker key (63-char label limit)."""
+    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
+    normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_WORKER_NAME_PREFIX
+    max_prefix_length = 63 - len(digest) - 1
+    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
+    if not safe_prefix:
+        safe_prefix = _DEFAULT_WORKER_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
+    return f"{safe_prefix}-{digest}"
 
 
 def _normalize_worker_requester_part(value: str) -> str:

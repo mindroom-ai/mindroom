@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
 from mindroom.workers.models import (
@@ -584,7 +584,7 @@ class KubernetesWorkerBackend:
         return worker_lock
 
     def _worker_id(self, worker_key: str) -> str:
-        return resources.worker_id_for_key(worker_key, prefix=self.config.name_prefix)
+        return worker_id_for_key(worker_key, prefix=self.config.name_prefix)
 
     def _state_subpath(self, worker_key: str) -> str:
         prefix = self.config.storage_subpath_prefix.strip().strip("/")
