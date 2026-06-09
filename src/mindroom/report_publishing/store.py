@@ -153,7 +153,7 @@ class ReportPublishingStore:
             destination_dir = self._report_publishing_root / "artifacts" / slug
             try:
                 snapshot_static_site(source.artifact_path, destination_dir)
-            except StaticSiteSnapshotError as exc:
+            except (OSError, StaticSiteSnapshotError) as exc:
                 raise ReportPublishingError(str(exc)) from exc
             return _relative_artifact_path(destination_dir, self._storage_root)
         msg = f"Unsupported report artifact_kind '{source.artifact_kind}'."

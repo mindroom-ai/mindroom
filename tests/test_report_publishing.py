@@ -279,7 +279,7 @@ def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) ->
 
 
 def test_report_publishing_store_removes_single_page_snapshot_on_copy_failure(tmp_path: Path) -> None:
-    """Failed single-page snapshots should not leave an orphaned artifact directory."""
+    """Failed single-page snapshots should return a publishing error and leave no orphaned artifact directory."""
     storage_root = tmp_path / "mindroom_data"
     page_path = tmp_path / "workspace" / "report.html"
     page_path.parent.mkdir(parents=True)
@@ -288,7 +288,7 @@ def test_report_publishing_store_removes_single_page_snapshot_on_copy_failure(tm
 
     with (
         patch("mindroom.report_publishing.static_site.shutil.copy2", side_effect=OSError("disk full")),
-        pytest.raises(OSError, match="disk full"),
+        pytest.raises(ReportPublishingError, match="disk full"),
     ):
         store.publish_report(
             source=PublishableReport(
@@ -305,6 +305,35 @@ def test_report_publishing_store_removes_single_page_snapshot_on_copy_failure(tm
 
     artifacts_root = storage_root / "report_publishing" / "artifacts"
     assert not artifacts_root.exists() or list(artifacts_root.iterdir()) == []
+
+
+def test_report_publishing_tool_reports_static_site_copy_failure(tmp_path: Path) -> None:
+    """Static site copy failures should return the normal tool JSON error payload."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        public_url="https://mindroom.lab.mindroom.chat",
+        agent_memory_backend="file",
+    )
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "report.html").write_text("<!doctype html><h1>Single Page</h1>", encoding="utf-8")
+
+    with (
+        patch("mindroom.report_publishing.static_site.shutil.copy2", side_effect=OSError("disk full")),
+        tool_runtime_context(context),
+    ):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "report.html", "title": "Single Page"},
+                confirm_public=True,
+            ),
+        )
+
+    assert published["status"] == "error"
+    assert published["source_type"] == "static_site"
+    assert "disk full" in published["message"]
 
 
 def test_report_publishing_store_rejects_single_page_without_html_suffix(tmp_path: Path) -> None:
