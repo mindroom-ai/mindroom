@@ -1935,6 +1935,17 @@ def test_resolve_participant_toolkits_rejects_non_allowlisted_tool(tmp_path: Pat
     with pytest.raises(DynamicWorkflowError, match="allowlist"):
         dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": ["shell"]})
 
+    with pytest.raises(DynamicWorkflowError, match="list of non-empty strings"):
+        dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": "duckduckgo"})
+
+
+def test_resolve_participant_toolkits_returns_empty_for_missing_grants(tmp_path: Path) -> None:
+    """Participants without grants (missing, null, or empty tools) resolve to no toolkits."""
+    context = _make_context(tmp_path)
+
+    for participant in ({"id": "writer"}, {"id": "writer", "tools": None}, {"id": "writer", "tools": []}):
+        assert dynamic_workflow_module._resolve_participant_toolkits(context, participant) == []
+
 
 def test_resolve_participant_toolkits_builds_hook_bridged_instances(tmp_path: Path) -> None:
     """Granted tools should resolve to real toolkit instances with the hook bridge prepended."""
@@ -1991,6 +2002,44 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
     tools_kwarg = agent_mock.call_args.kwargs["tools"]
     assert tools_kwarg == [sentinel_toolkits["duckduckgo"], sentinel_toolkits["website"]]
     assert [call.args[0] for call in get_tool_mock.call_args_list] == ["duckduckgo", "website"]
+
+
+def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Path) -> None:
+    """Tool-less participants (empty or missing tools key) must keep running with tools=[]."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+    spec = _workflow_spec(
+        participants=[
+            {"id": "writer", "kind": "ephemeral_agent", "model": "claude-sonnet-4-6", "tools": []},
+            {"id": "editor", "kind": "ephemeral_agent", "model": "claude-sonnet-4-6"},
+        ],
+        workflow=[
+            {"id": "write", "type": "agent_step", "participant": "writer", "prompt": "Write."},
+            {"id": "edit", "type": "agent_step", "participant": "editor", "prompt": "Edit."},
+        ],
+        outputs=[{"id": "report_html", "type": "html_report", "from_step": "edit"}],
+    )
+
+    async def fake_arun(_prompt: str, *, user_id: str, session_id: str) -> SimpleNamespace:
+        assert user_id == "@user:localhost"
+        assert session_id
+        return SimpleNamespace(content="done", status=RunStatus.completed)
+
+    agent_mock = Mock(return_value=SimpleNamespace(arun=fake_arun))
+    with (
+        tool_runtime_context(context),
+        patch.object(dynamic_workflow_module, "get_tool_by_name") as get_tool_mock,
+        patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
+        patch.object(dynamic_workflow_module, "Agent", agent_mock),
+    ):
+        create_payload = _tool_payload(tool.create_workflow(spec))
+        run_payload = _tool_payload(tool.run_workflow("competitor-research-report", {"topic": "Agno"}))
+
+    assert create_payload["status"] == "ok"
+    assert run_payload["status"] == "completed"
+    assert agent_mock.call_count == 2
+    assert [call.kwargs["tools"] for call in agent_mock.call_args_list] == [[], []]
+    get_tool_mock.assert_not_called()
 
 
 def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
