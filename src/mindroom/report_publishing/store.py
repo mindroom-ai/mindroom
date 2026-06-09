@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 _PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
 _ARTIFACT_KIND_HTML_FILE = "html_file"
-_ARTIFACT_KIND_STATIC_SITE = "static_site"
+ARTIFACT_KIND_STATIC_SITE = "static_site"
 _REQUIRED_PUBLISHED_REPORT_FIELDS = frozenset(
     {
         "slug",
@@ -68,6 +68,11 @@ class PublishedReport:
     revoked_at: str | None = None
     revoked_by: str | None = None
 
+    @property
+    def is_static_site(self) -> bool:
+        """Return whether this report serves a copied static site."""
+        return self.artifact_kind == ARTIFACT_KIND_STATIC_SITE
+
 
 class ReportPublishingStore:
     """Persist revocable public report links under one storage root."""
@@ -109,31 +114,25 @@ class ReportPublishingStore:
             raise ReportPublishingError(msg)
         return report
 
-    def public_report_html_path(self, slug: str) -> Path:
-        """Return the public HTML report path for one active public link."""
-        report = self.get_public_report(slug)
-        report_path = self._artifact_path_from_relative(report.artifact_path)
-        if not report_path.is_file():
-            msg = f"Public report '{slug}' artifact was not found."
-            raise ReportPublishingError(msg)
-        return report_path
-
-    def public_report_asset_path(self, slug: str, asset_path: str | None = None) -> Path:
-        """Return one active public report file or static-site asset path."""
-        report = self.get_public_report(slug)
-        if report.artifact_kind == _ARTIFACT_KIND_HTML_FILE:
-            if asset_path not in (None, ""):
-                msg = f"Public report '{slug}' does not contain static assets."
-                raise ReportPublishingError(msg)
-            return self.public_report_html_path(slug)
-        if report.artifact_kind == _ARTIFACT_KIND_STATIC_SITE:
+    def report_asset_path(self, report: PublishedReport, asset_path: str | None = None) -> Path:
+        """Return one served file or static-site asset path for a loaded public report."""
+        if report.is_static_site:
             site_root = self._artifact_path_from_relative(report.artifact_path)
             try:
                 return resolve_static_site_asset(site_root, asset_path)
             except StaticSiteSnapshotError as exc:
                 raise ReportPublishingError(str(exc)) from exc
-        msg = f"Public report '{slug}' artifact kind is invalid."
-        raise ReportPublishingError(msg)
+        if report.artifact_kind != _ARTIFACT_KIND_HTML_FILE:
+            msg = f"Public report '{report.slug}' artifact kind is invalid."
+            raise ReportPublishingError(msg)
+        if asset_path not in (None, ""):
+            msg = f"Public report '{report.slug}' does not contain static assets."
+            raise ReportPublishingError(msg)
+        report_path = self._artifact_path_from_relative(report.artifact_path)
+        if not report_path.is_file():
+            msg = f"Public report '{report.slug}' artifact was not found."
+            raise ReportPublishingError(msg)
+        return report_path
 
     def revoke_public_report(self, slug: str, *, revoked_by: str) -> PublishedReport:
         """Revoke one public report link without deleting its underlying artifact."""
@@ -150,7 +149,7 @@ class ReportPublishingStore:
                 msg = "Report artifact was not found."
                 raise ReportPublishingError(msg)
             return _relative_artifact_path(source.artifact_path, self._storage_root)
-        if source.artifact_kind == _ARTIFACT_KIND_STATIC_SITE:
+        if source.artifact_kind == ARTIFACT_KIND_STATIC_SITE:
             destination_dir = self._report_publishing_root / "artifacts" / slug
             try:
                 snapshot_static_site(source.artifact_path, destination_dir)
@@ -224,7 +223,7 @@ def _validate_public_report_slug(value: str) -> None:
 def _public_report_url(base_url: str | None, slug: str, *, artifact_kind: str) -> str | None:
     if base_url is None or not base_url.strip():
         return None
-    suffix = f"/reports/public/{slug}/" if artifact_kind == _ARTIFACT_KIND_STATIC_SITE else f"/reports/public/{slug}"
+    suffix = f"/reports/public/{slug}/" if artifact_kind == ARTIFACT_KIND_STATIC_SITE else f"/reports/public/{slug}"
     return f"{base_url.rstrip('/')}{suffix}"
 
 

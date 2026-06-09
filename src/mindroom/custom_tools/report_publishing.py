@@ -15,6 +15,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.store import DynamicWorkflowError
 from mindroom.report_publishing.store import (
+    ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,
     PublishedReport,
     ReportPublishingError,
@@ -205,7 +206,7 @@ def _resolve_static_site_source(
         artifact_path=site_dir,
         title=title,
         requested_by=context.requester_id,
-        artifact_kind="static_site",
+        artifact_kind=ARTIFACT_KIND_STATIC_SITE,
     )
 
 
@@ -253,7 +254,7 @@ def _public_path_for_report(report: PublishedReport) -> str:
         public_path = urlsplit(report.public_url).path
         if public_path:
             return public_path
-    suffix = "/" if report.artifact_kind == "static_site" else ""
+    suffix = "/" if report.is_static_site else ""
     return f"/reports/public/{report.slug}{suffix}"
 
 

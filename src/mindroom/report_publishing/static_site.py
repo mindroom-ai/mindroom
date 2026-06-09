@@ -30,8 +30,8 @@ def snapshot_static_site(source_path: Path, destination_dir: Path) -> None:
         raise StaticSiteSnapshotError(msg)
 
     entries = _static_site_entries(resolved_source)
-    file_count = sum(1 for source_path, _relative_path in entries if source_path.is_file())
-    total_bytes = sum(source_path.stat().st_size for source_path, _relative_path in entries if source_path.is_file())
+    file_count = sum(1 for entry_path, _relative_path in entries if entry_path.is_file())
+    total_bytes = sum(entry_path.stat().st_size for entry_path, _relative_path in entries if entry_path.is_file())
     if file_count > _STATIC_SITE_MAX_FILES:
         msg = f"Static site contains too many files: {file_count} > {_STATIC_SITE_MAX_FILES}."
         raise StaticSiteSnapshotError(msg)
@@ -40,13 +40,18 @@ def snapshot_static_site(source_path: Path, destination_dir: Path) -> None:
         raise StaticSiteSnapshotError(msg)
 
     destination_dir.mkdir(parents=True, exist_ok=False)
-    for entry_path, relative_path in entries:
-        target_path = destination_dir / relative_path
-        if entry_path.is_dir():
-            target_path.mkdir(parents=True, exist_ok=True)
-            continue
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(entry_path, target_path)
+    try:
+        for entry_path, relative_path in entries:
+            target_path = destination_dir / relative_path
+            if entry_path.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(entry_path, target_path)
+    except OSError:
+        # A half-copied snapshot is unreferenced garbage; remove it before surfacing the failure.
+        shutil.rmtree(destination_dir, ignore_errors=True)
+        raise
 
 
 def _snapshot_single_html_page(source_file: Path, destination_dir: Path) -> None:

@@ -153,7 +153,7 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
         base_url="https://acme.mindroom.chat",
     )
     loaded = store.get_public_report(report.slug)
-    html_path = store.public_report_html_path(report.slug)
+    html_path = store.report_asset_path(store.get_public_report(report.slug))
     revoked = store.revoke_public_report(report.slug, revoked_by="@alice:localhost")
 
     assert report.slug.startswith("pub_")
@@ -163,7 +163,7 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
     assert html_path == report_path
     assert revoked.revoked_at is not None
     with pytest.raises(ReportPublishingError, match="revoked"):
-        store.public_report_html_path(report.slug)
+        store.report_asset_path(store.get_public_report(report.slug))
 
 
 def test_report_publishing_store_rejects_artifacts_outside_storage_root(tmp_path: Path) -> None:
@@ -211,7 +211,7 @@ def test_report_publishing_store_rejects_serve_time_symlink_escape(tmp_path: Pat
     report_path.symlink_to(outside_path)
 
     with pytest.raises(ReportPublishingError, match="artifact path is invalid"):
-        store.public_report_html_path(report.slug)
+        store.report_asset_path(store.get_public_report(report.slug))
 
 
 def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) -> None:
@@ -241,8 +241,8 @@ def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) ->
     )
     (source_dir / "index.html").write_text("<!doctype html>changed", encoding="utf-8")
 
-    index_path = store.public_report_asset_path(report.slug)
-    script_path = store.public_report_asset_path(report.slug, "app.js")
+    index_path = store.report_asset_path(store.get_public_report(report.slug))
+    script_path = store.report_asset_path(store.get_public_report(report.slug), "app.js")
 
     assert report.artifact_kind == "static_site"
     assert report.public_url == f"https://mindroom.lab.mindroom.chat/reports/public/{report.slug}/"
@@ -272,7 +272,7 @@ def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) ->
         base_url="https://mindroom.lab.mindroom.chat",
     )
 
-    index_path = store.public_report_asset_path(report.slug)
+    index_path = store.report_asset_path(store.get_public_report(report.slug))
     assert index_path.name == "index.html"
     assert index_path.read_text(encoding="utf-8") == "<!doctype html><h1>Single Page</h1>"
 
@@ -370,7 +370,7 @@ def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: P
     )
 
     with pytest.raises(ReportPublishingError, match="asset path is invalid"):
-        store.public_report_asset_path(report.slug, "../index.html")
+        store.report_asset_path(store.get_public_report(report.slug), "../index.html")
 
 
 def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:

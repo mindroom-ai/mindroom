@@ -80,6 +80,17 @@ def test_public_static_site_serves_index_and_assets_without_dashboard_auth(test_
     assert image_response.headers["content-type"].startswith("image/png")
 
 
+def test_public_static_site_redirects_root_without_trailing_slash(test_client: TestClient) -> None:
+    """Static site roots without a trailing slash should redirect so relative assets resolve."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_static_site(test_client)
+
+    response = test_client.get(f"/reports/public/{slug}", follow_redirects=False)
+
+    assert response.status_code == 301
+    assert response.headers["location"] == f"{slug}/"
+
+
 def test_public_static_site_rejects_missing_and_traversal_assets(test_client: TestClient) -> None:
     """Static site asset lookup should fail closed with uniform 404s."""
     runtime_paths = use_trusted_upstream_runtime(test_client.app)
