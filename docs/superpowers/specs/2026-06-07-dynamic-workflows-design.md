@@ -348,6 +348,7 @@ mindroom_data/
           artifacts/
 ```
 
+The tenant scope intentionally uses the literal owner key `tenant` because one storage root belongs to exactly one tenant; multi-tenant deployments isolate at the storage-root (instance) level, not inside it.
 `workflow.yaml` should be a small mutable pointer file.
 Revision files should be immutable.
 Run records should be append-only except for status updates.
