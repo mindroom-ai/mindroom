@@ -32,6 +32,87 @@ def _publish_public_report(test_client: TestClient) -> tuple[str, str]:
     return report.slug, str(runtime_paths.storage_root)
 
 
+def _publish_static_site(test_client: TestClient) -> tuple[str, str]:
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    source_dir = runtime_paths.storage_root / "workspace-fixtures" / "site"
+    source_dir.mkdir(parents=True)
+    (source_dir / "index.html").write_text(
+        "<!doctype html><script src='app.js'></script><img src='image.png'>",
+        encoding="utf-8",
+    )
+    (source_dir / "app.js").write_text("document.body.dataset.ready = 'true';", encoding="utf-8")
+    (source_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    store = ReportPublishingStore(runtime_paths.storage_root)
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="static_site",
+            source={"path": "site"},
+            artifact_path=source_dir,
+            title="Demo Site",
+            requested_by="@alice:example.org",
+            artifact_kind="static_site",
+        ),
+        published_by="@alice:example.org",
+        base_url="https://mindroom.lab.mindroom.chat",
+    )
+    return report.slug, str(runtime_paths.storage_root)
+
+
+def test_public_static_site_serves_index_and_assets_without_dashboard_auth(test_client: TestClient) -> None:
+    """Static site public URLs should serve copied index and assets without dashboard credentials."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_static_site(test_client)
+
+    index_response = test_client.get(f"/reports/public/{slug}/")
+    script_response = test_client.get(f"/reports/public/{slug}/app.js")
+    image_response = test_client.get(f"/reports/public/{slug}/image.png")
+
+    assert index_response.status_code == 200
+    assert index_response.headers["content-type"].startswith("text/html")
+    assert "sandbox allow-scripts" in index_response.headers["content-security-policy"]
+    assert "allow-same-origin" not in index_response.headers["content-security-policy"]
+    assert "connect-src 'none'" in index_response.headers["content-security-policy"]
+    assert "form-action 'none'" in index_response.headers["content-security-policy"]
+    assert script_response.status_code == 200
+    assert script_response.headers["content-type"].startswith("text/javascript")
+    assert "document.body.dataset.ready" in script_response.text
+    assert image_response.status_code == 200
+    assert image_response.headers["content-type"].startswith("image/png")
+
+
+def test_public_static_site_rejects_missing_and_traversal_assets(test_client: TestClient) -> None:
+    """Static site asset lookup should fail closed with uniform 404s."""
+    runtime_paths = use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_static_site(test_client)
+
+    missing_response = test_client.get(f"/reports/public/{slug}/missing.js")
+    traversal_response = test_client.get(f"/reports/public/{slug}/../config.yaml")
+
+    assert missing_response.status_code == 404
+    assert missing_response.json()["detail"] == "Public report was not found."
+    assert str(runtime_paths.storage_root) not in missing_response.text
+    assert traversal_response.status_code == 404
+    assert traversal_response.json()["detail"] == "Public report was not found."
+    assert str(runtime_paths.storage_root) not in traversal_response.text
+
+
+def test_public_static_site_returns_404_after_revocation(test_client: TestClient) -> None:
+    """Revoking a static site should disable the index and every asset."""
+    slug, storage_root = _publish_static_site(test_client)
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    ReportPublishingStore(runtime_paths.storage_root).revoke_public_report(slug, revoked_by="@alice:example.org")
+
+    index_response = test_client.get(f"/reports/public/{slug}/")
+    script_response = test_client.get(f"/reports/public/{slug}/app.js")
+
+    assert index_response.status_code == 404
+    assert index_response.json()["detail"] == "Public report was not found."
+    assert script_response.status_code == 404
+    assert script_response.json()["detail"] == "Public report was not found."
+    assert storage_root not in index_response.text
+    assert storage_root not in script_response.text
+
+
 def test_public_report_served_without_dashboard_auth(test_client: TestClient) -> None:
     """Public report URLs should serve published reports without dashboard credentials."""
     use_trusted_upstream_runtime(test_client.app)

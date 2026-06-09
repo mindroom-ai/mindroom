@@ -10,10 +10,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from mindroom.report_publishing.static_site import (
+    StaticSiteSnapshotError,
+    resolve_static_site_asset,
+    snapshot_static_site,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 _PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
+_ARTIFACT_KIND_HTML_FILE = "html_file"
+_ARTIFACT_KIND_STATIC_SITE = "static_site"
 _REQUIRED_PUBLISHED_REPORT_FIELDS = frozenset(
     {
         "slug",
@@ -40,6 +48,7 @@ class PublishableReport:
     artifact_path: Path
     title: str
     requested_by: str
+    artifact_kind: str = _ARTIFACT_KIND_HTML_FILE
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,7 @@ class PublishedReport:
     slug: str
     source_type: str
     source: dict[str, object]
+    artifact_kind: str
     artifact_path: str
     title: str
     requested_by: str
@@ -74,20 +84,19 @@ class ReportPublishingStore:
         base_url: str | None = None,
     ) -> PublishedReport:
         """Create a public link record for one authorized report artifact."""
-        if not source.artifact_path.is_file():
-            msg = "Report artifact was not found."
-            raise ReportPublishingError(msg)
         slug = f"pub_{uuid4().hex}"
+        artifact_path = self._publish_artifact(source, slug)
         report = PublishedReport(
             slug=slug,
             source_type=source.source_type,
             source=dict(source.source),
-            artifact_path=_relative_artifact_path(source.artifact_path, self._storage_root),
+            artifact_kind=source.artifact_kind,
+            artifact_path=artifact_path,
             title=source.title,
             requested_by=source.requested_by,
             published_by=published_by,
             published_at=_utc_now(),
-            public_url=_public_report_url(base_url, slug),
+            public_url=_public_report_url(base_url, slug, artifact_kind=source.artifact_kind),
         )
         _atomic_write_json(self._public_report_path(slug), _published_report_to_json(report))
         return report
@@ -109,6 +118,23 @@ class ReportPublishingStore:
             raise ReportPublishingError(msg)
         return report_path
 
+    def public_report_asset_path(self, slug: str, asset_path: str | None = None) -> Path:
+        """Return one active public report file or static-site asset path."""
+        report = self.get_public_report(slug)
+        if report.artifact_kind == _ARTIFACT_KIND_HTML_FILE:
+            if asset_path not in (None, ""):
+                msg = f"Public report '{slug}' does not contain static assets."
+                raise ReportPublishingError(msg)
+            return self.public_report_html_path(slug)
+        if report.artifact_kind == _ARTIFACT_KIND_STATIC_SITE:
+            site_root = self._artifact_path_from_relative(report.artifact_path)
+            try:
+                return resolve_static_site_asset(site_root, asset_path)
+            except StaticSiteSnapshotError as exc:
+                raise ReportPublishingError(str(exc)) from exc
+        msg = f"Public report '{slug}' artifact kind is invalid."
+        raise ReportPublishingError(msg)
+
     def revoke_public_report(self, slug: str, *, revoked_by: str) -> PublishedReport:
         """Revoke one public report link without deleting its underlying artifact."""
         report = self.get_public_report(slug, include_revoked=True)
@@ -117,6 +143,22 @@ class ReportPublishingStore:
         revoked = replace(report, revoked_at=_utc_now(), revoked_by=revoked_by)
         _atomic_write_json(self._public_report_path(slug), _published_report_to_json(revoked))
         return revoked
+
+    def _publish_artifact(self, source: PublishableReport, slug: str) -> str:
+        if source.artifact_kind == _ARTIFACT_KIND_HTML_FILE:
+            if not source.artifact_path.is_file():
+                msg = "Report artifact was not found."
+                raise ReportPublishingError(msg)
+            return _relative_artifact_path(source.artifact_path, self._storage_root)
+        if source.artifact_kind == _ARTIFACT_KIND_STATIC_SITE:
+            destination_dir = self._report_publishing_root / "artifacts" / slug
+            try:
+                snapshot_static_site(source.artifact_path, destination_dir)
+            except StaticSiteSnapshotError as exc:
+                raise ReportPublishingError(str(exc)) from exc
+            return _relative_artifact_path(destination_dir, self._storage_root)
+        msg = f"Unsupported report artifact_kind '{source.artifact_kind}'."
+        raise ReportPublishingError(msg)
 
     def _public_report_path(self, slug: str) -> Path:
         _validate_public_report_slug(slug)
@@ -139,6 +181,7 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
         "slug": report.slug,
         "source_type": report.source_type,
         "source": report.source,
+        "artifact_kind": report.artifact_kind,
         "artifact_path": report.artifact_path,
         "title": report.title,
         "requested_by": report.requested_by,
@@ -160,6 +203,7 @@ def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
         slug=str(data["slug"]),
         source_type=str(data["source_type"]),
         source=_object_mapping(cast("Mapping[object, object]", source)) if isinstance(source, dict) else {},
+        artifact_kind=str(data.get("artifact_kind", _ARTIFACT_KIND_HTML_FILE)),
         artifact_path=str(data["artifact_path"]),
         title=str(data["title"]),
         requested_by=str(data["requested_by"]),
@@ -177,10 +221,11 @@ def _validate_public_report_slug(value: str) -> None:
         raise ReportPublishingError(msg)
 
 
-def _public_report_url(base_url: str | None, slug: str) -> str | None:
+def _public_report_url(base_url: str | None, slug: str, *, artifact_kind: str) -> str | None:
     if base_url is None or not base_url.strip():
         return None
-    return f"{base_url.rstrip('/')}/reports/public/{slug}"
+    suffix = f"/reports/public/{slug}/" if artifact_kind == _ARTIFACT_KIND_STATIC_SITE else f"/reports/public/{slug}"
+    return f"{base_url.rstrip('/')}{suffix}"
 
 
 def _relative_artifact_path(artifact_path: Path, storage_root: Path) -> str:

@@ -212,6 +212,116 @@ def test_report_publishing_store_rejects_serve_time_symlink_escape(tmp_path: Pat
         store.public_report_html_path(report.slug)
 
 
+def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) -> None:
+    """Static sites should be copied into report publishing storage before serving."""
+    storage_root = tmp_path / "mindroom_data"
+    source_dir = tmp_path / "workspace" / "site"
+    source_dir.mkdir(parents=True)
+    (source_dir / "index.html").write_text(
+        "<!doctype html><script src='app.js'></script><img src='image.png'>",
+        encoding="utf-8",
+    )
+    (source_dir / "app.js").write_text("document.body.dataset.ready = 'true';", encoding="utf-8")
+    (source_dir / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    store = ReportPublishingStore(storage_root)
+
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="static_site",
+            source={"path": "site"},
+            artifact_path=source_dir,
+            title="Demo Site",
+            requested_by="@alice:localhost",
+            artifact_kind="static_site",
+        ),
+        published_by="@alice:localhost",
+        base_url="https://mindroom.lab.mindroom.chat",
+    )
+    (source_dir / "index.html").write_text("<!doctype html>changed", encoding="utf-8")
+
+    index_path = store.public_report_asset_path(report.slug)
+    script_path = store.public_report_asset_path(report.slug, "app.js")
+
+    assert report.artifact_kind == "static_site"
+    assert report.public_url == f"https://mindroom.lab.mindroom.chat/reports/public/{report.slug}/"
+    assert index_path.read_text(encoding="utf-8").startswith("<!doctype html><script")
+    assert script_path.read_text(encoding="utf-8") == "document.body.dataset.ready = 'true';"
+    assert index_path.parent.is_relative_to(storage_root / "report_publishing" / "artifacts")
+
+
+def test_report_publishing_store_rejects_static_site_without_index(tmp_path: Path) -> None:
+    """Static site publishing should require index.html."""
+    storage_root = tmp_path / "mindroom_data"
+    source_dir = tmp_path / "workspace" / "site"
+    source_dir.mkdir(parents=True)
+    (source_dir / "app.js").write_text("console.log('missing index')", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+
+    with pytest.raises(ReportPublishingError, match=r"index\.html"):
+        store.publish_report(
+            source=PublishableReport(
+                source_type="static_site",
+                source={"path": "site"},
+                artifact_path=source_dir,
+                title="Broken Site",
+                requested_by="@alice:localhost",
+                artifact_kind="static_site",
+            ),
+            published_by="@alice:localhost",
+            base_url="https://mindroom.lab.mindroom.chat",
+        )
+
+
+def test_report_publishing_store_rejects_static_site_symlink(tmp_path: Path) -> None:
+    """Static site snapshots should reject symlinks instead of copying or following them."""
+    storage_root = tmp_path / "mindroom_data"
+    source_dir = tmp_path / "workspace" / "site"
+    outside_file = tmp_path / "secret.txt"
+    source_dir.mkdir(parents=True)
+    (source_dir / "index.html").write_text("<!doctype html>Site", encoding="utf-8")
+    outside_file.write_text("secret", encoding="utf-8")
+    (source_dir / "secret.txt").symlink_to(outside_file)
+    store = ReportPublishingStore(storage_root)
+
+    with pytest.raises(ReportPublishingError, match="symlink"):
+        store.publish_report(
+            source=PublishableReport(
+                source_type="static_site",
+                source={"path": "site"},
+                artifact_path=source_dir,
+                title="Unsafe Site",
+                requested_by="@alice:localhost",
+                artifact_kind="static_site",
+            ),
+            published_by="@alice:localhost",
+            base_url="https://mindroom.lab.mindroom.chat",
+        )
+
+
+def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: Path) -> None:
+    """Static site asset lookup should reject traversal paths."""
+    storage_root = tmp_path / "mindroom_data"
+    source_dir = tmp_path / "workspace" / "site"
+    source_dir.mkdir(parents=True)
+    (source_dir / "index.html").write_text("<!doctype html>Site", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="static_site",
+            source={"path": "site"},
+            artifact_path=source_dir,
+            title="Demo Site",
+            requested_by="@alice:localhost",
+            artifact_kind="static_site",
+        ),
+        published_by="@alice:localhost",
+        base_url="https://mindroom.lab.mindroom.chat",
+    )
+
+    with pytest.raises(ReportPublishingError, match="asset path is invalid"):
+        store.public_report_asset_path(report.slug, "../index.html")
+
+
 def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
     """Report Publishing should expose Dynamic Workflow reports through a source reference."""
     dynamic_workflow_tool = DynamicWorkflowTools()
