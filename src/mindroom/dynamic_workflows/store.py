@@ -33,9 +33,6 @@ _MAX_WORKFLOW_STEPS = 64
 _MAX_WORKFLOW_AGENT_STEPS = 16
 _MAX_WORKFLOW_RUNTIME_SECONDS = 3600
 _MAX_WORKFLOW_CONCURRENT_AGENTS = 8
-# Credential-free, read-only research tools that workflow specs may grant to
-# ephemeral participants. Anything outside this set is rejected at validation.
-ALLOWED_WORKFLOW_PARTICIPANT_TOOLS = frozenset({"duckduckgo", "hackernews", "website", "wikipedia"})
 _PERMISSION_KEYS = frozenset(
     {
         "max_runtime_seconds",
@@ -816,10 +813,6 @@ def _normalized_tool_names(raw_tools: object, context: str) -> list[str]:
     tool_names: list[str] = []
     for raw_tool in raw_tools:
         tool_name = cast("str", raw_tool).strip()
-        if tool_name not in ALLOWED_WORKFLOW_PARTICIPANT_TOOLS:
-            allowed = ", ".join(sorted(ALLOWED_WORKFLOW_PARTICIPANT_TOOLS))
-            msg = f"{context} contains tool '{tool_name}' outside the Dynamic Workflow tool allowlist ({allowed})."
-            raise DynamicWorkflowError(msg)
         if tool_name not in tool_names:
             tool_names.append(tool_name)
     return tool_names

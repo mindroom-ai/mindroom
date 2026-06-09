@@ -733,7 +733,7 @@ def get_agent_toolkit_names(
     ]
 
 
-def _resolve_runtime_worker_tools(
+def resolve_runtime_worker_tools(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
@@ -1231,7 +1231,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
             tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in disabled_tool_names
         )
     )
-    worker_tools = _resolve_runtime_worker_tools(
+    worker_tools = resolve_runtime_worker_tools(
         agent_name,
         config,
         runtime_paths,
@@ -1542,5 +1542,6 @@ __all__ = [
     "get_agent_toolkit_names",
     "get_rooms_for_entity",
     "remove_run_by_event_id",
+    "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
 ]

@@ -555,16 +555,8 @@ def test_validate_workflow_spec_rejects_excessive_agent_steps(tmp_path: Path) ->
         )
 
 
-def test_validate_workflow_spec_rejects_tool_permission_outside_allowlist(tmp_path: Path) -> None:
-    """Workflow specs may only grant tools from the fixed read-only research allowlist."""
-    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-
-    with pytest.raises(DynamicWorkflowError, match="allowlist"):
-        store.validate_workflow(_workflow_spec(permissions={"tools": ["shell"]}))
-
-
-def test_validate_workflow_spec_normalizes_allowlisted_tool_grants(tmp_path: Path) -> None:
-    """Allowlisted tool grants should validate and normalize on permissions and participants."""
+def test_validate_workflow_spec_normalizes_tool_grants(tmp_path: Path) -> None:
+    """Tool grants of any registered name should validate, strip, and dedupe at the store layer."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
 
     validated = store.validate_workflow(
@@ -575,19 +567,19 @@ def test_validate_workflow_spec_normalizes_allowlisted_tool_grants(tmp_path: Pat
                     "kind": "ephemeral_agent",
                     "name": "Report Writer",
                     "model": "claude-sonnet-4-6",
-                    "tools": [" duckduckgo ", "website", "duckduckgo"],
+                    "tools": [" shell ", "website", "shell"],
                 },
             ],
-            permissions={"tools": ["duckduckgo", "website"]},
+            permissions={"tools": ["shell", "website"]},
         ),
     )
 
     participants = validated["participants"]
     assert isinstance(participants, list)
-    assert participants[0]["tools"] == ["duckduckgo", "website"]
+    assert participants[0]["tools"] == ["shell", "website"]
     permissions = validated["permissions"]
     assert isinstance(permissions, dict)
-    assert permissions["tools"] == ["duckduckgo", "website"]
+    assert permissions["tools"] == ["shell", "website"]
 
 
 def test_validate_workflow_spec_rejects_participant_tool_not_granted_by_permissions(tmp_path: Path) -> None:
@@ -603,17 +595,33 @@ def test_validate_workflow_spec_rejects_participant_tool_not_granted_by_permissi
         )
 
 
-def test_validate_workflow_spec_rejects_participant_tool_outside_allowlist(tmp_path: Path) -> None:
-    """Participant tool grants outside the allowlist should fail before any subset check."""
-    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+def test_validate_workflow_tool_policy_rejects_unknown_and_restricted_tools(tmp_path: Path) -> None:
+    """The context-aware policy layer rejects unregistered and agent-infrastructure tool grants."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
 
-    with pytest.raises(DynamicWorkflowError, match="allowlist"):
-        store.validate_workflow(
-            _workflow_spec(
-                participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["shell"]}],
-                permissions={"tools": ["duckduckgo"]},
+    with tool_runtime_context(context):
+        unknown_payload = _tool_payload(
+            tool.validate_workflow(
+                _workflow_spec(
+                    participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["not_a_real_tool"]}],
+                    permissions={"tools": ["not_a_real_tool"]},
+                ),
             ),
         )
+        restricted_payload = _tool_payload(
+            tool.validate_workflow(
+                _workflow_spec(
+                    participants=[{"id": "writer", "kind": "ephemeral_agent", "tools": ["delegate"]}],
+                    permissions={"tools": ["delegate"]},
+                ),
+            ),
+        )
+
+    assert unknown_payload["status"] == "error"
+    assert "not a registered tool" in unknown_payload["message"]
+    assert restricted_payload["status"] == "error"
+    assert "agent-infrastructure" in restricted_payload["message"]
 
 
 def test_validate_workflow_spec_rejects_room_agent_participant_tools(tmp_path: Path) -> None:
@@ -1928,12 +1936,15 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     assert create_kwargs["execution_identity"].session_id == create_kwargs["session_id"]
 
 
-def test_resolve_participant_toolkits_rejects_non_allowlisted_tool(tmp_path: Path) -> None:
-    """Executor-level grant resolution must re-check the allowlist for store-bypassing callers."""
+def test_resolve_participant_toolkits_rejects_unavailable_tools(tmp_path: Path) -> None:
+    """Executor-level grant resolution must re-reject bad names for store-bypassing callers."""
     context = _make_context(tmp_path)
 
-    with pytest.raises(DynamicWorkflowError, match="allowlist"):
-        dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": ["shell"]})
+    with pytest.raises(DynamicWorkflowError, match="not a registered tool"):
+        dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": ["not_a_real_tool"]})
+
+    with pytest.raises(DynamicWorkflowError, match="agent-infrastructure"):
+        dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": ["memory"]})
 
     with pytest.raises(DynamicWorkflowError, match="list of non-empty strings"):
         dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": "duckduckgo"})
@@ -1944,19 +1955,84 @@ def test_resolve_participant_toolkits_returns_empty_for_missing_grants(tmp_path:
     context = _make_context(tmp_path)
 
     for participant in ({"id": "writer"}, {"id": "writer", "tools": None}, {"id": "writer", "tools": []}):
-        assert dynamic_workflow_module._resolve_participant_toolkits(context, participant) == []
+        assert dynamic_workflow_module._resolve_participant_toolkits(context, participant) == {}
 
 
-def test_resolve_participant_toolkits_builds_hook_bridged_instances(tmp_path: Path) -> None:
-    """Granted tools should resolve to real toolkit instances with the hook bridge prepended."""
+def test_resolve_participant_toolkits_builds_real_instances_with_caller_routing(tmp_path: Path) -> None:
+    """Granted tools should resolve through the agent toolkit builder keyed by registry name."""
     context = _make_context(tmp_path)
 
     toolkits = dynamic_workflow_module._resolve_participant_toolkits(context, {"id": "writer", "tools": ["website"]})
 
-    assert len(toolkits) == 1
-    functions = toolkits[0].functions
-    assert "read_url" in functions
-    assert functions["read_url"].tool_hooks
+    assert list(toolkits) == ["website"]
+    assert "read_url" in toolkits["website"].functions
+
+
+def test_participant_run_config_requires_approval_for_granted_tools(tmp_path: Path) -> None:
+    """Without pre-approval config, granted tool calls must default to require_approval."""
+    context = _make_context(tmp_path)
+    toolkit = Toolkit(name="fake_shell")
+    toolkit.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": toolkit})
+
+    assert run_config.tool_approval.default == "require_approval"
+    assert run_config.tool_approval.rules == []
+    assert context.config.tool_approval.default == "auto_approve"
+
+
+def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
+    """Tools listed in the dynamic_workflow allowed_tools config skip per-call approval."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["website"]}}],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    website = Toolkit(name="fake_website")
+    website.functions["read_url"] = SimpleNamespace(name="read_url")
+    shell = Toolkit(name="fake_shell")
+    shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"website": website, "shell": shell})
+
+    assert run_config.tool_approval.default == "require_approval"
+    assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
+
+
+def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path: Path) -> None:
+    """allowed_tools ["*"] pre-approves every granted tool's functions."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    shell = Toolkit(name="fake_shell")
+    shell.functions["run_shell_command"] = SimpleNamespace(name="run_shell_command")
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"shell": shell})
+
+    assert run_config.tool_approval.default == "require_approval"
+    assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [
+        ("run_shell_command", "auto_approve"),
+    ]
 
 
 def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> None:
@@ -1981,16 +2057,18 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
         assert "Write a cited report" in prompt
         assert user_id == "@user:localhost"
         assert session_id
+        runtime_context = get_tool_runtime_context()
+        assert runtime_context is not None
+        assert runtime_context.config.tool_approval.default == "require_approval"
         return SimpleNamespace(content="researched", status=RunStatus.completed)
 
     agent_mock = Mock(return_value=SimpleNamespace(arun=fake_arun))
     with (
         tool_runtime_context(context),
-        patch.object(
-            dynamic_workflow_module,
-            "get_tool_by_name",
-            side_effect=lambda name, *_args, **_kwargs: sentinel_toolkits[name],
-        ) as get_tool_mock,
+        patch(
+            "mindroom.agents.build_agent_toolkit",
+            side_effect=lambda name, **_kwargs: sentinel_toolkits[name],
+        ) as build_toolkit_mock,
         patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
         patch.object(dynamic_workflow_module, "Agent", agent_mock),
     ):
@@ -2001,7 +2079,11 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
     assert run_payload["status"] == "completed"
     tools_kwarg = agent_mock.call_args.kwargs["tools"]
     assert tools_kwarg == [sentinel_toolkits["duckduckgo"], sentinel_toolkits["website"]]
-    assert [call.args[0] for call in get_tool_mock.call_args_list] == ["duckduckgo", "website"]
+    assert [call.args[0] for call in build_toolkit_mock.call_args_list] == ["duckduckgo", "website"]
+    build_kwargs = build_toolkit_mock.call_args.kwargs
+    assert build_kwargs["agent_name"] == "general"
+    assert build_kwargs["execution_identity"] is not None
+    assert isinstance(build_kwargs["worker_tools"], list)
 
 
 def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Path) -> None:
@@ -2028,7 +2110,7 @@ def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Pa
     agent_mock = Mock(return_value=SimpleNamespace(arun=fake_arun))
     with (
         tool_runtime_context(context),
-        patch.object(dynamic_workflow_module, "get_tool_by_name") as get_tool_mock,
+        patch("mindroom.agents.build_agent_toolkit") as build_toolkit_mock,
         patch.object(dynamic_workflow_module.model_loading, "get_model_instance", return_value=SimpleNamespace()),
         patch.object(dynamic_workflow_module, "Agent", agent_mock),
     ):
@@ -2039,7 +2121,7 @@ def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Pa
     assert run_payload["status"] == "completed"
     assert agent_mock.call_count == 2
     assert [call.kwargs["tools"] for call in agent_mock.call_args_list] == [[], []]
-    get_tool_mock.assert_not_called()
+    build_toolkit_mock.assert_not_called()
 
 
 def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
