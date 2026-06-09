@@ -45,7 +45,10 @@ logger = get_logger(__name__)
 __all__ = ["get_model_instance"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
-_PRE_AGNO_2_6_CLAUDE_TIMEOUT_SECONDS = 60.0
+# The anthropic SDK rejects non-streaming requests whose max_tokens project past
+# 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
+# ceiling for non-streaming operations.
+_CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
 
 
 def _canonical_provider(provider: str) -> str:
@@ -195,7 +198,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
         extra_kwargs.setdefault("extended_cache_time", True)
 
     if canonical_provider in {"anthropic", "vertexai_claude"}:
-        extra_kwargs.setdefault("timeout", _PRE_AGNO_2_6_CLAUDE_TIMEOUT_SECONDS)
+        extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
 
     if canonical_provider == "ollama":
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT

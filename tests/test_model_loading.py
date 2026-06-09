@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_vertexai_claude_preserves_pre_agno_2_6_timeout_for_large_outputs(tmp_path: Path) -> None:
-    """Vertex Claude keeps explicit timeout so large max_tokens can run non-streaming."""
+def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_streaming(tmp_path: Path) -> None:
+    """Vertex Claude gets an explicit timeout so large max_tokens can run non-streaming."""
     config = bind_runtime_paths(
         Config(
             models={
@@ -34,11 +34,11 @@ def test_vertexai_claude_preserves_pre_agno_2_6_timeout_for_large_outputs(tmp_pa
 
     model = get_model_instance(config, runtime_paths_for(config), "opus")
 
-    assert model.timeout == 60.0
+    assert model.timeout == 3600.0
 
 
 def test_anthropic_timeout_override_is_preserved(tmp_path: Path) -> None:
-    """Explicit Claude timeout config wins over compatibility default."""
+    """Explicit Claude timeout config wins over the default."""
     config = bind_runtime_paths(
         Config(
             models={
