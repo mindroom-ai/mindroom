@@ -45,6 +45,7 @@ logger = get_logger(__name__)
 __all__ = ["get_model_instance"]
 
 _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
+_PRE_AGNO_2_6_CLAUDE_TIMEOUT_SECONDS = 60.0
 
 
 def _canonical_provider(provider: str) -> str:
@@ -192,6 +193,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0912, PLR0915
     if canonical_provider in {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER}:
         extra_kwargs.setdefault("cache_system_prompt", True)
         extra_kwargs.setdefault("extended_cache_time", True)
+
+    if canonical_provider in {"anthropic", "vertexai_claude"}:
+        extra_kwargs.setdefault("timeout", _PRE_AGNO_2_6_CLAUDE_TIMEOUT_SECONDS)
 
     if canonical_provider == "ollama":
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
