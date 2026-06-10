@@ -3167,3 +3167,47 @@ def test_kubernetes_backend_startup_failure_with_vanished_deployment_deletes_bri
     assert bridge_id not in apps_api.deployments
     assert bridge_id not in core_api.services
     assert bridge_id not in networking_api.network_policies
+
+
+def test_kubernetes_backend_mounts_agent_vault_worker_ca_when_configured(tmp_path: Path) -> None:
+    """Worker pods mount the Agent Vault CA ConfigMap for brokered HTTPS trust."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault_bridge=_test_bridge_config(worker_ca_configmap_name="agent-vault-ca"),
+    )
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    worker_deployment = next(body for body in apps_api.created_bodies if body["metadata"]["name"] == handle.worker_id)
+    template_spec = worker_deployment["spec"]["template"]["spec"]
+    ca_volumes = [volume for volume in template_spec["volumes"] if volume["name"] == "agent-vault-ca"]
+    assert ca_volumes == [
+        {
+            "name": "agent-vault-ca",
+            "configMap": {"name": "agent-vault-ca", "items": [{"key": "ca.pem", "path": "ca.pem"}]},
+        },
+    ]
+    ca_mounts = [mount for mount in template_spec["containers"][0]["volumeMounts"] if mount["name"] == "agent-vault-ca"]
+    assert ca_mounts == [{"name": "agent-vault-ca", "mountPath": "/etc/agent-vault", "readOnly": True}]
+
+
+def test_kubernetes_backend_omits_agent_vault_worker_ca_by_default(tmp_path: Path) -> None:
+    """Without the CA ConfigMap option, worker pods get no extra mount."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        agent_vault_bridge=_test_bridge_config(),
+    )
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    worker_deployment = next(body for body in apps_api.created_bodies if body["metadata"]["name"] == handle.worker_id)
+    template_spec = worker_deployment["spec"]["template"]["spec"]
+    assert all(volume["name"] != "agent-vault-ca" for volume in template_spec["volumes"])

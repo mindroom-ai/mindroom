@@ -315,6 +315,10 @@ spec:
               value: {{ .proxyUrl | quote }}
             - name: MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME
               value: {{ .bootstrapSecretName | quote }}
+            {{- if .workerCaConfigMapName }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME
+              value: {{ .workerCaConfigMapName | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- end }}

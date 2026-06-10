@@ -84,6 +84,9 @@ _BRIDGE_WORK_MOUNT_PATH = "/agent-vault-work"
 _BRIDGE_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
 _BRIDGE_TOKEN_FILE = "token"  # noqa: S105
 _BRIDGE_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
+_AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
+_AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
+_AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
 _BRIDGE_MINT_SCRIPT = """\
 set -eu
 export HOME="{work_path}"
@@ -1387,7 +1390,21 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
+        if self._agent_vault_worker_ca_configmap_name() is not None:
+            mounts.append(
+                {
+                    "name": "agent-vault-ca",
+                    "mountPath": _AGENT_VAULT_WORKER_CA_MOUNT_DIR,
+                    "readOnly": True,
+                },
+            )
         return mounts
+
+    def _agent_vault_worker_ca_configmap_name(self) -> str | None:
+        bridge_config = self.config.agent_vault_bridge
+        if bridge_config is None:
+            return None
+        return bridge_config.worker_ca_configmap_name
 
     def _file_config_storage_mounts(self) -> list[dict[str, object]]:
         storage_root = PurePosixPath(posixpath.normpath(self.config.storage_mount_path))
@@ -1421,6 +1438,22 @@ class KubernetesResourceManager:
                 {
                     "name": "worker-config",
                     "configMap": {"name": self.config.config_map_name},
+                },
+            )
+        ca_configmap_name = self._agent_vault_worker_ca_configmap_name()
+        if ca_configmap_name is not None:
+            volumes.append(
+                {
+                    "name": "agent-vault-ca",
+                    "configMap": {
+                        "name": ca_configmap_name,
+                        "items": [
+                            {
+                                "key": _AGENT_VAULT_WORKER_CA_FILE,
+                                "path": _AGENT_VAULT_WORKER_CA_FILE,
+                            },
+                        ],
+                    },
                 },
             )
         return volumes

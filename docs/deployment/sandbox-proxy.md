@@ -441,6 +441,11 @@ Proxy-role agent tokens cannot read or decrypt credentials through the Agent Vau
 Bridge resources are deleted when their worker is scaled down for idleness or marked failed, and are recreated (with a freshly rotated token) the next time the worker starts.
 The backend service account additionally needs create/patch/delete on `networkpolicies` in the worker namespace, plus the worker namespace must contain the bootstrap Secret.
 
+For brokered HTTPS traffic, Agent Vault terminates TLS at its proxy, so workers must trust the vault root CA.
+Publish the CA (from `agent-vault ca fetch`) as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVaultBridge.workerCaConfigMapName`).
+Worker pods then mount it at `/etc/agent-vault/ca.pem`; point the broker's `ca_bundle` at that path so brokered requests export `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE`.
+Because those variables replace the default trust store for the request, publish a bundle that appends the vault CA to the standard system bundle if brokered tools also reach TLS endpoints on `no_proxy` hosts.
+
 ### Agent Vault bridge adapter
 
 MindRoom ships a small Agent Vault bridge adapter that can run as a private sidecar/service.

@@ -328,6 +328,11 @@ workers:
       proxyUrl: http://agent-vault:14322
       # Secret in the worker namespace holding AGENT_VAULT_OWNER_PASSWORD.
       bootstrapSecretName: agent-vault-bootstrap
+      # Optional ConfigMap (key ca.pem) with the Agent Vault root CA; when set,
+      # worker pods mount it at /etc/agent-vault/ca.pem so brokered HTTPS
+      # traffic can trust the vault's TLS interception. Pair with the broker's
+      # ca_bundle setting in agent config.
+      workerCaConfigMapName: ""
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when

@@ -80,6 +80,9 @@ _AGENT_VAULT_OWNER_EMAIL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agen
 _AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
     "agent_vault_bootstrap_secret_name"
 ]
+_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
+    "agent_vault_worker_ca_configmap_name"
+]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
@@ -155,6 +158,7 @@ class KubernetesAgentVaultBridgeConfig:
     proxy_url: str
     owner_email: str
     bootstrap_secret_name: str
+    worker_ca_configmap_name: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> KubernetesAgentVaultBridgeConfig | None:
@@ -185,6 +189,7 @@ class KubernetesAgentVaultBridgeConfig:
                 _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
             )
             or _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+            worker_ca_configmap_name=_read_env(env, _AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV) or None,
         )
 
     def signature(self) -> str:
@@ -198,6 +203,7 @@ class KubernetesAgentVaultBridgeConfig:
                 "proxy_url": self.proxy_url,
                 "owner_email": self.owner_email,
                 "bootstrap_secret_name": self.bootstrap_secret_name,
+                "worker_ca_configmap_name": self.worker_ca_configmap_name,
             },
             sort_keys=True,
             separators=(",", ":"),
