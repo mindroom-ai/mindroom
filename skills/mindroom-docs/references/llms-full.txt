@@ -15511,45 +15511,13 @@ That keeps PATH handling deployment-specific instead of baking host-specific dir
 
 ## Brokered worker egress
 
-For tools that should call external APIs without receiving the real upstream credential, configure a worker egress broker.
-MindRoom injects proxy and CA env into worker-routed `shell` and `python` requests; the worker process then uses the proxy for HTTP(S) traffic.
-This does not inspect command lines or match API URLs, so URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the broker.
-Run the broker as a separate proxy service or sidecar.
-It holds the upstream session or credential, while MindRoom workers receive only the broker's local proxy URL.
+For tools that should call external APIs without receiving the real upstream credential, route worker-routed `shell`/`python` egress through a proxy that injects the credential in transit.
+Because this works at the network layer (proxy env), it does not inspect command lines or match API URLs — URLs hidden inside bash scripts, Python code, package CLIs, or subprocesses still route through the proxy.
 
-Example:
+There are two supported shapes:
 
-```yaml
-worker_egress_brokers:
-  agent_vault:
-    proxy_url: http://egress-proxy:8080
-    ca_bundle: /etc/ssl/agent-vault-ca.pem
-    no_proxy: localhost,127.0.0.1,.svc
-
-defaults:
-  worker_tools: [shell, python]
-  worker_scope: user_agent
-  worker_egress_broker: agent_vault
-
-agents:
-  code:
-    display_name: Code
-    tools: [shell, python]
-```
-
-For each brokered worker request MindRoom adds:
-
-- `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy`
-- `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `SSL_CERT_FILE` when `ca_bundle` is set
-- `NO_PROXY` and `no_proxy` when `no_proxy` is set
-
-Agent-level `worker_egress_broker` overrides `defaults.worker_egress_broker`.
-Set `worker_egress_broker: false` on an agent to disable an inherited broker.
-Unknown broker names fail config validation when the config is loaded.
-
-Broker profiles are backend-neutral: the same config works for Docker/static runners and dedicated Kubernetes workers as long as the worker can reach `proxy_url` and read the configured CA path.
-The proxy should be an adapter or broker that owns the real credential or broker session.
-Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
+- **Per-worker Agent Vault egress (Kubernetes backend)** — each worker gets its own vault identity and proxy-role token; see below. This is the per-user/per-agent isolation path.
+- **A shared egress proxy** — point worker egress at a proxy you run (for example [mindroom-egress-proxy](https://github.com/mindroom-ai/mindroom-egress-proxy)) by setting the worker proxy env yourself (`MINDROOM_KUBERNETES_WORKER_ENV_JSON` / the chart's `egressProxy` integration). The proxy owns the real credential; workers receive only its local URL. Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intentionally want the worker process to receive them.
 
 ### Per-worker Agent Vault egress (Kubernetes backend)
 
@@ -15578,7 +15546,7 @@ Worker pods mount it at `/etc/agent-vault/ca.pem` and the runner exports `REQUES
 If you also enable the worker egress-proxy / approved-egress NetworkPolicies, they restrict worker egress and do not open the Agent Vault ports.
 Allow the worker pods and their init container to reach the Agent Vault api (`apiUrl`) and proxy (`proxyUrl`) ports — e.g. via `egressProxy.networkPolicy.extraEgress` — or the init container's health-check loop times out and the pod never starts.
 
-For non-Kubernetes deployments, use a `static` worker egress broker pointing at a shared proxy you run yourself (the broker only sets proxy env; it does not provision anything).
+For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
 
 ### Self-service vault access
 
