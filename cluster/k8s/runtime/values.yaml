@@ -381,7 +381,7 @@ workers:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
-              - NET_RAW
+              - ALL
         resources: {}
       # Optional one-shot bootstrap Job: create/log in the instance owner, set
       # instance policy (invite-only, allowed signup domains), and publish the

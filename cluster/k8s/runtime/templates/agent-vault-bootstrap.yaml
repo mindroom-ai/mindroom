@@ -53,6 +53,9 @@ metadata:
   labels:
     {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
 spec:
+  # The finished Job is garbage-collected after 24h; the RBAC objects above are
+  # Helm-managed and stay. To force a re-run (the script is idempotent), delete
+  # the Job and `helm upgrade`, which re-applies it.
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
@@ -83,19 +86,27 @@ spec:
                 fi
                 sleep 2
               done
+              # The first login is expected to fail on a fresh instance (the
+              # owner does not exist yet), so capture it instead of spamming
+              # the log; if registration then fails too, surface both captures
+              # before the final unsuppressed login fails the Job with context.
               if ! printf '%s\n' "$password" | agent-vault auth login \
                 --address "$addr" \
                 --email "$AGENT_VAULT_OWNER_EMAIL" \
                 --password-stdin >/tmp/login.log 2>&1; then
-                printf '%s\n' "$password" | agent-vault auth register \
+                if ! printf '%s\n' "$password" | agent-vault auth register \
                   --address "$addr" \
                   --email "$AGENT_VAULT_OWNER_EMAIL" \
-                  --password-stdin >/tmp/register.log 2>&1 || true
+                  --password-stdin >/tmp/register.log 2>&1; then
+                  cat /tmp/login.log /tmp/register.log >&2 || true
+                fi
                 printf '%s\n' "$password" | agent-vault auth login \
                   --address "$addr" \
                   --email "$AGENT_VAULT_OWNER_EMAIL" \
                   --password-stdin
               fi
+              # owner config set has no --address flag; it uses the session
+              # (and server address) persisted in $HOME by auth login.
               agent-vault owner config set \
                 --invite-only={{ $bs.inviteOnly }} \
                 --allowed-domains "$AGENT_VAULT_ALLOWED_DOMAINS"
@@ -106,6 +117,8 @@ spec:
               value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when bootstrap is enabled" $av.ownerEmail | quote }}
             - name: AGENT_VAULT_ALLOWED_DOMAINS
               value: {{ $bs.allowedDomains | quote }}
+          resources:
+            {{- toYaml $bs.resources | nindent 12 }}
           volumeMounts:
             - name: work
               mountPath: /work
@@ -128,6 +141,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          resources:
+            {{- toYaml $bs.resources | nindent 12 }}
           volumeMounts:
             - name: work
               mountPath: /work
