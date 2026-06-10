@@ -59,6 +59,18 @@ rules:
       - patch
       - update
       - watch
+  {{- if .Values.workers.kubernetes.agentVaultBridge.enabled }}
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - create
+      - delete
+      - get
+      - patch
+      - update
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

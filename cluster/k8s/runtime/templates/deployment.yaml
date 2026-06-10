@@ -297,6 +297,26 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
+            {{- with .Values.workers.kubernetes.agentVaultBridge }}
+            {{- if .enabled }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_ENABLED
+              value: "true"
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE
+              value: {{ required "workers.kubernetes.agentVaultBridge.cliImage is required when agentVaultBridge is enabled" .cliImage | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL
+              value: {{ required "workers.kubernetes.agentVaultBridge.ownerEmail is required when agentVaultBridge is enabled" .ownerEmail | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_NAME_PREFIX
+              value: {{ .namePrefix | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BRIDGE_PORT
+              value: {{ .port | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_API_URL
+              value: {{ .apiUrl | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL
+              value: {{ .proxyUrl | quote }}
+            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME
+              value: {{ .bootstrapSecretName | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER

@@ -312,6 +312,22 @@ workers:
       limits:
         cpu: 500m
         memory: 1Gi
+    # Per-worker Agent Vault bridge provisioning. When enabled, the runtime
+    # creates one bridge Deployment/Service/NetworkPolicy per dedicated worker
+    # so worker_scoped_proxy egress brokers resolve to a worker-private bridge.
+    agentVaultBridge:
+      enabled: false
+      # Agent Vault CLI image used by the bridge init container to mint
+      # per-worker proxy-role agent tokens. Required when enabled.
+      cliImage: ""
+      # Agent Vault instance owner email used for provisioning. Required when enabled.
+      ownerEmail: ""
+      namePrefix: agent-vault-bridge
+      port: 18080
+      apiUrl: http://agent-vault:14321
+      proxyUrl: http://agent-vault:14322
+      # Secret in the worker namespace holding AGENT_VAULT_OWNER_PASSWORD.
+      bootstrapSecretName: agent-vault-bootstrap
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when
