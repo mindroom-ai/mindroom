@@ -15,11 +15,11 @@ def _runtime_paths_with_vault(tmp_path: Path, *, with_ca: bool = True) -> tuple[
     token_path = tmp_path / "token"
     token_path.write_text("av_sess_worker_token\n", encoding="utf-8")
     env = {
-        "MINDROOM_AGENT_VAULT_PROXY_URL": "http://agent-vault:14322",
-        "MINDROOM_AGENT_VAULT_TOKEN_FILE": str(token_path),
+        "MINDROOM_WORKER_EGRESS_PROXY_URL": "http://agent-vault:14322",
+        "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE": str(token_path),
     }
     if with_ca:
-        env["MINDROOM_AGENT_VAULT_CA_FILE"] = "/etc/agent-vault/ca.pem"
+        env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] = "/etc/agent-vault/ca.pem"
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,

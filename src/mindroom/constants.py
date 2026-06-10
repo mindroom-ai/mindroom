@@ -662,22 +662,23 @@ EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 # Worker pod env (set by the Kubernetes backend) that lets the runner compose
 # the Agent Vault egress proxy for python/shell. The token never reaches the
 # primary; it is minted into the worker pod and read here at execution time.
-_AGENT_VAULT_PROXY_URL_ENV = "MINDROOM_AGENT_VAULT_PROXY_URL"
-_AGENT_VAULT_TOKEN_FILE_ENV = "MINDROOM_AGENT_VAULT_TOKEN_FILE"  # noqa: S105
-_AGENT_VAULT_CA_FILE_ENV = "MINDROOM_AGENT_VAULT_CA_FILE"
-_AGENT_VAULT_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
+_WORKER_EGRESS_PROXY_URL_ENV = "MINDROOM_WORKER_EGRESS_PROXY_URL"
+_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"  # noqa: S105
+_WORKER_EGRESS_PROXY_CA_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"
+_WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
 
 
-def agent_vault_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
-    """Return the Agent Vault proxy env overlay for python/shell, or ``{}``.
+def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
+    """Return the per-worker egress proxy env overlay for python/shell, or ``{}``.
 
-    Reads the per-worker proxy endpoint plus the token minted into the worker
-    pod and composes ``http://<token>:@<host>`` (Agent Vault accepts the token
-    as the proxy basic-auth username). Returns empty when Agent Vault egress is
-    not configured for this worker or the token is not yet present.
+    General mechanism, provider-agnostic: reads a per-worker proxy endpoint plus
+    a token file written into the worker pod and composes ``http://<token>:@<host>``
+    (the token becomes the proxy basic-auth username, which credential-injecting
+    forward proxies such as Agent Vault accept). Returns empty when no per-worker
+    egress proxy is configured for this worker or the token is not yet present.
     """
-    proxy_url = (process_env.get(_AGENT_VAULT_PROXY_URL_ENV) or "").strip()
-    token_file = (process_env.get(_AGENT_VAULT_TOKEN_FILE_ENV) or "").strip()
+    proxy_url = (process_env.get(_WORKER_EGRESS_PROXY_URL_ENV) or "").strip()
+    token_file = (process_env.get(_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV) or "").strip()
     if not proxy_url or "://" not in proxy_url or not token_file:
         return {}
     try:
@@ -693,10 +694,10 @@ def agent_vault_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str,
         "HTTPS_PROXY": authed,
         "http_proxy": authed,
         "https_proxy": authed,
-        "NO_PROXY": _AGENT_VAULT_NO_PROXY,
-        "no_proxy": _AGENT_VAULT_NO_PROXY,
+        "NO_PROXY": _WORKER_EGRESS_NO_PROXY,
+        "no_proxy": _WORKER_EGRESS_NO_PROXY,
     }
-    ca_file = (process_env.get(_AGENT_VAULT_CA_FILE_ENV) or "").strip()
+    ca_file = (process_env.get(_WORKER_EGRESS_PROXY_CA_FILE_ENV) or "").strip()
     if ca_file:
         env["REQUESTS_CA_BUNDLE"] = ca_file
         env["CURL_CA_BUNDLE"] = ca_file
@@ -725,10 +726,10 @@ def build_execution_tool_env(
                 process_env=shell_process_env,
             ),
         )
-        env.update(agent_vault_proxy_execution_env(shell_process_env or runtime_paths.process_env))
+        env.update(worker_proxy_execution_env(shell_process_env or runtime_paths.process_env))
         return env
     env = dict(_execution_tool_runtime_env_values(runtime_paths))
-    env.update(agent_vault_proxy_execution_env(runtime_paths.process_env))
+    env.update(worker_proxy_execution_env(runtime_paths.process_env))
     return env
 
 

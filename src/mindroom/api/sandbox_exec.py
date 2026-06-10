@@ -157,7 +157,7 @@ def request_execution_env(
     # Agent Vault egress is composed from the worker pod's own token + endpoint,
     # so it is always overlaid here at the worker (never shipped from the
     # primary, which has neither the token nor the endpoint env).
-    agent_vault_env = constants.agent_vault_proxy_execution_env({**os.environ, **runtime_paths.process_env})
+    agent_vault_env = constants.worker_proxy_execution_env({**os.environ, **runtime_paths.process_env})
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}

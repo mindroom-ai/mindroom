@@ -2869,9 +2869,9 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}
-    assert main_env["MINDROOM_AGENT_VAULT_PROXY_URL"] == "http://agent-vault:14322"
-    assert main_env["MINDROOM_AGENT_VAULT_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
-    assert main_env["MINDROOM_AGENT_VAULT_CA_FILE"] == "/etc/agent-vault/ca.pem"
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_URL"] == "http://agent-vault:14322"
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
+    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] == "/etc/agent-vault/ca.pem"
 
     volume_names = {v["name"] for v in template_spec["volumes"]}
     assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
@@ -2895,7 +2895,7 @@ def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> N
     assert "initContainers" not in template_spec
     assert all(v["name"] != "agent-vault-token" for v in template_spec["volumes"])
     main_env = {e["name"] for e in template_spec["containers"][0]["env"]}
-    assert "MINDROOM_AGENT_VAULT_PROXY_URL" not in main_env
+    assert "MINDROOM_WORKER_EGRESS_PROXY_URL" not in main_env
     assert backend._resources.agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
 
 

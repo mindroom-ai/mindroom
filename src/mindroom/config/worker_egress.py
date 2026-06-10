@@ -14,7 +14,7 @@ class WorkerEgressBrokerConfig(BaseModel):
     injected into python/shell execution env. Per-worker Agent Vault isolation
     on the Kubernetes backend does not use this broker; that backend mints a
     per-worker token into the worker pod and the runner composes the proxy URL
-    itself (see ``mindroom.constants.agent_vault_proxy_execution_env``).
+    itself (see ``mindroom.constants.worker_proxy_execution_env``).
     """
 
     model_config = ConfigDict(extra="forbid")

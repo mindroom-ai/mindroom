@@ -91,9 +91,9 @@ _AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
 _AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
 _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
 # Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
-_AGENT_VAULT_PROXY_URL_ENV = "MINDROOM_AGENT_VAULT_PROXY_URL"
-_AGENT_VAULT_TOKEN_FILE_ENV = "MINDROOM_AGENT_VAULT_TOKEN_FILE"  # noqa: S105
-_AGENT_VAULT_CA_FILE_ENV = "MINDROOM_AGENT_VAULT_CA_FILE"
+_WORKER_EGRESS_PROXY_URL_ENV = "MINDROOM_WORKER_EGRESS_PROXY_URL"
+_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"  # noqa: S105
+_WORKER_EGRESS_PROXY_CA_FILE_ENV = "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"
 # HOME is kept on the init container's own ephemeral filesystem (not the shared
 # token volume) so the owner CLI session never lands on a volume the
 # agent-executing container can read. Only the minted proxy token is written to
@@ -621,11 +621,11 @@ class KubernetesResourceManager:
         if cfg is None:
             return []
         env: list[dict[str, object]] = [
-            {"name": _AGENT_VAULT_PROXY_URL_ENV, "value": cfg.proxy_url},
-            {"name": _AGENT_VAULT_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
+            {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},
+            {"name": _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
         ]
         if cfg.worker_ca_configmap_name is not None:
-            env.append({"name": _AGENT_VAULT_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
+            env.append({"name": _WORKER_EGRESS_PROXY_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
         return env
 
     def _agent_vault_volumes(self) -> list[dict[str, object]]:
